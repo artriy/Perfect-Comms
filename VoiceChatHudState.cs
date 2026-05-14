@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using MiraAPI.LocalSettings;
 using TMPro;
+using TownOfUs.Patches;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.SceneManagement;
@@ -14,98 +15,45 @@ namespace VoiceChatPlugin.VoiceChat;
 
 public static class VoiceChatHudState
 {
+    // ── Button references ─────────────────────────────────────────────────────
+    // Mic and speaker live in the TOU UiTopRight grid row (no AspectPosition).
+    // The jail button stays free-floating with AspectPosition because it is
+    // conditional (only visible to the Jailor during meetings).
+
     private static PassiveButton?  _micButton;
     private static GameObject?     _micButtonObj;
     private static PassiveButton?  _spkButton;
     private static GameObject?     _spkButtonObj;
     private static PassiveButton?  _jailButton;
     private static GameObject?     _jailButtonObj;
-    private static AspectPosition? _micAspect;
-    private static AspectPosition? _spkAspect;
     private static AspectPosition? _jailAspect;
 
-    // ── Indicator position ────────────────────────────────────────────────────
-    // Each IndicatorPosition value maps to an EdgeAlignment + two edge vectors
-    // (mic offset, spk offset).  The two buttons are spaced 0.65 units apart
-    // along the dominant axis of each anchor.
+    // Tracks whether we've already inserted the buttons into the TOU grid this HUD session.
+    private static bool _insertedIntoGrid;
 
-    private const float ButtonScale = 0.42f;
-    private const int ButtonSortOrder = 32760;
-    private static AspectPosition.EdgeAlignments _buttonAnchor = AspectPosition.EdgeAlignments.LeftTop;
-    private static Vector3 _micEdge = new(0.10f, 0.10f, -100f);
-    private static Vector3 _spkEdge = new(0.10f, 0.40f, -100f);
+    // ── Jail button position (free-floating, unchanged from original) ──────────
+    private static AspectPosition.EdgeAlignments _jailAnchor = AspectPosition.EdgeAlignments.LeftTop;
     private static Vector3 _jailEdge = new(0.10f, 0.72f, -100f);
 
-    /// <summary>
-    /// Applies a new indicator position immediately.  Called from
-    /// VoiceChatLocalSettings.OnOptionChanged and on HUD construction.
-    /// </summary>
-    public static void ApplyIndicatorPosition(IndicatorPosition pos)
-    {
-        switch (pos)
-        {
-            case IndicatorPosition.TopRight:
-                _buttonAnchor = AspectPosition.EdgeAlignments.RightTop;
-                _micEdge = new Vector3(0.10f, 0.10f, -100f);
-                _spkEdge = new Vector3(0.10f, 0.40f, -100f);
-                _jailEdge = new Vector3(0.10f, 0.72f, -100f);
-                break;
-            case IndicatorPosition.BottomLeft:
-                _buttonAnchor = AspectPosition.EdgeAlignments.LeftBottom;
-                _micEdge = new Vector3(0.10f, 0.40f, -100f);
-                _spkEdge = new Vector3(0.10f, 0.10f, -100f);
-                _jailEdge = new Vector3(0.10f, 0.72f, -100f);
-                break;
-            case IndicatorPosition.BottomRight:
-                _buttonAnchor = AspectPosition.EdgeAlignments.RightBottom;
-                _micEdge = new Vector3(0.10f, 0.40f, -100f);
-                _spkEdge = new Vector3(0.10f, 0.10f, -100f);
-                _jailEdge = new Vector3(0.10f, 0.72f, -100f);
-                break;
-            default:
-                _buttonAnchor = AspectPosition.EdgeAlignments.LeftTop;
-                _micEdge = new Vector3(0.10f, 0.10f, -100f);
-                _spkEdge = new Vector3(0.10f, 0.40f, -100f);
-                _jailEdge = new Vector3(0.10f, 0.72f, -100f);
-                break;
-        }
+    private const float ButtonScale    = 0.42f;
+    private const int   ButtonSortOrder = 32760;
 
-        // If buttons already exist, update them live without recreation.
-        if (_micAspect != null)
-        {
-            _micAspect.Alignment        = _buttonAnchor;
-            _micAspect.DistanceFromEdge = _micEdge;
-            _micAspect.AdjustPosition();
-            KeepButtonOnTop(_micButtonObj);
-        }
-        if (_spkAspect != null)
-        {
-            _spkAspect.Alignment        = _buttonAnchor;
-            _spkAspect.DistanceFromEdge = _spkEdge;
-            _spkAspect.AdjustPosition();
-            KeepButtonOnTop(_spkButtonObj);
-        }
-        if (_jailAspect != null)
-        {
-            _jailAspect.Alignment        = _buttonAnchor;
-            _jailAspect.DistanceFromEdge = _jailEdge;
-            _jailAspect.AdjustPosition();
-            KeepButtonOnTop(_jailButtonObj);
-        }
-    }
-
+    // ── State ─────────────────────────────────────────────────────────────────
     private static GameObject?  _micTooltip;
     private static GameObject?  _spkTooltip;
     private static TextMeshPro? _micTooltipTmp;
     private static TextMeshPro? _spkTooltipTmp;
-    private static bool _micMuted;
-    private static bool _impostorHeld;
-    private static bool _pushToTalkHeld;
-    private static bool _speakerMuted;
+    private static bool  _micMuted;
+    private static bool  _impostorHeld;
+    private static bool  _pushToTalkHeld;
+    private static bool  _speakerMuted;
     private static float _overlayScale = 1f;
-    public static bool IsMuted           => _micMuted;
-    public static bool IsImpostorRadio   => _impostorHeld && CanUseImpostorRadio();
-    public static bool IsSpeakerMuted    => _speakerMuted;
+
+    public static bool IsMuted        => _micMuted;
+    public static bool IsImpostorRadio => _impostorHeld && CanUseTeamChatRadio();
+    public static bool IsSpeakerMuted  => _speakerMuted;
+
+    // ── Init ──────────────────────────────────────────────────────────────────
 
     internal static void Init()
     {
@@ -114,25 +62,33 @@ public static class VoiceChatHudState
             {
                 DestroyButtons();
                 DestroyTooltips();
+                _insertedIntoGrid = false;
             });
 
-        // Apply saved position immediately.
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         if (settings != null)
         {
-            ApplyIndicatorPosition(settings.VoiceIndicatorPosition.Value);
             ApplyOverlayScale(settings.OverlayScale.Value);
-            _micMuted = settings.StartMuted.Value;
+            _micMuted     = settings.StartMuted.Value;
             _speakerMuted = settings.StartDeafened.Value;
         }
     }
+
+    // ── HUD update (called every frame by VCManager) ──────────────────────────
 
     internal static void UpdateHud()
     {
         var hud = HudManager.Instance;
         if (hud == null) return;
 
-        EnsureHudButtons(hud);
+        // Try inserting into the TOU grid if it exists and we haven't yet.
+        TryInsertIntoTouGrid(hud);
+
+        // If we still have no buttons (grid not ready yet), fall back to building
+        // free-floating buttons so voice is never silently broken.
+        if (_micButtonObj == null)
+            EnsureHudButtonsFallback(hud);
+
         EnsureTooltips(hud);
         EnsureHudParent(hud);
         VoiceRoleMuteState.Update();
@@ -141,13 +97,188 @@ public static class VoiceChatHudState
         RefreshButtonVisuals();
     }
 
+    /// <summary>
+    /// Inserts the Mic and Speaker buttons as the two leftmost children of
+    /// <c>HudManagerPatches.UiTopRight</c> (TOU's main button row).  Called every
+    /// frame until it succeeds; after that <c>_insertedIntoGrid</c> prevents re-entry.
+    /// </summary>
+    private static void TryInsertIntoTouGrid(HudManager hud)
+    {
+        if (_insertedIntoGrid) return;
+
+        var gridParent = HudManagerPatches.UiTopRight;
+        if (gridParent == null) return; // TOU grid not ready yet this frame
+
+        // Build the buttons if they don't exist yet.
+        if (_micButtonObj == null)
+            BuildMicButton(hud, gridParent.transform);
+        if (_spkButtonObj == null)
+            BuildSpkButton(hud, gridParent.transform);
+
+        // Re-parent to the grid if already created elsewhere.
+        if (_micButtonObj!.transform.parent != gridParent.transform)
+            _micButtonObj.transform.SetParent(gridParent.transform, false);
+        if (_spkButtonObj!.transform.parent != gridParent.transform)
+            _spkButtonObj.transform.SetParent(gridParent.transform, false);
+
+        // Place mic and speaker at the front (index 0 and 1) so they are the
+        // leftmost items in the grid row.
+        _micButtonObj.transform.SetSiblingIndex(0);
+        _spkButtonObj.transform.SetSiblingIndex(1);
+
+        // Remove AspectPosition if one somehow got attached -- the GridArrange
+        // component on UiTopRight owns layout for everything in that parent.
+        foreach (var ap in _micButtonObj.GetComponents<AspectPosition>())
+            Object.Destroy(ap);
+        foreach (var ap in _spkButtonObj.GetComponents<AspectPosition>())
+            Object.Destroy(ap);
+
+        // Scale to match the other TOU buttons (they sit in a 0.85×0.85 grid cell).
+        _micButtonObj.transform.localScale = Vector3.one;
+        _spkButtonObj.transform.localScale = Vector3.one;
+
+        // Force the grid to re-arrange now.
+        var grid = HudManagerPatches.UiGrid;
+        if (grid != null)
+            grid.ArrangeChilds();
+
+        _insertedIntoGrid = true;
+    }
+
+    // ── Button construction ────────────────────────────────────────────────────
+
+    private static void BuildMicButton(HudManager hud, Transform parent)
+    {
+        _micButtonObj      = Object.Instantiate(hud.MapButton.gameObject, parent);
+        _micButtonObj.name = "VC_MicButton";
+        ClearButtonBG(_micButtonObj);
+        CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
+        KeepButtonOnTop(_micButtonObj);
+
+        _micButton = _micButtonObj.GetComponent<PassiveButton>();
+        _micButton.OnClick = new ButtonClickedEvent();
+        _micButton.OnClick.AddListener((Action)ToggleMutePublic);
+        _micButton.OnMouseOver = new UnityEvent();
+        _micButton.OnMouseOver.AddListener((Action)ShowMicTooltip);
+        _micButton.OnMouseOut = new UnityEvent();
+        _micButton.OnMouseOut.AddListener((Action)HideTooltips);
+    }
+
+    private static void BuildSpkButton(HudManager hud, Transform parent)
+    {
+        _spkButtonObj      = Object.Instantiate(hud.MapButton.gameObject, parent);
+        _spkButtonObj.name = "VC_SpkButton";
+        ClearButtonBG(_spkButtonObj);
+        CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
+        KeepButtonOnTop(_spkButtonObj);
+
+        _spkButton = _spkButtonObj.GetComponent<PassiveButton>();
+        _spkButton.OnClick = new ButtonClickedEvent();
+        _spkButton.OnClick.AddListener((Action)ToggleSpeakerPublic);
+        _spkButton.OnMouseOver = new UnityEvent();
+        _spkButton.OnMouseOver.AddListener((Action)ShowSpeakerTooltip);
+        _spkButton.OnMouseOut = new UnityEvent();
+        _spkButton.OnMouseOut.AddListener((Action)HideTooltips);
+    }
+
+    private static void BuildJailButton(HudManager hud, Transform parent)
+    {
+        _jailButtonObj      = Object.Instantiate(hud.MapButton.gameObject, parent);
+        _jailButtonObj.name = "VC_JailUnmuteButton";
+        _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+        ClearButtonBG(_jailButtonObj);
+        CreateIconChild(_jailButtonObj, "VoiceChatPlugin.Resources.JailUnmute.png");
+        KeepButtonOnTop(_jailButtonObj);
+
+        _jailButton = _jailButtonObj.GetComponent<PassiveButton>();
+        _jailButton.OnClick = new ButtonClickedEvent();
+        _jailButton.OnClick.AddListener((Action)JailUnmutePublic);
+        _jailButton.OnMouseOver = new UnityEvent();
+        _jailButton.OnMouseOut  = new UnityEvent();
+
+        _jailAspect = _jailButtonObj.GetComponent<AspectPosition>()
+                      ?? _jailButtonObj.AddComponent<AspectPosition>();
+        _jailAspect.Alignment        = _jailAnchor;
+        _jailAspect.DistanceFromEdge = _jailEdge;
+    }
+
+    /// <summary>
+    /// Fallback: builds free-floating buttons (with AspectPosition) when the TOU
+    /// grid isn't available yet.  These will be re-parented into the grid as soon
+    /// as it becomes available.
+    /// </summary>
+    private static void EnsureHudButtonsFallback(HudManager hud)
+    {
+        if (hud.MapButton == null) return;
+        var root = ResolveHudRoot(hud);
+
+        if (_micButtonObj == null)
+        {
+            BuildMicButton(hud, root);
+            var ap = _micButtonObj!.AddComponent<AspectPosition>();
+            ap.Alignment        = AspectPosition.EdgeAlignments.RightTop;
+            ap.DistanceFromEdge = new Vector3(0.95f, 0.10f, -100f);
+            _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+        }
+
+        if (_spkButtonObj == null)
+        {
+            BuildSpkButton(hud, root);
+            var ap = _spkButtonObj!.AddComponent<AspectPosition>();
+            ap.Alignment        = AspectPosition.EdgeAlignments.RightTop;
+            ap.DistanceFromEdge = new Vector3(0.95f, 0.40f, -100f);
+            _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+        }
+
+        if (_jailButtonObj == null)
+            BuildJailButton(hud, root);
+    }
+
+    // ── Indicator position -- jail button only (mic/spk are in the grid) ──────
+
+    /// <summary>
+    /// The jail button is the only one that still uses a configurable position
+    /// because it is conditionally visible and shouldn't occupy a permanent grid slot.
+    /// </summary>
+    public static void ApplyIndicatorPosition(IndicatorPosition pos)
+    {
+        switch (pos)
+        {
+            case IndicatorPosition.TopRight:
+                _jailAnchor = AspectPosition.EdgeAlignments.RightTop;
+                _jailEdge   = new Vector3(0.10f, 0.72f, -100f);
+                break;
+            case IndicatorPosition.BottomLeft:
+                _jailAnchor = AspectPosition.EdgeAlignments.LeftBottom;
+                _jailEdge   = new Vector3(0.10f, 0.72f, -100f);
+                break;
+            case IndicatorPosition.BottomRight:
+                _jailAnchor = AspectPosition.EdgeAlignments.RightBottom;
+                _jailEdge   = new Vector3(0.10f, 0.72f, -100f);
+                break;
+            default:
+                _jailAnchor = AspectPosition.EdgeAlignments.LeftTop;
+                _jailEdge   = new Vector3(0.10f, 0.72f, -100f);
+                break;
+        }
+
+        if (_jailAspect != null)
+        {
+            _jailAspect.Alignment        = _jailAnchor;
+            _jailAspect.DistanceFromEdge = _jailEdge;
+            _jailAspect.AdjustPosition();
+            KeepButtonOnTop(_jailButtonObj);
+        }
+    }
+
+    // ── Mic / speaker state ───────────────────────────────────────────────────
+
     internal static void ApplyMicState()
     {
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-        bool radioTransmit = IsInImpostorRadioMode();
-        bool pushToTalkMuted = settings?.MicMode.Value == VoiceMicMode.PushToTalk &&
-                               !_pushToTalkHeld &&
-                               !radioTransmit;
+        bool radioTransmit  = IsInImpostorRadioMode();
+        bool pushToTalkMuted = settings?.MicMode.Value == VoiceMicMode.PushToTalk
+                               && !_pushToTalkHeld && !radioTransmit;
         bool roleMuted = VoiceRoleMuteState.IsLocalMeetingVoiceBlocked();
         VoiceChatRoom.Current?.SetMute(_micMuted || pushToTalkMuted || roleMuted);
     }
@@ -166,63 +297,14 @@ public static class VoiceChatHudState
 
     internal static void TrySyncHostRoomSettings() { }
 
-    internal static void ToggleMutePublic()
-    {
-        SetMuted(!_micMuted);
-    }
+    internal static void ToggleMutePublic()   => SetMuted(!_micMuted);
+    internal static void ToggleSpeakerPublic() => SetSpeakerMuted(!_speakerMuted);
 
     internal static void SetMuted(bool muted)
     {
         _micMuted = muted;
         ApplyMicState();
-        if (muted)
-            MeetingSpeakingIndicatorPatch.ClearLocalIndicator();
-        RefreshButtonVisuals();
-    }
-
-    internal static void UpdateImpostorRadioHold(bool held, bool justPressed, bool justReleased)
-    {
-        if (!CanUseImpostorRadio())
-        {
-            if (_impostorHeld)
-            {
-                _impostorHeld = false;
-                ApplyMicState();
-                RefreshButtonVisuals();
-            }
-            return;
-        }
-
-        bool prev = _impostorHeld;
-        _impostorHeld = held;
-
-        if (prev != _impostorHeld)
-        {
-            ApplyMicState();
-            RefreshButtonVisuals();
-        }
-    }
-
-    internal static bool IsInImpostorRadioMode()
-        => _impostorHeld && CanUseImpostorRadio() && !_micMuted;
-
-    internal static void UpdatePushToTalkHeld(bool held)
-    {
-        if (_pushToTalkHeld == held) return;
-        _pushToTalkHeld = held;
-        ApplyMicState();
-        RefreshButtonVisuals();
-    }
-
-    internal static void ToggleSpeakerPublic()
-    {
-        SetSpeakerMuted(!_speakerMuted);
-    }
-
-    internal static void JailUnmutePublic()
-    {
-        VoiceRoleMuteState.LocalJailorAllowVoice();
-        UpdateHudButtonsVisibility();
+        if (muted) MeetingSpeakingIndicatorPatch.ClearLocalIndicator();
         RefreshButtonVisuals();
     }
 
@@ -233,24 +315,55 @@ public static class VoiceChatHudState
         RefreshButtonVisuals();
     }
 
+    internal static void UpdateImpostorRadioHold(bool held, bool justPressed, bool justReleased)
+    {
+        if (!CanUseTeamChatRadio())
+        {
+            if (_impostorHeld) { _impostorHeld = false; ApplyMicState(); RefreshButtonVisuals(); }
+            return;
+        }
+
+        bool prev = _impostorHeld;
+        _impostorHeld = held;
+        if (prev != _impostorHeld) { ApplyMicState(); RefreshButtonVisuals(); }
+    }
+
+    internal static bool IsInImpostorRadioMode()
+        => _impostorHeld && CanUseTeamChatRadio() && !_micMuted;
+
+    internal static void UpdatePushToTalkHeld(bool held)
+    {
+        if (_pushToTalkHeld == held) return;
+        _pushToTalkHeld = held;
+        ApplyMicState();
+        RefreshButtonVisuals();
+    }
+
+    internal static void JailUnmutePublic()
+    {
+        VoiceRoleMuteState.LocalJailorAllowVoice();
+        UpdateHudButtonsVisibility();
+        RefreshButtonVisuals();
+    }
+
     public static void ApplyOverlayScale(float scale)
     {
         _overlayScale = Mathf.Clamp(scale, 0.75f, 1.5f);
-        if (_micButtonObj != null)
-            _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-        if (_spkButtonObj != null)
-            _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+        // Mic and speaker are in the TOU grid so their scale is managed by the grid cell size.
+        // Only the jail button (free-floating) gets the explicit scale.
         if (_jailButtonObj != null)
             _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
     }
 
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
     private static void DestroyButtons()
     {
-        if (_micButtonObj != null) { Object.Destroy(_micButtonObj); _micButtonObj = null; }
-        if (_spkButtonObj != null) { Object.Destroy(_spkButtonObj); _spkButtonObj = null; }
+        if (_micButtonObj  != null) { Object.Destroy(_micButtonObj);  _micButtonObj  = null; }
+        if (_spkButtonObj  != null) { Object.Destroy(_spkButtonObj);  _spkButtonObj  = null; }
         if (_jailButtonObj != null) { Object.Destroy(_jailButtonObj); _jailButtonObj = null; }
         _micButton = null; _spkButton = null; _jailButton = null;
-        _micAspect = null; _spkAspect = null; _jailAspect = null;
+        _jailAspect = null;
     }
 
     private static void DestroyTooltips()
@@ -260,93 +373,18 @@ public static class VoiceChatHudState
         _micTooltipTmp = null; _spkTooltipTmp = null;
     }
 
-    private static void EnsureHudButtons(HudManager hud)
-    {
-        if (hud.MapButton == null) return;
-        var root = ResolveHudRoot(hud);
-
-        if (_micButtonObj == null)
-        {
-            _micButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _micButtonObj.name = "VC_MicButton";
-            _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_micButtonObj);
-            CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
-            KeepButtonOnTop(_micButtonObj);
-
-            _micButton = _micButtonObj.GetComponent<PassiveButton>();
-            _micButton.OnClick = new ButtonClickedEvent();
-            _micButton.OnClick.AddListener((Action)ToggleMutePublic);
-            _micButton.OnMouseOver = new UnityEvent();
-            _micButton.OnMouseOver.AddListener((Action)ShowMicTooltip);
-            _micButton.OnMouseOut = new UnityEvent();
-            _micButton.OnMouseOut.AddListener((Action)HideTooltips);
-
-            _micAspect = _micButtonObj.GetComponent<AspectPosition>()
-                ?? _micButtonObj.AddComponent<AspectPosition>();
-            _micAspect.Alignment        = _buttonAnchor;
-            _micAspect.DistanceFromEdge = _micEdge;
-        }
-
-        if (_spkButtonObj == null)
-        {
-            _spkButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _spkButtonObj.name = "VC_SpkButton";
-            _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_spkButtonObj);
-            CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
-            KeepButtonOnTop(_spkButtonObj);
-
-            _spkButton = _spkButtonObj.GetComponent<PassiveButton>();
-            _spkButton.OnClick = new ButtonClickedEvent();
-            _spkButton.OnClick.AddListener((Action)ToggleSpeakerPublic);
-            _spkButton.OnMouseOver = new UnityEvent();
-            _spkButton.OnMouseOver.AddListener((Action)ShowSpeakerTooltip);
-            _spkButton.OnMouseOut = new UnityEvent();
-            _spkButton.OnMouseOut.AddListener((Action)HideTooltips);
-
-            _spkAspect = _spkButtonObj.GetComponent<AspectPosition>()
-                ?? _spkButtonObj.AddComponent<AspectPosition>();
-            _spkAspect.Alignment        = _buttonAnchor;
-            _spkAspect.DistanceFromEdge = _spkEdge;
-        }
-
-        if (_jailButtonObj == null)
-        {
-            _jailButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _jailButtonObj.name = "VC_JailUnmuteButton";
-            _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_jailButtonObj);
-            CreateIconChild(_jailButtonObj, "VoiceChatPlugin.Resources.JailUnmute.png");
-            KeepButtonOnTop(_jailButtonObj);
-
-            _jailButton = _jailButtonObj.GetComponent<PassiveButton>();
-            _jailButton.OnClick = new ButtonClickedEvent();
-            _jailButton.OnClick.AddListener((Action)JailUnmutePublic);
-            _jailButton.OnMouseOver = new UnityEvent();
-            _jailButton.OnMouseOut = new UnityEvent();
-
-            _jailAspect = _jailButtonObj.GetComponent<AspectPosition>()
-                ?? _jailButtonObj.AddComponent<AspectPosition>();
-            _jailAspect.Alignment        = _buttonAnchor;
-            _jailAspect.DistanceFromEdge = _jailEdge;
-        }
-    }
-
     private static void EnsureTooltips(HudManager hud)
     {
         var root = ResolveHudRoot(hud);
-        if (_micTooltip == null)
-            _micTooltip = CreateTooltipObject(root, out _micTooltipTmp);
-        if (_spkTooltip == null)
-            _spkTooltip = CreateTooltipObject(root, out _spkTooltipTmp);
+        if (_micTooltip == null) _micTooltip = CreateTooltipObject(root, out _micTooltipTmp);
+        if (_spkTooltip == null) _spkTooltip = CreateTooltipObject(root, out _spkTooltipTmp);
     }
 
     private static void EnsureHudParent(HudManager hud)
     {
+        // Mic and spk belong to the TOU grid -- don't re-parent them to the HUD root.
+        // Only the jail button and tooltips need to follow the HUD root.
         var root = ResolveHudRoot(hud);
-        ReparentToRoot(_micButtonObj, root);
-        ReparentToRoot(_spkButtonObj, root);
         ReparentToRoot(_jailButtonObj, root);
         ReparentToRoot(_micTooltip, root);
         ReparentToRoot(_spkTooltip, root);
@@ -362,7 +400,6 @@ public static class VoiceChatHudState
                 return meetingParent;
             return meeting.transform;
         }
-
         return hud.transform.parent != null ? hud.transform.parent : hud.transform;
     }
 
@@ -374,19 +411,13 @@ public static class VoiceChatHudState
 
     private static void UpdateHudButtonsVisibility()
     {
-        if (_micButtonObj == null || _spkButtonObj == null) return;
-        _micButtonObj.SetActive(true);
-        _spkButtonObj.SetActive(true);
+        if (_micButtonObj != null) _micButtonObj.SetActive(true);
+        if (_spkButtonObj != null) _spkButtonObj.SetActive(true);
         _jailButtonObj?.SetActive(VoiceRoleMuteState.CanLocalJailorUnmute(out _));
-        _micAspect?.AdjustPosition();
-        _spkAspect?.AdjustPosition();
         _jailAspect?.AdjustPosition();
-        KeepButtonOnTop(_micButtonObj);
-        KeepButtonOnTop(_spkButtonObj);
         KeepButtonOnTop(_jailButtonObj);
     }
 
-    // ── Visual refresh ────────────────────────────────────────────────────────
     private static void RefreshButtonVisuals()
     {
         if (_micButtonObj != null)
@@ -420,11 +451,7 @@ public static class VoiceChatHudState
         if (_jailButtonObj != null)
         {
             var sr = _jailButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
-            if (sr != null)
-            {
-                sr.sprite = Sprites.JailUnmute;
-                sr.color = Color.white;
-            }
+            if (sr != null) { sr.sprite = Sprites.JailUnmute; sr.color = Color.white; }
         }
 
         if (_spkButtonObj != null)
@@ -439,6 +466,7 @@ public static class VoiceChatHudState
     }
 
     // ── Tooltips ──────────────────────────────────────────────────────────────
+
     private static GameObject CreateTooltipObject(Transform root, out TextMeshPro tmp)
     {
         var go = new GameObject("VC_Tooltip");
@@ -448,9 +476,9 @@ public static class VoiceChatHudState
         var bg = new GameObject("BG");
         bg.transform.SetParent(go.transform, false);
         var bgSr = bg.AddComponent<SpriteRenderer>();
-        bgSr.sprite = CreateSolidSprite(new Color(0f, 0f, 0f, 0.82f));
+        bgSr.sprite           = CreateSolidSprite(new Color(0f, 0f, 0f, 0.82f));
         bgSr.sortingLayerName = VCSorting.Layer;
-        bgSr.sortingOrder = ButtonSortOrder + 1;
+        bgSr.sortingOrder     = ButtonSortOrder + 1;
         bg.transform.localScale = new Vector3(2.6f, 2.0f, 1f);
 
         var textGo = new GameObject("Text");
@@ -459,7 +487,9 @@ public static class VoiceChatHudState
         tmp = textGo.AddComponent<TextMeshPro>();
         tmp.fontSize = 1.5f; tmp.color = Color.white;
         tmp.alignment = TextAlignmentOptions.Center;
-        tmp.enableWordWrapping = false; tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer); tmp.sortingOrder = ButtonSortOrder + 2;
+        tmp.enableWordWrapping = false;
+        tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+        tmp.sortingOrder = ButtonSortOrder + 2;
         tmp.rectTransform.sizeDelta = new Vector2(2.4f, 1.8f);
         go.SetActive(false);
         return go;
@@ -470,10 +500,10 @@ public static class VoiceChatHudState
         if (_micTooltip == null || _micTooltipTmp == null || _micButtonObj == null) return;
 
         string status = _micMuted ? "Muted"
-            : IsInImpostorRadioMode() ? "Impostor Radio (held)"
+            : IsInImpostorRadioMode() ? "Team Chat Radio (held)"
             : "Active";
 
-        var tab = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+        var tab     = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         string muteKey  = VoiceChatKeybinds.ToggleMute.CurrentKey.ToString();
         string radioKey = VoiceChatKeybinds.ImpostorRadio.CurrentKey.ToString();
 
@@ -481,7 +511,7 @@ public static class VoiceChatHudState
             "<b>Microphone</b>\n" +
             $"Status: {status}\n" +
             $"Volume: {(int)(tab.MicVolume.Value * 100f)}%\n" +
-            $"Mute: {muteKey}  |  Imp. Radio: {radioKey} (hold)";
+            $"Mute: {muteKey}  |  Radio: {radioKey} (hold)";
 
         PositionNear(_micTooltip, _micButtonObj);
         _micTooltip.SetActive(true);
@@ -492,14 +522,14 @@ public static class VoiceChatHudState
         if (_spkTooltip == null || _spkTooltipTmp == null || _spkButtonObj == null) return;
 
         string status = _speakerMuted ? "Muted" : "Active";
-        var tab = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-        string hotkey = VoiceChatKeybinds.ToggleSpeaker.CurrentKey.ToString();
+        var tab    = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+        string key = VoiceChatKeybinds.ToggleSpeaker.CurrentKey.ToString();
 
         _spkTooltipTmp.text =
             "<b>Speaker</b>\n" +
             $"Status: {status}\n" +
             $"Volume: {(int)(tab.MasterVolume.Value * 100f)}%\n" +
-            $"Hotkey: {hotkey}";
+            $"Hotkey: {key}";
 
         PositionNear(_spkTooltip, _spkButtonObj);
         _spkTooltip.SetActive(true);
@@ -517,12 +547,10 @@ public static class VoiceChatHudState
         tooltip.transform.position = new Vector3(p.x - 0.2f, p.y - 0.9f, p.z - 1f);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-    private static bool CanUseImpostorRadio()
-        => PlayerControl.LocalPlayer != null
-        && PlayerControl.LocalPlayer.Data?.Role?.IsImpostor == true
-        && PlayerControl.LocalPlayer.Data?.IsDead == false
-        && VoiceChatGameOptions.Instance.ImpostorPrivateRadio.Value;
+    // ── Misc helpers ──────────────────────────────────────────────────────────
+
+    private static bool CanUseTeamChatRadio()
+        => VoiceRoleMuteState.CanLocalPlayerUseTeamChatRadio();
 
     private static void ClearButtonBG(GameObject obj)
     {
@@ -537,9 +565,9 @@ public static class VoiceChatHudState
         go.transform.localPosition = Vector3.zero;
         go.layer = parent.layer;
         var sr = go.AddComponent<SpriteRenderer>();
-        sr.sprite = LoadSprite(resource);
+        sr.sprite           = LoadSprite(resource);
         sr.sortingLayerName = VCSorting.Layer;
-        sr.sortingOrder = ButtonSortOrder;
+        sr.sortingOrder     = ButtonSortOrder;
     }
 
     private static void KeepButtonOnTop(GameObject? button)
@@ -551,7 +579,7 @@ public static class VoiceChatHudState
         foreach (var sr in button.GetComponentsInChildren<SpriteRenderer>(true))
         {
             sr.sortingLayerName = VCSorting.Layer;
-            sr.sortingOrder = ButtonSortOrder;
+            sr.sortingOrder     = ButtonSortOrder;
         }
     }
 
@@ -569,8 +597,7 @@ public static class VoiceChatHudState
         if (_spriteCache.TryGetValue(path, out var cached)) return cached;
         try
         {
-            var tex = new Texture2D(0, 0, TextureFormat.RGBA32, false)
-                { wrapMode = TextureWrapMode.Clamp };
+            var tex = new Texture2D(0, 0, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
             var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(path)!;
             using var ms = new MemoryStream();
             stream.CopyTo(ms);
@@ -590,10 +617,10 @@ public static class VoiceChatHudState
 
     private static class Sprites
     {
-        public static Sprite MicOn  => LoadSprite("VoiceChatPlugin.Resources.MicOn.png");
-        public static Sprite MicOff => LoadSprite("VoiceChatPlugin.Resources.MicOff.png");
-        public static Sprite SpkOn  => LoadSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
-        public static Sprite SpkOff => LoadSprite("VoiceChatPlugin.Resources.SpeakerOff.png");
+        public static Sprite MicOn     => LoadSprite("VoiceChatPlugin.Resources.MicOn.png");
+        public static Sprite MicOff    => LoadSprite("VoiceChatPlugin.Resources.MicOff.png");
+        public static Sprite SpkOn     => LoadSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
+        public static Sprite SpkOff    => LoadSprite("VoiceChatPlugin.Resources.SpeakerOff.png");
         public static Sprite JailUnmute => LoadSprite("VoiceChatPlugin.Resources.JailUnmute.png");
     }
 }

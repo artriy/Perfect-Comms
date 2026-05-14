@@ -105,9 +105,6 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     public ConfigEntry<SpkDeviceEnum> SpeakerDeviceIndex { get; }
 #endif
 
-    [LocalEnumSetting("Indicator Position")]
-    public ConfigEntry<IndicatorPosition> VoiceIndicatorPosition { get; }
-
     [LocalEnumSetting("Speaking Bar Position")]
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
 
@@ -243,9 +240,6 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         };
 #endif
 
-        VoiceIndicatorPosition = config.Bind("UI", "VoiceIndicatorPosition",
-            IndicatorPosition.BottomRight,
-            new ConfigDescription("Position of the mic/speaker HUD buttons"));
 
         SpeakingBarPosition = config.Bind("UI", "SpeakingBarPosition",
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
@@ -377,10 +371,6 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatRoom.Current?.SetSpeaker(SpeakerDevice);
         }
 #endif
-        else if (configEntry == VoiceIndicatorPosition)
-        {
-            VoiceChatHudState.ApplyIndicatorPosition(VoiceIndicatorPosition.Value);
-        }
         else if (configEntry == SpeakingBarPosition)
         {
             PingTrackerPatch.ApplySpeakingBarPosition(SpeakingBarPosition.Value);

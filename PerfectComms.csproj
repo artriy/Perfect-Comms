@@ -49,6 +49,10 @@
 		<PackageReference Include="NAudio" Version="2.3.0" />
 		<PackageReference Include="NAudio.Core" Version="2.3.0" />
 		<PackageReference Include="NAudio.Wasapi" Version="2.3.0" />
+		<Reference Include="TownOfUsMira">
+      <HintPath>$(AmongUsDir)\BepInEx\plugins\TownOfUsMira.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
 	</ItemGroup>
 
 	<ItemGroup>

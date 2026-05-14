@@ -10,10 +10,14 @@ internal readonly record struct VoicePlayerSnapshot(
     bool IsLocal,
     bool IsDead,
     bool IsImpostor,
+    bool IsVampire,
     bool InVent,
     bool Disconnected,
     bool IsDummy,
     bool IsVisible,
     bool IsBlackmailed,
+    bool IsBlackmailedNextRound,
     bool IsJailed,
-    byte JailorId);
+    byte JailorId,
+    bool IsMediumSpiritual,
+    bool IsParasiteVictim);
