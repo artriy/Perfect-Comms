@@ -19,7 +19,7 @@ internal static class VoiceSnapshotBuilder
             var data = player.Data;
             int clientId = ResolveClientId(player, data);
             string name = data?.PlayerName ?? player.name ?? "Unknown";
-            bool isJailed = VoiceRoleMuteState.TryGetJailorId(player, out byte jailorId);
+            VoiceRoleMuteState.GetPlayerRoleState(player, out bool isBlackmailed, out bool isJailed, out byte jailorId);
 
             players.Add(new VoicePlayerSnapshot(
                 player.PlayerId,
@@ -29,17 +29,13 @@ internal static class VoiceSnapshotBuilder
                 player.PlayerId == localPlayerId,
                 data?.IsDead == true,
                 data?.Role?.IsImpostor == true,
-                VoiceRoleMuteState.IsVampire(player),
                 player.inVent,
                 data?.Disconnected == true,
                 player.isDummy || player.notRealPlayer,
                 player.gameObject != null && player.gameObject.activeInHierarchy,
-                VoiceRoleMuteState.IsBlackmailed(player),
-                VoiceRoleMuteState.IsBlackmailedNextRound(player),
+                isBlackmailed,
                 isJailed,
-                jailorId,
-                VoiceRoleMuteState.IsMediumInSpiritualState(player),
-                VoiceRoleMuteState.IsParasiteVictim(player)));
+                jailorId));
         }
 
         return new VoiceGameStateSnapshot(
@@ -58,8 +54,14 @@ internal static class VoiceSnapshotBuilder
 
     private static int ResolveMapId()
     {
-        try { return ShipStatus.Instance != null ? (int)ShipStatus.Instance.Type : -1; }
-        catch { return -1; }
+        try
+        {
+            return ShipStatus.Instance != null ? (int)ShipStatus.Instance.Type : -1;
+        }
+        catch
+        {
+            return -1;
+        }
     }
 
     private static int ResolveClientId(PlayerControl player, NetworkedPlayerInfo? data)
@@ -70,13 +72,20 @@ internal static class VoiceSnapshotBuilder
             var client = AmongUsClient.Instance.GetClientFromCharacter(player);
             if (client != null) return client.Id;
         }
+
         return -1;
     }
 
     private static int ResolveCameraCount()
     {
-        try { return ShipStatus.Instance?.AllCameras?.Length ?? 0; }
-        catch { return 0; }
+        try
+        {
+            return ShipStatus.Instance?.AllCameras?.Length ?? 0;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private static float ResolveLocalLightRadius(PlayerControl? local)
@@ -86,7 +95,11 @@ internal static class VoiceSnapshotBuilder
             if (local?.Data != null && ShipStatus.Instance != null)
                 return ShipStatus.Instance.CalculateLightRadius(local.Data);
         }
-        catch { }
+        catch
+        {
+            // ignored; diagnostics will report -1 when unavailable
+        }
+
         return -1f;
     }
 
@@ -96,12 +109,16 @@ internal static class VoiceSnapshotBuilder
         {
             var doors = ShipStatus.Instance?.AllDoors;
             if (doors == null) return 0;
+
             int closed = 0;
             foreach (var door in doors)
                 if (door != null && !door.IsOpen)
                     closed++;
             return closed;
         }
-        catch { return 0; }
+        catch
+        {
+            return 0;
+        }
     }
 }

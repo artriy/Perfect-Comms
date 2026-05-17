@@ -95,7 +95,7 @@ internal static class VoiceLobbyBrowserUi
     internal static void OpenInfoEditor()
     {
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-        _editTitle = settings?.LobbyBrowserTitle.Value ?? "TOU Mira + Voice";
+        _editTitle = settings?.LobbyBrowserTitle.Value ?? "Perfect Comms";
         _editLanguage = settings?.LobbyBrowserLanguage.Value ?? "English";
         _editingLanguage = false;
         _editorOpen = true;
@@ -412,7 +412,7 @@ internal static class VoiceLobbyBrowserUi
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         if (settings != null)
         {
-            settings.LobbyBrowserTitle.Value = string.IsNullOrWhiteSpace(_editTitle) ? "TOU Mira + Voice" : _editTitle.Trim();
+            settings.LobbyBrowserTitle.Value = string.IsNullOrWhiteSpace(_editTitle) ? "Perfect Comms" : _editTitle.Trim();
             settings.LobbyBrowserLanguage.Value = string.IsNullOrWhiteSpace(_editLanguage) ? "English" : _editLanguage.Trim();
         }
         _editorOpen = false;

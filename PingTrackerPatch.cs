@@ -3,6 +3,7 @@ using TMPro;
 using System.Collections.Generic;
 using VoiceChatPlugin.VoiceChat;
 using UnityEngine;
+using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
 using MiraAPI.LocalSettings;
 
@@ -11,16 +12,64 @@ namespace VoiceChatPlugin;
 internal static class VCSorting
 {
     public const string Layer = "UI";
-    public const int    Base  = 32700; 
-    public const int    Ring  = 32705;
-    public const int    Text  = 32710; 
-    public const int    Glow  = 32690; 
+    public const int    Glow  = 32765;
+    public const int    Base  = 32766;
+    public const int    Ring  = 32767;
+    public const int    Text  = 32765;
+}
+
+internal static class VCOverlayCamera
+{
+    private const int OverlayLayer = 31;
+    private static Camera? _camera;
+
+    public static void Sync()
+        => SyncCamera();
+
+    public static void EnsureOnTop(GameObject? go)
+    {
+        if (go == null) return;
+        SyncCamera();
+        SetLayerRecursive(go.transform);
+    }
+
+    private static void SyncCamera()
+    {
+        var main = Camera.main;
+        if (main == null) return;
+
+        if (_camera == null)
+        {
+            var go = new GameObject("VC_OverlayCamera");
+            Object.DontDestroyOnLoad(go);
+            _camera = go.AddComponent<Camera>();
+            _camera.clearFlags = CameraClearFlags.Depth;
+            _camera.cullingMask = 1 << OverlayLayer;
+            _camera.allowHDR = false;
+            _camera.allowMSAA = false;
+        }
+
+        _camera.enabled = true;
+        _camera.orthographic = main.orthographic;
+        _camera.orthographicSize = main.orthographicSize;
+        _camera.fieldOfView = main.fieldOfView;
+        _camera.nearClipPlane = main.nearClipPlane;
+        _camera.farClipPlane = main.farClipPlane;
+        _camera.depth = main.depth + 1000f;
+        _camera.transform.SetPositionAndRotation(main.transform.position, main.transform.rotation);
+    }
+
+    private static void SetLayerRecursive(Transform root)
+    {
+        root.gameObject.layer = OverlayLayer;
+        for (int i = 0; i < root.childCount; i++)
+            SetLayerRecursive(root.GetChild(i));
+    }
 }
 
 [HarmonyPatch(typeof(PingTracker), nameof(PingTracker.Update))]
 public static class PingTrackerPatch
 {
-    private const float IconScale   = 0.16f;
     private const float LabelSize   = 0.95f;
     private const float SlotWidth   = 0.52f;
     private const float SlotHeight  = 0.58f;
@@ -33,9 +82,6 @@ public static class PingTrackerPatch
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
     private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopRight;
-    private static GameObject? _cacheHolder;
-    private static readonly Dictionary<byte, GameObject>        _iconCache        = new();
-    private static readonly Dictionary<byte, OutfitFingerprint> _cacheFingerprint = new();
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
     private static readonly HashSet<byte> _activeSpeakerIds = new();
     private static readonly Dictionary<byte, float> _activeSpeakerLevels = new();
@@ -63,6 +109,7 @@ public static class PingTrackerPatch
 
         EnsureBar(__instance);
         if (_barRoot == null) return;
+        KeepSpeakingBarOnTop(__instance);
 
         var room = VoiceChatRoom.Current;
         var overlay = VoiceOverlayState.Current(room);
@@ -107,7 +154,6 @@ public static class PingTrackerPatch
                 if (slot.Fingerprint != liveFp)
                 {
                     RemoveSlot(id);
-                    InvalidateCacheFor(id);
                 }
                 else
                 {
@@ -130,6 +176,7 @@ public static class PingTrackerPatch
         LayoutSlotsIfDirty();
 
         _barRoot.SetActive(_slots.Count > 0);
+        KeepSpeakingBarOnTop(__instance);
     }
 
     private static void EnsureBar(PingTracker template)
@@ -137,8 +184,9 @@ public static class PingTrackerPatch
         if (_barRoot != null) return;
 
         _barRoot   = new GameObject("VC_SpeakingBar");
-        _barRoot.transform.SetParent(template.transform.parent, false);
+        _barRoot.transform.SetParent(ResolveOverlayRoot(template), false);
         _barAspect = _barRoot.AddComponent<AspectPosition>();
+        ApplySortingGroup(_barRoot, VCSorting.Ring);
 
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         if (settings != null)
@@ -152,7 +200,74 @@ public static class PingTrackerPatch
 
         ApplyPositionToAspect(_barAspect, _barPosition);
         _barAspect.AdjustPosition();
+        KeepSpeakingBarOnTop(template);
         _barRoot.SetActive(false);
+    }
+
+    private static Transform ResolveOverlayRoot(PingTracker? template = null)
+    {
+        var meeting = MeetingHud.Instance;
+        if (meeting != null)
+        {
+            var meetingParent = meeting.transform.parent;
+            if (meetingParent != null && meetingParent.gameObject.activeInHierarchy)
+                return meetingParent;
+            return meeting.transform;
+        }
+
+        var hud = HudManager.Instance;
+        if (hud != null)
+            return hud.transform.parent != null ? hud.transform.parent : hud.transform;
+
+        if (template?.transform.parent != null) return template.transform.parent;
+        if (template != null) return template.transform;
+        return _barRoot != null && _barRoot.transform.parent != null ? _barRoot.transform.parent : _barRoot!.transform;
+    }
+
+    private static void KeepSpeakingBarOnTop(PingTracker? template = null)
+    {
+        if (_barRoot == null) return;
+
+        var root = ResolveOverlayRoot(template);
+        if (_barRoot.transform.parent != root)
+        {
+            _barRoot.transform.SetParent(root, false);
+            _barAspect?.AdjustPosition();
+        }
+
+        _barRoot.transform.SetAsLastSibling();
+        var pos = _barRoot.transform.localPosition;
+        _barRoot.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
+        ApplySortingGroup(_barRoot, VCSorting.Ring);
+        VCOverlayCamera.Sync();
+        ApplySpeakingBarSorting();
+    }
+
+    private static void ApplySortingGroup(GameObject go, int order)
+    {
+        var group = go.GetComponent<SortingGroup>() ?? go.AddComponent<SortingGroup>();
+        group.sortingLayerName = VCSorting.Layer;
+        group.sortingOrder = order;
+    }
+
+    private static void ApplySpeakingBarSorting()
+    {
+        foreach (var slot in _slots.Values)
+        {
+            if (slot.IconGO != null)
+                ApplyTopSorting(slot.IconGO);
+            if (slot.RingRenderer != null)
+            {
+                slot.RingRenderer.sortingLayerName = VCSorting.Layer;
+                slot.RingRenderer.sortingOrder = VCSorting.Ring;
+                slot.RingRenderer.maskInteraction = SpriteMaskInteraction.None;
+            }
+            if (slot.LabelTMP != null)
+            {
+                slot.LabelTMP.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+                slot.LabelTMP.sortingOrder = VCSorting.Text;
+            }
+        }
     }
 
     private static void ApplyPositionToAspect(AspectPosition asp, SpeakingBarPosition pos)
@@ -186,143 +301,27 @@ public static class PingTrackerPatch
         }
     }
 
-    [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.Start))]
-    private static class MeetingStartCachePatch
-    {
-        private static void Postfix(MeetingHud __instance)
-        {
-            if (__instance.playerStates == null) return;
-            EnsureCacheHolder();
-            foreach (var state in __instance.playerStates)
-            {
-                if (state?.PlayerIcon == null) continue;
-                RefreshCacheFromMeeting(state.TargetPlayerId, state.PlayerIcon.gameObject);
-            }
-        }
-    }
-
-    [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.Update))]
-    private static class MeetingUpdateCachePatch
-    {
-        private static void Postfix(MeetingHud __instance)
-        {
-            if (__instance.playerStates == null || _cacheHolder == null) return;
-            foreach (var state in __instance.playerStates)
-            {
-                if (state?.PlayerIcon == null) continue;
-                if (_iconCache.ContainsKey(state.TargetPlayerId)) continue;
-                RefreshCacheFromMeeting(state.TargetPlayerId, state.PlayerIcon.gameObject);
-            }
-        }
-    }
-
-    private static void EnsureCacheHolder()
-    {
-        if (_cacheHolder != null) return;
-        _cacheHolder = new GameObject("VC_IconCacheHolder");
-        Object.DontDestroyOnLoad(_cacheHolder);
-        _cacheHolder.SetActive(false);
-    }
-
-    private static void RefreshCacheFromMeeting(byte playerId, GameObject sourceGO)
-    {
-        EnsureCacheHolder();
-        if (_iconCache.TryGetValue(playerId, out var old) && old != null)
-            Object.Destroy(old);
-
-        var clone = Object.Instantiate(sourceGO, _cacheHolder!.transform);
-        clone.name = $"VC_CachedIcon_{playerId}";
-        clone.SetActive(false);
-        foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
-            anim.enabled = false;
-        foreach (var rb in clone.GetComponentsInChildren<Rigidbody2D>(true))
-            rb.simulated = false;
-        
-        ApplyTopSorting(clone);
-
-        _iconCache[playerId]        = clone;
-        _cacheFingerprint[playerId] = GetFingerprint(playerId);
-    }
-
-    private static void InvalidateCacheFor(byte playerId)
-    {
-        if (_iconCache.TryGetValue(playerId, out var old) && old != null)
-            Object.Destroy(old);
-        _iconCache.Remove(playerId);
-        _cacheFingerprint.Remove(playerId);
-    }
-
     private static void AddSlot(byte playerId, float voiceLevel)
     {
         if (_barRoot == null) return;
 
-        var fp   = GetFingerprint(playerId);
+        var player = FindPlayer(playerId);
+        var fp = GetFingerprint(playerId);
         var slot = new SpeakerSlot
         {
             Fingerprint = fp,
-            PlayerColor = GetPaletteColor(FindPlayer(playerId)),
+            PlayerColor = GetPaletteColor(player),
             Level = voiceLevel,
             TargetLevel = voiceLevel,
             SmoothedLevel = NormalizeVoiceLevel(voiceLevel),
             IsSpeaking = true
         };
-        bool gotIcon = false;
 
-        if (MeetingHud.Instance?.playerStates != null)
-        {
-            foreach (var state in MeetingHud.Instance.playerStates)
-            {
-                if (state == null || state.TargetPlayerId != playerId || state.PlayerIcon == null)
-                    continue;
-
-                RefreshCacheFromMeeting(playerId, state.PlayerIcon.gameObject);
-
-                var copy = Object.Instantiate(state.PlayerIcon.gameObject, _barRoot.transform);
-                copy.SetActive(true);
-                copy.transform.localScale = Vector3.one * IconScale;
-                
-                EnsurePlayerModelVisible(copy);
-                
-                ApplyTopSorting(copy);
-                slot.IconGO = copy;
-                gotIcon = true;
-                break;
-            }
-        }
-
-        if (!gotIcon
-            && _iconCache.TryGetValue(playerId, out var tmpl) && tmpl != null
-            && _cacheFingerprint.TryGetValue(playerId, out var cachedFp) && cachedFp == fp)
-        {
-            var copy = Object.Instantiate(tmpl, _barRoot.transform);
-            copy.SetActive(true);
-            copy.transform.localScale = Vector3.one * IconScale;
-            EnsurePlayerModelVisible(copy);
-            ApplyTopSorting(copy);
-            slot.IconGO = copy;
-            gotIcon = true;
-        }
-
-        if (!gotIcon)
-            gotIcon = TryBuildIconFromPlayerControl(playerId, slot);
-
-        if (!gotIcon)
-        {
-            var pc       = FindPlayer(playerId);
-            var circleGO = new GameObject("VC_Circle");
-            circleGO.transform.SetParent(_barRoot.transform, false);
-            var sr              = circleGO.AddComponent<SpriteRenderer>();
-            sr.sprite           = CreateCircleSprite();
-            sr.color            = GetPaletteColor(pc);
-            sr.sortingLayerName = VCSorting.Layer;
-            sr.sortingOrder     = VCSorting.Base;
-            circleGO.transform.localScale = Vector3.one * (IconScale * 0.65f);
-            slot.IconGO = circleGO;
-        }
+        if (player != null && CrewmateAvatarRenderer.TryCreate(playerId, player, _barRoot.transform, out var iconGO))
+            slot.IconGO = iconGO;
 
         CreateRing(playerId, slot);
 
-        var player  = FindPlayer(playerId);
         var labelGO = new GameObject("VC_Label");
         labelGO.transform.SetParent(_barRoot.transform, false);
         var tmp = labelGO.AddComponent<TextMeshPro>();
@@ -335,71 +334,9 @@ public static class PingTrackerPatch
         tmp.color              = Color.white;
         tmp.rectTransform.sizeDelta = new Vector2(1.4f, 0.45f);
         slot.LabelTMP = tmp;
+        VCOverlayCamera.EnsureOnTop(labelGO);
         _slots[playerId] = slot;
         _layoutDirty = true;
-    }
-
-    private static bool TryBuildIconFromPlayerControl(byte playerId, SpeakerSlot slot)
-    {
-        if (_barRoot == null) return false;
-        var pc = FindPlayer(playerId);
-        if (pc == null) return false;
-
-        try
-        {
-            var cosLayer = pc.GetComponentInChildren<CosmeticsLayer>();
-            if (cosLayer == null) return false;
-
-            var clone = Object.Instantiate(cosLayer.gameObject, _barRoot.transform);
-            clone.SetActive(true);
-            clone.name = $"VC_CosIcon_{playerId}";
-
-            foreach (var anim in clone.GetComponentsInChildren<Animator>(true))
-                anim.enabled = false;
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody2D>(true))
-                rb.simulated = false;
-            foreach (var mono in clone.GetComponentsInChildren<MonoBehaviour>(true))
-            {
-                var type = mono.GetType().Name;
-                if (!type.Contains("Renderer") && !type.Contains("Transform") 
-                    && !type.Contains("Layout") && !type.Contains("Canvas")
-                    && !type.Contains("RectTransform") && !type.Contains("Mask"))
-                {
-                    mono.enabled = false;
-                }
-            }
-
-            ApplyTopSorting(clone);
-            clone.transform.localScale    = Vector3.one * IconScale;
-            clone.transform.localPosition = Vector3.zero;
-            EnsurePlayerModelVisible(clone);
-            
-            slot.IconGO = clone;
-            return true;
-        }
-        catch { return false; }
-    }
-
-    private static void EnsurePlayerModelVisible(GameObject iconGO)
-    {
-        if (iconGO == null) return;
-
-        string[] possibleNames = { "PlayerModel", "BeanSprite", "CharacterVisual", "Sprite" };
-        
-        foreach (var modelName in possibleNames)
-        {
-            Transform modelTransform = iconGO.transform.Find(modelName);
-            if (modelTransform != null)
-            {
-                modelTransform.gameObject.SetActive(true);
-                var animator = modelTransform.GetComponentInChildren<Animator>(true);
-                if (animator != null)
-                    animator.enabled = false;
-                modelTransform.SetAsLastSibling();
-                
-                return;
-            }
-        }
     }
 
     private static void RemoveSlot(byte id)
@@ -425,6 +362,7 @@ public static class PingTrackerPatch
         sr.sortingLayerName = VCSorting.Layer;
         sr.sortingOrder = VCSorting.Ring;
         sr.maskInteraction = SpriteMaskInteraction.None;
+        VCOverlayCamera.EnsureOnTop(ringGO);
 
         slot.RingGO = ringGO;
         slot.RingRenderer = sr;
@@ -475,11 +413,11 @@ public static class PingTrackerPatch
             {
                 float y = startY - i * SlotHeight;
                 if (kv.Value.IconGO   != null)
-                    kv.Value.IconGO.transform.localPosition  = new Vector3(0f, y, 0f);
+                    kv.Value.IconGO.transform.localPosition  = new Vector3(0f, y, -100f);
                 if (kv.Value.RingGO   != null)
-                    kv.Value.RingGO.transform.localPosition  = new Vector3(0f, y, 0.02f);
+                    kv.Value.RingGO.transform.localPosition  = new Vector3(0f, y, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(0f, y - LabelOffset, 0f);
+                    kv.Value.LabelTMP.transform.localPosition = new Vector3(0f, y - LabelOffset, -102f);
                 i++;
             }
         }
@@ -492,11 +430,11 @@ public static class PingTrackerPatch
             {
                 float x = startX + i * SlotWidth;
                 if (kv.Value.IconGO   != null)
-                    kv.Value.IconGO.transform.localPosition  = new Vector3(x, 0f, 0f);
+                    kv.Value.IconGO.transform.localPosition  = new Vector3(x, 0f, -100f);
                 if (kv.Value.RingGO   != null)
-                    kv.Value.RingGO.transform.localPosition  = new Vector3(x, 0f, 0.02f);
+                    kv.Value.RingGO.transform.localPosition  = new Vector3(x, 0f, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(x, -LabelOffset, 0f);
+                    kv.Value.LabelTMP.transform.localPosition = new Vector3(x, -LabelOffset, -102f);
                 i++;
             }
         }
@@ -528,11 +466,23 @@ public static class PingTrackerPatch
 
     private static void ApplyTopSorting(GameObject go)
     {
+        if (CrewmateAvatarRenderer.IsCustomIcon(go))
+        {
+            CrewmateAvatarRenderer.ApplySorting(go);
+            return;
+        }
+
         foreach (var sr in go.GetComponentsInChildren<SpriteRenderer>(true))
         {
             sr.sortingLayerName = VCSorting.Layer;
             sr.sortingOrder     = VCSorting.Base;
             sr.maskInteraction  = SpriteMaskInteraction.None;
+        }
+
+        foreach (var tmp in go.GetComponentsInChildren<TextMeshPro>(true))
+        {
+            tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+            tmp.sortingOrder = VCSorting.Text;
         }
     }
 
@@ -560,25 +510,7 @@ public static class PingTrackerPatch
             : Color.white;
     }
 
-    private static Sprite? _circleSprite;
     private static Sprite? _ringSprite;
-    private static Sprite CreateCircleSprite()
-    {
-        if (_circleSprite != null) return _circleSprite;
-        const int size = 64;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
-        float r = size * 0.5f;
-        for (int y = 0; y < size; y++)
-        for (int x = 0; x < size; x++)
-        {
-            float dx = x - r + 0.5f, dy = y - r + 0.5f;
-            float d  = Mathf.Sqrt(dx * dx + dy * dy);
-            tex.SetPixel(x, y, new Color(1, 1, 1, Mathf.Clamp01((r - d) * 2f)));
-        }
-        tex.Apply();
-        _circleSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
-        return _circleSprite;
-    }
 
     private static Sprite CreateRingSprite()
     {

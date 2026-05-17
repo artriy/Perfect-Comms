@@ -1,6 +1,7 @@
 using HarmonyLib;
 using VoiceChatPlugin.VoiceChat;
 using UnityEngine;
+using UnityEngine.Rendering;
 using System;
 using System.Collections.Generic;
 using MiraAPI.LocalSettings;
@@ -203,10 +204,14 @@ public static class MeetingSpeakingIndicatorPatch
     {
         if (border != null)
         {
-            if (border.transform.parent != meetingHud.transform)
-                border.transform.SetParent(meetingHud.transform, false);
-            border.transform.localPosition = GetIconLocalPosition(state);
+            var root = ResolveMeetingOverlayRoot(meetingHud);
+            if (border.transform.parent != root)
+                border.transform.SetParent(root, false);
+            border.transform.localPosition = ToOverlayLocal(root, GetIconWorldPosition(state), -100f);
             border.transform.localScale = Vector3.one * BorderScale;
+            ApplySortingGroup(border.gameObject, VCSorting.Ring);
+            VCOverlayCamera.EnsureOnTop(border.gameObject);
+            border.transform.SetAsLastSibling();
         }
 
         if (glow != null)
@@ -220,13 +225,47 @@ public static class MeetingSpeakingIndicatorPatch
             }
             else
             {
-                if (glow.transform.parent != meetingHud.transform)
-                    glow.transform.SetParent(meetingHud.transform, false);
-                glow.transform.localPosition = GetCardLocalPosition(state);
+                var root = ResolveMeetingOverlayRoot(meetingHud);
+                if (glow.transform.parent != root)
+                    glow.transform.SetParent(root, false);
+                glow.transform.localPosition = ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
                 glow.transform.localScale = CardGlowScale;
+                ApplySortingGroup(glow.gameObject, VCSorting.Glow);
+                VCOverlayCamera.EnsureOnTop(glow.gameObject);
+                glow.transform.SetAsLastSibling();
             }
         }
     }
+
+    private static void ApplySortingGroup(GameObject go, int order)
+    {
+        var group = go.GetComponent<SortingGroup>() ?? go.AddComponent<SortingGroup>();
+        group.sortingLayerName = VCSorting.Layer;
+        group.sortingOrder = order;
+    }
+
+    private static Transform ResolveMeetingOverlayRoot(MeetingHud meetingHud)
+    {
+        var meetingParent = meetingHud.transform.parent;
+        if (meetingParent != null && meetingParent.gameObject.activeInHierarchy)
+            return meetingParent;
+        return meetingHud.transform;
+    }
+
+    private static Vector3 ToOverlayLocal(Transform root, Vector3 worldPosition, float z)
+    {
+        var local = root.InverseTransformPoint(worldPosition);
+        return new Vector3(local.x, local.y, z);
+    }
+
+    private static Vector3 GetIconWorldPosition(PlayerVoteArea state)
+    {
+        var icon = state.PlayerIcon;
+        return icon != null ? icon.transform.position : state.transform.position;
+    }
+
+    private static Vector3 GetCardWorldPosition(PlayerVoteArea state)
+        => state.Background != null ? state.Background.transform.position : state.transform.position;
 
     private static SmoothVisualState GetVisualState(byte playerId)
     {
@@ -247,7 +286,9 @@ public static class MeetingSpeakingIndicatorPatch
         var highlightColor = color;
         highlightColor.a = Mathf.Lerp(0.20f, 0.95f, brightness) * visibility;
         highlight.color = highlightColor;
-        highlight.sortingOrder = VCSorting.Ring + 21;
+        highlight.sortingLayerName = VCSorting.Layer;
+        highlight.sortingOrder = VCSorting.Ring;
+        highlight.maskInteraction = SpriteMaskInteraction.None;
         highlight.enabled = visibility > 0.01f;
         _controlledHighlights.Add(playerId);
     }
@@ -485,14 +526,19 @@ public static class MeetingSpeakingIndicatorPatch
         try
         {
             var go = new GameObject("VC_GlowBorder");
-            go.transform.SetParent(meetingHud.transform, false);
-            go.transform.localPosition = GetIconLocalPosition(state);
+            var root = ResolveMeetingOverlayRoot(meetingHud);
+            go.transform.SetParent(root, false);
+            go.transform.localPosition = ToOverlayLocal(root, GetIconWorldPosition(state), -100f);
             go.transform.localScale    = Vector3.one * BorderScale;
+            ApplySortingGroup(go, VCSorting.Ring);
+            VCOverlayCamera.EnsureOnTop(go);
+            go.transform.SetAsLastSibling();
 
             var sr         = go.AddComponent<SpriteRenderer>();
             sr.sprite           = GetRingSprite();
             sr.sortingLayerName = VCSorting.Layer;
-            sr.sortingOrder     = VCSorting.Ring + 20;
+            sr.sortingOrder     = VCSorting.Ring;
+            sr.maskInteraction  = SpriteMaskInteraction.None;
             sr.enabled          = false;
 
             _borders[playerId] = sr;
@@ -515,14 +561,15 @@ public static class MeetingSpeakingIndicatorPatch
             var go = new GameObject("VC_CardSpeakingGlow");
             var background = state.Background;
             bool hasBackground = background != null && background.sprite != null;
-            go.transform.SetParent(hasBackground ? background!.transform : meetingHud.transform, false);
-            go.transform.localPosition = hasBackground ? new Vector3(0f, 0f, -0.05f) : GetCardLocalPosition(state);
+            var root = ResolveMeetingOverlayRoot(meetingHud);
+            go.transform.SetParent(hasBackground ? background!.transform : root, false);
+            go.transform.localPosition = hasBackground ? new Vector3(0f, 0f, -0.05f) : ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
             go.transform.localScale = hasBackground ? new Vector3(1.10f, 1.28f, 1f) : CardGlowScale;
 
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = hasBackground ? background!.sprite : GetCardGlowSprite();
             sr.sortingLayerID = hasBackground ? background!.sortingLayerID : SortingLayer.NameToID(VCSorting.Layer);
-            sr.sortingOrder = VCSorting.Ring + 19;
+            sr.sortingOrder = VCSorting.Glow;
             sr.maskInteraction = SpriteMaskInteraction.None;
             sr.enabled = false;
 

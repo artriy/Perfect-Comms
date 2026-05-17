@@ -99,7 +99,7 @@ internal static class VoiceLobbyRegistryPublisher
         request.Code = code;
         request.Region = ResolveRegionName();
         request.Language = Clamp(settings.LobbyBrowserLanguage.Value, 16, "English");
-        request.Title = Clamp(settings.LobbyBrowserTitle.Value, 40, "TOU Mira + Voice");
+        request.Title = Clamp(settings.LobbyBrowserTitle.Value, 40, "Perfect Comms");
         request.Host = Clamp(PlayerControl.LocalPlayer?.Data?.PlayerName, 24, "Unknown");
         request.Players = CountPlayers();
         request.MaxPlayers = ResolveMaxPlayers();

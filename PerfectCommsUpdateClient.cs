@@ -17,9 +17,17 @@ internal sealed class PerfectCommsUpdateInfo
     [JsonPropertyName("showEveryMainMenu")] public bool ShowEveryMainMenu { get; set; }
 }
 
+internal sealed class GitHubReleaseInfo
+{
+    [JsonPropertyName("tag_name")] public string TagName { get; set; } = "";
+    [JsonPropertyName("html_url")] public string HtmlUrl { get; set; } = "";
+}
+
 internal static class PerfectCommsUpdateClient
 {
-    private const string DefaultUrl = "https://perfect-comms-lobbies.edgetel.workers.dev/updates/latest";
+    private const string GitHubLatestReleaseUrl = "https://api.github.com/repos/artriy/Perfect-Comms/releases/latest";
+    private const string LegacyCloudflareUpdateUrl = "https://perfect-comms-lobbies.edgetel.workers.dev/updates/latest";
+    private const string GitHubReleasesUrl = "https://github.com/artriy/Perfect-Comms/releases/latest";
 
     private static readonly HttpClient Client = new()
     {
@@ -34,10 +42,14 @@ internal static class PerfectCommsUpdateClient
     internal static async Task<PerfectCommsUpdateInfo?> GetLatestAsync(string configuredUrl)
     {
         var url = BuildUrl(configuredUrl);
-        using var response = await Client.GetAsync(url).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+        request.Headers.TryAddWithoutValidation("User-Agent", $"PerfectComms/{VoiceChatPluginMain.Version}");
+
+        using var response = await Client.SendAsync(request).ConfigureAwait(false);
         var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        return JsonSerializer.Deserialize<PerfectCommsUpdateInfo>(text, JsonOptions);
+        return ParseUpdateInfo(text);
     }
 
     internal static bool IsNewerThanCurrent(string latestVersion)
@@ -45,12 +57,37 @@ internal static class PerfectCommsUpdateClient
 
     private static string BuildUrl(string configuredUrl)
     {
-        var baseUrl = string.IsNullOrWhiteSpace(configuredUrl) ? DefaultUrl : configuredUrl.Trim();
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
-            baseUrl = DefaultUrl;
+        var url = string.IsNullOrWhiteSpace(configuredUrl) ? GitHubLatestReleaseUrl : configuredUrl.Trim();
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+            return GitHubLatestReleaseUrl;
 
-        var separator = baseUrl.Contains('?') ? '&' : '?';
-        return baseUrl + separator + "current=" + Uri.EscapeDataString(VoiceChatPluginMain.Version);
+        if (url.StartsWith(LegacyCloudflareUpdateUrl, StringComparison.OrdinalIgnoreCase))
+            return GitHubLatestReleaseUrl;
+
+        if (string.Equals(uri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase))
+            return url;
+
+        var separator = url.Contains('?') ? '&' : '?';
+        return url + separator + "current=" + Uri.EscapeDataString(VoiceChatPluginMain.Version);
+    }
+
+    private static PerfectCommsUpdateInfo? ParseUpdateInfo(string text)
+    {
+        var github = JsonSerializer.Deserialize<GitHubReleaseInfo>(text, JsonOptions);
+        if (!string.IsNullOrWhiteSpace(github?.TagName))
+        {
+            return new PerfectCommsUpdateInfo
+            {
+                Enabled = true,
+                LatestVersion = github.TagName,
+                Title = "Perfect Comms update available",
+                Message = "Click here to download the latest Perfect Comms release.",
+                ReleaseUrl = string.IsNullOrWhiteSpace(github.HtmlUrl) ? GitHubReleasesUrl : github.HtmlUrl,
+                ShowEveryMainMenu = false,
+            };
+        }
+
+        return JsonSerializer.Deserialize<PerfectCommsUpdateInfo>(text, JsonOptions);
     }
 
     private static int CompareVersions(string left, string right)
