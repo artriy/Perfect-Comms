@@ -327,7 +327,7 @@ public static class VoiceVolumeMenu
         divSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
     }
 
-    // ── Apply volume to VCPlayer + config ─────────────────────────────────────
+    // ── Apply volume to remote Interstellar peers + config ───────────────────
 
     private static float ApplyVolume(PlayerEntry entry, float v,
         Action<float> positionSlider, Action<float> setLabel)
@@ -337,25 +337,9 @@ public static class VoiceVolumeMenu
         setLabel(v);
         SaveVolume(entry, v);
 
-        // Apply immediately to the running VoiceChatRoom
-        if (VoiceChatRoom.Current != null)
-            foreach (var c in VoiceChatRoom.Current.AllClients)
-                if (c.PlayerName == entry.Name || c.PlayerId == entry.PlayerId)
-                {
-                    c.SetVolume(v);
-                    break;
-                }
+        VoiceChatRoom.Current?.TrySetRemoteVolume(entry.PlayerId, entry.Name, v);
 
         return v;
-    }
-
-    internal static void ApplySavedVolume(VCPlayer player)
-    {
-        EnsureSavedVolumesLoaded();
-        string key = GetVolumeKey(player.PlayerName);
-        if (key.Length == 0) return;
-        if (_savedVolumes.TryGetValue(key, out float volume))
-            player.SetVolume(Mathf.Clamp(volume, VMin, VMax));
     }
 
     // ── HUD lifecycle ─────────────────────────────────────────────────────────
@@ -375,11 +359,21 @@ public static class VoiceVolumeMenu
 
     private static float GetSavedVolume(PlayerEntry entry)
     {
+        return TryGetSavedVolume(entry.Name, out float volume) ? volume : 1f;
+    }
+
+    internal static bool TryGetSavedVolume(string playerName, out float volume)
+    {
         EnsureSavedVolumesLoaded();
-        string key = GetVolumeKey(entry.Name);
-        return key.Length > 0 && _savedVolumes.TryGetValue(key, out float volume)
-            ? Mathf.Clamp(volume, VMin, VMax)
-            : 1f;
+        string key = GetVolumeKey(playerName);
+        if (key.Length > 0 && _savedVolumes.TryGetValue(key, out volume))
+        {
+            volume = Mathf.Clamp(volume, VMin, VMax);
+            return true;
+        }
+
+        volume = 1f;
+        return false;
     }
 
     private static void SaveVolume(PlayerEntry entry, float volume)
@@ -441,14 +435,19 @@ public static class VoiceVolumeMenu
         var list = new List<PlayerEntry>();
         if (AmongUsClient.Instance == null) return list;
 
+        var playersById = new Dictionary<byte, PlayerControl>();
+        foreach (var pc in PlayerControl.AllPlayerControls)
+            if (pc != null && !playersById.ContainsKey(pc.PlayerId))
+                playersById.Add(pc.PlayerId, pc);
+
         var seen = new HashSet<byte>();
-        // Prefer live VoiceChatRoom clients (they have confirmed player IDs)
+        // Prefer active Interstellar peers (they have confirmed voice profiles)
         if (VoiceChatRoom.Current != null)
-            foreach (var c in VoiceChatRoom.Current.AllClients)
+            foreach (var c in VoiceChatRoom.Current.InterstellarRemoteOverlayStates)
             {
                 if (c.PlayerId == byte.MaxValue) continue;
                 if (!seen.Add(c.PlayerId)) continue;
-                var pc  = FindPlayer(c.PlayerId);
+                playersById.TryGetValue(c.PlayerId, out var pc);
                 var col = GetPaletteColor(pc);
                 list.Add(new PlayerEntry(c.PlayerId, c.PlayerName, col));
             }
@@ -464,13 +463,6 @@ public static class VoiceVolumeMenu
         }
 
         return list;
-    }
-
-    private static PlayerControl? FindPlayer(byte id)
-    {
-        foreach (var pc in PlayerControl.AllPlayerControls)
-            if (pc != null && pc.PlayerId == id) return pc;
-        return null;
     }
 
     private static Color GetPaletteColor(PlayerControl? pc)

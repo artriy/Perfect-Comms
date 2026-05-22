@@ -522,7 +522,7 @@ public static class VoiceChatHudState
         => PlayerControl.LocalPlayer != null
         && PlayerControl.LocalPlayer.Data?.Role?.IsImpostor == true
         && PlayerControl.LocalPlayer.Data?.IsDead == false
-        && VoiceChatGameOptions.Instance.ImpostorPrivateRadio.Value;
+        && VoiceChatGameOptions.GetInstance().ImpostorPrivateRadio.Value;
 
     private static void ClearButtonBG(GameObject obj)
     {
@@ -564,26 +564,38 @@ public static class VoiceChatHudState
 
     private static readonly Dictionary<string, Sprite> _spriteCache = new();
 
-    public static Sprite LoadSprite(string path)
+    public static Sprite LoadSprite(string path, bool highQuality = false)
     {
-        if (_spriteCache.TryGetValue(path, out var cached)) return cached;
+        var cacheKey = highQuality ? path + "#hq" : path;
+        if (_spriteCache.TryGetValue(cacheKey, out var cached)) return cached;
         try
         {
-            var tex = new Texture2D(0, 0, TextureFormat.RGBA32, false)
-                { wrapMode = TextureWrapMode.Clamp };
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, highQuality)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = highQuality ? 16 : 1,
+                mipMapBias = highQuality ? -1.15f : 0f,
+            };
             var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(path)!;
             using var ms = new MemoryStream();
             stream.CopyTo(ms);
             tex.LoadImage(ms.ToArray(), false);
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.anisoLevel = highQuality ? 16 : 1;
+            tex.mipMapBias = highQuality ? -1.15f : 0f;
+            if (highQuality)
+                tex.Apply(true, false);
             var spr = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height),
                 new Vector2(0.5f, 0.5f), 900f);
             spr.hideFlags |= HideFlags.HideAndDontSave | HideFlags.DontSaveInEditor;
-            _spriteCache[path] = spr;
+            _spriteCache[cacheKey] = spr;
             return spr;
         }
         catch
         {
-            VoiceChatPluginMain.Logger.LogError("[VC] Sprite load failed: " + path);
+            VoiceDiagnostics.DebugError("[VC] Sprite load failed: " + path);
             return null!;
         }
     }

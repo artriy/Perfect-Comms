@@ -6,7 +6,7 @@ namespace VoiceChatPlugin.Audio;
 
 internal class BufferedSampleProvider : ISampleProvider
 {
-    private const int EdgeFadeSamples = AudioHelpers.PlaybackEdgeFadeSamples;
+    private const int RecoveryDecayReads = 240;
 
     private CircularFloatBuffer? _ring;
     private readonly object _stateLock = new();
@@ -22,12 +22,14 @@ internal class BufferedSampleProvider : ISampleProvider
     private long _prebufferSilenceReads;
     private DateTime _lastBufferEventLogUtc = DateTime.MinValue;
     private DateTime _lastBufferWriteLogUtc = DateTime.MinValue;
-    private float _lastOutputSample;
     private bool _lastReadEndedSilent = true;
     private bool _hasPlayedAudio;
     private DateTime _prebufferFirstSampleUtc = DateTime.MinValue;
+    private int _adaptiveRecoveryPrebufferSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
+    private int _stableReadCycles;
 
     public bool ReadFully              { get; set; } = true;
+    public bool EnableRecoveryPrebuffer { get; set; } = true;
     public int  BufferLength           { get; set; }
     public int  BufferCutSize          { get; set; } = int.MaxValue;
     public int  BufferCutToSize        { get; set; } = int.MaxValue;
@@ -41,13 +43,16 @@ internal class BufferedSampleProvider : ISampleProvider
             lock (_stateLock)
             {
                 _prebufferSamples = Math.Max(0, value);
-                _isPrebuffering = _prebufferSamples > 0;
+                _isPrebuffering = EnableRecoveryPrebuffer && _prebufferSamples > 0;
+                _adaptiveRecoveryPrebufferSamples = EnableRecoveryPrebuffer ? AudioHelpers.PlaybackRecoveryPrebufferSamples : 0;
+                _stableReadCycles = 0;
             }
         }
     }
 
     public WaveFormat WaveFormat  => _format;
     public int  BufferedSamples   { get { lock (_stateLock) return _ring?.Count ?? 0; } }
+    internal int CurrentRecoveryPrebufferSamples { get { lock (_stateLock) return _adaptiveRecoveryPrebufferSamples; } }
     // Legacy name kept for compatibility
     public int  BufferedBytes     => BufferedSamples;
 
@@ -93,12 +98,12 @@ internal class BufferedSampleProvider : ISampleProvider
         if (written < count && !DiscardOnBufferOverflow)
             throw new InvalidOperationException("Buffer full");
         if (_ring.Count > BufferCutSize && BufferCutSize > BufferCutToSize)
-            _ring.Discard(_ring.Count - BufferCutToSize);
-        if (_prebufferSamples > 0 && _isPrebuffering)
         {
-            int target = _hasPlayedAudio
-                ? AudioHelpers.PlaybackRecoveryPrebufferSamples
-                : _prebufferSamples;
+            _ring.Discard(_ring.Count - BufferCutToSize);
+        }
+        if (EnableRecoveryPrebuffer && _prebufferSamples > 0 && _isPrebuffering)
+        {
+            int target = GetPrebufferTargetLocked();
             if (_ring.Count < target) return;
 
             _isPrebuffering = false;
@@ -112,11 +117,12 @@ internal class BufferedSampleProvider : ISampleProvider
         lock (_stateLock)
         {
             _ring?.Reset();
-            _isPrebuffering = _prebufferSamples > 0;
-            _lastOutputSample = 0f;
+            _isPrebuffering = EnableRecoveryPrebuffer && _prebufferSamples > 0;
             _lastReadEndedSilent = true;
             _hasPlayedAudio = false;
             _prebufferFirstSampleUtc = DateTime.MinValue;
+            _adaptiveRecoveryPrebufferSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
+            _stableReadCycles = 0;
         }
     }
 
@@ -137,12 +143,10 @@ internal class BufferedSampleProvider : ISampleProvider
             return CompleteRead(buffer, offset, count, 0);
         }
 
-        if (_prebufferSamples > 0 && _isPrebuffering)
+        if (EnableRecoveryPrebuffer && _prebufferSamples > 0 && _isPrebuffering)
         {
             int buffered = _ring.Count;
-            int target = _hasPlayedAudio
-                ? AudioHelpers.PlaybackRecoveryPrebufferSamples
-                : _prebufferSamples;
+            int target = GetPrebufferTargetLocked();
             bool waitExpired = buffered > 0 &&
                 _prebufferFirstSampleUtc != DateTime.MinValue &&
                 (DateTime.UtcNow - _prebufferFirstSampleUtc).TotalMilliseconds >= AudioHelpers.PlaybackMaxPrebufferWaitMilliseconds;
@@ -165,15 +169,56 @@ internal class BufferedSampleProvider : ISampleProvider
         int bufferedBeforeRead = _ring.Count;
         int num = _ring.Read(buffer, offset, count);
         System.Threading.Interlocked.Add(ref _actualReadSamples, num);
-        if (_prebufferSamples > 0 && num < count)
+        if (num < count)
         {
             System.Threading.Interlocked.Increment(ref _underruns);
-            _isPrebuffering = true;
-            _prebufferFirstSampleUtc = (_ring?.Count ?? 0) > 0 ? DateTime.UtcNow : DateTime.MinValue;
+            if (EnableRecoveryPrebuffer && _prebufferSamples > 0)
+            {
+                IncreaseRecoveryPrebufferLocked();
+                _isPrebuffering = true;
+                _prebufferFirstSampleUtc = (_ring?.Count ?? 0) > 0 ? DateTime.UtcNow : DateTime.MinValue;
+            }
             LogBufferEvent("audio.buffer.underrun",
-                $"requested={count} actual={num} bufferedBefore={bufferedBeforeRead} buffered={_ring?.Count ?? 0} prebuffer={_prebufferSamples} hasPlayed={_hasPlayedAudio} readEndedSilent={_lastReadEndedSilent}");
+                $"requested={count} actual={num} bufferedBefore={bufferedBeforeRead} buffered={_ring?.Count ?? 0} prebuffer={_prebufferSamples} recovery={_adaptiveRecoveryPrebufferSamples} hasPlayed={_hasPlayedAudio} readEndedSilent={_lastReadEndedSilent}");
+        }
+        else if (EnableRecoveryPrebuffer && _prebufferSamples > 0 && num == count)
+        {
+            DecayRecoveryPrebufferLocked();
         }
         return CompleteRead(buffer, offset, count, num);
+    }
+
+    private int GetPrebufferTargetLocked()
+    {
+        if (!_hasPlayedAudio)
+            return _prebufferSamples;
+
+        int boundedRecovery = Math.Clamp(_adaptiveRecoveryPrebufferSamples,
+            AudioHelpers.PlaybackRecoveryPrebufferSamples,
+            Math.Max(AudioHelpers.PlaybackRecoveryPrebufferSamples, _prebufferSamples));
+        return boundedRecovery;
+    }
+
+    private void IncreaseRecoveryPrebufferLocked()
+    {
+        _stableReadCycles = 0;
+        int maxRecovery = Math.Max(AudioHelpers.PlaybackRecoveryPrebufferSamples, _prebufferSamples);
+        _adaptiveRecoveryPrebufferSamples = Math.Min(maxRecovery,
+            _adaptiveRecoveryPrebufferSamples + (AudioHelpers.FrameSize * 2));
+    }
+
+    private void DecayRecoveryPrebufferLocked()
+    {
+        if (_adaptiveRecoveryPrebufferSamples <= AudioHelpers.PlaybackRecoveryPrebufferSamples)
+            return;
+
+        _stableReadCycles++;
+        if (_stableReadCycles < RecoveryDecayReads)
+            return;
+
+        _stableReadCycles = 0;
+        _adaptiveRecoveryPrebufferSamples = Math.Max(AudioHelpers.PlaybackRecoveryPrebufferSamples,
+            _adaptiveRecoveryPrebufferSamples - AudioHelpers.FrameSize);
     }
 
     public string ConsumeDebugStats()
@@ -189,14 +234,6 @@ internal class BufferedSampleProvider : ISampleProvider
     {
         if (num > 0)
         {
-            if (_lastReadEndedSilent)
-            {
-                int fadeIn = Math.Min(num, EdgeFadeSamples);
-                for (int i = 0; i < fadeIn; i++)
-                    buffer[offset + i] *= (i + 1f) / fadeIn;
-            }
-
-            _lastOutputSample = buffer[offset + num - 1];
             _lastReadEndedSilent = false;
             _hasPlayedAudio = true;
         }
@@ -204,14 +241,8 @@ internal class BufferedSampleProvider : ISampleProvider
         if (ReadFully && num < count)
         {
             int missing = count - num;
-            int fadeOut = Math.Min(missing, EdgeFadeSamples);
-            float start = num > 0 ? buffer[offset + num - 1] : _lastOutputSample;
-            for (int i = 0; i < fadeOut; i++)
-                buffer[offset + num + i] = start * (1f - ((i + 1f) / fadeOut));
-            if (missing > fadeOut)
-                Array.Clear(buffer, offset + num + fadeOut, missing - fadeOut);
+            Array.Clear(buffer, offset + num, missing);
             num = count;
-            _lastOutputSample = 0f;
             _lastReadEndedSilent = true;
         }
         return num;
@@ -409,6 +440,7 @@ internal class AudioMixer : ISampleProvider
     private readonly WaveFormat  _fmt;
     private Input[] _inputSnapshot = Array.Empty<Input>();
     private float[] _tmp = null!;
+    private DateTime _lastOutputPeakLogUtc = DateTime.MinValue;
 
     public WaveFormat WaveFormat => _fmt;
 
@@ -419,16 +451,47 @@ internal class AudioMixer : ISampleProvider
     {
         var inputs = _inputSnapshot;
 
+        Array.Clear(buffer, offset, count);
         if (_tmp == null || _tmp.Length < count) _tmp = new float[count];
-        if (inputs.Length == 0) { Array.Clear(buffer, offset, count); return count; }
-        bool first = true;
+        if (inputs.Length == 0) return count;
         foreach (var inp in inputs)
         {
             int r = inp.Provider.Read(_tmp, 0, count);
-            if (first) { for (int i = 0; i < r; i++) buffer[offset + i]  = _tmp[i]; first = false; }
-            else        { for (int i = 0; i < r; i++) buffer[offset + i] += _tmp[i]; }
+            for (int i = 0; i < r; i++) buffer[offset + i] += _tmp[i];
         }
+
+        LogOutputPeakIfNeeded(buffer, offset, count, inputs.Length);
         return count;
+    }
+
+    private void LogOutputPeakIfNeeded(float[] buffer, int offset, int count, int inputCount)
+    {
+        float peak = 0f;
+        int nonFinite = 0;
+        for (int i = 0; i < count; i++)
+        {
+            float sample = buffer[offset + i];
+            if (!float.IsFinite(sample))
+            {
+                nonFinite++;
+                continue;
+            }
+
+            float abs = sample < 0f ? -sample : sample;
+            if (abs > peak)
+                peak = abs;
+        }
+
+        if (nonFinite == 0 && peak < 0.98f)
+            return;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastOutputPeakLogUtc).TotalSeconds < 0.5)
+            return;
+
+        _lastOutputPeakLogUtc = now;
+        VoiceChatPlugin.VoiceChat.VoiceDiagnostics.Log("audio.output.peak",
+            $"peak={peak:0.00000} nonFinite={nonFinite} inputs={inputCount} samples={count} channels={_fmt.Channels}");
     }
 
     public void AddInput(ISampleProvider src, int groupId)
@@ -511,10 +574,26 @@ public class AudioRoutingInstance : IHasAudioPropertyNode
         _source = source;
     }
 
+    public DateTime LastReceiptUtc { get; private set; } = DateTime.MinValue;
+
     public void AddSamples(float[] samples, int offset, int count)
-        => _source.AddSamples(samples, offset, count);
+    {
+        LastReceiptUtc = DateTime.UtcNow;
+        _source.AddSamples(samples, offset, count);
+    }
 
     public void ClearBufferedSamples() => _source.Clear();
+
+    public bool ClearBufferedSamplesIfStale(DateTime nowUtc, TimeSpan maxAge)
+    {
+        if (LastReceiptUtc == DateTime.MinValue || BufferedSamples <= 0)
+            return false;
+        if (nowUtc - LastReceiptUtc <= maxAge)
+            return false;
+
+        ClearBufferedSamples();
+        return true;
+    }
 
     public int BufferedSamples => _source.BufferedSamples;
 

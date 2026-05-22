@@ -10,6 +10,12 @@ public class VoiceChatGameOptions : AbstractOptionGroup
 
     public ModdedToggleOption PublicVoiceLobby { get; } = new("Public Voice Lobby", false);
 
+    public ModdedEnumOption VoiceBackend { get; } = new("Voice Backend", (int)VoiceTransportBackend.BetterCrewLink,
+        typeof(VoiceTransportBackend), ["BetterCrewLink", "Interstellar"]);
+
+    public ModdedEnumOption LobbyBrowserBackend { get; } = new("Lobby Browser Backend", (int)VoiceLobbyBrowserSource.BetterCrewLink,
+        typeof(VoiceLobbyBrowserSource), ["BCL Live", "Cloudflare (Limited)"]);
+
     public ModdedNumberOption MaxChatDistance { get; } =
         new("Max Distance", 6f, 1.5f, 20f, 0.5f, MiraNumberSuffixes.None, "0.0");
 
@@ -30,6 +36,6 @@ public class VoiceChatGameOptions : AbstractOptionGroup
     public ModdedToggleOption OnlyGhostsCanTalk    { get; } = new("Only Ghosts can Talk/Hear",      false);
     public ModdedToggleOption OnlyMeetingOrLobby   { get; } = new("Meetings/Lobby Only",            false);
 
-    public static VoiceChatGameOptions Instance =>
+    internal static VoiceChatGameOptions GetInstance() =>
         OptionGroupSingleton<VoiceChatGameOptions>.Instance;
 }

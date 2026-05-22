@@ -167,20 +167,11 @@ internal static class VoiceRoleMuteState
     {
         try
         {
-            if (AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return;
-            var w = AmongUsClient.Instance.StartRpcImmediately(
-                PlayerControl.LocalPlayer.NetId,
-                VoiceProtocol.AudioRpcId,
-                Hazel.SendOption.Reliable,
-                -1);
-            w.Write((byte)VoicePacketType.JailVoice);
-            w.Write(jailedPlayerId);
-            w.Write(allowed);
-            AmongUsClient.Instance.FinishRpcImmediately(w);
+            VoiceChatRoom.SendJailVoicePacket(jailedPlayerId, allowed);
         }
         catch (Exception ex)
         {
-            VoiceChatPluginMain.Logger.LogError($"[VC] Jail voice RPC send failed: {ex.Message}");
+            VoiceDiagnostics.DebugError($"[VC] Jail voice send failed: {ex.Message}");
         }
     }
 

@@ -1,8 +1,9 @@
 #if ANDROID
 using System;
+using System.Threading;
+using Interstellar.VoiceChat;
 using NAudio.Wave;
 using UnityEngine;
-using VoiceChatPlugin.Audio;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -38,23 +39,22 @@ internal sealed class AndroidSpeaker : IDisposable
     private const int   Channels   = 2;
     private const float ClipSecs   = 0.5f;
 
-    private readonly AudioSource      _source;
-    private readonly AudioClip        _clip;
-    private readonly ISampleProvider  _endpoint; // the AudioManager graph endpoint
-    private readonly float[]          _readBuf;  // scratch buffer for mono→stereo conversion
-    private float _masterVolume = 1f;
+    private readonly AudioSource   _source;
+    private readonly AudioClip     _clip;
+    private readonly ManualSpeaker _speaker;
+    private readonly float[]       _readBuf;
+    private int _readCallbacks;
 
     public bool IsPlaying => _source != null && _source.isPlaying;
+    public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
 
     /// <summary>
-    /// Create the speaker. The <paramref name="endpoint"/> is the AudioManager.Endpoint
-    /// (ISampleProvider) — the final output of the audio routing graph.
-    /// We call endpoint.Read() inside the PCMReaderCallback to pull audio through
-    /// the full graph, exactly as Nebula's ManualSpeaker does via Interstellar.
+    /// Create the speaker. The <paramref name="speaker"/> is Interstellar's manual
+    /// speaker endpoint. Unity pulls PCM from it in the AudioClip reader callback.
     /// </summary>
-    public AndroidSpeaker(ISampleProvider endpoint)
+    public AndroidSpeaker(ManualSpeaker speaker)
     {
-        _endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
+        _speaker = speaker ?? throw new ArgumentNullException(nameof(speaker));
 
         var host = VoiceChatPluginMain.ResidentObject
             ?? throw new InvalidOperationException("[VC] ResidentObject is null");
@@ -83,32 +83,16 @@ internal sealed class AndroidSpeaker : IDisposable
         _source.loop = true;
         _source.Play();
 
-        VoiceChatPluginMain.Logger.LogInfo("[VC] Android speaker initialised (Nebula pattern, graph-driven).");
+        VoiceDiagnostics.DebugInfo("[VC] Android speaker initialised (Nebula pattern, graph-driven).");
     }
 
     // ── PCMReaderCallback — called by Unity audio thread ────────────────────
-    // Mirrors Nebula's ManualSpeaker.Read(ary):
-    // pulls audio through the full AudioManager routing graph via _endpoint.Read().
+    // Mirrors Nebula's ManualSpeaker.Read(ary): pulls audio from Interstellar.
 
     private void Read(float[] data)
     {
-        // _endpoint outputs stereo at 48 kHz — same format as the AudioClip.
-        int got = _endpoint.Read(data, 0, data.Length);
-
-        // Zero any unfilled samples (under-run)
-        for (int i = got; i < data.Length; i++) data[i] = 0f;
-
-        // Apply master volume
-        if (_masterVolume != 1f)
-            for (int i = 0; i < data.Length; i++) data[i] *= _masterVolume;
-    }
-
-    // ── Volume ────────────────────────────────────────────────────────────────
-
-    public void SetMasterVolume(float v)
-    {
-        _masterVolume  = Math.Clamp(v, 0f, 2f);
-        _source.volume = Math.Clamp(v, 0f, 1f);
+        Interlocked.Increment(ref _readCallbacks);
+        _speaker.Read(data);
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -118,7 +102,65 @@ internal sealed class AndroidSpeaker : IDisposable
         _source.Stop();
         // Nebula: if (audioSource) GameObject.Destroy(audioSource)
         if (_source != null) UnityEngine.Object.Destroy(_source);
-        VoiceChatPluginMain.Logger.LogInfo("[VC] Android speaker disposed.");
+        VoiceDiagnostics.DebugInfo("[VC] Android speaker disposed.");
+    }
+}
+
+internal sealed class AndroidSampleProviderSpeaker : IDisposable
+{
+    private readonly AudioSource _source;
+    private readonly AudioClip _clip;
+    private readonly ISampleProvider _provider;
+    private int _readCallbacks;
+
+    public bool IsPlaying => _source != null && _source.isPlaying;
+    public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
+
+    public AndroidSampleProviderSpeaker(ISampleProvider provider)
+    {
+        _provider = provider ?? throw new ArgumentNullException(nameof(provider));
+
+        var host = VoiceChatPluginMain.ResidentObject
+            ?? throw new InvalidOperationException("[VC] ResidentObject is null");
+
+        var format = _provider.WaveFormat;
+        int channels = Math.Max(1, format.Channels);
+        int sampleRate = format.SampleRate > 0 ? format.SampleRate : 48000;
+        int clipSamples = Math.Max(sampleRate / 2, 1);
+
+        _source = host.AddComponent<AudioSource>();
+        _source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
+        _source.spatialBlend = 0f;
+        _source.volume = 1f;
+
+        _clip = AudioClip.Create(
+            "VCBclAudio",
+            clipSamples,
+            channels,
+            sampleRate,
+            true,
+            (AudioClip.PCMReaderCallback)(ary => Read(ary)));
+
+        _source.clip = _clip;
+        _source.loop = true;
+        _source.Play();
+
+        VoiceDiagnostics.DebugInfo($"[VC] Android BCL speaker initialised ({sampleRate} Hz, {channels} ch).");
+    }
+
+    private void Read(float[] data)
+    {
+        Interlocked.Increment(ref _readCallbacks);
+        int read = _provider.Read(data, 0, data.Length);
+        if (read < data.Length)
+            Array.Clear(data, Math.Max(read, 0), data.Length - Math.Max(read, 0));
+    }
+
+    public void Dispose()
+    {
+        _source.Stop();
+        if (_source != null) UnityEngine.Object.Destroy(_source);
+        VoiceDiagnostics.DebugInfo("[VC] Android BCL speaker disposed.");
     }
 }
 #endif

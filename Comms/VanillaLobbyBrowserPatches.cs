@@ -78,23 +78,25 @@ internal static class FindGameMoreInfoPopupSetupInfoPatch
 
 internal readonly struct VanillaLobbyDisplayData
 {
-    internal VanillaLobbyDisplayData(GameListing listing, VanillaLobbyMetadata metadata, bool fromApi)
+    internal VanillaLobbyDisplayData(GameListing listing, VanillaLobbyMetadata metadata, bool fromApi, TimeSpan statusAge)
     {
         Listing = listing;
         Metadata = metadata;
         FromApi = fromApi;
+        StatusAge = statusAge;
     }
 
     internal GameListing Listing { get; }
     internal VanillaLobbyMetadata Metadata { get; }
     internal bool FromApi { get; }
+    internal TimeSpan StatusAge { get; }
     internal string Code => string.IsNullOrWhiteSpace(Metadata.Code) ? ResolveCode(Listing.GameId) : Metadata.Code;
     internal string Host => string.IsNullOrWhiteSpace(Metadata.HostName) ? ResolveHostName(Listing) : Metadata.HostName;
-    internal string Status => string.IsNullOrWhiteSpace(Metadata.StatusLabel) ? "Lobby" : Metadata.StatusLabel;
+    internal string Status => FormatStatusLabel(Metadata.StatusLabel);
     internal int Players => Metadata.PlayerCount > 0 ? Metadata.PlayerCount : Listing.PlayerCount;
     internal int MaxPlayers => Metadata.MaxPlayers > 0 ? Metadata.MaxPlayers : Listing.MaxPlayers;
     internal string PlayerText => $"{Players}/{MaxPlayers}";
-    internal string StatusText => $"{Status} • {PlayerText}";
+    internal string StatusText => $"{Status} {FormatStatusAge(StatusAge)}";
     internal string HostTagText => $"Host: {Host}";
     internal string StatusTagText => StatusText;
     internal string MapText => ResolveMapName(Metadata.MapId != 0 ? Metadata.MapId : Listing.MapId);
@@ -104,7 +106,10 @@ internal readonly struct VanillaLobbyDisplayData
     {
         var fromApi = VanillaLobbyMetadataCache.TryGet(listing, out var apiMetadata);
         var metadata = fromApi ? apiMetadata : BuildFallbackMetadata(listing);
-        return new VanillaLobbyDisplayData(listing, metadata, fromApi);
+        var code = string.IsNullOrWhiteSpace(metadata.Code) ? ResolveCode(listing.GameId) : metadata.Code;
+        var status = FormatStatusLabel(metadata.StatusLabel);
+        var statusAge = VanillaLobbyStatusAgeTracker.Observe(code, status);
+        return new VanillaLobbyDisplayData(listing, metadata, fromApi, statusAge);
     }
 
     private static VanillaLobbyMetadata BuildFallbackMetadata(GameListing listing)
@@ -134,6 +139,26 @@ internal readonly struct VanillaLobbyDisplayData
         catch { return ""; }
     }
 
+    private static string FormatStatusLabel(string status)
+    {
+        status = string.IsNullOrWhiteSpace(status) ? "Lobby" : status.Trim();
+        return status.Replace("_", "", StringComparison.OrdinalIgnoreCase).Replace(" ", "", StringComparison.OrdinalIgnoreCase) switch
+        {
+            "InGame" => "In Game",
+            "Started" => "In Game",
+            "Game" => "In Game",
+            _ => status
+        };
+    }
+
+    private static string FormatStatusAge(TimeSpan age)
+    {
+        if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+        return age.TotalHours >= 1
+            ? $"{(int)age.TotalHours}h{age.Minutes:00}m"
+            : $"{(int)age.TotalMinutes}:{age.Seconds:00}";
+    }
+
     private static string ResolveMapName(int mapId) => mapId switch
     {
         0 => "The Skeld",
@@ -143,6 +168,43 @@ internal readonly struct VanillaLobbyDisplayData
         4 => "The Fungle",
         _ => $"Map {mapId}"
     };
+}
+
+internal static class VanillaLobbyStatusAgeTracker
+{
+    private static readonly object Gate = new();
+    private static readonly Dictionary<string, Entry> Entries = new(StringComparer.OrdinalIgnoreCase);
+
+    internal static TimeSpan Observe(string code, string status)
+    {
+        var now = DateTime.UtcNow;
+        code = VanillaLobbyPublicApiClient.NormalizeCode(code);
+        status = string.IsNullOrWhiteSpace(status) ? "Lobby" : status.Trim();
+        if (code.Length == 0) return TimeSpan.Zero;
+
+        lock (Gate)
+        {
+            if (!Entries.TryGetValue(code, out var entry) || !string.Equals(entry.Status, status, StringComparison.OrdinalIgnoreCase))
+            {
+                Entries[code] = new Entry(status, now);
+                return TimeSpan.Zero;
+            }
+
+            return now - entry.SinceUtc;
+        }
+    }
+
+    private readonly struct Entry
+    {
+        internal Entry(string status, DateTime sinceUtc)
+        {
+            Status = status;
+            SinceUtc = sinceUtc;
+        }
+
+        internal string Status { get; }
+        internal DateTime SinceUtc { get; }
+    }
 }
 
 internal static class VanillaLobbyBrowserRowUi
@@ -355,6 +417,7 @@ internal static class VanillaLobbyBrowserRowUi
         => text.IndexOf("Roles", StringComparison.OrdinalIgnoreCase) >= 0
            || text.StartsWith("Lobby", StringComparison.OrdinalIgnoreCase)
            || text.StartsWith("InGame", StringComparison.OrdinalIgnoreCase)
+           || text.StartsWith("In Game", StringComparison.OrdinalIgnoreCase)
            || text.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsCapacityText(string text)

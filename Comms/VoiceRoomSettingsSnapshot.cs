@@ -1,0 +1,107 @@
+using System;
+using MiraAPI.LocalSettings;
+
+namespace VoiceChatPlugin.VoiceChat;
+
+public readonly record struct VoiceRoomSettingsSnapshot(
+    int Backend,
+    string BackendServerUrl,
+    float MaxChatDistance,
+    int FalloffMode,
+    int OcclusionMode,
+    bool WallsBlockSound,
+    bool OnlyHearInSight,
+    bool ImpostorHearGhosts,
+    bool HearInVent,
+    bool VentPrivateChat,
+    bool CommsSabDisables,
+    bool CameraCanHear,
+    bool ImpostorPrivateRadio,
+    bool OnlyGhostsCanTalk,
+    bool OnlyMeetingOrLobby)
+{
+    public const float MinChatDistance = 1.5f;
+    public const float MaxChatDistanceLimit = 20f;
+
+    public static VoiceRoomSettingsSnapshot Defaults { get; } = new(
+        (int)VoiceTransportBackend.BetterCrewLink,
+        VoiceEndpointSettings.DefaultBetterCrewLinkServerUrl,
+        6f,
+        (int)VoiceFalloffMode.Smooth,
+        (int)VoiceOcclusionMode.VisionOnly,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false);
+
+    public static VoiceRoomSettingsSnapshot FromGameOptions()
+    {
+        var s = VoiceChatGameOptions.GetInstance();
+        var local = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+        var backend = (VoiceTransportBackend)s.VoiceBackend.Value;
+        var endpoint = VoiceEndpointSettings.Resolve(
+            backend,
+            local?.BetterCrewLinkServerUrl.Value,
+            local?.InterstellarServerUrl.Value);
+        return new VoiceRoomSettingsSnapshot(
+            (int)endpoint.Backend,
+            endpoint.ServerUrl,
+            s.MaxChatDistance.Value,
+            s.FalloffMode.Value,
+            s.OcclusionMode.Value,
+            s.WallsBlockSound.Value,
+            s.OnlyHearInSight.Value,
+            s.ImpostorHearGhosts.Value,
+            s.HearInVent.Value,
+            s.VentPrivateChat.Value,
+            s.CommsSabDisables.Value,
+            s.CameraCanHear.Value,
+            s.ImpostorPrivateRadio.Value,
+            s.OnlyGhostsCanTalk.Value,
+            s.OnlyMeetingOrLobby.Value).Clamp();
+    }
+
+    public VoiceRoomSettingsSnapshot Clamp()
+    {
+        return this with
+        {
+            Backend = Enum.IsDefined(typeof(VoiceTransportBackend), Backend) ? Backend : (int)VoiceTransportBackend.BetterCrewLink,
+            BackendServerUrl = NormalizeBackendServerUrl(Backend, BackendServerUrl),
+            MaxChatDistance = Math.Clamp(MaxChatDistance, MinChatDistance, MaxChatDistanceLimit),
+            FalloffMode = Enum.IsDefined(typeof(VoiceFalloffMode), FalloffMode) ? FalloffMode : (int)VoiceFalloffMode.Smooth,
+            OcclusionMode = Enum.IsDefined(typeof(VoiceOcclusionMode), OcclusionMode) ? OcclusionMode : (int)VoiceOcclusionMode.VisionOnly,
+        };
+    }
+
+    private static string NormalizeBackendServerUrl(int backend, string? serverUrl)
+    {
+        return backend == (int)VoiceTransportBackend.Interstellar
+            ? VoiceEndpointSettings.NormalizeInterstellarServerUrl(serverUrl)
+            : VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
+    }
+}
+
+internal static class VoiceRoomSettingsState
+{
+    private static VoiceRoomSettingsSnapshot? _remoteSnapshot;
+
+    public static VoiceRoomSettingsSnapshot Current => _remoteSnapshot ?? VoiceRoomSettingsSnapshot.FromGameOptions();
+
+    public static VoiceRoomSettingsSnapshot? RemoteSnapshot => _remoteSnapshot;
+
+    public static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot)
+    {
+        _remoteSnapshot = snapshot.Clamp();
+    }
+
+    public static void ClearRemote()
+    {
+        _remoteSnapshot = null;
+    }
+}

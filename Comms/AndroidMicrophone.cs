@@ -61,7 +61,7 @@ internal sealed class AndroidMicrophone : IDisposable
         _lastPos   = 0;
         _recording = true;
 
-        VoiceChatPluginMain.Logger.LogInfo(
+        VoiceDiagnostics.DebugInfo(
             $"[VC] Android mic started: '{(string.IsNullOrEmpty(_device) ? "default" : _device)}'");
     }
 

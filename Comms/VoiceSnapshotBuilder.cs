@@ -11,6 +11,8 @@ internal static class VoiceSnapshotBuilder
         byte localPlayerId = local != null ? local.PlayerId : byte.MaxValue;
         int localClientId = AmongUsClient.Instance != null ? AmongUsClient.Instance.ClientId : -1;
         Vector2? localPosition = local != null ? (Vector2)local.transform.position : null;
+        int mapId = ResolveMapId();
+        var cameraView = ResolveCameraView(local, mapId);
 
         var players = new List<VoicePlayerSnapshot>(16);
         foreach (var player in PlayerControl.AllPlayerControls)
@@ -40,11 +42,15 @@ internal static class VoiceSnapshotBuilder
 
         return new VoiceGameStateSnapshot(
             VoiceSceneState.ResolvePhase(),
-            ResolveMapId(),
+            mapId,
             localClientId,
+            ResolveHostClientId(),
             localPlayerId,
             localPosition,
             ResolveLocalLightRadius(local),
+            cameraView.Active,
+            cameraView.Index,
+            cameraView.Position,
             players,
             commsSabotageActive,
             MeetingHud.Instance != null,
@@ -62,6 +68,25 @@ internal static class VoiceSnapshotBuilder
         {
             return -1;
         }
+    }
+
+    private static int ResolveHostClientId()
+    {
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null) return -1;
+
+            var hostIdProperty = client.GetType().GetProperty("HostId");
+            if (hostIdProperty?.GetValue(client) is int hostId)
+                return hostId;
+        }
+        catch
+        {
+            // Host id is best-effort; settings sync will refuse unauthenticated snapshots when unknown.
+        }
+
+        return -1;
     }
 
     private static int ResolveClientId(PlayerControl player, NetworkedPlayerInfo? data)
@@ -85,6 +110,59 @@ internal static class VoiceSnapshotBuilder
         catch
         {
             return 0;
+        }
+    }
+
+    private static CameraView ResolveCameraView(PlayerControl? local, int mapId)
+    {
+        if (local == null)
+        {
+            VoiceCameraState.Clear();
+            return default;
+        }
+
+        try
+        {
+            return VoiceCameraState.TryGetActiveMinigame(out var minigame)
+                ? ResolveCameraViewFromMinigame(minigame, mapId)
+                : default;
+        }
+        catch
+        {
+            VoiceCameraState.Clear();
+            return default;
+        }
+    }
+
+    private static CameraView ResolveCameraViewFromMinigame(Minigame minigame, int mapId)
+    {
+        switch (minigame)
+        {
+            case SurveillanceMinigame:
+                return new CameraView(true, 6, null);
+            case PlanetSurveillanceMinigame planet:
+            {
+                int index = Mathf.Clamp(planet.currentCamera, 0, 5);
+                if (VoiceAudioOcclusion.TryGetFixedCameraPosition(mapId, index, out var position))
+                    return new CameraView(true, index, position);
+
+                Vector2 target = planet.TargetPosition;
+                return target != default
+                    ? new CameraView(true, index, target)
+                    : new CameraView(true, index, null);
+            }
+            case FungleSurveillanceMinigame fungle:
+            {
+                if (fungle.securityCamera?.cam != null)
+                    return new CameraView(true, -1, (Vector2)fungle.securityCamera.cam.transform.position);
+
+                Vector2 target = fungle.TargetPosition;
+                return target != default
+                    ? new CameraView(true, -1, target)
+                    : new CameraView(true, -1, null);
+            }
+            default:
+                return default;
         }
     }
 
@@ -121,4 +199,6 @@ internal static class VoiceSnapshotBuilder
             return 0;
         }
     }
+
+    private readonly record struct CameraView(bool Active, int Index, Vector2? Position);
 }

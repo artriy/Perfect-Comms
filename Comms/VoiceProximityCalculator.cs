@@ -6,6 +6,8 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal static class VoiceProximityCalculator
 {
+    private const float GhostVisionRangeMultiplier = 1f;
+
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
         Vector2? listenerPos)
@@ -15,11 +17,11 @@ internal static class VoiceProximityCalculator
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener);
 
-        var s = VoiceChatGameOptions.Instance;
+        var s = VoiceRoomSettingsState.Current;
         var target = targetPlayer.Value;
-        float maxDistance = s.MaxChatDistance.Value;
-        float dist = Vector2.Distance(target.Position, listenerPos.Value);
-        float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode.Value);
+        float maxDistance = s.MaxChatDistance;
+        float dist = Distance(target.Position, listenerPos.Value);
+        float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
         if (volume < 0.06f)
             volume = 0f;
         float pan = VoiceChatRoom.GetPan(listenerPos.Value.x, target.Position.x);
@@ -36,17 +38,17 @@ internal static class VoiceProximityCalculator
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
 
-        var s = VoiceChatGameOptions.Instance;
+        var s = VoiceRoomSettingsState.Current;
         var target = targetPlayer.Value;
         bool localDead = localPlayer?.IsDead == true;
         bool targetDead = target.IsDead;
         bool localImp = localPlayer?.IsImpostor == true;
         bool targetImp = target.IsImpostor;
 
-        if (s.OnlyGhostsCanTalk.Value && !localDead)
+        if (s.OnlyGhostsCanTalk && !localDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk);
 
-        if (s.ImpostorPrivateRadio.Value && targetRadioActive && targetImp && !targetDead)
+        if (s.ImpostorPrivateRadio && targetRadioActive && targetImp && !targetDead)
         {
             if (localImp)
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
@@ -59,7 +61,7 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetMeetingBlockReason(target));
 
         if (localDead)
-            return CalculateLocalDeadHearing(targetDead, s.OnlyGhostsCanTalk.Value, 1f, 1f, 0f);
+            return CalculateLocalDeadHearing(targetDead, s.OnlyGhostsCanTalk, 1f, 1f, 0f);
 
         if (targetDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetDeadMuted);
@@ -73,6 +75,10 @@ internal static class VoiceProximityCalculator
         VoicePlayerSnapshot? targetPlayer,
         Vector2? listenerPos,
         float localLightRadius,
+        int mapId,
+        bool cameraViewActive,
+        int activeCameraIndex,
+        Vector2? activeCameraPosition,
         IEnumerable<VoiceChatRoom.SpeakerCache> speakers,
         IEnumerable<IVoiceComponent> virtualMics,
         bool localInVent,
@@ -85,26 +91,32 @@ internal static class VoiceProximityCalculator
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
 
-        var s = VoiceChatGameOptions.Instance;
+        var s = VoiceRoomSettingsState.Current;
         var target = targetPlayer.Value;
         var targetPos = target.Position;
         var localListenerPos = listenerPos.Value;
         Vector2 cameraPosition = default;
-        bool hasCameraProxy = s.CameraCanHear.Value && VoiceAudioOcclusion.TryGetCameraListenerPosition(targetPos, out cameraPosition);
+        bool hasCameraProxy = s.CameraCanHear && VoiceAudioOcclusion.TryGetCameraListenerPosition(
+            mapId,
+            cameraViewActive,
+            activeCameraIndex,
+            activeCameraPosition,
+            targetPos,
+            out cameraPosition);
         bool localDead = localPlayer?.IsDead == true;
         bool targetDead = target.IsDead;
         bool localImp = localPlayer?.IsImpostor == true;
         bool targetImp = target.IsImpostor;
         bool targetInVent = target.InVent;
 
-        if (s.OnlyMeetingOrLobby.Value)
+        if (s.OnlyMeetingOrLobby)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
-        if (s.OnlyGhostsCanTalk.Value && !localDead)
+        if (s.OnlyGhostsCanTalk && !localDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
-        if (commsSabActive && s.CommsSabDisables.Value && !localDead)
+        if (commsSabActive && s.CommsSabDisables && !localDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.CommsSabotage, previousWallCoefficient);
 
-        if (s.ImpostorPrivateRadio.Value && targetRadioActive && targetImp && !targetDead)
+        if (s.ImpostorPrivateRadio && targetRadioActive && targetImp && !targetDead)
         {
             if (localImp)
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
@@ -114,15 +126,20 @@ internal static class VoiceProximityCalculator
         }
 
         if (localDead)
-            return CalculateLocalDeadHearing(targetDead, s.OnlyGhostsCanTalk.Value, previousWallCoefficient, 1f, 0f);
-
-        if (localImp && targetDead && s.ImpostorHearGhosts.Value)
         {
-            float ghostDist = Vector2.Distance(targetPos, localListenerPos);
+            if (targetDead)
+                return CalculateLocalDeadGhostHearing(targetPos, localListenerPos, localLightRadius, s, previousWallCoefficient);
+            if (s.OnlyGhostsCanTalk)
+                return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
+        }
+
+        if (localImp && targetDead && s.ImpostorHearGhosts)
+        {
+            float ghostDist = Distance(targetPos, localListenerPos);
             float ghostVolume = VoiceAudioOcclusion.ApplyFalloff(
                 ghostDist,
-                s.MaxChatDistance.Value,
-                (VoiceFalloffMode)s.FalloffMode.Value);
+                s.MaxChatDistance,
+                (VoiceFalloffMode)s.FalloffMode);
             float ghostPan = VoiceChatRoom.GetPan(localListenerPos.x, targetPos.x);
             return new(0f, ghostVolume, 0f, ghostPan, VoiceAudioFilterMode.Ghost,
                 ghostVolume > 0f,
@@ -133,27 +150,27 @@ internal static class VoiceProximityCalculator
         if (targetDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetDeadMuted, previousWallCoefficient);
 
-        if (s.VentPrivateChat.Value && (localInVent || targetInVent))
+        if (s.VentPrivateChat && (localInVent || targetInVent))
         {
             if (targetInVent && !localInVent)
                 return VoiceProximityResult.Muted(VoiceProximityReason.VentPrivateMuted, previousWallCoefficient);
         }
 
-        if (targetInVent && !s.VentPrivateChat.Value)
+        if (targetInVent && !s.VentPrivateChat)
         {
-            if (!targetImp || !s.HearInVent.Value)
+            if (!targetImp || !s.HearInVent)
                 return VoiceProximityResult.Muted(VoiceProximityReason.VentMuted, previousWallCoefficient);
         }
 
-        float maxDistance = s.MaxChatDistance.Value;
-        if (s.OnlyHearInSight.Value && localLightRadius > 0f)
+        float maxDistance = s.MaxChatDistance;
+        if (s.OnlyHearInSight && localLightRadius > 0f)
             maxDistance = Math.Min(maxDistance, localLightRadius);
 
-        float dist = Vector2.Distance(targetPos, localListenerPos);
-        float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode.Value);
+        float dist = Distance(targetPos, localListenerPos);
+        float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
         float pan = VoiceChatRoom.GetPan(localListenerPos.x, targetPos.x);
 
-        if (s.OnlyHearInSight.Value)
+        if (s.OnlyHearInSight)
         {
             bool inSight = VoiceAudioOcclusion.Inspect(localListenerPos, targetPos).InSight;
             if (!inSight || dist > maxDistance)
@@ -162,12 +179,12 @@ internal static class VoiceProximityCalculator
 
         float wallCoefficient = previousWallCoefficient;
         VoiceAudioFilterMode filterMode = VoiceAudioFilterMode.None;
-        if (volume > 0f && s.WallsBlockSound.Value)
+        if (volume > 0f && s.WallsBlockSound)
         {
             var occlusion = VoiceAudioOcclusion.Evaluate(
                 localListenerPos,
                 targetPos,
-                (VoiceOcclusionMode)s.OcclusionMode.Value);
+                (VoiceOcclusionMode)s.OcclusionMode);
 
             if (occlusion.TargetVolumeMultiplier <= 0f && occlusion.IsOccluded)
             {
@@ -190,16 +207,15 @@ internal static class VoiceProximityCalculator
 
         float finalVolume = volume * wallCoefficient;
         var virtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, previousWallCoefficient);
-        if (virtualRoute.Audible && virtualRoute.NormalVolume > finalVolume)
-            return virtualRoute;
-
-        if (finalVolume <= 0f && hasCameraProxy)
-            return CalculateCameraProxy(targetPos, cameraPosition, s, previousWallCoefficient);
-
-        return new(finalVolume, 0f, 0f, pan, filterMode,
+        var proximityRoute = new VoiceProximityResult(finalVolume, 0f, 0f, pan, filterMode,
             finalVolume > 0f,
-            VoiceProximityReason.Proximity,
+            localDead ? VoiceProximityReason.LocalDeadHearsLiving : VoiceProximityReason.Proximity,
             wallCoefficient);
+        var cameraRoute = hasCameraProxy
+            ? CalculateCameraProxy(targetPos, cameraPosition, s, previousWallCoefficient)
+            : VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
+
+        return SelectBestNormalRoute(proximityRoute, virtualRoute, cameraRoute);
     }
 
     private static VoiceProximityResult CalculateVirtualRoute(
@@ -249,26 +265,88 @@ internal static class VoiceProximityCalculator
         if (onlyGhostsCanTalk && !targetDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, wallCoefficient);
 
-        return new(0f, volume, 0f, pan, VoiceAudioFilterMode.Ghost,
+        return new(volume, 0f, 0f, pan, VoiceAudioFilterMode.None,
             true,
             targetDead ? VoiceProximityReason.LocalDeadHearsGhost : VoiceProximityReason.LocalDeadHearsLiving,
             wallCoefficient);
     }
 
+    private static VoiceProximityResult CalculateLocalDeadGhostHearing(
+        Vector2 targetPos,
+        Vector2 listenerPos,
+        float localLightRadius,
+        VoiceRoomSettingsSnapshot s,
+        float wallCoefficient)
+    {
+        float maxDistance = ResolveGhostHearingDistance(localLightRadius, s.MaxChatDistance);
+        float dx = targetPos.x - listenerPos.x;
+        float dy = targetPos.y - listenerPos.y;
+        float distance = MathF.Sqrt(dx * dx + dy * dy);
+        float volume = ApplyGhostFalloff(distance, maxDistance, (VoiceFalloffMode)s.FalloffMode);
+        if (volume <= 0f)
+            return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, wallCoefficient);
+
+        float pan = VoiceChatRoom.GetPan(listenerPos.x, targetPos.x);
+        return CalculateLocalDeadHearing(true, s.OnlyGhostsCanTalk, wallCoefficient, volume, pan);
+    }
+
+    private static float ResolveGhostHearingDistance(float localLightRadius, float fallbackDistance)
+    {
+        if (localLightRadius > 0f)
+            return Math.Clamp(
+                localLightRadius * GhostVisionRangeMultiplier,
+                VoiceRoomSettingsSnapshot.MinChatDistance,
+                VoiceRoomSettingsSnapshot.MaxChatDistanceLimit);
+
+        return fallbackDistance;
+    }
+
+    private static float ApplyGhostFalloff(float distance, float maxDistance, VoiceFalloffMode mode)
+    {
+        if (maxDistance <= 0f) return 0f;
+        float t = Math.Clamp(distance / maxDistance, 0f, 1f);
+        return mode switch
+        {
+            VoiceFalloffMode.Smooth => 1f - t * t * (3f - 2f * t),
+            VoiceFalloffMode.VoiceFocused => t < 0.35f ? 1f : MathF.Pow(1f - t, 1.35f),
+            _ => 1f - t,
+        };
+    }
+
     private static VoiceProximityResult CalculateCameraProxy(
         Vector2 targetPos,
         Vector2 cameraPosition,
-        VoiceChatGameOptions s,
+        VoiceRoomSettingsSnapshot s,
         float previousWallCoefficient)
     {
-        float cameraRange = s.MaxChatDistance.Value * 0.65f;
-        float cameraDist = Vector2.Distance(targetPos, cameraPosition);
-        float cameraVolume = VoiceAudioOcclusion.ApplyFalloff(cameraDist, cameraRange, (VoiceFalloffMode)s.FalloffMode.Value) * 0.65f;
+        float cameraRange = s.MaxChatDistance;
+        float cameraDist = Distance(targetPos, cameraPosition);
+        float cameraVolume = VoiceAudioOcclusion.ApplyFalloff(cameraDist, cameraRange, (VoiceFalloffMode)s.FalloffMode) * 0.8f;
         if (cameraVolume <= 0f)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
 
         float pan = VoiceChatRoom.GetPan(cameraPosition.x, targetPos.x);
         return new(cameraVolume, 0f, 0f, pan, VoiceAudioFilterMode.WallMuffle,
             true, VoiceProximityReason.CameraProxy, previousWallCoefficient);
+    }
+
+    private static VoiceProximityResult SelectBestNormalRoute(
+        VoiceProximityResult proximityRoute,
+        VoiceProximityResult virtualRoute,
+        VoiceProximityResult cameraRoute)
+    {
+        var best = proximityRoute;
+        if (virtualRoute.Audible && virtualRoute.NormalVolume > best.NormalVolume)
+            best = virtualRoute;
+        if (cameraRoute.Audible && cameraRoute.NormalVolume > best.NormalVolume)
+            best = cameraRoute;
+        return best;
+    }
+
+    private static float Distance(Vector2 a, Vector2 b)
+    {
+        float dx = a.x - b.x;
+        float dy = a.y - b.y;
+        return MathF.Sqrt(dx * dx + dy * dy);
     }
 }

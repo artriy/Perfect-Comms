@@ -47,17 +47,17 @@ internal class PermissionHelper : MonoBehaviour
 
     private IEnumerator RequestAndStart()
     {
-        VoiceChatPluginMain.Logger.LogInfo("[VC] Android: requesting microphone permission...");
+        VoiceDiagnostics.DebugInfo("[VC] Android: requesting microphone permission...");
         yield return Application.RequestUserAuthorization(UserAuthorization.Microphone);
 
         if (Application.HasUserAuthorization(UserAuthorization.Microphone))
         {
-            VoiceChatPluginMain.Logger.LogInfo("[VC] Android: microphone permission granted.");
+            VoiceDiagnostics.DebugInfo("[VC] Android: microphone permission granted.");
             _room?.StartMicNow(_device);
         }
         else
         {
-            VoiceChatPluginMain.Logger.LogWarning("[VC] Android: microphone permission denied.");
+            VoiceDiagnostics.DebugWarning("[VC] Android: microphone permission denied.");
         }
 
         _room   = null;

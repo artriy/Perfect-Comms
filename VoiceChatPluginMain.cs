@@ -51,24 +51,34 @@ public class VoiceChatPluginMain : BasePlugin, IMiraPlugin
             shortName.Equals("Reactor", StringComparison.OrdinalIgnoreCase))
             return null;
         if (_asmCache.TryGetValue(shortName, out var cached)) return cached;
-        var resourceName = ResPrefix + shortName + ".dll";
-        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
-        if (stream == null) return null;
-        using var ms = new MemoryStream();
-        stream.CopyTo(ms);
-        var loaded = Assembly.Load(ms.ToArray());
-        _asmCache[shortName] = loaded;
-        return loaded;
+        foreach (var resourceName in new[]
+        {
+            ResPrefix + shortName + ".dll",
+            typeof(VoiceChatPluginMain).Namespace + ".Libs." + shortName + ".dll"
+        })
+        {
+            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+            if (stream == null) continue;
+
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            var loaded = Assembly.Load(ms.ToArray());
+            _asmCache[shortName] = loaded;
+            return loaded;
+        }
+
+        return null;
     }
 
     public override void Load()
     {
         Logger = Log;
         VanillaLobbyDiagnostics.Configure(message => Logger.LogInfo(message), message => Logger.LogWarning(message));
-        Logger.LogInfo("[VC] Loading Perfect Comms.");
+        VoiceDiagnostics.DebugInfo("[VC] Loading Perfect Comms.");
         ReactorCredits.Register("Perfect Comms", Version, false, ReactorCredits.AlwaysShow);
         VoiceDiagnostics.Init();
-        Logger.LogInfo($"[VC] Diagnostics log: {VoiceDiagnostics.Path}");
+        if (VoiceDiagnostics.IsEnabled && !string.IsNullOrEmpty(VoiceDiagnostics.Path))
+            VoiceDiagnostics.DebugInfo($"[VC] Diagnostics log: {VoiceDiagnostics.Path}");
         ResidentObject = new GameObject("PerfectComms_ResidentObject");
         GameObject.DontDestroyOnLoad(ResidentObject);
         ResidentObject.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
@@ -77,6 +87,6 @@ public class VoiceChatPluginMain : BasePlugin, IMiraPlugin
         VoiceChatPatches.RegisterKeybindHandlers();
         Harmony.PatchAll(Assembly.GetExecutingAssembly());
         VanillaLobbyPatchDiagnostics.LogPatchState(Harmony);
-        Logger.LogInfo("[VC] Perfect Comms loaded.");
+        VoiceDiagnostics.DebugInfo("[VC] Perfect Comms loaded.");
     }
 }

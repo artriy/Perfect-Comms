@@ -11,18 +11,14 @@ namespace VoiceChatPlugin;
 [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.Update))]
 public static class MeetingSpeakingIndicatorPatch
 {
-    private const float BorderScale   = 0.72f;
     private const float LevelSmoothSpeed = 12f;
     private const float FadeInSpeed = 7f;
     private const float FadeOutSpeed = 5f;
     private static readonly Vector3 CardGlowScale = new(0.92f, 0.66f, 1f);
-    private static readonly Dictionary<byte, SpriteRenderer> _borders = new();
     private static readonly Dictionary<byte, SpriteRenderer> _cardGlows = new();
     private static readonly Dictionary<byte, float> _speakingLevels = new();
     private static readonly Dictionary<byte, SmoothVisualState> _visualStates = new();
     private static readonly Dictionary<byte, Color> _playerColors = new();
-    private static readonly HashSet<byte> _controlledHighlights = new();
-    private static Sprite? _ringSprite;
     private static Sprite? _cardGlowSprite;
     private static DateTime _lastUpdateLogUtc;
     private static int _updateCalls;
@@ -53,8 +49,6 @@ public static class MeetingSpeakingIndicatorPatch
     {
         _speakingLevels.Remove(playerId);
         _visualStates.Remove(playerId);
-        if (_borders.TryGetValue(playerId, out var border) && border != null)
-            border.enabled = false;
         if (_cardGlows.TryGetValue(playerId, out var glow) && glow != null)
             glow.enabled = false;
 
@@ -63,7 +57,7 @@ public static class MeetingSpeakingIndicatorPatch
         foreach (var state in meetingHud.playerStates)
         {
             if (state == null || state.TargetPlayerId != playerId) continue;
-            ClearBuiltInHighlight(state, playerId, true);
+            ClearBuiltInHighlight(state);
         }
     }
 
@@ -119,26 +113,16 @@ public static class MeetingSpeakingIndicatorPatch
                 isTalking ? 1f : 0f,
                 Time.deltaTime * (isTalking ? FadeInSpeed : FadeOutSpeed));
 
-            if (!_borders.TryGetValue(pid, out var borderSr) || borderSr == null)
-                borderSr = CreateBorder(meetingHud, state, pid);
             if (!_cardGlows.TryGetValue(pid, out var cardGlowSr) || cardGlowSr == null)
                 cardGlowSr = CreateCardGlow(meetingHud, state, pid);
 
-            if (borderSr == null && cardGlowSr == null) continue;
-
-            SyncOverlayTransforms(meetingHud, state, borderSr, cardGlowSr);
+            SyncOverlayTransforms(meetingHud, state, cardGlowSr);
 
             if (visual.Visibility > 0.01f)
             {
                 Color playerColor = GetPlayerColor(pid);
                 float brightness = Mathf.SmoothStep(0f, 1f, visual.SmoothedLevel);
                 playerColor.a = Mathf.Lerp(0.28f, 1f, brightness) * visual.Visibility;
-                if (borderSr != null)
-                {
-                    borderSr.color    = playerColor;
-                    borderSr.enabled  = true;
-                }
-
                 if (cardGlowSr != null)
                 {
                     var glowColor = playerColor;
@@ -147,14 +131,12 @@ public static class MeetingSpeakingIndicatorPatch
                     cardGlowSr.enabled = true;
                 }
 
-                ApplyBuiltInHighlight(state, pid, playerColor, brightness, visual.Visibility);
-
+                ApplyBuiltInHighlight(state, playerColor, brightness, visual.Visibility);
             }
             else
             {
-                if (borderSr != null) borderSr.enabled = false;
                 if (cardGlowSr != null) cardGlowSr.enabled = false;
-                ClearBuiltInHighlight(state, pid, true);
+                ClearBuiltInHighlight(state);
             }
         }
 
@@ -163,7 +145,7 @@ public static class MeetingSpeakingIndicatorPatch
             int states = CountPlayerStates(meetingHud);
             LogHud("hud.meeting.update",
                 $"calls={Take(ref _updateCalls)} {DescribeHudRoot(meetingHud)} states={states} " +
-                $"speakingLevels={DescribeSpeakingLevels()} borders={_borders.Count} cardGlows={_cardGlows.Count} {DescribeOverlay(overlay)}");
+                $"speakingLevels={DescribeSpeakingLevels()} cardGlows={_cardGlows.Count} {DescribeOverlay(overlay)}");
 
             int index = 0;
             foreach (var state in meetingHud.playerStates)
@@ -176,12 +158,9 @@ public static class MeetingSpeakingIndicatorPatch
 
     private static void DisableAll()
     {
-        foreach (var sr in _borders.Values)
-            if (sr != null) sr.enabled = false;
         foreach (var sr in _cardGlows.Values)
             if (sr != null) sr.enabled = false;
         ClearAllBuiltInHighlights();
-        _controlledHighlights.Clear();
         _visualStates.Clear();
     }
 
@@ -192,28 +171,15 @@ public static class MeetingSpeakingIndicatorPatch
         foreach (var state in meetingHud.playerStates)
         {
             if (state != null)
-                ClearBuiltInHighlight(state, state.TargetPlayerId, true);
+                ClearBuiltInHighlight(state);
         }
     }
 
     private static void SyncOverlayTransforms(
         MeetingHud meetingHud,
         PlayerVoteArea state,
-        SpriteRenderer? border,
         SpriteRenderer? glow)
     {
-        if (border != null)
-        {
-            var root = ResolveMeetingOverlayRoot(meetingHud);
-            if (border.transform.parent != root)
-                border.transform.SetParent(root, false);
-            border.transform.localPosition = ToOverlayLocal(root, GetIconWorldPosition(state), -100f);
-            border.transform.localScale = Vector3.one * BorderScale;
-            ApplySortingGroup(border.gameObject, VCSorting.Ring);
-            VCOverlayCamera.EnsureOnTop(border.gameObject);
-            border.transform.SetAsLastSibling();
-        }
-
         if (glow != null)
         {
             if (state.Background != null)
@@ -258,12 +224,6 @@ public static class MeetingSpeakingIndicatorPatch
         return new Vector3(local.x, local.y, z);
     }
 
-    private static Vector3 GetIconWorldPosition(PlayerVoteArea state)
-    {
-        var icon = state.PlayerIcon;
-        return icon != null ? icon.transform.position : state.transform.position;
-    }
-
     private static Vector3 GetCardWorldPosition(PlayerVoteArea state)
         => state.Background != null ? state.Background.transform.position : state.transform.position;
 
@@ -278,7 +238,7 @@ public static class MeetingSpeakingIndicatorPatch
         return visual;
     }
 
-    private static void ApplyBuiltInHighlight(PlayerVoteArea state, byte playerId, Color color, float brightness, float visibility)
+    private static void ApplyBuiltInHighlight(PlayerVoteArea state, Color color, float brightness, float visibility)
     {
         var highlight = state.HighlightedFX;
         if (highlight == null) return;
@@ -290,13 +250,10 @@ public static class MeetingSpeakingIndicatorPatch
         highlight.sortingOrder = VCSorting.Ring;
         highlight.maskInteraction = SpriteMaskInteraction.None;
         highlight.enabled = visibility > 0.01f;
-        _controlledHighlights.Add(playerId);
     }
 
-    private static void ClearBuiltInHighlight(PlayerVoteArea state, byte playerId, bool force = false)
+    private static void ClearBuiltInHighlight(PlayerVoteArea state)
     {
-        if (!force && !_controlledHighlights.Remove(playerId)) return;
-        _controlledHighlights.Remove(playerId);
         if (state.HighlightedFX != null)
             state.HighlightedFX.enabled = false;
     }
@@ -394,7 +351,7 @@ public static class MeetingSpeakingIndicatorPatch
     {
         string full = $"{message}";
         VoiceDiagnostics.Log(category, full);
-        VoiceChatPluginMain.Logger.LogInfo($"[VC HUD] {category} {full}");
+        VoiceDiagnostics.DebugInfo($"[VC HUD] {category} {full}");
     }
 
     private static bool ShouldDebugLogHud()
@@ -448,7 +405,6 @@ public static class MeetingSpeakingIndicatorPatch
 
         byte pid = state.TargetPlayerId;
         bool talking = _speakingLevels.TryGetValue(pid, out float level);
-        _borders.TryGetValue(pid, out var border);
         _cardGlows.TryGetValue(pid, out var glow);
         bool hasBounds = TryGetWorldBounds(state, out var bounds);
         bool hasRect = TryGetScreenRect(state, out var rect);
@@ -458,7 +414,7 @@ public static class MeetingSpeakingIndicatorPatch
                $"pos={DescribeVector(state.transform.position)} local={DescribeVector(state.transform.localPosition)} renderers={rendererCount} " +
                $"bounds={(hasBounds ? DescribeBounds(bounds) : "none")} screenRect={(hasRect ? DescribeRect(rect) : "none")} " +
                $"background={DescribeSpriteRenderer(state.Background)} playerIcon={DescribePlayerIcon(state.PlayerIcon)} " +
-               $"border={DescribeSpriteRenderer(border)} glow={DescribeSpriteRenderer(glow)}";
+               $"glow={DescribeSpriteRenderer(glow)}";
     }
 
     private static int CountRenderers(PlayerVoteArea state)
@@ -521,39 +477,6 @@ public static class MeetingSpeakingIndicatorPatch
         return Mathf.Pow(Mathf.Clamp01(normalized), 0.65f);
     }
 
-    private static SpriteRenderer? CreateBorder(MeetingHud meetingHud, PlayerVoteArea state, byte playerId)
-    {
-        try
-        {
-            var go = new GameObject("VC_GlowBorder");
-            var root = ResolveMeetingOverlayRoot(meetingHud);
-            go.transform.SetParent(root, false);
-            go.transform.localPosition = ToOverlayLocal(root, GetIconWorldPosition(state), -100f);
-            go.transform.localScale    = Vector3.one * BorderScale;
-            ApplySortingGroup(go, VCSorting.Ring);
-            VCOverlayCamera.EnsureOnTop(go);
-            go.transform.SetAsLastSibling();
-
-            var sr         = go.AddComponent<SpriteRenderer>();
-            sr.sprite           = GetRingSprite();
-            sr.sortingLayerName = VCSorting.Layer;
-            sr.sortingOrder     = VCSorting.Ring;
-            sr.maskInteraction  = SpriteMaskInteraction.None;
-            sr.enabled          = false;
-
-            _borders[playerId] = sr;
-            if (ShouldDebugLogHud())
-                LogHud("hud.meeting.create", $"type=border player={playerId} parent={ParentName(go.transform)} localPos={DescribeVector(go.transform.localPosition)} scale={DescribeVector(go.transform.localScale)} renderer={DescribeSpriteRenderer(sr)}");
-            return sr;
-        }
-        catch (Exception ex)
-        {
-            if (ShouldDebugLogHud())
-                LogHud("hud.meeting.create.error", $"type=border player={playerId} error={ex.GetType().Name}:{ex.Message}");
-            return null;
-        }
-    }
-
     private static SpriteRenderer? CreateCardGlow(MeetingHud meetingHud, PlayerVoteArea state, byte playerId)
     {
         try
@@ -591,49 +514,11 @@ public static class MeetingSpeakingIndicatorPatch
     {
         private static void Postfix()
         {
-            _borders.Clear();
             _cardGlows.Clear();
             _speakingLevels.Clear();
             _visualStates.Clear();
             _playerColors.Clear();
-            _controlledHighlights.Clear();
         }
-    }
-
-    private static Sprite GetRingSprite()
-    {
-        if (_ringSprite != null) return _ringSprite;
-
-        const int   Size      = 128;
-        const float Inner     = 0.80f; 
-        const float Feather   = 1.8f; 
-
-        var   tex     = new Texture2D(Size, Size, TextureFormat.RGBA32, false);
-        float centre  = Size * 0.5f;
-        float outerR  = centre - 1f;
-        float innerR  = outerR * Inner;
-
-        for (int y = 0; y < Size; y++)
-        for (int x = 0; x < Size; x++)
-        {
-            float dx = x - centre + 0.5f;
-            float dy = y - centre + 0.5f;
-            float d  = Mathf.Sqrt(dx * dx + dy * dy);
-            float outerA = Mathf.Clamp01((outerR - d) / Feather);
-            float innerA = Mathf.Clamp01((d - innerR) / Feather);
-            float a      = outerA * innerA;
-
-            tex.SetPixel(x, y, new Color(1f, 1f, 1f, a));
-        }
-        tex.Apply();
-
-        _ringSprite = Sprite.Create(
-            tex,
-            new Rect(0, 0, Size, Size),
-            new Vector2(0.5f, 0.5f),
-            Size);
-        _ringSprite.hideFlags |= HideFlags.HideAndDontSave;
-        return _ringSprite;
     }
 
     private static Sprite GetCardGlowSprite()
@@ -684,7 +569,7 @@ public static class MeetingSpeakingIndicatorPatch
             }
         }
 
-        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // BCL fallback green
+        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
         _playerColors[playerId] = fallback;
         return fallback;
     }

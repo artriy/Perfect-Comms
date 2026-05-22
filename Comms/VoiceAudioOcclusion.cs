@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -22,11 +21,11 @@ internal static class VoiceAudioOcclusion
     public static float ApplyFalloff(float distance, float maxDistance, VoiceFalloffMode mode)
     {
         if (maxDistance <= 0f) return 0f;
-        float t = Mathf.Clamp01(distance / maxDistance);
+        float t = Math.Clamp(distance / maxDistance, 0f, 1f);
         return mode switch
         {
             VoiceFalloffMode.Smooth => 1f - SmoothStep(t),
-            VoiceFalloffMode.VoiceFocused => t < 0.35f ? 1f : Mathf.Pow(1f - t, 1.35f),
+            VoiceFalloffMode.VoiceFocused => t < 0.35f ? 1f : MathF.Pow(1f - t, 1.35f),
             _ => 1f - t,
         };
     }
@@ -66,69 +65,78 @@ internal static class VoiceAudioOcclusion
         return result;
     }
 
-    public static bool TryGetCameraListenerPosition(Vector2 targetPos, out Vector2 position)
+    public static bool TryGetCameraListenerPosition(
+        int mapId,
+        bool cameraViewActive,
+        int activeCameraIndex,
+        Vector2? activeCameraPosition,
+        Vector2 targetPos,
+        out Vector2 position)
     {
         position = default;
-        var minigame = Minigame.Instance;
-        if (minigame == null) return false;
+        if (!cameraViewActive) return false;
 
-        switch (minigame)
+        if (IsSkeldCameraView(mapId, activeCameraIndex))
+            return TryGetNearestCameraPosition(SkeldCameras, targetPos, out position);
+
+        if (activeCameraPosition.HasValue)
         {
-            case SurveillanceMinigame:
-                return TryGetNearestCameraPosition(SkeldCameras, targetPos, out position);
-            case PlanetSurveillanceMinigame planet:
-                if (TryGetPlanetCameraPosition(planet, out position)) return true;
-                position = planet.TargetPosition;
-                return position != default;
-            case FungleSurveillanceMinigame fungle:
-                if (fungle.securityCamera?.cam != null)
-                {
-                    position = fungle.securityCamera.cam.transform.position;
-                    return true;
-                }
-                position = fungle.TargetPosition;
-                return position != default;
-            default:
-                return false;
+            position = activeCameraPosition.Value;
+            return true;
         }
+
+        return TryGetFixedCameraPosition(mapId, activeCameraIndex, out position);
+    }
+
+    public static bool TryGetFixedCameraPosition(int mapId, int cameraIndex, out Vector2 position)
+    {
+        position = default;
+        var cameras = mapId switch
+        {
+            2 => PolusCameras,
+            4 => AirshipCameras,
+            _ => null,
+        };
+
+        if (cameras == null || cameraIndex < 0 || cameraIndex >= cameras.Length) return false;
+        position = cameras[cameraIndex];
+        return true;
     }
 
     private static readonly Vector2[] SkeldCameras =
     [
-        new(13.2417f, -4.348f),
-        new(0.6216f, -6.5642f),
-        new(-7.1503f, 1.6709f),
-        new(-17.8098f, -4.8983f),
+        CreateVector(13.2417f, -4.348f),
+        CreateVector(0.6216f, -6.5642f),
+        CreateVector(-7.1503f, 1.6709f),
+        CreateVector(-17.8098f, -4.8983f),
     ];
 
     private static readonly Vector2[] PolusCameras =
     [
-        new(29f, -15.7f),
-        new(15.4f, -15.4f),
-        new(24.4f, -8.5f),
-        new(17f, -20.6f),
-        new(4.7f, -22.73f),
-        new(11.6f, -8.2f),
+        CreateVector(29f, -15.7f),
+        CreateVector(15.4f, -15.4f),
+        CreateVector(24.4f, -8.5f),
+        CreateVector(17f, -20.6f),
+        CreateVector(4.7f, -22.73f),
+        CreateVector(11.6f, -8.2f),
     ];
 
     private static readonly Vector2[] AirshipCameras =
     [
-        new(-8.2872f, 0.0527f),
-        new(-4.0477f, 9.1447f),
-        new(23.5616f, 9.8882f),
-        new(4.881f, -11.1688f),
-        new(30.3702f, -0.874f),
-        new(3.3018f, 16.2631f),
+        CreateVector(-8.2872f, 0.0527f),
+        CreateVector(-4.0477f, 9.1447f),
+        CreateVector(23.5616f, 9.8882f),
+        CreateVector(4.881f, -11.1688f),
+        CreateVector(30.3702f, -0.874f),
+        CreateVector(3.3018f, 16.2631f),
     ];
 
-    private static bool TryGetPlanetCameraPosition(PlanetSurveillanceMinigame planet, out Vector2 position)
+    private static Vector2 CreateVector(float x, float y)
     {
-        position = default;
-        int index = Mathf.Clamp(planet.currentCamera, 0, 5);
-        var cameras = ResolveMapId() == 4 ? AirshipCameras : PolusCameras;
-        if (index < 0 || index >= cameras.Length) return false;
-        position = cameras[index];
-        return true;
+        var vector = default(Vector2);
+        vector.x = x;
+        vector.y = y;
+        return vector;
     }
 
     private static bool TryGetNearestCameraPosition(Vector2[] cameras, Vector2 targetPos, out Vector2 position)
@@ -139,7 +147,9 @@ internal static class VoiceAudioOcclusion
         float bestDistance = float.MaxValue;
         foreach (var camera in cameras)
         {
-            float distance = Vector2.SqrMagnitude(targetPos - camera);
+            float dx = targetPos.x - camera.x;
+            float dy = targetPos.y - camera.y;
+            float distance = dx * dx + dy * dy;
             if (distance >= bestDistance) continue;
             bestDistance = distance;
             position = camera;
@@ -148,32 +158,8 @@ internal static class VoiceAudioOcclusion
         return bestDistance < float.MaxValue;
     }
 
-    private static int ResolveMapId()
-    {
-        try
-        {
-            var options = GameOptionsManager.Instance?.CurrentGameOptions;
-            object? mapId = options?.GetType().GetProperty("MapId", BindingFlags.Public | BindingFlags.Instance)?.GetValue(options)
-                            ?? options?.GetType().GetField("MapId", BindingFlags.Public | BindingFlags.Instance)?.GetValue(options);
-            if (mapId != null) return Convert.ToInt32(mapId);
-        }
-        catch { }
-
-        try
-        {
-            var ship = ShipStatus.Instance;
-            if (ship == null) return -1;
-            if (ship.GetType().Name.Contains("Airship", StringComparison.OrdinalIgnoreCase)) return 4;
-            if (ship.Type == ShipStatus.MapType.Pb) return 2;
-            if (ship.Type == ShipStatus.MapType.Fungle) return 5;
-            if (ship.Type == ShipStatus.MapType.Hq) return 1;
-            return 0;
-        }
-        catch
-        {
-            return -1;
-        }
-    }
+    private static bool IsSkeldCameraView(int mapId, int activeCameraIndex)
+        => activeCameraIndex == 6 || mapId is 0 or 3;
 
     private static float SmoothStep(float t)
         => t * t * (3f - 2f * t);

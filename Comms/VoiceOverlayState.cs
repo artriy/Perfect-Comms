@@ -54,37 +54,9 @@ internal sealed class VoiceOverlayState
         if (room == null)
             return Empty;
 
-        var snapshot = room.CurrentSnapshot;
         var remotePlayers = new List<VoiceRemoteOverlayState>(16);
-        foreach (var entry in room.AllClientEntries)
-        {
-            int senderId = entry.Key;
-            var client = entry.Value;
-            byte playerId = client.PlayerId;
-            string playerName = client.PlayerName;
-            if (snapshot != null &&
-                TryResolvePlayer(snapshot, senderId, playerId, out var player) &&
-                !player.Disconnected &&
-                !player.IsDummy)
-            {
-                playerId = player.PlayerId;
-                playerName = string.IsNullOrWhiteSpace(player.PlayerName)
-                    ? playerName
-                    : player.PlayerName;
-            }
-
-            if (playerId == byte.MaxValue) continue;
-
-            bool isSpeaking = client.IsSpeaking || client.Level >= 0.004f;
-
-            remotePlayers.Add(new VoiceRemoteOverlayState(
-                playerId,
-                playerName,
-                client.Level,
-                isSpeaking,
-                client.CurrentRoute.Audible,
-                client.CurrentRoute.Reason));
-        }
+        foreach (var remote in room.InterstellarRemoteOverlayStates)
+            remotePlayers.Add(remote);
 
         var local = new VoiceLocalOverlayState(
             VoiceChatHudState.IsMuted,
@@ -95,26 +67,5 @@ internal sealed class VoiceOverlayState
             room.UsingSpeaker);
 
         return new VoiceOverlayState(local, remotePlayers);
-    }
-
-    private static bool TryResolvePlayer(
-        VoiceGameStateSnapshot snapshot,
-        int senderId,
-        byte playerId,
-        out VoicePlayerSnapshot player)
-    {
-        if (playerId != byte.MaxValue && snapshot.TryGetPlayer(playerId, out player))
-            return true;
-
-        if (senderId >= 0 && snapshot.TryGetClient(senderId, out player))
-            return true;
-
-        int fallbackPlayerId = senderId - 1000;
-        if (fallbackPlayerId >= 0 && fallbackPlayerId <= byte.MaxValue &&
-            snapshot.TryGetPlayer((byte)fallbackPlayerId, out player))
-            return true;
-
-        player = default;
-        return false;
     }
 }

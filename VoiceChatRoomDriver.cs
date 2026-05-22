@@ -56,7 +56,7 @@ internal static class VoiceChatRoomDriver
                 if (_closeGraceTimer <= 0f)
                 {
                     _closeGraceTimer = TransitionCloseGraceSeconds;
-                    VoiceChatPluginMain.Logger.LogInfo("[VC] Room close deferred; likely scene transition.");
+                    VoiceDiagnostics.DebugInfo("[VC] Room close deferred; likely scene transition.");
                     VoiceChatRoom.Current.ForceCompatibilityRefresh("close deferred");
                 }
 
@@ -69,7 +69,7 @@ internal static class VoiceChatRoomDriver
                     }
                     catch (Exception ex)
                     {
-                        VoiceChatPluginMain.Logger.LogError("[VC] Room update error during close grace: " + ex);
+                        VoiceDiagnostics.DebugError("[VC] Room update error during close grace: " + ex);
                     }
                     return;
                 }
@@ -95,7 +95,7 @@ internal static class VoiceChatRoomDriver
             if (_roomRetryTimer <= 0f)
             {
                 _roomRetryTimer = 1f;
-                VoiceChatPluginMain.Logger.LogInfo(
+                VoiceDiagnostics.DebugInfo(
                     "[VC] VoiceChatRoom is missing while joined; creating now.");
 
                 try
@@ -104,18 +104,18 @@ internal static class VoiceChatRoomDriver
 
                     if (VoiceChatRoom.Current != null)
                     {
-                        VoiceChatPluginMain.Logger.LogInfo("[VC] Room created successfully");
+                        VoiceDiagnostics.DebugInfo("[VC] Room created successfully");
                         VoiceChatHudState.ApplyMicState();
                         VoiceChatHudState.ApplySpeakerState();
                     }
                     else
                     {
-                        VoiceChatPluginMain.Logger.LogError("[VC] Room creation failed.");
+                        VoiceDiagnostics.DebugError("[VC] Room creation failed.");
                     }
                 }
                 catch (Exception ex)
                 {
-                    VoiceChatPluginMain.Logger.LogError($"[VC] Room creation exception: {ex.Message}\n{ex.StackTrace}");
+                    VoiceDiagnostics.DebugError($"[VC] Room creation exception: {ex.Message}\n{ex.StackTrace}");
                 }
             }
             if (VoiceChatRoom.Current == null)
@@ -132,7 +132,7 @@ internal static class VoiceChatRoomDriver
         {
             _pendingRemap = true;
             _remapCountdown = 2;
-            VoiceChatPluginMain.Logger.LogInfo("[VC] IntroCutscene ended: deferred mappings reset.");
+            VoiceDiagnostics.DebugInfo("[VC] IntroCutscene ended: deferred mappings reset.");
         }
         _wasInIntro = inIntro;
 
@@ -143,20 +143,20 @@ internal static class VoiceChatRoomDriver
             VoiceChatRoom.Current.ForceUpdateLocalProfile();
             _pendingRemap = false;
             _remapCountdown = 0;
-            VoiceChatPluginMain.Logger.LogInfo("[VC] EndGame: room rejoined.");
+            VoiceDiagnostics.DebugInfo("[VC] EndGame: room rejoined.");
         }
         _wasInEndGame = inEndGame;
 
         bool inGame = ShipStatus.Instance != null;
         if (inGame && !_wasInGame)
         {
-            VoiceChatPluginMain.Logger.LogInfo("[VC] Entered OnlineGame scene");
+            VoiceDiagnostics.DebugInfo("[VC] Entered OnlineGame scene");
             
             // Ensure audio is working
             var room = VoiceChatRoom.Current;
             if (room != null)
             {
-                VoiceChatPluginMain.Logger.LogInfo($"[VC] Microphone active: {room.UsingMicrophone}");
+                VoiceDiagnostics.DebugInfo($"[VC] Microphone active: {room.UsingMicrophone}");
                 room.ForceCompatibilityRefresh("entered game");
             }
         }
@@ -171,36 +171,31 @@ internal static class VoiceChatRoomDriver
             else
             {
                 _pendingRemap = false;
-                ForceRemapAllClients();
+                ForceRemapRemotePeers();
             }
         }
 
         VoiceChatHudState.TrySyncHostRoomSettings();
 
-        try 
-        { 
-            VoiceChatRoom.Current.Update(); 
+        try
+        {
+            VoiceChatRoom.Current.Update();
         }
         catch (Exception ex)
-        { 
-            VoiceChatPluginMain.Logger.LogError("[VC] Room update error: " + ex); 
+        {
+            VoiceDiagnostics.DebugError("[VC] Room update error: " + ex);
         }
     }
 
-    private static void ForceRemapAllClients()
+    private static void ForceRemapRemotePeers()
     {
         var room = VoiceChatRoom.Current;
         if (room == null) return;
 
-        int count = 0;
-        foreach (var client in room.AllClients)
-        {
-            client.ResetMappingNoMute();
-            count++;
-        }
+        int count = room.ResetRemotePeerMappingsNoMute();
 
         room.ForceCompatibilityRefresh("deferred remap");
 
-        VoiceChatPluginMain.Logger.LogInfo($"[VC] Deferred mappings reset for {count} client(s).");
+        VoiceDiagnostics.DebugInfo($"[VC] Deferred mappings reset for {count} client(s).");
     }
 }

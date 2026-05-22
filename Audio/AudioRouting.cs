@@ -54,6 +54,8 @@ public class AudioManager : IHasAudioPropertyNode
 {
     private readonly AbstractAudioRouter        _router;
     private readonly int                        _bufLen, _bufMax;
+    private readonly bool                       _enableRecoveryPrebuffer;
+    private readonly int                        _instancePrebufferSamples;
     private readonly AudioRoutingInstanceNode[] _globals;
     private readonly int                        _nodeCount;
     private          ISampleProvider?           _endpoint;
@@ -103,11 +105,18 @@ public class AudioManager : IHasAudioPropertyNode
         }
     }
 
-    public AudioManager(AbstractAudioRouter router, int bufLen = 2048, int bufMax = 4096)
+    public AudioManager(
+        AbstractAudioRouter router,
+        int bufLen = 2048,
+        int bufMax = 4096,
+        bool enableRecoveryPrebuffer = true,
+        int? instancePrebufferSamples = null)
     {
         _router  = router;
         _bufLen  = bufLen;
         _bufMax  = bufMax;
+        _enableRecoveryPrebuffer = enableRecoveryPrebuffer;
+        _instancePrebufferSamples = instancePrebufferSamples ?? AudioHelpers.PlaybackRecoveryPrebufferSamples;
         _nodeCount = AssignIds(router);
         _globals   = BuildGlobalNodes();
     }
@@ -169,7 +178,7 @@ public class AudioManager : IHasAudioPropertyNode
                 throw new InvalidDataException("Non-global router cannot be a child of a global router.");
             }
             foreach (var c in r.GetChildRouters())
-                Build(c, nodes[r.Id]?.Processor, r.IsGlobalRouter || inGlobal);
+                Build(c, nodes[r.Id]?.Output, r.IsGlobalRouter || inGlobal);
         }
         Build(_router, null, false);
         return nodes;
@@ -188,7 +197,8 @@ public class AudioManager : IHasAudioPropertyNode
             DiscardOnBufferOverflow = true,
             BufferCutSize  = _bufMax > _bufLen ? Math.Min(_bufMax - 1, _bufLen + AudioHelpers.FrameSize) : int.MaxValue,
             BufferCutToSize = _bufLen,
-            PrebufferSamples = AudioHelpers.PlaybackPrebufferSamples,
+            EnableRecoveryPrebuffer = _enableRecoveryPrebuffer,
+            PrebufferSamples = Math.Min(_bufLen, _instancePrebufferSamples),
             DebugGroupId = groupId,
         };
 
@@ -205,7 +215,7 @@ public class AudioManager : IHasAudioPropertyNode
                 nodes[r.Id].AddInput(parent, groupId);
             }
             if (!r.IsGlobalRouter)
-                foreach (var c in r.GetChildRouters()) Build(c, nodes[r.Id]?.Processor);
+                foreach (var c in r.GetChildRouters()) Build(c, nodes[r.Id]?.Output);
         }
         Build(_router, source);
         return new AudioRoutingInstance(nodes, source);
@@ -246,20 +256,30 @@ public class VolumeRouter : AbstractAudioNodeProvider<VolumeRouter.Property>
     public class Property : ISampleProvider
     {
         private readonly ISampleProvider _src;
-        public float Volume { get; set; }
+        private float _volume;
+
+        public float Volume
+        {
+            get => _volume;
+            set => _volume = Math.Clamp(value, 0f, 1f);
+        }
+
         public WaveFormat WaveFormat => _src.WaveFormat;
         internal Property(ISampleProvider src) => _src = src;
 
         public int Read(float[] buffer, int offset, int count)
         {
-            if (Volume > 0f)
+            if (_volume <= 0f)
             {
-                int r = _src.Read(buffer, offset, count);
-                if (Volume != 1f) for (int i = 0; i < count; i++) buffer[offset + i] *= Volume;
-                return r;
+                Array.Clear(buffer, offset, count);
+                return count;
             }
-            Array.Clear(buffer, offset, count);
-            return count;
+
+            int read = _src.Read(buffer, offset, count);
+            if (_volume >= 1f) return read;
+            for (int i = 0; i < read; i++)
+                buffer[offset + i] *= _volume;
+            return read;
         }
     }
     protected internal override bool ShouldBeGivenStereoInput => false;
@@ -289,6 +309,52 @@ public class StereoRouter : AbstractAudioNodeProvider<StereoRouter.Property>
     }
 }
 
+public class MonoPanRouter : AbstractAudioNodeProvider<MonoPanRouter.Property>
+{
+    public class Property : ISampleProvider
+    {
+        private readonly ISampleProvider _src;
+        private readonly WaveFormat _format;
+        private float[] _stereo = Array.Empty<float>();
+        public float Volume { get; set; } = 1f;
+        public float Pan { get; set; }
+        public WaveFormat WaveFormat => _format;
+        internal Property(ISampleProvider src)
+        {
+            _src = src;
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(src.WaveFormat.SampleRate, 1);
+        }
+        public int Read(float[] buffer, int offset, int count)
+        {
+            if (_src.WaveFormat.Channels == 1)
+            {
+                var read = _src.Read(buffer, offset, count);
+                if (Volume >= 1f) return read;
+                for (var i = 0; i < read; i++)
+                    buffer[offset + i] *= Volume;
+                return read;
+            }
+
+            var stereoCount = count * _src.WaveFormat.Channels;
+            if (_stereo.Length < stereoCount) _stereo = new float[stereoCount];
+            var stereoRead = _src.Read(_stereo, 0, stereoCount);
+            var frames = stereoRead / _src.WaveFormat.Channels;
+            for (var frame = 0; frame < frames; frame++)
+            {
+                var sum = 0f;
+                var baseIndex = frame * _src.WaveFormat.Channels;
+                for (var ch = 0; ch < _src.WaveFormat.Channels; ch++)
+                    sum += _stereo[baseIndex + ch];
+                buffer[offset + frame] = sum / _src.WaveFormat.Channels * Volume;
+            }
+            return frames;
+        }
+    }
+    protected internal override bool ShouldBeGivenStereoInput => false;
+    protected internal override bool IsEndpoint               => false;
+    internal override ISampleProvider GenerateProcessor(ISampleProvider src) => new Property(src);
+}
+
 public class LevelMeterRouter : AbstractAudioNodeProvider<LevelMeterRouter.Property>
 {
     public class Property : ISampleProvider
@@ -304,7 +370,12 @@ public class LevelMeterRouter : AbstractAudioNodeProvider<LevelMeterRouter.Prope
             int r = _src.Read(buffer, offset, count);
             Level -= Decay * ((float)count / AudioHelpers.ClockRate);
             if (Level < 0f) Level = 0f;
-            for (int i = 0; i < r; i++) if (Level < buffer[offset + i]) Level = buffer[offset + i];
+            for (int i = 0; i < r; i++)
+            {
+                float sample = buffer[offset + i];
+                float magnitude = sample < 0f ? -sample : sample;
+                if (Level < magnitude) Level = magnitude;
+            }
             if (Level > 1f) Level = 1f;
             return r;
         }

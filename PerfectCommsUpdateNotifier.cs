@@ -53,7 +53,7 @@ internal static class PerfectCommsUpdateNotifier
         }
         catch (Exception ex)
         {
-            VoiceChatPluginMain.Logger.LogWarning("[VC] Update notification check failed: " + ex.Message);
+            VoiceDiagnostics.DebugWarning("[VC] Update notification check failed: " + ex.Message);
             info = null;
         }
 
@@ -93,7 +93,7 @@ internal static class PerfectCommsUpdateNotifier
         CreateText("Title", new Vector3(0f, 0.17f, -0.2f), "Perfect Comms Update Available", 0.92f, Accent, TextAlignmentOptions.Center);
         CreateText("Message", new Vector3(0f, -0.16f, -0.2f), "(Click here to download)", 0.64f, Color.white, TextAlignmentOptions.Center);
 
-        VoiceChatPluginMain.Logger.LogInfo($"[VC] Showing update notification: {info.Title}");
+        VoiceDiagnostics.DebugInfo($"[VC] Showing update notification: {info.Title}");
     }
 
     private static void CreateClickArea(string releaseUrl)

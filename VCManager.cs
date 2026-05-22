@@ -31,8 +31,8 @@ internal class VCManager : MonoBehaviour
         {
             case "MainMenu":
             case "MatchMaking":
-                VoiceChatRoom.CloseCurrentRoom();
                 VoiceLobbyRegistryPublisher.ClearLocalListing();
+                VoiceChatRoom.CloseCurrentRoom();
                 VoiceLobbyBrowserUi.Clear();
                 break;
         }

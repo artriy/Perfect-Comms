@@ -4,7 +4,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class VoiceActivityTracker
 {
-    private const float OnThreshold = 0.012f;
+    private const float OnThreshold = 0.004f;
     private const float GraceSeconds = 0.22f;
     private const float DecayPerSecond = 10f;
 

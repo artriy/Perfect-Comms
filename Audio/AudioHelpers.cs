@@ -11,9 +11,50 @@ internal static class AudioHelpers
     public const int FrameSize  = 960;   // 20 ms @ 48 kHz
     public const int Channels   = 1;     // mono capture
     public const int PlaybackPrebufferSamples = FrameSize * 5; // 100 ms jitter cushion for HTTP/modded RPC jitter
-    public const int PlaybackRecoveryPrebufferSamples = FrameSize * 2; // 40 ms after stream already started
-    public const int PlaybackMaxPrebufferWaitMilliseconds = 120; // do not strand short utterances forever
-    public const int PlaybackEdgeFadeSamples = FrameSize / 2; // 10 ms, removes start/end clicks without eating words
+    public const int ImmediatePlaybackPrebufferSamples = 0; // no startup hold; avoid starvation/prebuffer loops
+    public const int PlaybackRecoveryPrebufferSamples = FrameSize * 3; // 60 ms after stream already started
+    public const int PlaybackMaxPrebufferWaitMilliseconds = 180; // do not strand short utterances forever
+    public const int OpusBitrate = 48_000;
+    public const int OpusComplexity = 10;
+    public const bool OpusUseConstrainedVbr = true;
+    public const bool OpusUseInbandFec = false;
+    public const int OpusPacketLossPercent = 0;
+    public const float TransmitPeakCeiling = 0.30f;
+    public const float TransmitLimiterReleasePerFrame = 0.025f;
+
+    public static float GetTransmitLimiterGain(float peak)
+    {
+        if (peak <= 0f || peak <= TransmitPeakCeiling) return 1f;
+        return TransmitPeakCeiling / peak;
+    }
+
+    public static float GetSmoothedTransmitLimiterGain(float currentGain, float peak)
+    {
+        var targetGain = GetTransmitLimiterGain(peak);
+        currentGain = Math.Clamp(currentGain, 0f, 1f);
+        if (targetGain < currentGain) return targetGain;
+        return Math.Min(targetGain, currentGain + TransmitLimiterReleasePerFrame);
+    }
+
+    public static float MeasurePeak(float[] samples, int count)
+    {
+        count = Math.Min(count, samples.Length);
+        var peak = 0f;
+        for (var i = 0; i < count; i++)
+        {
+            var abs = Math.Abs(samples[i]);
+            if (abs > peak) peak = abs;
+        }
+        return peak;
+    }
+
+    public static void ApplyGain(float[] samples, int count, float gain)
+    {
+        if (gain >= 1f) return;
+        count = Math.Min(count, samples.Length);
+        for (var i = 0; i < count; i++)
+            samples[i] *= gain;
+    }
 
     private static readonly object WarmupLock = new();
     private static readonly float[] SilenceFrame = new float[FrameSize];
@@ -31,24 +72,27 @@ internal static class AudioHelpers
     {
         var enc = new OpusEncoder(ClockRate, Channels, OpusApplication.OPUS_APPLICATION_VOIP);
 
-        // Keep voice packets small enough for real-time game RPC transport.
-        enc.Bitrate    = 32_000;
+        // Interstellar media transport can afford a higher voice bitrate than
+        // the old RPC path while staying far below raw PCM bandwidth.
+        enc.Bitrate = OpusBitrate;
 
-        // Mid-high complexity keeps quality good without starving capture/update
-        // threads on weaker clients.
-        enc.Complexity = 6;
+        // Keep realtime voice analysis high without adding tonal filters.
+        enc.Complexity = OpusComplexity;
+        enc.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
 
-        // Keep VBR so quiet passages still compress well.
-        enc.UseVBR     = true;
+        // Keep VBR so quiet passages compress well, but constrain bursts for the
+        // data-channel fallback and small relay queues.
+        enc.UseVBR = true;
+        enc.UseConstrainedVBR = OpusUseConstrainedVbr;
 
         // DTX (discontinuous transmission) OFF — it caused brief cut-ins at the
         // start of each utterance which felt like the mic was "muting itself".
-        enc.UseDTX     = false;
+        enc.UseDTX = false;
 
         // FEC/PLC concealment caused occasional static bursts on packet gaps in
         // the game RPC transport. Prefer a tiny dropout over synthetic noise.
-        enc.UseInbandFEC     = false;
-        enc.PacketLossPercent = 0;
+        enc.UseInbandFEC = OpusUseInbandFec;
+        enc.PacketLossPercent = OpusPacketLossPercent;
 
         return enc;
     }

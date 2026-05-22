@@ -7,6 +7,7 @@ internal enum VoicePacketType : byte
     Audio = 0,
     Profile = 1,
     JailVoice = 2,
+    Custom = 3,
 }
 
 [Flags]
@@ -19,9 +20,6 @@ internal enum VoiceFrameFlags : byte
 
 internal static class VoiceProtocol
 {
-    public const byte HandshakeRpcId = 198;
-    public const byte AudioRpcId = 203;
-
     public const int ProtocolVersion = 3;
     public const int MinCompatibleVersion = 3;
 
@@ -37,11 +35,11 @@ internal static class VoiceProtocol
     public const int MaxProfileNameChars = 64;
     public const int MaxQueuedSendFrames = 12;
     public const int MaxQueuedReceivePackets = 160;
-    public const int JitterBufferDelayFrames = 1;
-    public const int MaxJitterBufferFrames = 16;
-    public const int MaxJitterFramesPerUpdate = 6;
-    public const int MaxDecodedAudioFramesPerUpdate = 48;
-    public const double MaxJitterBufferDelayMilliseconds = 25;
+    public const int JitterBufferDelayFrames = 2;
+    public const int MaxJitterBufferFrames = 24;
+    public const int MaxJitterFramesPerUpdate = 8;
+    public const int MaxDecodedAudioFramesPerUpdate = 64;
+    public const double MaxJitterBufferDelayMilliseconds = 60;
     public const int MaxSenderPacketsPerSecond = 80;
     public const int MaxSenderBytesPerSecond = 320_000;
     public const double MaxQueuedFrameAgeSeconds = 0.50;
@@ -53,7 +51,6 @@ internal static class VoiceProtocol
         VoiceFeatureFlags.UnreliableAudio |
         VoiceFeatureFlags.BundledAudio |
         VoiceFeatureFlags.ProfilePackets |
-        VoiceFeatureFlags.CompatibilityHandshake |
         VoiceFeatureFlags.AudioFrameFlags;
 
     internal const VoiceFrameFlags AllowedFrameFlags =
@@ -66,4 +63,11 @@ internal static class VoiceProtocol
 
     public static bool IsValidAudioPayloadLength(int length)
         => length > AudioHeaderBytes && length <= MaxAudioPayloadBytes;
+
+}
+
+internal static class VoiceSenderGuard
+{
+    public static bool IsLocalSender(int senderId, int localClientId)
+        => localClientId >= 0 && senderId == localClientId;
 }

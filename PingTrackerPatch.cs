@@ -110,6 +110,7 @@ public static class PingTrackerPatch
         EnsureBar(__instance);
         if (_barRoot == null) return;
         KeepSpeakingBarOnTop(__instance);
+        TrackAvatarIdlePoses();
 
         var room = VoiceChatRoom.Current;
         var overlay = VoiceOverlayState.Current(room);
@@ -159,6 +160,8 @@ public static class PingTrackerPatch
                 {
                     slot.TargetLevel = level;
                     slot.IsSpeaking = true;
+                    if (slot.IconGO == null)
+                        TryCreateSlotIcon(id, slot);
                     continue;
                 }
             }
@@ -243,6 +246,12 @@ public static class PingTrackerPatch
         ApplySpeakingBarSorting();
     }
 
+    private static void TrackAvatarIdlePoses()
+    {
+        foreach (var pc in PlayerControl.AllPlayerControls)
+            CrewmateAvatarRenderer.TrackIdlePose(pc);
+    }
+
     private static void ApplySortingGroup(GameObject go, int order)
     {
         var group = go.GetComponent<SortingGroup>() ?? go.AddComponent<SortingGroup>();
@@ -317,8 +326,7 @@ public static class PingTrackerPatch
             IsSpeaking = true
         };
 
-        if (player != null && CrewmateAvatarRenderer.TryCreate(playerId, player, _barRoot.transform, out var iconGO))
-            slot.IconGO = iconGO;
+        TryCreateSlotIcon(playerId, slot);
 
         CreateRing(playerId, slot);
 
@@ -337,6 +345,18 @@ public static class PingTrackerPatch
         VCOverlayCamera.EnsureOnTop(labelGO);
         _slots[playerId] = slot;
         _layoutDirty = true;
+    }
+
+    private static void TryCreateSlotIcon(byte playerId, SpeakerSlot slot)
+    {
+        if (_barRoot == null || slot.IconGO != null) return;
+
+        var player = FindPlayer(playerId);
+        if (player != null && CrewmateAvatarRenderer.TryCreate(playerId, player, _barRoot.transform, out var iconGO))
+        {
+            slot.IconGO = iconGO;
+            _layoutDirty = true;
+        }
     }
 
     private static void RemoveSlot(byte id)

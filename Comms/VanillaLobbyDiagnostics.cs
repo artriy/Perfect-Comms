@@ -9,7 +9,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal static class VanillaLobbyDiagnostics
 {
-    internal static readonly bool Verbose = false;
+    internal static bool Verbose => VoiceDiagnostics.IsEnabled;
 
     private static readonly object Gate = new();
     private static readonly Dictionary<string, int> Counts = new(StringComparer.Ordinal);
@@ -29,13 +29,21 @@ internal static class VanillaLobbyDiagnostics
     }
 
     internal static void Warning(string area, string message)
-        => (_warningSink ?? _infoSink)?.Invoke($"[VC][VanillaLobby][{area}] {message}");
+    {
+        if (Verbose)
+            (_warningSink ?? _infoSink)?.Invoke($"[VC][VanillaLobby][{area}] {message}");
+    }
 
     internal static void Notice(string area, string message)
-        => _infoSink?.Invoke($"[VC][VanillaLobby][{area}] {message}");
+    {
+        if (Verbose)
+            _infoSink?.Invoke($"[VC][VanillaLobby][{area}] {message}");
+    }
 
     internal static void NoticeLimited(string key, string area, string message, int first = 8, int every = 120)
     {
+        if (!Verbose) return;
+
         int count;
         lock (Gate)
         {

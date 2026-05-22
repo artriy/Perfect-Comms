@@ -20,15 +20,24 @@ internal static class VoiceLobbyRegistryPublisher
 
     internal static void Update()
     {
-        if (_pending is { IsCompleted: false }) return;
-
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-        if (settings == null || !VoiceChatGameOptions.Instance.PublicVoiceLobby.Value || !TryBuildRequest(settings, out var request))
+        var options = VoiceChatGameOptions.GetInstance();
+        if (settings == null || !options.PublicVoiceLobby.Value || !TryBuildRequest(settings, out var request))
         {
             ClearLocalListing();
             return;
         }
 
+        if (ResolvePublishSource(options) == VoiceLobbyBrowserSource.BetterCrewLink)
+        {
+            ClearCloudflareListing();
+            BetterCrewLinkLobbyPublisher.Update(settings.BetterCrewLinkServerUrl.Value, request);
+            return;
+        }
+
+        BetterCrewLinkLobbyPublisher.Clear();
+        if (_pending is { IsCompleted: false }) return;
+        PrepareCloudflareRequest(request);
         var signature = BuildSignature(request);
         if (DateTime.UtcNow < _nextPublishUtc
             && string.Equals(_lastCode, request.Code, StringComparison.Ordinal)
@@ -41,7 +50,21 @@ internal static class VoiceLobbyRegistryPublisher
         _pending = PublishAsync(settings.LobbyRegistryUrl.Value, request);
     }
 
+    private static VoiceLobbyBrowserSource ResolvePublishSource(VoiceChatGameOptions options)
+    {
+        var source = (VoiceLobbyBrowserSource)options.LobbyBrowserBackend.Value;
+        return Enum.IsDefined(typeof(VoiceLobbyBrowserSource), source)
+            ? source
+            : VoiceLobbyBrowserSource.BetterCrewLink;
+    }
+
     internal static void ClearLocalListing()
+    {
+        ClearCloudflareListing();
+        BetterCrewLinkLobbyPublisher.Clear();
+    }
+
+    private static void ClearCloudflareListing()
     {
         if (string.IsNullOrEmpty(_listingId) || string.IsNullOrEmpty(_ownerToken)) return;
 
@@ -65,7 +88,7 @@ internal static class VoiceLobbyRegistryPublisher
         }
         catch (Exception ex)
         {
-            VoiceChatPluginMain.Logger.LogWarning($"[VC] Lobby registry publish failed: {ex.Message}");
+            VoiceDiagnostics.DebugWarning($"[VC] Lobby registry publish failed: {ex.Message}");
         }
     }
 
@@ -77,7 +100,7 @@ internal static class VoiceLobbyRegistryPublisher
         }
         catch (Exception ex)
         {
-            VoiceChatPluginMain.Logger.LogWarning($"[VC] Lobby registry delete failed: {ex.Message}");
+            VoiceDiagnostics.DebugWarning($"[VC] Lobby registry delete failed: {ex.Message}");
         }
     }
 
@@ -92,10 +115,6 @@ internal static class VoiceLobbyRegistryPublisher
         if (string.IsNullOrWhiteSpace(code) || code == "????")
             return false;
 
-        EnsureListingIdentity(code);
-
-        request.Id = _listingId!;
-        request.OwnerToken = _ownerToken!;
         request.Code = code;
         request.Region = ResolveRegionName();
         request.Language = Clamp(settings.LobbyBrowserLanguage.Value, 16, "English");
@@ -110,11 +129,21 @@ internal static class VoiceLobbyRegistryPublisher
         return true;
     }
 
-    private static void EnsureListingIdentity(string code)
+    private static void PrepareCloudflareRequest(VoiceLobbyPublishRequest request)
     {
-        if (_listingId != null && string.Equals(_lastCode, code, StringComparison.Ordinal)) return;
-        _listingId = Guid.NewGuid().ToString("N");
-        _ownerToken = CreateToken();
+        if (string.IsNullOrEmpty(_listingId)
+            || string.IsNullOrEmpty(_ownerToken)
+            || !string.Equals(_lastCode, request.Code, StringComparison.Ordinal))
+        {
+            _listingId = Guid.NewGuid().ToString("N");
+            _ownerToken = CreateToken();
+            _lastCode = null;
+            _lastSignature = null;
+            _nextPublishUtc = DateTime.MinValue;
+        }
+
+        request.Id = _listingId!;
+        request.OwnerToken = _ownerToken!;
     }
 
     private static string CreateToken()
@@ -195,4 +224,3 @@ internal static class VoiceLobbyRegistryPublisher
             request.Region,
             request.ProtocolVersion);
 }
-

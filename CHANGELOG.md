@@ -1,5 +1,21 @@
 # Changelog
 
+## Perfect Comms v2.0.0
+
+This is the backend rewrite release. Perfect Comms no longer depends on Among Us RPCs for voice audio transport. Voice now runs through selectable voice backends, with BetterCrewLink live voice as the default path and Interstellar available as an alternate backend.
+
+### Why You Should Update
+
+- BetterCrewLink backend + lobby browser is now fully built in.
+- Interstellar backend is now fully supported.
+- Voice transport no longer depends on Among Us RPCs.
+- Public lobby browsing and publishing are much better.
+- Directional and proximity audio are more reliable.
+- Host settings now sync across the lobby automatically.
+- Debug logs are quiet by default unless you turn them on.
+
+See `docs/release-notes-v2.0.0.md` for the full technical changelog.
+
 ## Perfect Comms v1.0.2
 
 ### Changed

@@ -342,7 +342,7 @@ internal static class VanillaLobbyMetadataCache
             }
 
             if (shouldLog)
-                VoiceChatPluginMain.Logger.LogWarning($"[VC] Vanilla lobby metadata fetch failed: {warning}");
+                VoiceDiagnostics.DebugWarning($"[VC] Vanilla lobby metadata fetch failed: {warning}");
         }
     }
 }

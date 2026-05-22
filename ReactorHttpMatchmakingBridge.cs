@@ -3,6 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using Il2CppInterop.Runtime.InteropTypes;
 using UnityEngine;
+using VoiceChatPlugin.VoiceChat;
 using static UnityEngine.UI.Button;
 
 namespace VoiceChatPlugin;
@@ -80,7 +81,7 @@ internal static class ReactorHttpMatchmakingBridge
             if (!_loggedBridge)
             {
                 _loggedBridge = true;
-                VoiceChatPluginMain.Logger.LogInfo("[VC] Marked known modded HTTP region as Reactor-compatible.");
+                VoiceDiagnostics.DebugInfo("[VC] Marked known modded HTTP region as Reactor-compatible.");
             }
         }
         catch (Exception ex)
@@ -124,6 +125,6 @@ internal static class ReactorHttpMatchmakingBridge
     {
         if (string.Equals(_lastWarning, warning, StringComparison.Ordinal)) return;
         _lastWarning = warning;
-        VoiceChatPluginMain.Logger.LogWarning($"[VC] {warning}");
+        VoiceDiagnostics.DebugWarning($"[VC] {warning}");
     }
 }

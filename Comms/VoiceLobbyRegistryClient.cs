@@ -103,7 +103,11 @@ internal static class VoiceLobbyRegistryClient
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
         using var response = await Client.SendAsync(request).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            throw new HttpRequestException($"registry {method.Method} {url} failed {(int)response.StatusCode} {response.ReasonPhrase}: {text}");
+        }
     }
 
     private static string BuildUrl(string registryUrl, string path)
@@ -116,4 +120,3 @@ internal static class VoiceLobbyRegistryClient
         return baseUrl.TrimEnd('/') + path;
     }
 }
-
