@@ -17,8 +17,16 @@ internal static class VoiceLobbyBrowserUi
 {
     private const int SortBase = 32740;
     private const float VoiceButtonHeightScale = 497f / 433f;
+    private const float PanelTargetWidth = 7.4f;
+    private const float PanelTargetHeight = 4.25f;
+    private const float CloseButtonSize = 0.72f;
+    private const float CloseButtonRightInset = 0.30f;
+    private const float CloseButtonTopInset = 0.15f;
     private const float PanelAnimationSeconds = 0.18f;
     private const float PanelPrewarmDelaySeconds = 0.10f;
+    private static readonly Vector3 CloseButtonPosition = new Vector3(PanelTargetWidth * 0.5f - CloseButtonSize * 0.5f - CloseButtonRightInset,
+        PanelTargetHeight * 0.5f - CloseButtonSize * 0.5f - CloseButtonTopInset,
+        -0.2f);
     private static GameObject? _buttonObj;
     private static GameObject? _buttonVisualObj;
     private static GameObject? _panelRoot;
@@ -50,6 +58,7 @@ internal static class VoiceLobbyBrowserUi
     private static Sprite? _normalButtonSprite;
     private static Sprite? _disabledButtonSprite;
     private static Sprite? _clearButtonSprite;
+    private static Sprite? _closeShadowSprite;
 
     internal static void EnsureMainMenuButton(MainMenuManager menu)
     {
@@ -338,7 +347,7 @@ internal static class VoiceLobbyBrowserUi
         {
             var panelSize = panelSr.sprite.bounds.size;
             if (panelSize.x > 0f && panelSize.y > 0f)
-                panelArt.transform.localScale = new Vector3(7.4f / panelSize.x, 4.25f / panelSize.y, 1f);
+                panelArt.transform.localScale = new Vector3(PanelTargetWidth / panelSize.x, PanelTargetHeight / panelSize.y, 1f);
         }
 
         var titleText = CreateText("Title", _panelRoot.transform, new Vector3(0f, 1.35f, -0.2f),
@@ -355,8 +364,8 @@ internal static class VoiceLobbyBrowserUi
         _rowsRoot.transform.SetParent(_panelRoot.transform, false);
         /*var closeTextOffset = new Vector3(2.9f, 3.05f, 0f);*/
 
-        CreateTextButton("CloseX", _panelRoot.transform, new Vector3(2.2f, 1.5f, -0.2f),
-            new Vector2(0.72f, 0.72f), "X", ClosePanel, transparentBackground: true);
+        CreateTextButton("CloseX", _panelRoot.transform, CloseButtonPosition,
+            new Vector2(CloseButtonSize, CloseButtonSize), "X", ClosePanel, transparentBackground: true);
         CreateTextButton("Refresh", _panelRoot.transform, new Vector3(-2.05f, -1.35f, -0.2f),
             new Vector2(1.08f, 0.44f), "Refresh", () => Refresh());
         CreateTextButton("Source", _panelRoot.transform, new Vector3(-2.55f, 1.28f, -0.2f),
@@ -794,8 +803,9 @@ internal static class VoiceLobbyBrowserUi
         var closeTextOffset = new Vector3(0.013f, -0.014f, 0f);
         if (isCloseButton)
         {
+            AddCloseShadowBox(go.transform, closeTextOffset, backgroundScale);
             var outline = CreateText("TextOutline", go.transform, new Vector3(closeTextOffset.x, closeTextOffset.y, -0.21f), label,
-                3f, TextAlignmentOptions.Center, SortBase + 3);
+                3.12f, TextAlignmentOptions.Center, SortBase + 4);
             outline.transform.localScale = new Vector3(1f / backgroundScale.x, 1f / backgroundScale.y, 1f);
             outline.fontStyle = FontStyles.Bold;
             outline.characterSpacing = 0f;
@@ -806,21 +816,34 @@ internal static class VoiceLobbyBrowserUi
             ? new Vector3(closeTextOffset.x, closeTextOffset.y, -0.2f)
             : new Vector3(0f, 0.01f, -0.2f);
         var txt = CreateText("Text", go.transform, textPosition, label,
-            isCloseButton ? 2.627f : isSourceButton ? 0.68f : transparentBackground ? 0.86f : 0.78f, TextAlignmentOptions.Center, SortBase + 4);
+            isCloseButton ? 2.74f : isSourceButton ? 0.68f : transparentBackground ? 0.86f : 0.78f, TextAlignmentOptions.Center, SortBase + 5);
         txt.transform.localScale = new Vector3(1f / backgroundScale.x, 1f / backgroundScale.y, 1f);
         txt.fontStyle = FontStyles.Bold;
         txt.characterSpacing = transparentBackground ? 0f : 0.6f;
         txt.color = enabled
-            ? isCloseButton ? new Color32(255, 76, 76, 255) : transparentBackground ? new Color32(255, 248, 238, 255) : new Color32(238, 255, 252, 255)
+            ? isCloseButton ? new Color32(255, 42, 42, 255) : transparentBackground ? new Color32(255, 248, 238, 255) : new Color32(238, 255, 252, 255)
             : new Color32(150, 164, 170, 255);
         if (isCloseButton)
         {
             txt.outlineColor = new Color32(0, 0, 0, 255);
-            txt.outlineWidth = 0.30f;
+            txt.outlineWidth = 0.36f;
         }
         if (name == "Source")
             _sourceButtonText = txt;
         return button;
+    }
+
+    private static void AddCloseShadowBox(Transform parent, Vector3 closeTextOffset, Vector3 backgroundScale)
+    {
+        var shadow = new GameObject("CloseShadowBox");
+        shadow.transform.SetParent(parent, false);
+        shadow.transform.localPosition = new Vector3(closeTextOffset.x, closeTextOffset.y, -0.225f);
+        shadow.transform.localScale = new Vector3(0.38f / backgroundScale.x, 0.34f / backgroundScale.y, 1f);
+        var sr = shadow.AddComponent<SpriteRenderer>();
+        if (_closeShadowSprite == null) _closeShadowSprite = SolidSprite(new Color(0f, 0f, 0f, 0.46f));
+        sr.sprite = _closeShadowSprite;
+        sr.sortingLayerName = "UI";
+        sr.sortingOrder = SortBase + 3;
     }
 
     private static void SetButtonText(GameObject button, string text)
