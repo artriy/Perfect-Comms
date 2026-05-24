@@ -7,6 +7,7 @@
 - Changed the assets to a cleaner version by @AtonyGit in #1.
 - Fixed the Voice Lobbies close X so it sits in a clearer top-right position and is easier to see.
 - Fixed bottom-positioned speaking indicators so player names no longer clip off the bottom of the screen while staying close to the edge.
+- Confirmed the default UI/debug setup: speaking bar starts top middle, mic/speaker indicators start bottom right, and debug options stay off by default.
 
 See `docs/release-notes-v2.0.1.md` for the full release notes.
 
