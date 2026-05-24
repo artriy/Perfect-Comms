@@ -35,6 +35,8 @@ public enum SpeakingBarPosition
     BottomLeft   = 3,
     BottomMiddle = 4,
     BottomRight  = 5,
+    MiddleLeft   = 6,
+    MiddleRight  = 7,
 }
 
 public enum VoiceMicMode

@@ -96,7 +96,9 @@ public static class PingTrackerPatch
         _layoutVertical = pos is SpeakingBarPosition.TopLeft
             or SpeakingBarPosition.TopRight
             or SpeakingBarPosition.BottomLeft
-            or SpeakingBarPosition.BottomRight;
+            or SpeakingBarPosition.BottomRight
+            or SpeakingBarPosition.MiddleLeft
+            or SpeakingBarPosition.MiddleRight;
         _layoutAnchoredBottom = pos is SpeakingBarPosition.BottomLeft
             or SpeakingBarPosition.BottomMiddle
             or SpeakingBarPosition.BottomRight;
@@ -203,7 +205,9 @@ public static class PingTrackerPatch
             _layoutVertical = _barPosition is SpeakingBarPosition.TopLeft
                 or SpeakingBarPosition.TopRight
                 or SpeakingBarPosition.BottomLeft
-                or SpeakingBarPosition.BottomRight;
+                or SpeakingBarPosition.BottomRight
+                or SpeakingBarPosition.MiddleLeft
+                or SpeakingBarPosition.MiddleRight;
             _layoutAnchoredBottom = _barPosition is SpeakingBarPosition.BottomLeft
                 or SpeakingBarPosition.BottomMiddle
                 or SpeakingBarPosition.BottomRight;
@@ -311,7 +315,15 @@ public static class PingTrackerPatch
                 asp.Alignment        = AspectPosition.EdgeAlignments.RightBottom;
                 asp.DistanceFromEdge = new Vector3(1.2f, 0.35f, 0f);
                 break;
-            default:
+            case SpeakingBarPosition.MiddleLeft:
+                asp.Alignment        = AspectPosition.EdgeAlignments.Left;
+                asp.DistanceFromEdge = new Vector3(0.60f, 0f, 0f);
+                break;
+            case SpeakingBarPosition.MiddleRight:
+                asp.Alignment        = AspectPosition.EdgeAlignments.Right;
+                asp.DistanceFromEdge = new Vector3(1.2f, 0f, 0f);
+                break;
+            default: // TopLeft
                 asp.Alignment        = AspectPosition.EdgeAlignments.LeftTop;
                 asp.DistanceFromEdge = new Vector3(0.60f, 0.25f, 0f);
                 break;
