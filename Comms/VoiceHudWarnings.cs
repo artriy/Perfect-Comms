@@ -38,7 +38,7 @@ internal static class VoiceHudWarnings
         var room = VoiceChatRoom.Current;
         if (room == null) return "";
 
-        if (!room.UsingMicrophone && !VoiceChatHudState.IsMuted)
+        if (!room.UsingMicrophone && !room.Mute)
             return "mic unavailable";
 
         if (!room.UsingSpeaker && !VoiceChatHudState.IsSpeakerMuted)

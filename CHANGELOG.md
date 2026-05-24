@@ -1,5 +1,28 @@
 # Changelog
 
+## Perfect Comms v2.0.2
+
+### What's Changed
+
+- Fixed voice keybind behavior while chat is open so toggle shortcuts stay blocked during typing, while push-to-talk and impostor radio can still activate after a short hold.
+- Fixed printable push-to-talk and radio keys in chat so quick taps type normally, but held voice keys do not spam characters into the message field.
+- Fixed push-to-talk chat handling so it only applies when Mic Mode is set to Push To Talk.
+- Fixed impostor radio chat handling so it only applies when the local player can actually use the radio, including blackmailer and jailor voice-block rules.
+- Changed Push To Talk mode so the mute toggle no longer creates a redundant manual mute state; released PTT remains muted and holding PTT still transmits.
+- Fixed the `VC: mic unavailable` warning appearing during normal Push To Talk idle mute.
+
+See `docs/release-notes-v2.0.2.md` for the full release notes.
+
+## Perfect Comms v2.0.1
+
+### What's Changed
+
+- Changed the assets to a cleaner version by @AtonyGit in #1.
+- Fixed the Voice Lobbies close X so it sits in a clearer top-right position and is easier to see.
+- Fixed bottom-positioned speaking indicators so player names no longer clip off the bottom of the screen while staying close to the edge.
+
+See `docs/release-notes-v2.0.1.md` for the full release notes.
+
 ## Perfect Comms v2.0.0
 
 This is the backend rewrite release. Perfect Comms no longer depends on Among Us RPCs for voice audio transport. Voice now runs through selectable voice backends, with BetterCrewLink live voice as the default path and Interstellar available as an alternate backend.

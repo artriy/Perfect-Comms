@@ -74,6 +74,7 @@ public static class PingTrackerPatch
     private const float SlotWidth   = 0.52f;
     private const float SlotHeight  = 0.58f;
     private const float LabelOffset = 0.34f;
+    private const float BottomNameLift = 0.12f;
     private const float RingScale   = 0.48f;
     private const float LevelSmoothSpeed = 12f;
     private const float FadeInSpeed = 7f;
@@ -81,7 +82,8 @@ public static class PingTrackerPatch
     private static GameObject?       _barRoot;
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
-    private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopMiddle;
+    private static bool              _layoutAnchoredBottom;
+    private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopRight;
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
     private static readonly HashSet<byte> _activeSpeakerIds = new();
     private static readonly Dictionary<byte, float> _activeSpeakerLevels = new();
@@ -94,6 +96,9 @@ public static class PingTrackerPatch
         _layoutVertical = pos is SpeakingBarPosition.TopLeft
             or SpeakingBarPosition.TopRight
             or SpeakingBarPosition.BottomLeft
+            or SpeakingBarPosition.BottomRight;
+        _layoutAnchoredBottom = pos is SpeakingBarPosition.BottomLeft
+            or SpeakingBarPosition.BottomMiddle
             or SpeakingBarPosition.BottomRight;
         if (_barAspect == null) return;
         ApplyPositionToAspect(_barAspect, pos);
@@ -199,6 +204,9 @@ public static class PingTrackerPatch
                 or SpeakingBarPosition.TopRight
                 or SpeakingBarPosition.BottomLeft
                 or SpeakingBarPosition.BottomRight;
+            _layoutAnchoredBottom = _barPosition is SpeakingBarPosition.BottomLeft
+                or SpeakingBarPosition.BottomMiddle
+                or SpeakingBarPosition.BottomRight;
         }
 
         ApplyPositionToAspect(_barAspect, _barPosition);
@@ -303,7 +311,7 @@ public static class PingTrackerPatch
                 asp.Alignment        = AspectPosition.EdgeAlignments.RightBottom;
                 asp.DistanceFromEdge = new Vector3(1.2f, 0.35f, 0f);
                 break;
-            default: // TopLeft
+            default:
                 asp.Alignment        = AspectPosition.EdgeAlignments.LeftTop;
                 asp.DistanceFromEdge = new Vector3(0.60f, 0.25f, 0f);
                 break;
@@ -431,13 +439,14 @@ public static class PingTrackerPatch
             int i = 0;
             foreach (var kv in _slots)
             {
-                float y = startY - i * SlotHeight;
+                float y = _layoutAnchoredBottom ? i * SlotHeight + BottomNameLift : startY - i * SlotHeight;
+                float labelY = y - LabelOffset;
                 if (kv.Value.IconGO   != null)
                     kv.Value.IconGO.transform.localPosition  = new Vector3(0f, y, -100f);
                 if (kv.Value.RingGO   != null)
                     kv.Value.RingGO.transform.localPosition  = new Vector3(0f, y, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(0f, y - LabelOffset, -102f);
+                    kv.Value.LabelTMP.transform.localPosition = new Vector3(0f, labelY, -102f);
                 i++;
             }
         }
@@ -445,16 +454,18 @@ public static class PingTrackerPatch
         {
             float totalW = _slots.Count * SlotWidth;
             float startX = -totalW * 0.5f + SlotWidth * 0.5f;
+            float iconY = _layoutAnchoredBottom ? BottomNameLift : 0f;
+            float labelY = _layoutAnchoredBottom ? BottomNameLift - LabelOffset : -LabelOffset;
             int i = 0;
             foreach (var kv in _slots)
             {
                 float x = startX + i * SlotWidth;
                 if (kv.Value.IconGO   != null)
-                    kv.Value.IconGO.transform.localPosition  = new Vector3(x, 0f, -100f);
+                    kv.Value.IconGO.transform.localPosition  = new Vector3(x, iconY, -100f);
                 if (kv.Value.RingGO   != null)
-                    kv.Value.RingGO.transform.localPosition  = new Vector3(x, 0f, -101f);
+                    kv.Value.RingGO.transform.localPosition  = new Vector3(x, iconY, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(x, -LabelOffset, -102f);
+                    kv.Value.LabelTMP.transform.localPosition = new Vector3(x, labelY, -102f);
                 i++;
             }
         }
