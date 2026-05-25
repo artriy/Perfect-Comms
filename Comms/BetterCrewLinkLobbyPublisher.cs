@@ -79,12 +79,7 @@ internal static class BetterCrewLinkLobbyPublisher
             return;
 
         ClearStandalone();
-        var socket = new SocketIOClient.SocketIO(new Uri(serverUrl), new SocketIOClient.SocketIOOptions
-        {
-            Reconnection = true,
-            ReconnectionAttempts = int.MaxValue,
-            EIO = SocketIO.Core.EngineIO.V3,
-        });
+        var socket = new SocketIOClient.SocketIO(new Uri(serverUrl), BetterCrewLinkSocketOptions.Create());
 
         socket.OnConnected += async (_, _) =>
         {

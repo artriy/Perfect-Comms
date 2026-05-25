@@ -939,12 +939,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void ConnectSocket()
     {
-        _socket = new SocketIOClient.SocketIO(new Uri(ServerUrl), new SocketIOClient.SocketIOOptions
-        {
-            Reconnection = true,
-            ReconnectionAttempts = int.MaxValue,
-            EIO = SocketIO.Core.EngineIO.V3,
-        });
+        _socket = new SocketIOClient.SocketIO(new Uri(ServerUrl), BetterCrewLinkSocketOptions.Create());
 
         _socket.OnConnected += async (_, _) =>
         {
