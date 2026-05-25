@@ -23,7 +23,7 @@ if (-not (Test-Path -LiteralPath $nativeDylib)) {
         throw "Missing $nativeDylib. Build NativeAudioMacOS on macOS and copy libperfectcomms_audio_macos.dylib into Libs before packaging."
     }
 
-    cmake -S $nativeProject -B $nativeBuildDir -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+    cmake -S $nativeProject -B $nativeBuildDir -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
     cmake --build $nativeBuildDir --config Release
 
     $builtDylib = @(
