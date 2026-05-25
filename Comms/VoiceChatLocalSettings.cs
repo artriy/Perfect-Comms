@@ -32,11 +32,11 @@ public enum SpeakingBarPosition
     TopLeft      = 0,
     TopMiddle    = 1,
     TopRight     = 2,
+    MiddleLeft   = 6,
+    MiddleRight  = 7,
     BottomLeft   = 3,
     BottomMiddle = 4,
     BottomRight  = 5,
-    MiddleLeft   = 6,
-    MiddleRight  = 7,
 }
 
 public enum VoiceControlsLayout
