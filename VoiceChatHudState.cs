@@ -20,15 +20,16 @@ public static class VoiceChatHudState
     private static GameObject?     _spkButtonObj;
     private static PassiveButton?  _jailButton;
     private static GameObject?     _jailButtonObj;
-    private static TextMeshPro? _micLabelTmp;
-    private static TextMeshPro? _spkLabelTmp;
-    private const float LabelFontSize = 1.15f;
-    private const float LabelYOffset  = -0.15f;
     private const float ButtonScale = 0.42f;
     private const int   ButtonSortOrder = 32760;
-    private const float EdgeThreshold = 0.08f;
-    private static float _btnX = 0.08f;
-    private static float _btnY = 0.90f;
+    private const int   TooltipSortOrder = 32767;
+    private const float TooltipHalfWidth = 1.35f;
+    private const float TooltipHalfHeight = 1.05f;
+    private const float TooltipButtonGap = 0.35f;
+    private const float TooltipViewportPadding = 0.02f;
+    private static float _btnX = 0.99f;
+    private static float _btnY = 0.10f;
+    private static VoiceControlsLayout _controlsLayout = VoiceControlsLayout.Vertical;
     private static GameObject?  _micTooltip;
     private static GameObject?  _spkTooltip;
     private static TextMeshPro? _micTooltipTmp;
@@ -38,7 +39,7 @@ public static class VoiceChatHudState
     private static bool _pushToTalkHeld;
     private static bool _speakerMuted;
     private static bool _initialized;
-    private static float _overlayScale = 1f;
+    private static float _overlayScale = 1.30f;
 
     public static bool IsMuted        => IsManualMuteActive();
     public static bool IsImpostorRadio => IsInImpostorRadioMode();
@@ -76,6 +77,7 @@ public static class VoiceChatHudState
     {
         _btnX = settings.ButtonPositionX.Value;
         _btnY = settings.ButtonPositionY.Value;
+        _controlsLayout = settings.VoiceControlsLayout.Value;
         PositionButtons();
     }
     private static void PositionButtons()
@@ -86,13 +88,11 @@ public static class VoiceChatHudState
         if (cam == null) return;
         var worldPt = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, 10f));
 
-        float scale   = _overlayScale * ButtonScale;
+        float scale = _overlayScale * ButtonScale;
         float spacing = scale * 0.8f;
 
-        bool nearHEdge = _btnX < EdgeThreshold || _btnX > (1f - EdgeThreshold);
-
         Vector3 micPos, spkPos, jailPos;
-        if (nearHEdge)
+        if (_controlsLayout == VoiceControlsLayout.Vertical)
         {
             micPos  = new Vector3(worldPt.x, worldPt.y,             -100f);
             spkPos  = new Vector3(worldPt.x, worldPt.y - spacing,   -100f);
@@ -147,7 +147,6 @@ public static class VoiceChatHudState
             _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
             ClearButtonBG(_micButtonObj);
             CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
-            CreateLabelChild(_micButtonObj, hud, MicLabelText(), out _micLabelTmp);
             KeepButtonOnTop(_micButtonObj);
 
             _micButton = _micButtonObj.GetComponent<PassiveButton>();
@@ -166,7 +165,6 @@ public static class VoiceChatHudState
             _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
             ClearButtonBG(_spkButtonObj);
             CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
-            CreateLabelChild(_spkButtonObj, hud, SpkLabelText(), out _spkLabelTmp);
             KeepButtonOnTop(_spkButtonObj);
 
             _spkButton = _spkButtonObj.GetComponent<PassiveButton>();
@@ -194,57 +192,6 @@ public static class VoiceChatHudState
             _jailButton.OnMouseOut = new UnityEvent();
         }
     }
-    private static void CreateLabelChild(
-        GameObject buttonObj,
-        HudManager hud,
-        string initialText,
-        out TextMeshPro labelTmp)
-    {
-        var labelGO = new GameObject("VCLabel");
-        labelGO.transform.SetParent(buttonObj.transform, false);
-
-        float btnScale = buttonObj.transform.localScale.x;
-        float invScale = btnScale > 0f ? 1f / btnScale : 1f;
-        labelGO.transform.localScale    = new Vector3(invScale, invScale, 1f);
-        labelGO.transform.localPosition = new Vector3(0f, LabelYOffset * invScale, -0.1f);
-        labelGO.layer = buttonObj.layer;
-
-        var tmp = labelGO.AddComponent<TextMeshPro>();
-        tmp.text               = initialText;
-        tmp.fontSize           = LabelFontSize;
-        tmp.fontSizeMin        = LabelFontSize;
-        tmp.fontSizeMax        = LabelFontSize;
-        tmp.alignment          = TextAlignmentOptions.Center;
-        tmp.enableWordWrapping = false;
-        tmp.sortingLayerID     = SortingLayer.NameToID(VCSorting.Layer);
-        tmp.sortingOrder       = ButtonSortOrder + 1;
-        tmp.characterSpacing   = 2f;
-        tmp.color              = Color.black;
-
-        var brookeFont = hud.KillButton?.buttonLabelText?.font;
-        if (brookeFont != null) tmp.font = brookeFont;
-
-        var mat = Object.Instantiate(tmp.fontMaterial);
-        mat.EnableKeyword("OUTLINE_ON");
-        mat.SetColor(ShaderUtilities.ID_OutlineColor, Color.white);
-        mat.SetFloat(ShaderUtilities.ID_OutlineWidth, 0.15f);
-        mat.SetFloat(ShaderUtilities.ID_FaceDilate,   0.20f);
-        tmp.fontMaterial = mat;
-        tmp.rectTransform.sizeDelta = new Vector2(1.8f, 0.45f);
-
-        labelTmp = tmp;
-    }
-    private static string MicLabelText()
-    {
-        if (VoiceRoleMuteState.TryGetLocalMeetingVoiceBlockReason(out _))
-            return "Blocked";
-        if (IsInImpostorRadioMode())
-            return "Radio";
-        return _micMuted ? "Unmute" : "Mute";
-    }
-
-    private static string SpkLabelText() => _speakerMuted ? "Off" : "On";
-
     private static void EnsureTooltips(HudManager hud)
     {
         var root = ResolveHudRoot(hud);
@@ -252,6 +199,8 @@ public static class VoiceChatHudState
             _micTooltip = CreateTooltipObject(root, out _micTooltipTmp);
         if (_spkTooltip == null)
             _spkTooltip = CreateTooltipObject(root, out _spkTooltipTmp);
+        KeepTooltipOnTop(_micTooltip);
+        KeepTooltipOnTop(_spkTooltip);
     }
 
     private static void EnsureHudParent(HudManager hud)
@@ -303,55 +252,35 @@ public static class VoiceChatHudState
         if (_micButtonObj != null)
         {
             var sr = _micButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
-            Color micColor;
 
             if (VoiceRoleMuteState.TryGetLocalMeetingVoiceBlockReason(out _))
             {
                 if (sr != null) { sr.sprite = Sprites.MicOff; sr.color = new Color(1f, 0.65f, 0.15f); }
-                micColor = new Color(1f, 0.65f, 0.15f);
             }
             else if (IsManualMuteActive())
             {
                 if (sr != null) { sr.sprite = Sprites.MicOff; sr.color = new Color(1f, 0.4f, 0.4f); }
-                micColor = new Color(1f, 0.4f, 0.4f);
             }
             else if (IsInImpostorRadioMode())
             {
                 if (sr != null) { sr.sprite = Sprites.MicOn; sr.color = new Color(1f, 0.55f, 0.1f); }
-                micColor = new Color(1f, 0.55f, 0.1f);
             }
             else
             {
                 if (sr != null) { sr.sprite = Sprites.MicOn; sr.color = Color.white; }
-                micColor = Color.black;
-            }
-
-            if (_micLabelTmp != null)
-            {
-                _micLabelTmp.text  = MicLabelText();
-                _micLabelTmp.color = micColor;
             }
         }
         if (_spkButtonObj != null)
         {
             var sr = _spkButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
-            Color spkColor;
 
             if (_speakerMuted)
             {
                 if (sr != null) { sr.sprite = Sprites.SpkOff; sr.color = new Color(1f, 0.4f, 0.4f); }
-                spkColor = new Color(1f, 0.4f, 0.4f);
             }
             else
             {
                 if (sr != null) { sr.sprite = Sprites.SpkOn; sr.color = Color.white; }
-                spkColor = Color.black;
-            }
-
-            if (_spkLabelTmp != null)
-            {
-                _spkLabelTmp.text  = SpkLabelText();
-                _spkLabelTmp.color = spkColor;
             }
         }
     }
@@ -450,7 +379,7 @@ public static class VoiceChatHudState
 
     public static void ApplyOverlayScale(float scale)
     {
-        _overlayScale = Mathf.Clamp(scale, 0.75f, 1.5f);
+        _overlayScale = Mathf.Clamp(scale, 0.75f, 3.0f);
         if (_micButtonObj != null)
             _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
         if (_spkButtonObj != null)
@@ -465,7 +394,6 @@ public static class VoiceChatHudState
         if (_spkButtonObj  != null) { Object.Destroy(_spkButtonObj);  _spkButtonObj  = null; }
         if (_jailButtonObj != null) { Object.Destroy(_jailButtonObj); _jailButtonObj = null; }
         _micButton   = null; _spkButton   = null; _jailButton  = null;
-        _micLabelTmp = null; _spkLabelTmp = null;
     }
 
     private static void DestroyTooltips()
@@ -480,14 +408,6 @@ public static class VoiceChatHudState
         go.transform.SetParent(root, false);
         go.transform.localPosition = new Vector3(0f, 0f, -80f);
 
-        var bg = new GameObject("BG");
-        bg.transform.SetParent(go.transform, false);
-        var bgSr = bg.AddComponent<SpriteRenderer>();
-        bgSr.sprite = CreateSolidSprite(new Color(0f, 0f, 0f, 0.82f));
-        bgSr.sortingLayerName = VCSorting.Layer;
-        bgSr.sortingOrder = ButtonSortOrder + 1;
-        bg.transform.localScale = new Vector3(2.6f, 2.0f, 1f);
-
         var textGo = new GameObject("Text");
         textGo.transform.SetParent(go.transform, false);
         textGo.transform.localPosition = new Vector3(0f, 0f, -80f);
@@ -496,8 +416,9 @@ public static class VoiceChatHudState
         tmp.alignment = TextAlignmentOptions.Center;
         tmp.enableWordWrapping = false;
         tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
-        tmp.sortingOrder = ButtonSortOrder + 2;
+        tmp.sortingOrder = TooltipSortOrder;
         tmp.rectTransform.sizeDelta = new Vector2(2.4f, 1.8f);
+        KeepTooltipOnTop(go);
         go.SetActive(false);
         return go;
     }
@@ -526,6 +447,7 @@ public static class VoiceChatHudState
                 : $"Mute: {muteKey}  |  Imp. Radio: {radioKey} (hold)");
 
         PositionNear(_micTooltip, _micButtonObj);
+        KeepTooltipOnTop(_micTooltip);
         _micTooltip.SetActive(true);
     }
 
@@ -544,6 +466,7 @@ public static class VoiceChatHudState
             $"Hotkey: {hotkey}";
 
         PositionNear(_spkTooltip, _spkButtonObj);
+        KeepTooltipOnTop(_spkTooltip);
         _spkTooltip.SetActive(true);
     }
 
@@ -556,8 +479,57 @@ public static class VoiceChatHudState
     private static void PositionNear(GameObject tooltip, GameObject btn)
     {
         var p = btn.transform.position;
-        tooltip.transform.position = new Vector3(p.x - 0.2f, p.y - 0.9f, p.z - 1f);
+        var cam = Camera.main;
+        if (cam == null)
+        {
+            tooltip.transform.position = new Vector3(p.x + TooltipHalfWidth, p.y + TooltipHalfHeight, p.z - 1f);
+            return;
+        }
+
+        var viewport = cam.WorldToViewportPoint(p);
+        float side = viewport.x < 0.5f ? 1f : -1f;
+        float x = p.x + side * (TooltipHalfWidth + TooltipButtonGap);
+        float y = p.y;
+
+        if (viewport.y < 0.35f)
+            y = p.y + TooltipHalfHeight + TooltipButtonGap;
+        else if (viewport.y > 0.65f)
+            y = p.y - TooltipHalfHeight - TooltipButtonGap;
+
+        float z = viewport.z;
+        var min = cam.ViewportToWorldPoint(new Vector3(TooltipViewportPadding, TooltipViewportPadding, z));
+        var max = cam.ViewportToWorldPoint(new Vector3(1f - TooltipViewportPadding, 1f - TooltipViewportPadding, z));
+        float minX = Mathf.Min(min.x, max.x) + TooltipHalfWidth;
+        float maxX = Mathf.Max(min.x, max.x) - TooltipHalfWidth;
+        float minY = Mathf.Min(min.y, max.y) + TooltipHalfHeight;
+        float maxY = Mathf.Max(min.y, max.y) - TooltipHalfHeight;
+
+        tooltip.transform.position = new Vector3(
+            ClampTooltipAxis(x, minX, maxX),
+            ClampTooltipAxis(y, minY, maxY),
+            p.z - 1f);
     }
+
+    private static float ClampTooltipAxis(float value, float min, float max)
+        => min <= max ? Mathf.Clamp(value, min, max) : (min + max) * 0.5f;
+
+    private static void KeepTooltipOnTop(GameObject? tooltip)
+    {
+        if (tooltip == null) return;
+        tooltip.transform.SetAsLastSibling();
+        VCOverlayCamera.EnsureOnTop(tooltip);
+        foreach (var tmp in tooltip.GetComponentsInChildren<TextMeshPro>(true))
+        {
+            tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+            tmp.sortingOrder = TooltipSortOrder;
+        }
+        foreach (var renderer in tooltip.GetComponentsInChildren<Renderer>(true))
+        {
+            renderer.sortingLayerName = VCSorting.Layer;
+            renderer.sortingOrder = TooltipSortOrder;
+        }
+    }
+
     internal static bool CanUseImpostorRadioInput()
         => CanUseImpostorRadio() && !VoiceRoleMuteState.IsLocalMeetingVoiceBlocked();
 
@@ -596,13 +568,6 @@ public static class VoiceChatHudState
             sr.sortingLayerName = VCSorting.Layer;
             sr.sortingOrder = ButtonSortOrder;
         }
-    }
-
-    private static Sprite CreateSolidSprite(Color c)
-    {
-        var tex = new Texture2D(1, 1);
-        tex.SetPixel(0, 0, c); tex.Apply();
-        return Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
     }
 
     private static readonly Dictionary<string, Sprite> _spriteCache = new();

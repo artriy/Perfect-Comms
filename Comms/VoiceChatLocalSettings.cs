@@ -39,6 +39,12 @@ public enum SpeakingBarPosition
     MiddleRight  = 7,
 }
 
+public enum VoiceControlsLayout
+{
+    Vertical = 0,
+    Horizontal = 1,
+}
+
 public enum VoiceMicMode
 {
     OpenMic = 0,
@@ -99,13 +105,16 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     public ConfigEntry<SpkDeviceEnum> SpeakerDeviceIndex { get; }
 #endif
 
-    [LocalSliderSetting("Button Position X", min: 0f, max: 1f,
+    [LocalSliderSetting("Voice Controls X", min: 0f, max: 1f,
         displayValue: true, formatString: "0.00")]
     public ConfigEntry<float> ButtonPositionX { get; }
 
-    [LocalSliderSetting("Button Position Y", min: 0f, max: 1f,
+    [LocalSliderSetting("Voice Controls Y", min: 0f, max: 1f,
         displayValue: true, formatString: "0.00")]
     public ConfigEntry<float> ButtonPositionY { get; }
+
+    [LocalEnumSetting("Voice Controls Layout")]
+    public ConfigEntry<VoiceControlsLayout> VoiceControlsLayout { get; }
 
     [LocalEnumSetting("Speaking Bar Position")]
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
@@ -113,7 +122,7 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     [LocalToggleSetting("Meeting Speaking Overlay")]
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
 
-    [LocalSliderSetting("Overlay Scale", min: 0.75f, max: 1.50f,
+    [LocalSliderSetting("Overlay Scale", min: 0.75f, max: 3.00f,
         displayValue: true, formatString: "0.00")]
     public ConfigEntry<float> OverlayScale { get; }
 
@@ -253,13 +262,17 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         };
 #endif
 
-        ButtonPositionX = config.Bind("UI", "ButtonPositionX", 0.08f,
+        ButtonPositionX = config.Bind("UI", "ButtonPositionX", 0.99f,
             new ConfigDescription("Horizontal position of voice buttons (0 = left edge, 1 = right edge)",
                 new AcceptableValueRange<float>(0f, 1f)));
 
-        ButtonPositionY = config.Bind("UI", "ButtonPositionY", 0.90f,
+        ButtonPositionY = config.Bind("UI", "ButtonPositionY", 0.10f,
             new ConfigDescription("Vertical position of voice buttons (0 = bottom, 1 = top)",
                 new AcceptableValueRange<float>(0f, 1f)));
+
+        VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
+            VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,
+            new ConfigDescription("Direction used to place the microphone and speaker controls"));
 
         SpeakingBarPosition = config.Bind("UI", "SpeakingBarPosition",
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
@@ -270,9 +283,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             new ConfigDescription(
                 "Show smooth coloured card glows around talking players during meetings"));
 
-        OverlayScale = config.Bind("UI", "OverlayScale", 1f,
+        OverlayScale = config.Bind("UI", "OverlayScale", 1.30f,
             new ConfigDescription("Scale for voice HUD buttons",
-                new AcceptableValueRange<float>(0.75f, 1.50f)));
+                new AcceptableValueRange<float>(0.75f, 3.00f)));
 
         DebugVoiceStats = config.Bind("Debug", "DebugVoiceStats", false,
             new ConfigDescription("Enable Perfect Comms diagnostic files and debug log output."));
@@ -423,7 +436,8 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatRoom.Current?.SetSpeaker(SpeakerDevice);
         }
 #endif
-        else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY)
+        else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY ||
+                 configEntry == VoiceControlsLayout)
         {
             VoiceChatHudState.RefreshButtonLayout();
         }
