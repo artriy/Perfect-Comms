@@ -85,6 +85,7 @@ public class VoiceChatRoom
     // ── Misc ───────────────────────────────────────────────────────────────────
     private bool  _commsSabActive;
     private float _commsSabCheckTimer;
+    private string _lastCommsSabotageSource = "";
     private byte   _lastId   = byte.MaxValue;
     private string _lastName = null!;
     private float  _lastCompatibilityRefreshTime = -999f;
@@ -253,7 +254,14 @@ public class VoiceChatRoom
         if (_commsSabCheckTimer <= 0f)
         {
             _commsSabCheckTimer = CommsSabotageRefreshInterval;
-            _commsSabActive     = CheckCommsSabotage();
+            bool commsSabActive = CheckCommsSabotage(out var commsSabotageSource);
+            if (commsSabActive != _commsSabActive || commsSabotageSource != _lastCommsSabotageSource)
+            {
+                VoiceDiagnostics.Log("state.comms",
+                    $"active={commsSabActive} source={commsSabotageSource} map={ShipStatus.Instance?.Type.ToString() ?? "none"}");
+            }
+            _commsSabActive = commsSabActive;
+            _lastCommsSabotageSource = commsSabotageSource;
         }
 
         _snapshotRefreshTimer -= Time.deltaTime;
@@ -750,14 +758,43 @@ public class VoiceChatRoom
         }
     }
 
-    private static bool CheckCommsSabotage()
+    private static bool CheckCommsSabotage(out string source)
     {
-        if (ShipStatus.Instance == null) return false;
-        foreach (var sys in ShipStatus.Instance.Systems.Values)
+        var ship = ShipStatus.Instance;
+        if (ship == null)
         {
-            var hud = sys.TryCast<HudOverrideSystemType>();
-            if (hud != null && hud.IsActive) return true;
+            source = "no-ship";
+            return false;
         }
+
+        if (!ship.Systems.TryGetValue(SystemTypes.Comms, out var comms))
+        {
+            source = "no-comms-system";
+            return false;
+        }
+
+        var hud = comms.TryCast<HudOverrideSystemType>();
+        if (hud != null)
+        {
+            source = "HudOverrideSystemType";
+            return hud.IsActive;
+        }
+
+        var hqHud = comms.TryCast<HqHudSystemType>();
+        if (hqHud != null)
+        {
+            source = "HqHudSystemType";
+            return hqHud.IsActive;
+        }
+
+        var activatable = comms.TryCast<IActivatable>();
+        if (activatable != null)
+        {
+            source = $"IActivatable:{comms.GetType().Name}";
+            return activatable.IsActive;
+        }
+
+        source = comms.GetType().Name;
         return false;
     }
 
