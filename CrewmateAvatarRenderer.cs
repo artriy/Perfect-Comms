@@ -353,17 +353,20 @@ internal static class CrewmateAvatarRenderer
 
     private static PoseFingerprint CapturePoseFingerprint(PlayerControl pc)
     {
-        var outfit = pc.Data.DefaultOutfit;
+        var outfit = GetDisplayOutfit(pc);
+        int outfitTypeId = GetDisplayOutfitId(pc);
         int colorId = GetPlayerColorId(pc);
         var cosmetics = pc.cosmetics;
         var parent = cosmetics.transform;
         var hash = new HashCode();
         int layers = 0;
 
+        hash.Add(outfitTypeId);
         hash.Add(colorId);
         hash.Add(outfit.HatId ?? string.Empty);
         hash.Add(outfit.SkinId ?? string.Empty);
         hash.Add(outfit.VisorId ?? string.Empty);
+        hash.Add(outfit.PlayerName ?? string.Empty);
 
         foreach (var source in cosmetics.GetComponentsInChildren<SpriteRenderer>(true))
         {
@@ -392,17 +395,20 @@ internal static class CrewmateAvatarRenderer
         }
 
         return new PoseFingerprint(
+            outfitTypeId,
             colorId,
             outfit.HatId ?? string.Empty,
             outfit.SkinId ?? string.Empty,
             outfit.VisorId ?? string.Empty,
+            outfit.PlayerName ?? string.Empty,
             layers,
             hash.ToHashCode());
     }
 
     private static AvatarSnapshot CaptureCurrentPose(PlayerControl pc)
     {
-        var outfit = pc.Data.DefaultOutfit;
+        var outfit = GetDisplayOutfit(pc);
+        int outfitTypeId = GetDisplayOutfitId(pc);
         int colorId = GetPlayerColorId(pc);
         var layers = new List<SpriteLayerSnapshot>();
         var cosmetics = pc.cosmetics;
@@ -424,7 +430,7 @@ internal static class CrewmateAvatarRenderer
                 source.sharedMaterial));
         }
 
-        return new AvatarSnapshot(colorId, outfit.HatId, outfit.SkinId, outfit.VisorId, layers);
+        return new AvatarSnapshot(outfitTypeId, colorId, outfit.HatId, outfit.SkinId, outfit.VisorId, outfit.PlayerName, layers);
     }
 
     private static SpriteRenderer AddSprite(Transform parent, string name, Sprite sprite, Vector3 localPosition, Quaternion localRotation, Vector3 localScale, Color color, int order)
@@ -489,7 +495,31 @@ internal static class CrewmateAvatarRenderer
         }
         catch
         {
-            return pc.Data.DefaultOutfit.ColorId;
+            return GetDisplayOutfit(pc).ColorId;
+        }
+    }
+
+    private static NetworkedPlayerInfo.PlayerOutfit GetDisplayOutfit(PlayerControl pc)
+    {
+        try
+        {
+            return pc.CurrentOutfit ?? pc.Data.DefaultOutfit;
+        }
+        catch
+        {
+            return pc.Data.DefaultOutfit;
+        }
+    }
+
+    private static int GetDisplayOutfitId(PlayerControl pc)
+    {
+        try
+        {
+            return (int)pc.CurrentOutfitType;
+        }
+        catch
+        {
+            return 0;
         }
     }
 
@@ -514,29 +544,35 @@ internal static class CrewmateAvatarRenderer
 
     private sealed class AvatarSnapshot
     {
+        public readonly int OutfitTypeId;
         public readonly int ColorId;
         public readonly string HatId;
         public readonly string SkinId;
         public readonly string VisorId;
+        public readonly string PlayerName;
         public readonly List<SpriteLayerSnapshot> Layers;
 
-        public AvatarSnapshot(int colorId, string hatId, string skinId, string visorId, List<SpriteLayerSnapshot> layers)
+        public AvatarSnapshot(int outfitTypeId, int colorId, string hatId, string skinId, string visorId, string playerName, List<SpriteLayerSnapshot> layers)
         {
+            OutfitTypeId = outfitTypeId;
             ColorId = colorId;
             HatId = hatId ?? string.Empty;
             SkinId = skinId ?? string.Empty;
             VisorId = visorId ?? string.Empty;
+            PlayerName = playerName ?? string.Empty;
             Layers = layers;
         }
 
         public bool Matches(PlayerControl pc)
         {
             if (pc?.Data == null) return false;
-            var outfit = pc.Data.DefaultOutfit;
-            return ColorId == outfit.ColorId
+            var outfit = GetDisplayOutfit(pc);
+            return OutfitTypeId == GetDisplayOutfitId(pc)
+                && ColorId == GetPlayerColorId(pc)
                 && HatId == (outfit.HatId ?? string.Empty)
                 && SkinId == (outfit.SkinId ?? string.Empty)
-                && VisorId == (outfit.VisorId ?? string.Empty);
+                && VisorId == (outfit.VisorId ?? string.Empty)
+                && PlayerName == (outfit.PlayerName ?? string.Empty);
         }
     }
 
@@ -558,28 +594,34 @@ internal static class CrewmateAvatarRenderer
 
     private readonly struct PoseFingerprint
     {
+        private readonly int OutfitTypeId;
         private readonly int ColorId;
         private readonly string HatId;
         private readonly string SkinId;
         private readonly string VisorId;
+        private readonly string PlayerName;
         private readonly int Hash;
         public readonly int LayerCount;
 
-        public PoseFingerprint(int colorId, string hatId, string skinId, string visorId, int layerCount, int hash)
+        public PoseFingerprint(int outfitTypeId, int colorId, string hatId, string skinId, string visorId, string playerName, int layerCount, int hash)
         {
+            OutfitTypeId = outfitTypeId;
             ColorId = colorId;
             HatId = hatId ?? string.Empty;
             SkinId = skinId ?? string.Empty;
             VisorId = visorId ?? string.Empty;
+            PlayerName = playerName ?? string.Empty;
             LayerCount = layerCount;
             Hash = hash;
         }
 
         public bool Matches(PoseFingerprint other)
-            => ColorId == other.ColorId
+            => OutfitTypeId == other.OutfitTypeId
+               && ColorId == other.ColorId
                && HatId == other.HatId
                && SkinId == other.SkinId
                && VisorId == other.VisorId
+               && PlayerName == other.PlayerName
                && LayerCount == other.LayerCount
                && Hash == other.Hash;
     }
