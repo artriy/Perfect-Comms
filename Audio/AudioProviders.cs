@@ -441,6 +441,7 @@ internal class AudioMixer : ISampleProvider
     private Input[] _inputSnapshot = Array.Empty<Input>();
     private float[] _tmp = null!;
     private DateTime _lastOutputPeakLogUtc = DateTime.MinValue;
+    private float _mixLimiterGain = 1f;
 
     public WaveFormat WaveFormat => _fmt;
 
@@ -460,29 +461,68 @@ internal class AudioMixer : ISampleProvider
             for (int i = 0; i < r; i++) buffer[offset + i] += _tmp[i];
         }
 
-        LogOutputPeakIfNeeded(buffer, offset, count, inputs.Length);
+        LimitOutputPeakIfNeeded(buffer, offset, count, inputs.Length);
         return count;
     }
 
-    private void LogOutputPeakIfNeeded(float[] buffer, int offset, int count, int inputCount)
+    private void LimitOutputPeakIfNeeded(float[] buffer, int offset, int count, int inputCount)
     {
-        float peak = 0f;
+        float preLimitPeak = 0f;
         int nonFinite = 0;
         for (int i = 0; i < count; i++)
         {
-            float sample = buffer[offset + i];
+            var index = offset + i;
+            float sample = buffer[index];
             if (!float.IsFinite(sample))
             {
+                buffer[index] = 0f;
                 nonFinite++;
                 continue;
             }
 
             float abs = sample < 0f ? -sample : sample;
-            if (abs > peak)
-                peak = abs;
+            if (abs > preLimitPeak)
+                preLimitPeak = abs;
         }
 
-        if (nonFinite == 0 && peak < 0.98f)
+        var targetGain = AudioHelpers.GetPlaybackMixLimiterGain(preLimitPeak);
+        if (targetGain < _mixLimiterGain)
+            _mixLimiterGain = targetGain;
+        else
+            _mixLimiterGain = Math.Min(targetGain, _mixLimiterGain + AudioHelpers.PlaybackMixLimiterReleasePerFrame);
+
+        if (_mixLimiterGain < 0.999f)
+        {
+            for (int i = 0; i < count; i++)
+                buffer[offset + i] *= _mixLimiterGain;
+        }
+
+        LogOutputPeakIfNeeded(buffer, offset, count, inputCount, preLimitPeak, nonFinite, _mixLimiterGain);
+    }
+
+    private void LogOutputPeakIfNeeded(
+        float[] buffer,
+        int offset,
+        int count,
+        int inputCount,
+        float preLimitPeak,
+        int nonFinite,
+        float limiterGain)
+    {
+        float postLimitPeak = 0f;
+        for (int i = 0; i < count; i++)
+        {
+            float sample = buffer[offset + i];
+            if (!float.IsFinite(sample))
+                continue;
+
+            float abs = sample < 0f ? -sample : sample;
+            if (abs > postLimitPeak)
+                postLimitPeak = abs;
+        }
+
+        bool limited = limiterGain < 0.999f || nonFinite > 0;
+        if (!limited && postLimitPeak < 0.98f)
             return;
 
         var now = DateTime.UtcNow;
@@ -491,7 +531,7 @@ internal class AudioMixer : ISampleProvider
 
         _lastOutputPeakLogUtc = now;
         VoiceChatPlugin.VoiceChat.VoiceDiagnostics.Log("audio.output.peak",
-            $"peak={peak:0.00000} nonFinite={nonFinite} inputs={inputCount} samples={count} channels={_fmt.Channels}");
+            $"peak={postLimitPeak:0.00000} preLimitPeak={preLimitPeak:0.00000} limiterGain={limiterGain:0.000} limited={limited} nonFinite={nonFinite} inputs={inputCount} samples={count} channels={_fmt.Channels}");
     }
 
     public void AddInput(ISampleProvider src, int groupId)

@@ -21,6 +21,8 @@ internal static class AudioHelpers
     public const int OpusPacketLossPercent = 0;
     public const float TransmitPeakCeiling = 0.30f;
     public const float TransmitLimiterReleasePerFrame = 0.025f;
+    public const float PlaybackMixPeakCeiling = 0.95f;
+    public const float PlaybackMixLimiterReleasePerFrame = 0.05f;
 
     public static float GetTransmitLimiterGain(float peak)
     {
@@ -34,6 +36,12 @@ internal static class AudioHelpers
         currentGain = Math.Clamp(currentGain, 0f, 1f);
         if (targetGain < currentGain) return targetGain;
         return Math.Min(targetGain, currentGain + TransmitLimiterReleasePerFrame);
+    }
+
+    public static float GetPlaybackMixLimiterGain(float peak)
+    {
+        if (peak <= 0f || peak <= PlaybackMixPeakCeiling) return 1f;
+        return PlaybackMixPeakCeiling / peak;
     }
 
     public static float MeasurePeak(float[] samples, int count)
