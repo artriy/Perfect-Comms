@@ -47,7 +47,7 @@ Some mods get extra voice behavior when installed:
 
 | Mod | Supported behavior |
 |---|---|
-| TOU-Mira | Blackmailed players stay muted. Jailed players are muted automatically; Jailor can unmute. |
+| TOU-Mira | Blackmailed players stay muted. Jailed players are muted automatically; Jailor can unmute. Parasite/Puppeteer-controlled players muted |
 
 ## Install
 
