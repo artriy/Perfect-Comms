@@ -155,6 +155,38 @@ internal sealed class MicPreprocessor : IDisposable
         _noiseSuppressor = null;
     }
 
+    public float LimitFramePeakForEncode(float[] pcm, int sampleCount)
+    {
+        int count = Math.Min(sampleCount, pcm.Length);
+        if (count <= 0)
+            return 1f;
+
+        float peak = 0f;
+        for (int i = 0; i < count; i++)
+        {
+            float sample = pcm[i];
+            if (!float.IsFinite(sample))
+                continue;
+
+            float abs = sample < 0f ? -sample : sample;
+            if (abs > peak) peak = abs;
+        }
+
+        var gain = AudioHelpers.GetCaptureEncodeLimiterGain(peak);
+        if (gain >= 1f)
+            return 1f;
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!float.IsFinite(pcm[i]))
+                pcm[i] = 0f;
+            else
+                pcm[i] *= gain;
+        }
+
+        return gain;
+    }
+
     public MicFrameDecision PrepareFrameForEncode(
         float[] pcm,
         int sampleCount,

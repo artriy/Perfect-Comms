@@ -1765,6 +1765,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (_captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
+        var transmitGain = _micPreprocessor.LimitFramePeakForEncode(floatPcm, samples);
         var max = 0f;
         double squareSum = 0.0;
         var nonZeroSamples = 0;
@@ -1814,13 +1815,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var frameTimestamp = _sendTimestamp;
         unchecked { _sendTimestamp += (uint)samples; }
 
-        var transmitGain = 1f;
         var transmitPeak = 0f;
         double transmitSquareSum = 0.0;
         var pcm = new short[samples];
         for (var i = 0; i < samples; i++)
         {
-            var scaled = Math.Clamp(floatPcm[i] * transmitGain, -1f, 1f);
+            var scaled = Math.Clamp(floatPcm[i], -1f, 1f);
             var pcmSample = (short)(scaled * short.MaxValue);
             pcm[i] = pcmSample;
             transmitSquareSum += (double)(scaled * short.MaxValue) * (scaled * short.MaxValue);
