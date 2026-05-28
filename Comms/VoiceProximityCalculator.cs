@@ -7,6 +7,9 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class VoiceProximityCalculator
 {
     private const float GhostVisionRangeMultiplier = 1f;
+    private static float _lastUnimpairedLocalLightRadius;
+
+    internal static Func<bool>? LocalListenerBlindedOrFlashedProvider { get; set; }
 
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
@@ -175,8 +178,9 @@ internal static class VoiceProximityCalculator
         }
 
         float maxDistance = s.MaxChatDistance;
-        if (s.OnlyHearInSight && localLightRadius > 0f)
-            maxDistance = Math.Min(maxDistance, localLightRadius);
+        bool listenerBlindedOrFlashed = IsLocalListenerBlindedOrFlashed();
+        if (s.OnlyHearInSight)
+            maxDistance = ResolveSightLimitedMaxDistance(maxDistance, localLightRadius, listenerBlindedOrFlashed);
 
         float dist = Distance(targetPos, localListenerPos);
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
@@ -318,6 +322,39 @@ internal static class VoiceProximityCalculator
 
     private static Vector2 ResolveListenerPosition(VoicePlayerSnapshot? localPlayer, Vector2 fallback)
         => IsMediatingMedium(localPlayer) ? localPlayer!.Value.MediumSpiritPosition : fallback;
+
+    private static bool IsLocalListenerBlindedOrFlashed()
+        => LocalListenerBlindedOrFlashedProvider?.Invoke() ??
+           VoiceRoleMuteState.IsLocalListenerBlindedOrFlashed();
+
+    private static float ResolveSightLimitedMaxDistance(
+        float maxDistance,
+        float localLightRadius,
+        bool listenerBlindedOrFlashed)
+    {
+        if (!listenerBlindedOrFlashed)
+        {
+            if (localLightRadius > 0f)
+            {
+                _lastUnimpairedLocalLightRadius = localLightRadius;
+                return Math.Min(maxDistance, localLightRadius);
+            }
+
+            return maxDistance;
+        }
+
+        float referenceRadius = _lastUnimpairedLocalLightRadius > 0f
+            ? _lastUnimpairedLocalLightRadius
+            : VoiceRoomSettingsSnapshot.Defaults.MaxChatDistance;
+        if (localLightRadius > 0f)
+            referenceRadius = Math.Min(referenceRadius, localLightRadius);
+
+        referenceRadius = Math.Clamp(
+            referenceRadius,
+            VoiceRoomSettingsSnapshot.MinChatDistance,
+            VoiceRoomSettingsSnapshot.MaxChatDistanceLimit);
+        return Math.Min(maxDistance, referenceRadius);
+    }
 
     private static VoiceProximityResult CalculateMediumSpatialRoute(
         Vector2 sourcePos,

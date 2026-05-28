@@ -16,6 +16,9 @@ internal static partial class VoiceRoleMuteState
     private const string LoverModifierName = "TownOfUs.Modifiers.Game.Alliance.LoverModifier";
     private const string SwoopModifierName = "TownOfUs.Modifiers.Impostor.SwoopModifier";
     private const string GlitchHackedModifierName = "TownOfUs.Modifiers.Neutral.GlitchHackedModifier";
+    private const string EclipsalBlindModifierName = "TownOfUs.Modifiers.Impostor.EclipsalBlindModifier";
+    private const string GrenadierFlashModifierName = "TownOfUs.Modifiers.Impostor.GrenadierFlashModifier";
+    private const string HypnotisedModifierName = "TownOfUs.Modifiers.Impostor.HypnotisedModifier";
     private const string JailorRoleName = "TownOfUs.Roles.Crewmate.JailorRole";
     private const string VampireRoleName = "TownOfUs.Roles.Neutral.VampireRole";
     private const string MediumRoleName = "TownOfUs.Roles.Crewmate.MediumRole";
@@ -35,6 +38,9 @@ internal static partial class VoiceRoleMuteState
     private static Type? _loverModifierType;
     private static Type? _swoopModifierType;
     private static Type? _glitchHackedModifierType;
+    private static Type? _eclipsalBlindModifierType;
+    private static Type? _grenadierFlashModifierType;
+    private static Type? _hypnotisedModifierType;
     private static Type? _vampireRoleType;
     private static Type? _mediumRoleType;
     private static Type? _mediatedModifierType;
@@ -128,6 +134,39 @@ internal static partial class VoiceRoleMuteState
 
     internal static bool IsLocalMeetingVoiceBlocked()
         => TryGetLocalMeetingVoiceBlockReason(out _);
+
+    internal static bool IsLocalListenerBlindedOrFlashed()
+    {
+        var local = PlayerControl.LocalPlayer;
+        if (local == null)
+            return false;
+
+        RefreshSupportedModTypesIfNeeded();
+        return GetModifier(local, _eclipsalBlindModifierType) != null ||
+               GetModifier(local, _grenadierFlashModifierType) != null;
+    }
+
+    internal static bool IsLocalListenerHypnotizedDuringHysteria()
+    {
+        var local = PlayerControl.LocalPlayer;
+        if (local == null)
+            return false;
+
+        RefreshSupportedModTypesIfNeeded();
+        return IsHypnotisedHysteriaActive(GetModifier(local, _hypnotisedModifierType));
+    }
+
+    internal static bool IsLocalListenerAudioMuffled()
+    {
+        var settings = VoiceRoomSettingsState.Current;
+        return settings.MuffleBlindedOrFlashedHearing && IsLocalListenerBlindedOrFlashed() ||
+               settings.MuffleHypnotizedDuringHysteria && IsLocalListenerHypnotizedDuringHysteria();
+    }
+
+    internal static VoiceProximityResult ApplyLocalListenerAudioMuffle(VoiceProximityResult result)
+        => result.Audible && IsLocalListenerAudioMuffled()
+            ? result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle }
+            : result;
 
     internal static bool TryGetLocalVoiceBlockReason(out string reason)
     {

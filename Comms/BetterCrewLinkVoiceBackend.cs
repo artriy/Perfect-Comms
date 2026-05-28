@@ -900,6 +900,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             else
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
+            result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result);
             if (!peer.TryFlushBufferedVoice(out var flushError, out var flushedFrames))
             {

@@ -10,6 +10,7 @@ internal sealed class BclMonoPlaybackGraph
     private readonly VolumeRouter _normalVolume;
     private readonly VolumeRouter _ghostVolume;
     private readonly VolumeRouter _radioVolume;
+    private readonly VolumeRouter _listenerMuffleVolume;
     private readonly VolumeRouter _clientVolume;
     private readonly LevelMeterRouter _levelMeter;
     private readonly AudioManager _audioManager;
@@ -23,10 +24,13 @@ internal sealed class BclMonoPlaybackGraph
         _normalVolume = new VolumeRouter();
         _ghostVolume = new VolumeRouter();
         _radioVolume = new VolumeRouter();
+        _listenerMuffleVolume = new VolumeRouter();
         _clientVolume = new VolumeRouter();
         _levelMeter = new LevelMeterRouter();
 
         var ghostLowpass = FilterRouter.CreateLowPassFilter(1900f, 2f);
+        var listenerMuffleLowpass = FilterRouter.CreateLowPassFilter(650f, 0.8f);
+        var listenerMuffleReverb = new ReverbRouter(41, 0.55f, 0.65f) { IsGlobalRouter = true };
         var ghostReverb1 = new ReverbRouter(53, 0.7f, 0.2f) { IsGlobalRouter = true };
         var ghostReverb2 = new ReverbRouter(173, 0.4f, 0.6f) { IsGlobalRouter = true };
         var radioHighpass = FilterRouter.CreateHighPassFilter(650f, 3.2f);
@@ -43,6 +47,10 @@ internal sealed class BclMonoPlaybackGraph
         _ghostVolume.Connect(ghostReverb1);
         ghostReverb1.Connect(ghostReverb2);
         ghostReverb2.Connect(masterRouter);
+        _imager.Connect(listenerMuffleLowpass);
+        listenerMuffleLowpass.Connect(_listenerMuffleVolume);
+        _listenerMuffleVolume.Connect(listenerMuffleReverb);
+        listenerMuffleReverb.Connect(masterRouter);
         _clientVolume.Connect(radioHighpass);
         radioHighpass.Connect(_radioVolume);
         _radioVolume.Connect(radioDistort);
@@ -67,6 +75,7 @@ internal sealed class BclMonoPlaybackGraph
             _normalVolume.GetProperty(instance),
             _ghostVolume.GetProperty(instance),
             _radioVolume.GetProperty(instance),
+            _listenerMuffleVolume.GetProperty(instance),
             _clientVolume.GetProperty(instance),
             _levelMeter.GetProperty(instance));
     }
@@ -81,6 +90,7 @@ internal sealed class BclPeerPlaybackRoute
     private readonly VolumeRouter.Property _normalVolume;
     private readonly VolumeRouter.Property _ghostVolume;
     private readonly VolumeRouter.Property _radioVolume;
+    private readonly VolumeRouter.Property _listenerMuffleVolume;
     private readonly VolumeRouter.Property _clientVolume;
     private readonly LevelMeterRouter.Property _levelMeter;
 
@@ -90,6 +100,7 @@ internal sealed class BclPeerPlaybackRoute
         VolumeRouter.Property normalVolume,
         VolumeRouter.Property ghostVolume,
         VolumeRouter.Property radioVolume,
+        VolumeRouter.Property listenerMuffleVolume,
         VolumeRouter.Property clientVolume,
         LevelMeterRouter.Property levelMeter)
     {
@@ -98,6 +109,7 @@ internal sealed class BclPeerPlaybackRoute
         _normalVolume = normalVolume;
         _ghostVolume = ghostVolume;
         _radioVolume = radioVolume;
+        _listenerMuffleVolume = listenerMuffleVolume;
         _clientVolume = clientVolume;
         _levelMeter = levelMeter;
         _clientVolume.Volume = 1f;
@@ -114,15 +126,19 @@ internal sealed class BclPeerPlaybackRoute
         _normalVolume.Volume = 0f;
         _ghostVolume.Volume = 0f;
         _radioVolume.Volume = 0f;
+        _listenerMuffleVolume.Volume = 0f;
         _imager.Pan = 0f;
     }
 
     public void Apply(VoiceProximityResult result, float gain)
     {
         gain = Math.Clamp(gain, 0f, 1f);
-        _normalVolume.Volume = result.NormalVolume * gain;
-        _ghostVolume.Volume = result.GhostVolume * gain;
-        _radioVolume.Volume = result.RadioVolume * gain;
+        bool listenerMuffled = result.FilterMode == VoiceAudioFilterMode.ListenerMuffle;
+        float routeVolume = Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f);
+        _normalVolume.Volume = listenerMuffled ? 0f : result.NormalVolume * gain;
+        _ghostVolume.Volume = listenerMuffled ? 0f : result.GhostVolume * gain;
+        _radioVolume.Volume = listenerMuffled ? 0f : result.RadioVolume * gain;
+        _listenerMuffleVolume.Volume = listenerMuffled ? routeVolume * 0.75f * gain : 0f;
         _imager.Pan = 0f;
     }
 

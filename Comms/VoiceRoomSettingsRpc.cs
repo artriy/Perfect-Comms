@@ -74,6 +74,8 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.MuteSwooperWhileSwooped);
         writer.Write(settings.MediumGhostVoice);
         writer.Write(settings.MuteGlitchHacked);
+        writer.Write(settings.MuffleBlindedOrFlashedHearing);
+        writer.Write(settings.MuffleHypnotizedDuringHysteria);
     }
 
     private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
@@ -114,6 +116,8 @@ internal static class VoiceRoomSettingsRpc
         bool muteSwooperWhileSwooped = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
         int mediumGhostVoice = reader.BytesRemaining >= 4 ? reader.ReadInt32() : (int)MediumGhostVoiceMode.None;
         bool muteGlitchHacked = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+        bool muffleBlindedOrFlashedHearing = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+        bool muffleHypnotizedDuringHysteria = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
 
         return new VoiceRoomSettingsSnapshot(
             backend,
@@ -143,7 +147,9 @@ internal static class VoiceRoomSettingsRpc
             crewpostorUsesImpostorVoice,
             muteSwooperWhileSwooped,
             mediumGhostVoice,
-            muteGlitchHacked).Clamp();
+            muteGlitchHacked,
+            muffleBlindedOrFlashedHearing,
+            muffleHypnotizedDuringHysteria).Clamp();
     }
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]

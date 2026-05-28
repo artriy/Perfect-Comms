@@ -26,6 +26,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private readonly VolumeRouter _normalVolume;
     private readonly VolumeRouter _ghostVolume;
     private readonly VolumeRouter _radioVolume;
+    private readonly VolumeRouter _listenerMuffleVolume;
     private readonly VolumeRouter _clientVolume;
     private static readonly byte[] RadioStateMagic = [(byte)'P', (byte)'C', (byte)'R', (byte)'D'];
     // The vendored Interstellar client reserves Custom messages for its audio relay fallback.
@@ -156,10 +157,13 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         _normalVolume = new VolumeRouter();
         _ghostVolume = new VolumeRouter();
         _radioVolume = new VolumeRouter();
+        _listenerMuffleVolume = new VolumeRouter();
         _clientVolume = new VolumeRouter();
         _levelMeter = new LevelMeterRouter();
 
         var ghostLowpass = FilterRouter.CreateLowPassFilter(1900f, 2f);
+        var listenerMuffleLowpass = FilterRouter.CreateLowPassFilter(650f, 0.8f);
+        var listenerMuffleReverb = new ReverbRouter(41, 0.55f, 0.65f) { IsGlobalRouter = true };
         var ghostReverb1 = new ReverbRouter(53, 0.7f, 0.2f) { IsGlobalRouter = true };
         var ghostReverb2 = new ReverbRouter(173, 0.4f, 0.6f) { IsGlobalRouter = true };
         var radioHighpass = FilterRouter.CreateHighPassFilter(RadioHighPassFrequency, 3.2f);
@@ -176,6 +180,10 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         _ghostVolume.Connect(ghostReverb1);
         ghostReverb1.Connect(ghostReverb2);
         ghostReverb2.Connect(masterRouter);
+        _imager.Connect(listenerMuffleLowpass);
+        listenerMuffleLowpass.Connect(_listenerMuffleVolume);
+        _listenerMuffleVolume.Connect(listenerMuffleReverb);
+        listenerMuffleReverb.Connect(masterRouter);
         _clientVolume.Connect(radioHighpass);
         radioHighpass.Connect(_radioVolume);
         _radioVolume.Connect(radioDistort);
@@ -196,7 +204,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
                     }
                     else
                     {
-                        _peers[clientId] = new Peer(clientId, instance, _imager, _normalVolume, _ghostVolume, _radioVolume, _clientVolume, _levelMeter);
+                        _peers[clientId] = new Peer(clientId, instance, _imager, _normalVolume, _ghostVolume, _radioVolume, _listenerMuffleVolume, _clientVolume, _levelMeter);
                         VoiceDiagnostics.Log("interstellar.peer-connected", $"client={clientId}");
                     }
                 },
@@ -938,6 +946,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             else
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
+            result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result);
             peer.SampleDiagnostics();
         }
@@ -1199,6 +1208,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         private readonly VolumeRouter.Property _normalVolume;
         private readonly VolumeRouter.Property _ghostVolume;
         private readonly VolumeRouter.Property _radioVolume;
+        private readonly VolumeRouter.Property _listenerMuffleVolume;
         private readonly VolumeRouter.Property _clientVolume;
         private readonly LevelMeterRouter.Property _levelMeter;
 
@@ -1241,6 +1251,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             VolumeRouter normalVolume,
             VolumeRouter ghostVolume,
             VolumeRouter radioVolume,
+            VolumeRouter listenerMuffleVolume,
             VolumeRouter clientVolume,
             LevelMeterRouter levelMeter)
         {
@@ -1249,6 +1260,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             _normalVolume = normalVolume.GetProperty(instance);
             _ghostVolume = ghostVolume.GetProperty(instance);
             _radioVolume = radioVolume.GetProperty(instance);
+            _listenerMuffleVolume = listenerMuffleVolume.GetProperty(instance);
             _clientVolume = clientVolume.GetProperty(instance);
             _levelMeter = levelMeter.GetProperty(instance);
             _clientVolume.Volume = 1f;
@@ -1281,6 +1293,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             _normalVolume.Volume = 0f;
             _ghostVolume.Volume = 0f;
             _radioVolume.Volume = 0f;
+            _listenerMuffleVolume.Volume = 0f;
             _imager.Pan = 0f;
         }
 
@@ -1291,9 +1304,12 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             _hasRouteSample = true;
             _currentRoute = result;
             WallCoefficient = result.WallCoefficient;
-            _normalVolume.Volume = result.NormalVolume;
-            _ghostVolume.Volume = result.GhostVolume;
-            _radioVolume.Volume = result.RadioVolume;
+            bool listenerMuffled = result.FilterMode == VoiceAudioFilterMode.ListenerMuffle;
+            float routeVolume = Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f);
+            _normalVolume.Volume = listenerMuffled ? 0f : result.NormalVolume;
+            _ghostVolume.Volume = listenerMuffled ? 0f : result.GhostVolume;
+            _radioVolume.Volume = listenerMuffled ? 0f : result.RadioVolume;
+            _listenerMuffleVolume.Volume = listenerMuffled ? routeVolume * 0.75f : 0f;
             _imager.Pan = result.Pan;
         }
 

@@ -18,6 +18,8 @@ public class VoiceRoleIntegrationOptions : AbstractOptionGroup
     public ModdedToggleOption MutePuppeteerControlled { get; } = new("Mute <color=#FF6666><b>Puppeteer</b></color>'s Victim", true);
     public ModdedToggleOption MuteSwooperWhileSwooped { get; } = new("Mute <color=#FF6666><b>Swooper</b></color> While Swooped", true);
     public ModdedToggleOption MuteGlitchHacked { get; } = new("Mute <color=#FF6666><b>Glitch-Hacked</b></color> Players", true);
+    public ModdedToggleOption MuffleBlindedOrFlashedHearing { get; } = new("Muffle <color=#FF6666><b>Blinded/Flashed</b></color> Hearing", true);
+    public ModdedToggleOption MuffleHypnotizedDuringHysteria { get; } = new("Muffle <color=#FF6666><b>Hypnotized</b></color> During Hysteria", true);
     public ModdedToggleOption CrewpostorUsesImpostorVoice { get; } = new("Crewpostor Uses Impostor Voice", true);
     public ModdedEnumOption MediumGhostVoice { get; } = new("Medium Ghost Voice",
         (int)MediumGhostVoiceMode.None,

@@ -18,6 +18,9 @@ internal static partial class VoiceRoleMuteState
             _loverModifierType == null &&
             _swoopModifierType == null &&
             _glitchHackedModifierType == null &&
+            _eclipsalBlindModifierType == null &&
+            _grenadierFlashModifierType == null &&
+            _hypnotisedModifierType == null &&
             _vampireRoleType == null &&
             _mediumRoleType == null &&
             _mediatedModifierType == null &&
@@ -126,6 +129,20 @@ internal static partial class VoiceRoleMuteState
         }
     }
 
+    private static bool IsHypnotisedHysteriaActive(BaseModifier? modifier)
+    {
+        if (modifier == null) return false;
+        try
+        {
+            object? value = modifier.GetType().GetProperty("HysteriaActive")?.GetValue(modifier);
+            return value is bool hysteriaActive && hysteriaActive;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void RefreshSupportedModTypesIfNeeded()
     {
         VoiceGamePhase phase = VoiceSceneState.ResolvePhase();
@@ -151,6 +168,9 @@ internal static partial class VoiceRoleMuteState
         _loverModifierType = ResolveType(LoverModifierName);
         _swoopModifierType = ResolveType(SwoopModifierName);
         _glitchHackedModifierType = ResolveType(GlitchHackedModifierName);
+        _eclipsalBlindModifierType = ResolveType(EclipsalBlindModifierName);
+        _grenadierFlashModifierType = ResolveType(GrenadierFlashModifierName);
+        _hypnotisedModifierType = ResolveType(HypnotisedModifierName);
         _vampireRoleType = ResolveType(VampireRoleName);
         _mediumRoleType = ResolveType(MediumRoleName);
         _mediatedModifierType = ResolveType(MediatedModifierName);
