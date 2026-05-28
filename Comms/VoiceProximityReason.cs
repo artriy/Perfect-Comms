@@ -16,6 +16,7 @@ internal enum VoiceProximityReason
     ParasiteControlled,
     PuppeteerControlled,
     Swooped,
+    GlitchHacked,
     MeetingLiving,
     TeamRadio,
     TeamRadioMuted,

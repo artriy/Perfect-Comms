@@ -30,7 +30,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     bool MutePuppeteerControlled,
     bool CrewpostorUsesImpostorVoice,
     bool MuteSwooperWhileSwooped,
-    int MediumGhostVoice)
+    int MediumGhostVoice,
+    bool MuteGlitchHacked)
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
@@ -62,7 +63,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         true,
         true,
         true,
-        (int)MediumGhostVoiceMode.None);
+        (int)MediumGhostVoiceMode.None,
+        true);
 
     public static VoiceRoomSettingsSnapshot FromGameOptions()
     {
@@ -101,7 +103,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             role.MutePuppeteerControlled.Value,
             role.CrewpostorUsesImpostorVoice.Value,
             role.MuteSwooperWhileSwooped.Value,
-            role.MediumGhostVoice.Value).Clamp();
+            role.MediumGhostVoice.Value,
+            role.MuteGlitchHacked.Value).Clamp();
     }
 
     public VoiceRoomSettingsSnapshot Clamp()

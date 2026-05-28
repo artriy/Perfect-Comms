@@ -15,6 +15,7 @@ internal static partial class VoiceRoleMuteState
     private const string CrewpostorModifierName = "TownOfUs.Modifiers.Game.Alliance.CrewpostorModifier";
     private const string LoverModifierName = "TownOfUs.Modifiers.Game.Alliance.LoverModifier";
     private const string SwoopModifierName = "TownOfUs.Modifiers.Impostor.SwoopModifier";
+    private const string GlitchHackedModifierName = "TownOfUs.Modifiers.Neutral.GlitchHackedModifier";
     private const string JailorRoleName = "TownOfUs.Roles.Crewmate.JailorRole";
     private const string VampireRoleName = "TownOfUs.Roles.Neutral.VampireRole";
     private const string MediumRoleName = "TownOfUs.Roles.Crewmate.MediumRole";
@@ -33,6 +34,7 @@ internal static partial class VoiceRoleMuteState
     private static Type? _crewpostorModifierType;
     private static Type? _loverModifierType;
     private static Type? _swoopModifierType;
+    private static Type? _glitchHackedModifierType;
     private static Type? _vampireRoleType;
     private static Type? _mediumRoleType;
     private static Type? _mediatedModifierType;
@@ -54,6 +56,7 @@ internal static partial class VoiceRoleMuteState
         byte LoverPartnerId,
         bool IsBlackmailedNextRound,
         bool IsSwooped,
+        bool IsGlitchHacked,
         bool IsMedium,
         bool HasMediumSpirit,
         Vector2 MediumSpiritPosition,
@@ -138,7 +141,7 @@ internal static partial class VoiceRoleMuteState
         GetPlayerRoleState(local, out bool isBlackmailed, out bool isJailed, out byte jailorId,
             out bool isParasiteControlled, out bool isPuppeteerControlled, out bool isCrewpostor,
             out bool isVampire, out bool isLover, out byte loverPartnerId,
-            out bool isBlackmailedNextRound, out bool isSwooped);
+            out bool isBlackmailedNextRound, out bool isSwooped, out bool isGlitchHacked);
 
         var state = new CachedRoleState(
             isBlackmailed,
@@ -152,6 +155,7 @@ internal static partial class VoiceRoleMuteState
             loverPartnerId,
             isBlackmailedNextRound,
             isSwooped,
+            isGlitchHacked,
             false,
             false,
             default,
@@ -159,6 +163,12 @@ internal static partial class VoiceRoleMuteState
             byte.MaxValue);
 
         var settings = VoiceRoomSettingsState.Current;
+        if (settings.MuteGlitchHacked && state.IsGlitchHacked)
+        {
+            reason = ToDisplayReason(VoiceProximityReason.GlitchHacked);
+            return true;
+        }
+
         if (MeetingHud.Instance != null && IsMeetingVoiceBlocked(local.PlayerId, state, settings, out var meetingReason))
         {
             reason = ToDisplayReason(meetingReason);
@@ -184,9 +194,15 @@ internal static partial class VoiceRoleMuteState
             return false;
 
         GetPlayerRoleState(local, out bool isBlackmailed, out bool isJailed, out byte jailorId,
-            out _, out _, out _, out _, out _, out _, out _, out bool isSwooped);
+            out _, out _, out _, out _, out _, out _, out _, out bool isSwooped, out bool isGlitchHacked);
 
-        var state = new CachedRoleState(isBlackmailed, isJailed, jailorId, false, false, false, false, false, byte.MaxValue, false, isSwooped, false, false, default, false, byte.MaxValue);
+        var state = new CachedRoleState(isBlackmailed, isJailed, jailorId, false, false, false, false, false, byte.MaxValue, false, isSwooped, isGlitchHacked, false, false, default, false, byte.MaxValue);
+        if (VoiceRoomSettingsState.Current.MuteGlitchHacked && state.IsGlitchHacked)
+        {
+            reason = ToDisplayReason(VoiceProximityReason.GlitchHacked);
+            return true;
+        }
+
         if (!IsMeetingVoiceBlocked(local.PlayerId, state, VoiceRoomSettingsState.Current, out var blockReason))
             return false;
 
@@ -211,6 +227,7 @@ internal static partial class VoiceRoleMuteState
             player.LoverPartnerId,
             player.IsBlackmailedNextRound,
             player.IsSwooped,
+            false,
             player.IsMedium,
             player.HasMediumSpirit,
             player.MediumSpiritPosition,
@@ -234,6 +251,7 @@ internal static partial class VoiceRoleMuteState
             player.LoverPartnerId,
             player.IsBlackmailedNextRound,
             player.IsSwooped,
+            false,
             player.IsMedium,
             player.HasMediumSpirit,
             player.MediumSpiritPosition,
@@ -262,6 +280,7 @@ internal static partial class VoiceRoleMuteState
             player.LoverPartnerId,
             player.IsBlackmailedNextRound,
             player.IsSwooped,
+            false,
             player.IsMedium,
             player.HasMediumSpirit,
             player.MediumSpiritPosition,
@@ -285,6 +304,7 @@ internal static partial class VoiceRoleMuteState
             player.LoverPartnerId,
             player.IsBlackmailedNextRound,
             player.IsSwooped,
+            false,
             player.IsMedium,
             player.HasMediumSpirit,
             player.MediumSpiritPosition,
@@ -298,13 +318,13 @@ internal static partial class VoiceRoleMuteState
 
     internal static bool IsBlackmailed(PlayerControl? player)
     {
-        GetPlayerRoleState(player, out bool isBlackmailed, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
+        GetPlayerRoleState(player, out bool isBlackmailed, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _);
         return isBlackmailed;
     }
 
     internal static bool TryGetJailorId(PlayerControl? player, out byte jailorId)
     {
-        GetPlayerRoleState(player, out _, out bool isJailed, out jailorId, out _, out _, out _, out _, out _, out _, out _, out _);
+        GetPlayerRoleState(player, out _, out bool isJailed, out jailorId, out _, out _, out _, out _, out _, out _, out _, out _, out _);
         return isJailed;
     }
 
@@ -315,7 +335,7 @@ internal static partial class VoiceRoleMuteState
         if (!VoiceRoomSettingsState.Current.CrewpostorUsesImpostorVoice)
             return false;
 
-        GetPlayerRoleState(player, out _, out _, out _, out _, out _, out bool isCrewpostor, out _, out _, out _, out _, out _);
+        GetPlayerRoleState(player, out _, out _, out _, out _, out _, out bool isCrewpostor, out _, out _, out _, out _, out _, out _);
         return isCrewpostor;
     }
 
@@ -364,7 +384,7 @@ internal static partial class VoiceRoleMuteState
     private static bool HasRoleRadioState(PlayerControl player, bool vampire = false, bool lover = false)
     {
         GetPlayerRoleState(player, out _, out _, out _, out _, out _, out _,
-            out bool isVampire, out bool isLover, out _, out _, out _);
+            out bool isVampire, out bool isLover, out _, out _, out _, out _);
         return (vampire && isVampire) || (lover && isLover);
     }
 
@@ -380,7 +400,8 @@ internal static partial class VoiceRoleMuteState
         out bool isLover,
         out byte loverPartnerId,
         out bool isBlackmailedNextRound,
-        out bool isSwooped)
+        out bool isSwooped,
+        out bool isGlitchHacked)
     {
         isBlackmailed = false;
         isJailed = false;
@@ -393,6 +414,7 @@ internal static partial class VoiceRoleMuteState
         loverPartnerId = byte.MaxValue;
         isBlackmailedNextRound = false;
         isSwooped = false;
+        isGlitchHacked = false;
         if (player == null) return;
 
         RefreshRoleStateCacheIfNeeded();
@@ -409,6 +431,7 @@ internal static partial class VoiceRoleMuteState
         loverPartnerId = state.LoverPartnerId;
         isBlackmailedNextRound = state.IsBlackmailedNextRound;
         isSwooped = state.IsSwooped;
+        isGlitchHacked = state.IsGlitchHacked;
     }
 
     internal static void GetPlayerMediumVoiceState(
@@ -567,6 +590,7 @@ internal static partial class VoiceRoleMuteState
             VoiceProximityReason.ParasiteControlled => "Parasite Controlled",
             VoiceProximityReason.PuppeteerControlled => "Puppeteer Controlled",
             VoiceProximityReason.Swooped => "Swooped",
+            VoiceProximityReason.GlitchHacked => "Glitch Hacked",
             _ => "Role Muted",
         };
 

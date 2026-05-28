@@ -73,6 +73,7 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.CrewpostorUsesImpostorVoice);
         writer.Write(settings.MuteSwooperWhileSwooped);
         writer.Write(settings.MediumGhostVoice);
+        writer.Write(settings.MuteGlitchHacked);
     }
 
     private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
@@ -101,6 +102,19 @@ internal static class VoiceRoomSettingsRpc
             teamRadioLovers = reader.ReadBoolean();
         }
 
+        bool onlyGhostsCanTalk = reader.ReadBoolean();
+        bool onlyMeetingOrLobby = reader.ReadBoolean();
+        bool muteBlackmailedInMeetings = reader.ReadBoolean();
+        bool muteBlackmailedNextRound = reader.ReadBoolean();
+        bool muteJailedInMeetings = reader.ReadBoolean();
+        bool jailorCanUnmuteJailed = reader.ReadBoolean();
+        bool muteParasiteControlled = reader.ReadBoolean();
+        bool mutePuppeteerControlled = reader.ReadBoolean();
+        bool crewpostorUsesImpostorVoice = reader.ReadBoolean();
+        bool muteSwooperWhileSwooped = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+        int mediumGhostVoice = reader.BytesRemaining >= 4 ? reader.ReadInt32() : (int)MediumGhostVoiceMode.None;
+        bool muteGlitchHacked = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+
         return new VoiceRoomSettingsSnapshot(
             backend,
             backendServerUrl,
@@ -118,17 +132,18 @@ internal static class VoiceRoomSettingsRpc
             teamRadioImpostors,
             teamRadioVampires,
             teamRadioLovers,
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.ReadBoolean(),
-            reader.BytesRemaining > 0 ? reader.ReadBoolean() : true,
-            reader.BytesRemaining >= 4 ? reader.ReadInt32() : (int)MediumGhostVoiceMode.None).Clamp();
+            onlyGhostsCanTalk,
+            onlyMeetingOrLobby,
+            muteBlackmailedInMeetings,
+            muteBlackmailedNextRound,
+            muteJailedInMeetings,
+            jailorCanUnmuteJailed,
+            muteParasiteControlled,
+            mutePuppeteerControlled,
+            crewpostorUsesImpostorVoice,
+            muteSwooperWhileSwooped,
+            mediumGhostVoice,
+            muteGlitchHacked).Clamp();
     }
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]

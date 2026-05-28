@@ -35,7 +35,8 @@ internal static class VoiceSnapshotBuilder
                 out bool isLover,
                 out byte loverPartnerId,
                 out bool isBlackmailedNextRound,
-                out bool isSwooped);
+                out bool isSwooped,
+                out _);
             VoiceRoleMuteState.GetPlayerMediumVoiceState(
                 player,
                 out bool isMedium,

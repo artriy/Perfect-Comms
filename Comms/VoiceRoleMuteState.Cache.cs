@@ -17,6 +17,7 @@ internal static partial class VoiceRoleMuteState
             _crewpostorModifierType == null &&
             _loverModifierType == null &&
             _swoopModifierType == null &&
+            _glitchHackedModifierType == null &&
             _vampireRoleType == null &&
             _mediumRoleType == null &&
             _mediatedModifierType == null &&
@@ -52,6 +53,7 @@ internal static partial class VoiceRoleMuteState
         bool isLover = loverModifier != null;
         byte loverPartnerId = GetLoverPartnerId(loverModifier);
         bool isSwooped = GetModifier(player, _swoopModifierType) != null;
+        bool isGlitchHacked = IsGlitchHackActive(GetModifier(player, _glitchHackedModifierType));
         var mediatedModifier = GetModifier(player, _mediatedModifierType);
         bool isMediatedGhost = mediatedModifier != null && player.Data?.IsDead == true;
         byte mediatingMediumId = isMediatedGhost ? GetMediatingMediumId(mediatedModifier) : byte.MaxValue;
@@ -89,6 +91,7 @@ internal static partial class VoiceRoleMuteState
             loverPartnerId,
             isBlackmailedNextRound,
             isSwooped,
+            isGlitchHacked,
             isMedium,
             hasMediumSpirit,
             mediumSpiritPosition,
@@ -106,6 +109,20 @@ internal static partial class VoiceRoleMuteState
         catch
         {
             return null;
+        }
+    }
+
+    private static bool IsGlitchHackActive(BaseModifier? modifier)
+    {
+        if (modifier == null) return false;
+        try
+        {
+            object? value = modifier.GetType().GetProperty("ShouldHideHacked")?.GetValue(modifier);
+            return value is bool shouldHideHacked ? !shouldHideHacked : true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -133,6 +150,7 @@ internal static partial class VoiceRoleMuteState
         _crewpostorModifierType = ResolveType(CrewpostorModifierName);
         _loverModifierType = ResolveType(LoverModifierName);
         _swoopModifierType = ResolveType(SwoopModifierName);
+        _glitchHackedModifierType = ResolveType(GlitchHackedModifierName);
         _vampireRoleType = ResolveType(VampireRoleName);
         _mediumRoleType = ResolveType(MediumRoleName);
         _mediatedModifierType = ResolveType(MediatedModifierName);
