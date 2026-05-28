@@ -9,6 +9,10 @@ internal static class SurveillanceCameraStatePatches
     private static void Begin_Postfix(SurveillanceMinigame __instance)
         => VoiceCameraState.Open(__instance);
 
+    [HarmonyPostfix, HarmonyPatch(nameof(SurveillanceMinigame.Update))]
+    private static void Update_Postfix(SurveillanceMinigame __instance)
+        => VoiceCameraState.NoteUpdate(__instance);
+
     [HarmonyPrefix, HarmonyPatch(nameof(SurveillanceMinigame.Close))]
     private static void Close_Prefix(SurveillanceMinigame __instance)
         => VoiceCameraState.Close(__instance);
@@ -25,6 +29,10 @@ internal static class PlanetCameraStatePatches
     private static void Begin_Postfix(PlanetSurveillanceMinigame __instance)
         => VoiceCameraState.Open(__instance);
 
+    [HarmonyPostfix, HarmonyPatch(nameof(PlanetSurveillanceMinigame.Update))]
+    private static void Update_Postfix(PlanetSurveillanceMinigame __instance)
+        => VoiceCameraState.NoteUpdate(__instance);
+
     [HarmonyPrefix, HarmonyPatch(nameof(PlanetSurveillanceMinigame.Close))]
     private static void Close_Prefix(PlanetSurveillanceMinigame __instance)
         => VoiceCameraState.Close(__instance);
@@ -40,6 +48,10 @@ internal static class FungleCameraStatePatches
     [HarmonyPostfix, HarmonyPatch(nameof(FungleSurveillanceMinigame.Begin))]
     private static void Begin_Postfix(FungleSurveillanceMinigame __instance)
         => VoiceCameraState.Open(__instance);
+
+    [HarmonyPostfix, HarmonyPatch(nameof(FungleSurveillanceMinigame.Update))]
+    private static void Update_Postfix(FungleSurveillanceMinigame __instance)
+        => VoiceCameraState.NoteUpdate(__instance);
 
     [HarmonyPrefix, HarmonyPatch(nameof(FungleSurveillanceMinigame.Close))]
     private static void Close_Prefix(FungleSurveillanceMinigame __instance)

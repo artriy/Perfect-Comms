@@ -4,6 +4,7 @@ internal enum VoiceProximityReason
 {
     Lobby,
     Unmapped,
+    TargetUnavailable,
     NoListener,
     OnlyMeetingOrLobby,
     OnlyGhostsCanTalk,

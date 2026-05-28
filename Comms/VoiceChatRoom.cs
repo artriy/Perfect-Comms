@@ -146,7 +146,7 @@ public class VoiceChatRoom
 
     public void SetMasterVolume(float v)
     {
-        _voiceBackend?.SetMasterVolume(v);
+        _voiceBackend?.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(v));
     }
 
     public void SetMicVolume(float v)
@@ -584,7 +584,7 @@ public class VoiceChatRoom
         _betterCrewLinkVoice = _voiceBackend as BetterCrewLinkVoiceBackend;
         _voiceBackend.CustomMessageReceived += HandleBackendCustomMessage;
         _voiceBackend.SetMute(Mute);
-        _voiceBackend.SetMasterVolume(settings?.MasterVolume.Value ?? 1f);
+        SetMasterVolume(settings?.MasterVolume.Value ?? 1f);
         _voiceBackend.SetNoiseGate(
             ApplyMicSensitivity(settings?.NoiseGateThreshold.Value ?? 0.003f, settings?.MicSensitivity.Value ?? 1f),
             ApplyMicSensitivity(settings?.VadThreshold.Value ?? 0.004f, settings?.MicSensitivity.Value ?? 1f));

@@ -76,6 +76,7 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.MuteGlitchHacked);
         writer.Write(settings.MuffleBlindedOrFlashedHearing);
         writer.Write(settings.MuffleHypnotizedDuringHysteria);
+        writer.Write(settings.OnlyMeetingOrLobbyAffectsGhosts);
     }
 
     private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
@@ -118,6 +119,7 @@ internal static class VoiceRoomSettingsRpc
         bool muteGlitchHacked = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
         bool muffleBlindedOrFlashedHearing = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
         bool muffleHypnotizedDuringHysteria = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+        bool onlyMeetingOrLobbyAffectsGhosts = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
 
         return new VoiceRoomSettingsSnapshot(
             backend,
@@ -138,6 +140,7 @@ internal static class VoiceRoomSettingsRpc
             teamRadioLovers,
             onlyGhostsCanTalk,
             onlyMeetingOrLobby,
+            onlyMeetingOrLobbyAffectsGhosts,
             muteBlackmailedInMeetings,
             muteBlackmailedNextRound,
             muteJailedInMeetings,

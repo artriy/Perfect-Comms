@@ -796,7 +796,9 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             var target = FindTarget(snapshot, peer);
             if (!target.HasValue && TryApplySingleRemoteFallback(snapshot, peer, out var fallback))
                 target = fallback;
-            if (target.HasValue && !target.Value.Disconnected && !target.Value.IsDummy &&
+            if (target.HasValue && VoiceProximityCalculator.IsUnavailableTarget(target.Value))
+                peer.ResetMappingNoMute();
+            if (target.HasValue && !VoiceProximityCalculator.IsUnavailableTarget(target.Value) &&
                 peer.UpdateProfile(target.Value.PlayerId, target.Value.PlayerName))
                 ApplySavedVolume(peer);
 
@@ -823,7 +825,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             return false;
 
         var remotePlayers = snapshot.Players
-            .Where(player => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+            .Where(player => !player.IsLocal && !VoiceProximityCalculator.IsUnavailableTarget(player) && player.ClientId >= 0)
             .ToArray();
         if (remotePlayers.Length != 1)
             return false;
@@ -843,11 +845,10 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
 
     public void Dispose()
     {
+        StopMicrophone("dispose");
         try { _room.Disconnect(); } catch { }
         _peers.Clear();
 #if ANDROID
-        _androidMicrophone?.Dispose();
-        _androidMicrophone = null;
         _androidSpeaker?.Dispose();
         _androidSpeaker = null;
 #elif WINDOWS

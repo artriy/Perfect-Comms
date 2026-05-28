@@ -784,7 +784,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         foreach (var peer in SnapshotPeers())
         {
             var target = FindTarget(snapshot, peer);
-            if (target.HasValue && !target.Value.Disconnected && !target.Value.IsDummy && peer.UpdateProfile(target.Value.PlayerId, target.Value.PlayerName))
+            if (target.HasValue && VoiceProximityCalculator.IsUnavailableTarget(target.Value))
+                peer.ResetMappingNoMute();
+            if (target.HasValue && !VoiceProximityCalculator.IsUnavailableTarget(target.Value) && peer.UpdateProfile(target.Value.PlayerId, target.Value.PlayerName))
                 ApplySavedVolume(peer);
 
             VoiceProximityResult result;

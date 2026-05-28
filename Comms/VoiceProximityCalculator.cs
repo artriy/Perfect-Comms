@@ -17,11 +17,13 @@ internal static class VoiceProximityCalculator
     {
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
+        var target = targetPlayer.Value;
+        if (IsUnavailableTarget(target))
+            return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable);
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener);
 
         var s = VoiceRoomSettingsState.Current;
-        var target = targetPlayer.Value;
         float maxDistance = s.MaxChatDistance;
         float dist = Distance(target.Position, listenerPos.Value);
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
@@ -52,6 +54,8 @@ internal static class VoiceProximityCalculator
 
         var s = VoiceRoomSettingsState.Current;
         var target = targetPlayer.Value;
+        if (IsUnavailableTarget(target))
+            return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable);
         bool localDead = localPlayer?.IsDead == true;
         bool targetDead = target.IsDead;
 
@@ -101,11 +105,13 @@ internal static class VoiceProximityCalculator
     {
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped, previousWallCoefficient);
+        var target = targetPlayer.Value;
+        if (IsUnavailableTarget(target))
+            return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable, previousWallCoefficient);
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
 
         var s = VoiceRoomSettingsState.Current;
-        var target = targetPlayer.Value;
         var targetPos = target.Position;
         var localListenerPos = ResolveListenerPosition(localPlayer, listenerPos.Value);
         Vector2 cameraPosition = default;
@@ -124,7 +130,7 @@ internal static class VoiceProximityCalculator
         bool localMediatingMedium = IsMediatingMedium(localPlayer) &&
                                      (MediumGhostVoiceMode)s.MediumGhostVoice != MediumGhostVoiceMode.None;
 
-        if (s.OnlyMeetingOrLobby)
+        if (ShouldMeetingLobbyOnlyBlockTaskVoice(s, localDead, targetDead))
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
 
         var mediumGhostRoute = TryCalculateMediumGhostRoute(localPlayer, target, localListenerPos, s, previousWallCoefficient);
@@ -242,6 +248,13 @@ internal static class VoiceProximityCalculator
         return SelectBestNormalRoute(proximityRoute, virtualRoute, cameraRoute);
     }
 
+    private static bool ShouldMeetingLobbyOnlyBlockTaskVoice(
+        VoiceRoomSettingsSnapshot settings,
+        bool localDead,
+        bool targetDead)
+        => settings.OnlyMeetingOrLobby &&
+           (settings.OnlyMeetingOrLobbyAffectsGhosts || !localDead || !targetDead);
+
     private static bool CanHearTeamRadio(
         VoicePlayerSnapshot? localPlayer,
         VoicePlayerSnapshot target,
@@ -264,6 +277,9 @@ internal static class VoiceProximityCalculator
             _ => false,
         };
     }
+
+    internal static bool IsUnavailableTarget(VoicePlayerSnapshot target)
+        => target.Disconnected || target.IsDummy || !target.IsVisible;
 
     private static VoiceProximityResult? TryCalculateMediumGhostRoute(
         VoicePlayerSnapshot? localPlayer,

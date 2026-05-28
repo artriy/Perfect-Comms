@@ -76,8 +76,8 @@ internal static class VoiceAudioOcclusion
         position = default;
         if (!cameraViewActive) return false;
 
-        if (IsSkeldCameraView(mapId, activeCameraIndex))
-            return TryGetNearestCameraPosition(SkeldCameras, targetPos, out position);
+        if (IsAllCameraView(mapId, activeCameraIndex, out var allCameras))
+            return TryGetNearestCameraPosition(allCameras, targetPos, out position);
 
         if (activeCameraPosition.HasValue)
         {
@@ -158,8 +158,16 @@ internal static class VoiceAudioOcclusion
         return bestDistance < float.MaxValue;
     }
 
-    private static bool IsSkeldCameraView(int mapId, int activeCameraIndex)
-        => activeCameraIndex == 6 || mapId is 0 or 3;
+    private static bool IsAllCameraView(int mapId, int activeCameraIndex, out Vector2[] cameras)
+    {
+        cameras = mapId switch
+        {
+            0 or 3 when activeCameraIndex == 6 => SkeldCameras,
+            4 when activeCameraIndex == 6 => AirshipCameras,
+            _ => Array.Empty<Vector2>(),
+        };
+        return cameras.Length > 0;
+    }
 
     private static float SmoothStep(float t)
         => t * t * (3f - 2f * t);

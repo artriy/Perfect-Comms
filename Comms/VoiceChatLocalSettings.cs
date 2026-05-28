@@ -455,7 +455,7 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         }
         else if (configEntry == MasterVolume)
         {
-            VoiceChatRoom.Current?.SetMasterVolume(MasterVolume.Value);
+            VoiceChatHudState.ApplySpeakerState();
         }
         else if (configEntry == MicMode)
         {

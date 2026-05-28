@@ -48,6 +48,7 @@ public static class VoiceChatHudState
     public static bool IsTeamRadio => IsInTeamRadioMode();
     public static bool IsImpostorRadio => IsTeamRadio;
     public static bool IsSpeakerMuted => _speakerMuted;
+    internal static bool IsLocalTransmitBlocked => TryGetLocalTransmitBlockReason(out _);
     internal static void Init()
     {
         if (_initialized) return;
@@ -302,7 +303,7 @@ public static class VoiceChatHudState
         {
             var sr = _micButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
 
-            if (VoiceRoleMuteState.TryGetLocalVoiceBlockReason(out _))
+            if (TryGetLocalTransmitBlockReason(out _))
             {
                 if (sr != null) { sr.sprite = Sprites.MicOff; sr.color = new Color(1f, 0.65f, 0.15f); }
             }
@@ -345,20 +346,18 @@ public static class VoiceChatHudState
         if (pushToTalkMode && _micMuted) _micMuted = false;
         bool pushToTalkMuted = pushToTalkMode && !_pushToTalkHeld && !radioTransmit;
         bool roleMuted       = VoiceRoleMuteState.IsLocalVoiceBlocked(VoiceSceneState.ResolvePhase());
-        VoiceChatRoom.Current?.SetMute(_speakerMuted || _micMuted || pushToTalkMuted || roleMuted);
+        bool policyMuted     = IsLocalRoomPolicyVoiceBlocked(VoiceSceneState.ResolvePhase());
+        VoiceChatRoom.Current?.SetMute(_speakerMuted || _micMuted || pushToTalkMuted || roleMuted || policyMuted);
     }
 
     internal static void ApplySpeakerState()
     {
-        if (_speakerMuted)
-            VoiceChatRoom.Current?.SetMasterVolume(0f);
-        else
-        {
-            var tab = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-            if (tab != null)
-                VoiceChatRoom.Current?.SetMasterVolume(tab.MasterVolume.Value);
-        }
+        var tab = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+        VoiceChatRoom.Current?.SetMasterVolume(tab?.MasterVolume.Value ?? 1f);
     }
+
+    internal static float GetEffectiveMasterVolume(float masterVolume)
+        => _speakerMuted ? 0f : masterVolume;
 
     internal static void TrySyncHostRoomSettings() { }
 
@@ -409,7 +408,7 @@ public static class VoiceChatHudState
         && GetSelectedTeamRadioChannel() != VoiceTeamRadioChannel.None
         && !_speakerMuted
         && !IsManualMuteActive()
-        && !VoiceRoleMuteState.IsLocalVoiceBlocked();
+        && !TryGetLocalTransmitBlockReason(out _);
 
     internal static bool IsInImpostorRadioMode()
         => IsInTeamRadioMode();
@@ -520,8 +519,8 @@ public static class VoiceChatHudState
 
         var tab = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         bool pushToTalkMode = tab?.MicMode.Value == VoiceMicMode.PushToTalk;
-        string status = VoiceRoleMuteState.TryGetLocalVoiceBlockReason(out string roleMuteReason)
-            ? roleMuteReason
+        string status = TryGetLocalTransmitBlockReason(out string transmitBlockReason)
+            ? transmitBlockReason
             : _speakerMuted ? "Deafened"
             : IsManualMuteActive() ? "Muted"
             : IsInTeamRadioMode() ? $"Team Radio: {VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel())} (held)"
@@ -626,7 +625,7 @@ public static class VoiceChatHudState
     }
 
     internal static bool CanUseTeamRadioInput()
-        => CanUseTeamRadio() && !VoiceRoleMuteState.IsLocalVoiceBlocked();
+        => CanUseTeamRadio() && !TryGetLocalTransmitBlockReason(out _);
 
     internal static bool CanUseImpostorRadioInput()
         => CanUseTeamRadioInput();
@@ -638,6 +637,61 @@ public static class VoiceChatHudState
 
     private static bool CanUseImpostorRadio()
         => CanUseTeamRadio();
+
+    internal static bool TryGetLocalTransmitBlockReason(out string reason)
+    {
+        var phase = VoiceSceneState.ResolvePhase();
+        if (VoiceRoleMuteState.TryGetLocalVoiceBlockReason(phase, out reason))
+            return true;
+
+        if (IsLocalRoomPolicyVoiceBlocked(phase, out var policyReason))
+        {
+            reason = policyReason;
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
+
+    internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase)
+    {
+        var local = PlayerControl.LocalPlayer;
+        return IsLocalRoomPolicyVoiceBlocked(phase, local?.Data?.IsDead == true, out _);
+    }
+
+    internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead)
+        => IsLocalRoomPolicyVoiceBlocked(phase, localDead, out _);
+
+    private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, out string reason)
+    {
+        var local = PlayerControl.LocalPlayer;
+        return IsLocalRoomPolicyVoiceBlocked(phase, local?.Data?.IsDead == true, out reason);
+    }
+
+    private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead, out string reason)
+    {
+        reason = string.Empty;
+        var settings = VoiceRoomSettingsState.Current;
+
+        if (settings.OnlyMeetingOrLobby &&
+            VoiceSceneState.IsTaskVoicePhase(phase) &&
+            (settings.OnlyMeetingOrLobbyAffectsGhosts || !localDead))
+        {
+            reason = "Meetings/Lobby Only";
+            return true;
+        }
+
+        if (settings.OnlyGhostsCanTalk &&
+            !localDead &&
+            (VoiceSceneState.IsTaskVoicePhase(phase) || VoiceSceneState.IsMeetingVoicePhase(phase)))
+        {
+            reason = "Only Ghosts can Talk/Hear";
+            return true;
+        }
+
+        return false;
+    }
 
     private static void ClearButtonBG(GameObject obj)
     {
