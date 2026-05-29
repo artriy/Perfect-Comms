@@ -90,7 +90,11 @@ public static class PingTrackerPatch
     private static readonly HashSet<byte> _activeSpeakerIds = new();
     private static readonly Dictionary<byte, float> _activeSpeakerLevels = new();
     private static readonly List<byte> _fadedSlotIds = new();
+    // Per-frame O(1) player lookup, rebuilt once per Postfix from a single AllPlayerControls pass.
+    private static readonly Dictionary<byte, PlayerControl> _playerLookup = new();
     private static bool _layoutDirty;
+    // Set when the slot set or an icon changes; gates the expensive per-slot sorting re-stamp.
+    private static bool _sortingDirty;
 
     public static void ApplySpeakingBarPosition(SpeakingBarPosition pos)
     {
@@ -118,95 +122,118 @@ public static class PingTrackerPatch
 
         EnsureBar(__instance);
         if (_barRoot == null) return;
-        KeepSpeakingBarOnTop(__instance);
-        TrackAvatarIdlePoses();
 
-        var room = VoiceChatRoom.Current;
-        var overlay = VoiceOverlayState.Current(room);
-        _activeSpeakerIds.Clear();
-        _activeSpeakerLevels.Clear();
-
-        foreach (var remote in overlay.RemotePlayers)
+        try
         {
-            if (remote.IsSpeaking && remote.IsAudible)
+            RebuildPlayerLookup();
+            TrackAvatarIdlePoses();
+
+            var room = VoiceChatRoom.Current;
+            var overlay = VoiceOverlayState.Current(room);
+            _activeSpeakerIds.Clear();
+            _activeSpeakerLevels.Clear();
+
+            foreach (var remote in overlay.RemotePlayers)
             {
-                _activeSpeakerIds.Add(remote.PlayerId);
-                _activeSpeakerLevels[remote.PlayerId] = remote.Level;
-            }
-        }
-
-        if (PlayerControl.LocalPlayer && overlay.Local.IsSpeaking)
-        {
-            byte lid = PlayerControl.LocalPlayer.PlayerId;
-            if (lid != byte.MaxValue)
-            {
-                _activeSpeakerIds.Add(lid);
-                _activeSpeakerLevels[lid] = overlay.Local.Level;
-            }
-        }
-
-        if (MeetingHud.Instance == null)
-            MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
-
-        foreach (var kv in _slots)
-        {
-            kv.Value.IsSpeaking = false;
-            kv.Value.TargetLevel = 0f;
-        }
-
-        // Add / rebuild slots for speaking players
-        foreach (byte id in _activeSpeakerIds)
-        {
-            var liveFp = GetFingerprint(id);
-            var player = FindPlayer(id);
-            float level = _activeSpeakerLevels.TryGetValue(id, out var currentLevel) ? currentLevel : 0f;
-            if (_slots.TryGetValue(id, out var slot))
-            {
-                slot.LastActiveTime = Time.time;
-                if (player != null) slot.LastPlayerSeenTime = Time.time;
-                if (slot.Fingerprint != liveFp)
+                if (remote.IsSpeaking && remote.IsAudible)
                 {
-                    slot.TargetLevel = level;
-                    slot.IsSpeaking = true;
-                    slot.PlayerColor = GetPaletteColor(player);
-                    if (slot.PendingFingerprint != liveFp)
-                    {
-                        slot.PendingFingerprint = liveFp;
-                        UpdateSlotLabel(slot, player);
-                    }
-                    TryCreateSlotIcon(id, slot, replaceExisting: true);
-                    continue;
-                }
-                else
-                {
-                    slot.TargetLevel = level;
-                    slot.IsSpeaking = true;
-                    if (slot.IconGO == null)
-                    {
-                        TryCreateSlotIcon(id, slot);
-                    }
-                    else if (!slot.HasCachedPoseIcon && player != null && CrewmateAvatarRenderer.HasCachedCosmeticPose(id, player))
-                    {
-                        TryCreateSlotIcon(id, slot, replaceExisting: true, requireCachedCosmetics: true);
-                    }
-                    continue;
+                    _activeSpeakerIds.Add(remote.PlayerId);
+                    _activeSpeakerLevels[remote.PlayerId] = remote.Level;
                 }
             }
-            AddSlot(id, level);
+
+            if (PlayerControl.LocalPlayer && overlay.Local.IsSpeaking)
+            {
+                byte lid = PlayerControl.LocalPlayer.PlayerId;
+                if (lid != byte.MaxValue)
+                {
+                    _activeSpeakerIds.Add(lid);
+                    _activeSpeakerLevels[lid] = overlay.Local.Level;
+                }
+            }
+
+            if (MeetingHud.Instance == null)
+                MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
+
+            foreach (var kv in _slots)
+            {
+                kv.Value.IsSpeaking = false;
+                kv.Value.TargetLevel = 0f;
+            }
+
+            // Add / rebuild slots for speaking players
+            foreach (byte id in _activeSpeakerIds)
+            {
+                var player = FindPlayer(id);
+                var liveFp = GetFingerprint(id);
+                float level = _activeSpeakerLevels.TryGetValue(id, out var currentLevel) ? currentLevel : 0f;
+                if (_slots.TryGetValue(id, out var slot))
+                {
+                    slot.LastActiveTime = Time.time;
+                    if (player != null) slot.LastPlayerSeenTime = Time.time;
+                    if (slot.Fingerprint != liveFp)
+                    {
+                        slot.TargetLevel = level;
+                        slot.IsSpeaking = true;
+                        slot.PlayerColor = GetPaletteColor(player);
+                        if (slot.PendingFingerprint != liveFp)
+                        {
+                            slot.PendingFingerprint = liveFp;
+                            UpdateSlotLabel(slot, player);
+                        }
+                        TryCreateSlotIcon(id, slot, replaceExisting: true);
+                        continue;
+                    }
+                    else
+                    {
+                        slot.TargetLevel = level;
+                        slot.IsSpeaking = true;
+                        if (slot.IconGO == null)
+                        {
+                            TryCreateSlotIcon(id, slot);
+                        }
+                        else if (!slot.HasCachedPoseIcon && player != null && CrewmateAvatarRenderer.HasCachedCosmeticPose(id, player))
+                        {
+                            // Upgrade body-only icon to cosmetics in place — no destroy/recreate pop.
+                            if (CrewmateAvatarRenderer.TryUpgradeWithCachedPose(slot.IconGO, id, player))
+                            {
+                                slot.HasCachedPoseIcon = true;
+                                _layoutDirty = true;
+                                _sortingDirty = true;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                AddSlot(id, level);
+            }
+
+            UpdateSlotRings();
+
+            _fadedSlotIds.Clear();
+            foreach (var kv in _slots)
+                if ((!kv.Value.IsSpeaking && kv.Value.Visibility <= 0.01f) || ShouldForceRemoveSlot(kv.Key, kv.Value))
+                    _fadedSlotIds.Add(kv.Key);
+            foreach (var id in _fadedSlotIds) RemoveSlot(id);
+
+            LayoutSlotsIfDirty();
+
+            _barRoot.SetActive(_slots.Count > 0);
+            KeepSpeakingBarOnTop(__instance);
         }
+        catch (System.Exception ex)
+        {
+            LogOverlayError("PingTracker overlay update", ex);
+        }
+    }
 
-        UpdateSlotRings();
+    private static float _lastOverlayErrorLog = -999f;
 
-        _fadedSlotIds.Clear();
-        foreach (var kv in _slots)
-            if ((!kv.Value.IsSpeaking && kv.Value.Visibility <= 0.01f) || ShouldForceRemoveSlot(kv.Key, kv.Value))
-                _fadedSlotIds.Add(kv.Key);
-        foreach (var id in _fadedSlotIds) RemoveSlot(id);
-
-        LayoutSlotsIfDirty();
-
-        _barRoot.SetActive(_slots.Count > 0);
-        KeepSpeakingBarOnTop(__instance);
+    private static void LogOverlayError(string where, System.Exception ex)
+    {
+        if (Time.time - _lastOverlayErrorLog < 5f) return;
+        _lastOverlayErrorLog = Time.time;
+        VoiceDiagnostics.DebugError($"[VC] {where} failed: {ex.Message}");
     }
 
     private static void EnsureBar(PingTracker template)
@@ -274,8 +301,14 @@ public static class PingTrackerPatch
         var pos = _barRoot.transform.localPosition;
         _barRoot.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
         ApplySortingGroup(_barRoot, VCSorting.Ring);
-        VCOverlayCamera.Sync();
-        ApplySpeakingBarSorting();
+        VCOverlayCamera.Sync(); // must follow the main camera every frame
+        // The per-slot re-stamp allocates via GetComponentsInChildren; only run it when
+        // the slot set or an icon actually changed, not every frame.
+        if (_sortingDirty)
+        {
+            ApplySpeakingBarSorting();
+            _sortingDirty = false;
+        }
     }
 
     private static void TrackAvatarIdlePoses()
@@ -397,6 +430,7 @@ public static class PingTrackerPatch
         VCOverlayCamera.EnsureOnTop(labelGO);
         _slots[playerId] = slot;
         _layoutDirty = true;
+        _sortingDirty = true;
     }
 
     private static bool TryCreateSlotIcon(byte playerId, SpeakerSlot slot, bool replaceExisting = false, bool requireCachedCosmetics = false)
@@ -420,6 +454,7 @@ public static class PingTrackerPatch
             slot.HasCachedPoseIcon = hasCachedCosmeticPose;
             slot.PendingFingerprint = default;
             _layoutDirty = true;
+            _sortingDirty = true;
             return true;
         }
         return false;
@@ -439,6 +474,7 @@ public static class PingTrackerPatch
         if (slot.LabelTMP != null) Object.Destroy(slot.LabelTMP.gameObject);
         _slots.Remove(id);
         _layoutDirty = true;
+        _sortingDirty = true;
     }
 
     private static bool ShouldForceRemoveSlot(byte id, SpeakerSlot slot)
@@ -588,9 +624,11 @@ public static class PingTrackerPatch
             _activeSpeakerIds.Clear();
             _activeSpeakerLevels.Clear();
             _fadedSlotIds.Clear();
+            _playerLookup.Clear();
             VoiceOverlayState.InvalidateCache();
             CrewmateAvatarRenderer.ClearCache();
             _layoutDirty = false;
+            _sortingDirty = false;
             if (_barRoot != null) { Object.Destroy(_barRoot); _barRoot = null; }
             _barAspect = null;
         }
@@ -632,21 +670,26 @@ public static class PingTrackerPatch
             outfit.PlayerName);
     }
 
-    private static PlayerControl? FindPlayer(byte id)
+    // Rebuilt once per Postfix frame; FindPlayer then resolves O(1) instead of scanning
+    // the IL2CPP-backed AllPlayerControls collection many times per speaker per frame.
+    private static void RebuildPlayerLookup()
     {
+        _playerLookup.Clear();
         try
         {
             var players = PlayerControl.AllPlayerControls;
-            if (players == null) return null;
+            if (players == null) return;
             foreach (var pc in players)
-                if (pc != null && pc.PlayerId == id) return pc;
+                if (pc != null) _playerLookup[pc.PlayerId] = pc;
         }
         catch
         {
-            return null;
+            // Scene transitions can temporarily invalidate the player collection.
         }
-        return null;
     }
+
+    private static PlayerControl? FindPlayer(byte id)
+        => _playerLookup.TryGetValue(id, out var pc) && pc != null ? pc : null;
 
     private static Color GetPaletteColor(PlayerControl? pc)
     {
@@ -659,14 +702,23 @@ public static class PingTrackerPatch
 
     private static int GetPlayerColorId(PlayerControl pc)
     {
-        try
+        int bodyColor;
+        try { bodyColor = pc.cosmetics.bodyMatProperties.ColorId; }
+        catch { try { return GetDisplayOutfit(pc).ColorId; } catch { return 0; } }
+
+        // bodyMatProperties briefly reads 0 (red) before cosmetics initialize during
+        // lobby/intro/transition. If the authoritative networked outfit reports a
+        // different, valid color, trust it so the fallback body isn't transiently red.
+        if (bodyColor == 0)
         {
-            return pc.cosmetics.bodyMatProperties.ColorId;
+            try
+            {
+                int outfitColor = GetDisplayOutfit(pc).ColorId;
+                if (outfitColor > 0) return outfitColor;
+            }
+            catch { /* keep bodyColor */ }
         }
-        catch
-        {
-            return GetDisplayOutfit(pc).ColorId;
-        }
+        return bodyColor;
     }
 
     private static NetworkedPlayerInfo.PlayerOutfit GetDisplayOutfit(PlayerControl pc)

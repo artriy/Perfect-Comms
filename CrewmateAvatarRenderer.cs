@@ -95,6 +95,18 @@ internal static class CrewmateAvatarRenderer
            && snapshot.Layers.Count > 0
            && snapshot.Matches(pc);
 
+    // Add cached cosmetic layers onto an already-created (body-only) icon in place,
+    // avoiding a destroy/recreate of the whole icon GameObject when cosmetics finish loading.
+    internal static bool TryUpgradeWithCachedPose(GameObject? iconRoot, byte playerId, PlayerControl? pc)
+    {
+        if (iconRoot == null || pc?.Data == null) return false;
+        if (!HasCachedCosmeticPose(playerId, pc)) return false;
+        if (!TryAddCachedPose(iconRoot.transform, playerId, pc)) return false;
+        ApplySorting(iconRoot);
+        VCOverlayCamera.EnsureOnTop(iconRoot);
+        return true;
+    }
+
     internal static void ClearCache()
     {
         IdlePoseCache.Clear();
@@ -109,6 +121,17 @@ internal static class CrewmateAvatarRenderer
 
     public static bool IsCustomIcon(GameObject go)
         => go != null && go.name.StartsWith("VC_SpriteIcon_");
+
+    // Shared palette color for speaking overlays (bar + meeting), using the same
+    // body-color source so both stay in parity.
+    internal static Color GetPaletteColor(PlayerControl? pc)
+    {
+        if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
+        int cid = GetPlayerColorId(pc);
+        return cid >= 0 && cid < Palette.PlayerColors.Length
+            ? (Color)Palette.PlayerColors[cid]
+            : Color.white;
+    }
 
     private static bool DestroyIncompleteIcon(GameObject root)
     {
@@ -515,14 +538,23 @@ internal static class CrewmateAvatarRenderer
 
     private static int GetPlayerColorId(PlayerControl pc)
     {
-        try
+        int bodyColor;
+        try { bodyColor = pc.cosmetics.bodyMatProperties.ColorId; }
+        catch { try { return GetDisplayOutfit(pc).ColorId; } catch { return 0; } }
+
+        // bodyMatProperties briefly reads 0 (red) before cosmetics initialize during
+        // lobby/intro/transition. If the authoritative networked outfit reports a
+        // different, valid color, trust it so the fallback body isn't transiently red.
+        if (bodyColor == 0)
         {
-            return pc.cosmetics.bodyMatProperties.ColorId;
+            try
+            {
+                int outfitColor = GetDisplayOutfit(pc).ColorId;
+                if (outfitColor > 0) return outfitColor;
+            }
+            catch { /* keep bodyColor */ }
         }
-        catch
-        {
-            return GetDisplayOutfit(pc).ColorId;
-        }
+        return bodyColor;
     }
 
     private static NetworkedPlayerInfo.PlayerOutfit GetDisplayOutfit(PlayerControl pc)

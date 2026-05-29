@@ -37,7 +37,7 @@ internal static class VoiceJailVoiceRpc
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
     private static class PlayerControlHandleRpcPatch
     {
-        public static void Postfix(byte callId, MessageReader reader)
+        public static void Postfix(PlayerControl __instance, byte callId, MessageReader reader)
         {
             if (callId != RpcId) return;
 
@@ -46,6 +46,16 @@ internal static class VoiceJailVoiceRpc
                 var jailorId = reader.ReadByte();
                 var jailedPlayerId = reader.ReadByte();
                 var allowed = reader.ReadBoolean();
+
+                // Bind to the network sender: only the jailor themselves may set jail-voice
+                // (ApplyRemoteJailVoice additionally validates jailorId is the real jailor).
+                if (__instance == null || __instance.PlayerId != jailorId)
+                {
+                    VoiceDiagnostics.Log("jailvoice.rpc.reject",
+                        $"sender={(__instance == null ? "null" : __instance.PlayerId.ToString())} claimedJailor={jailorId}");
+                    return;
+                }
+
                 VoiceRoleMuteState.ApplyRemoteJailVoice(jailorId, jailedPlayerId, allowed);
             }
             catch (Exception ex)

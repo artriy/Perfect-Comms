@@ -79,8 +79,8 @@ internal static class VoiceLobbyRegistryClient
     {
         var url = BuildUrl(registryUrl, "/lobbies");
         using var response = await Client.GetAsync(url).ConfigureAwait(false);
-        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         var parsed = JsonSerializer.Deserialize<VoiceLobbyListResponse>(text, JsonOptions);
         return parsed?.Lobbies ?? new List<VoiceLobbyListing>();
     }

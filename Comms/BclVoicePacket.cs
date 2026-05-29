@@ -219,18 +219,28 @@ internal sealed class BclVoiceJitterBuffer
 
         _lastEnqueueUtc = DateTime.UtcNow;
 
-        if (_packets.Keys.Any(existing => IsBefore(packet.Sequence, existing)) ||
-            Distance(_expectedSequence, packet.Sequence) > 0 && !_packets.ContainsKey(_expectedSequence))
+        // Manual scan instead of LINQ .Any() — avoids an iterator + closure allocation on
+        // every received packet on the audio/network thread.
+        bool anyBufferedAfter = false;
+        foreach (var existing in _packets.Keys)
+        {
+            if (IsBefore(packet.Sequence, existing)) { anyBufferedAfter = true; break; }
+        }
+        if (anyBufferedAfter ||
+            (Distance(_expectedSequence, packet.Sequence) > 0 && !_packets.ContainsKey(_expectedSequence)))
             _reorderedPackets++;
 
         _packets[packet.Sequence] = packet;
         _maxDepth = Math.Max(_maxDepth, _packets.Count);
 
+        // On overflow drop the newest (furthest-future) frame, not the next-to-play one:
+        // FindNextSequence returns the playout head, so evicting it forced an avoidable
+        // extra concealment/dropout every overflow.
         while (_packets.Count > _maxBufferedFrames)
         {
-            var oldest = FindNextSequence();
-            if (oldest == null) break;
-            _packets.Remove(oldest.Value);
+            var newest = FindHighestSequence();
+            if (newest == null) break;
+            _packets.Remove(newest.Value);
             _lateDrops++;
         }
 
@@ -304,6 +314,23 @@ internal sealed class BclVoiceJitterBuffer
             if (IsBefore(sequence, _expectedSequence)) continue;
             var distance = Distance(_expectedSequence, sequence);
             if (distance < bestDistance)
+            {
+                best = sequence;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    private ushort? FindHighestSequence()
+    {
+        ushort? best = null;
+        var bestDistance = -1;
+        foreach (var sequence in _packets.Keys)
+        {
+            if (IsBefore(sequence, _expectedSequence)) continue;
+            var distance = Distance(_expectedSequence, sequence);
+            if (distance > bestDistance)
             {
                 best = sequence;
                 bestDistance = distance;

@@ -303,6 +303,11 @@ internal class MonoToStereoSampleProvider : ISampleProvider
         if (read < monoCount)
             Array.Clear(buffer, offset + read * 2, (monoCount - read) * 2);
 
+        // Harmonize odd-count handling with BclStereoPlaybackProvider: a final
+        // unpaired element (odd requested count) has no stereo partner — zero it.
+        if ((count & 1) == 1)
+            buffer[offset + count - 1] = 0f;
+
         return read * 2;
     }
 }
@@ -382,7 +387,7 @@ internal class ReverbSampleProvider : ISampleProvider
     {
         _src   = src;
         int n  = (int)(src.WaveFormat.SampleRate * (delayMs / 1000f)) * src.WaveFormat.Channels;
-        _delay = new float[n];
+        _delay = new float[Math.Max(1, n)]; // guard a zero-length delay line (modulo-by-zero / OOB on _delay[_pos])
         Decay     = decay;
         WetDryMix = wetDry;
     }

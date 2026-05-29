@@ -22,11 +22,9 @@ internal static class PerfectCommsUpdateNotifier
     private static Task<PerfectCommsUpdateInfo?>? _checkTask;
     private static int _mainMenuLoadId;
     private static int _shownLoadId;
-    private static MainMenuManager? _menu;
 
     internal static void OnMainMenuLoaded(MainMenuManager menu)
     {
-        _menu = menu;
         _mainMenuLoadId++;
         _shownLoadId = -1;
         Clear();
@@ -40,7 +38,6 @@ internal static class PerfectCommsUpdateNotifier
 
     internal static void Update(MainMenuManager menu)
     {
-        _menu = menu;
         if (_root != null) return;
         if (_shownLoadId == _mainMenuLoadId) return;
         if (_checkTask == null || !_checkTask.IsCompleted) return;

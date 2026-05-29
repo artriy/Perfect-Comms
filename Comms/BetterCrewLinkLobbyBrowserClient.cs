@@ -38,6 +38,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         {
             lock (Gate)
             {
+                if (!ReferenceEquals(_socket, socket)) return; // stale socket from a prior connection
                 _connected = true;
                 _status = "BCL live connected";
                 _dirty = true;
@@ -50,6 +51,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         {
             lock (Gate)
             {
+                if (!ReferenceEquals(_socket, socket)) return;
                 _connected = false;
                 _status = "BCL live disconnected";
                 Listings.Clear();
@@ -64,6 +66,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 var lobbies = ReadLobbyArray(response);
                 lock (Gate)
                 {
+                    if (!ReferenceEquals(_socket, socket)) return;
                     Listings.Clear();
                     var accepted = 0;
                     foreach (var lobby in lobbies)
@@ -91,6 +94,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 var lobby = ReadLobby(response);
                 lock (Gate)
                 {
+                    if (!ReferenceEquals(_socket, socket)) return;
                     if (lobby != null && BetterCrewLinkLobbyMetadata.IsPerfectComms(lobby))
                         Listings[lobby.id] = BetterCrewLinkLobbyMetadata.ToListing(lobby);
                     else if (lobby != null)
@@ -110,6 +114,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
             var id = response.GetValue<int>(0);
             lock (Gate)
             {
+                if (!ReferenceEquals(_socket, socket)) return;
                 Listings.Remove(id);
                 _dirty = true;
             }
@@ -188,10 +193,17 @@ internal static class BetterCrewLinkLobbyBrowserClient
             return BetterCrewLinkLobbyJoinResult.Fail(ex.Message);
         }
 
-        var completed = await Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromSeconds(6))).ConfigureAwait(false);
-        return completed == completion.Task
-            ? await completion.Task.ConfigureAwait(false)
-            : BetterCrewLinkLobbyJoinResult.Fail("Timed out joining BCL lobby");
+        using var delayCts = new System.Threading.CancellationTokenSource();
+        var completed = await Task.WhenAny(
+            completion.Task,
+            Task.Delay(TimeSpan.FromSeconds(6), delayCts.Token)).ConfigureAwait(false);
+        if (completed == completion.Task)
+        {
+            delayCts.Cancel(); // stop the timeout timer instead of leaking it for ~6s
+            return await completion.Task.ConfigureAwait(false);
+        }
+
+        return BetterCrewLinkLobbyJoinResult.Fail("Timed out joining BCL lobby");
     }
 
     internal static void Disconnect()
@@ -216,6 +228,8 @@ internal static class BetterCrewLinkLobbyBrowserClient
     {
         try { await socket.EmitAsync("lobbybrowser", false).ConfigureAwait(false); } catch { }
         try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
+        // Dispose releases the websocket, timers, and the unbounded reconnect loop's CTS.
+        try { socket.Dispose(); } catch { }
     }
 
     private static bool AddOrUpdateLocked(BetterCrewLinkPublicLobby lobby)

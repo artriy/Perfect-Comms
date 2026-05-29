@@ -30,6 +30,9 @@ internal sealed class VoiceOverlayState
     private static int _cachedFrame = -1;
     private static VoiceChatRoom? _cachedRoom;
     private static VoiceOverlayState _cachedState = Empty;
+    // Reused once per frame: Build only runs on a cache miss (frame/room change), and no
+    // caller retains RemotePlayers across frames, so clearing-and-refilling is safe.
+    private static readonly List<VoiceRemoteOverlayState> _remoteBuffer = new(16);
 
     private VoiceOverlayState(VoiceLocalOverlayState local, IReadOnlyList<VoiceRemoteOverlayState> remotePlayers)
     {
@@ -62,12 +65,15 @@ internal sealed class VoiceOverlayState
             return Empty;
 
         var snapshot = room.CurrentSnapshot;
-        var remotePlayers = new List<VoiceRemoteOverlayState>(16);
+        _remoteBuffer.Clear();
         foreach (var remote in room.InterstellarRemoteOverlayStates)
         {
-            if (!IsLiveRemoteSpeaker(remote.PlayerId, snapshot))
+            // Only suppress remotes we can positively classify as not-live. When the
+            // snapshot is briefly null (e.g. one tick after a Rejoin/transport switch),
+            // keep showing speakers instead of dropping all of them for a frame.
+            if (snapshot != null && !IsLiveRemoteSpeaker(remote.PlayerId, snapshot))
                 continue;
-            remotePlayers.Add(remote);
+            _remoteBuffer.Add(remote);
         }
 
         var local = new VoiceLocalOverlayState(
@@ -78,7 +84,7 @@ internal sealed class VoiceOverlayState
             room.UsingMicrophone,
             room.UsingSpeaker);
 
-        return new VoiceOverlayState(local, remotePlayers);
+        return new VoiceOverlayState(local, _remoteBuffer);
     }
 
     private static bool IsLiveRemoteSpeaker(byte playerId, VoiceGameStateSnapshot? snapshot)

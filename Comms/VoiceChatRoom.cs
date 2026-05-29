@@ -134,6 +134,7 @@ public class VoiceChatRoom
         VoiceOverlayState.InvalidateCache();
         CrewmateAvatarRenderer.ClearCache();
         VoiceCameraState.Clear();
+        VoiceProximityCalculator.ResetSightState();
         VoiceDiagnostics.Log("voice.ui.clear", $"reason={LogSafe(reason)}");
     }
 

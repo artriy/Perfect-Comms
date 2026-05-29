@@ -164,7 +164,6 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     public ConfigEntry<string> InterstellarServerUrl { get; }
     public ConfigEntry<bool> UpdateNotificationsEnabled { get; }
     public ConfigEntry<string> UpdateNotificationUrl { get; }
-    public ConfigEntry<bool> ShowTestUpdateNotifications { get; }
 
     private readonly ConfigEntry<string> _savedMicDeviceName;
 #if WINDOWS
@@ -366,9 +365,6 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             "https://api.github.com/repos/artriy/Perfect-Comms/releases/latest",
             new ConfigDescription("Perfect Comms GitHub latest-release API endpoint"));
 
-        ShowTestUpdateNotifications = config.Bind("Updates", "ShowTestNotifications", false,
-            new ConfigDescription("Reserved for local update notification testing"));
-
         PerPlayerVolumes = config.Bind("Audio", "PerPlayerVolumes", "",
             "Saved per-player voice volumes keyed by player name");
 
@@ -524,9 +520,29 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     }
 }
 
-[HarmonyPatch]
+// NOT an attribute-discovered [HarmonyPatch]: its target (MiraAPI's LocalEnumSetting display
+// method) is resolved by reflection and may be absent on a mismatched MiraAPI version.
+// Auto-discovery would make HarmonyX throw "Undefined target method" when the resolver returns
+// null (the same shape as the old FungleCameraOnDestroyPatch bug). Instead it is applied
+// manually from Load() only when the target resolves, and cleanly skipped otherwise.
 public static class DeviceLabelPatch
 {
+    internal static void TryApply(Harmony harmony)
+    {
+        var target = TargetMethod();
+        if (target == null) return; // TargetMethod already logged why it couldn't resolve
+
+        try
+        {
+            harmony.Patch(target, postfix: new HarmonyMethod(typeof(DeviceLabelPatch), nameof(Postfix)));
+            VoiceDiagnostics.DebugInfo("[VC] DeviceLabelPatch applied.");
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.DebugWarning($"[VC] DeviceLabelPatch failed to apply: {ex.Message}");
+        }
+    }
+
     static System.Reflection.MethodBase? TargetMethod()
     {
         foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())

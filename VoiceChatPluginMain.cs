@@ -85,8 +85,34 @@ public class VoiceChatPluginMain : BasePlugin, IMiraPlugin
         VCManager.RegisterSceneHook();
         VoiceChatHudState.Init();
         VoiceChatPatches.RegisterKeybindHandlers();
-        Harmony.PatchAll(Assembly.GetExecutingAssembly());
+        ApplyHarmonyPatchesResiliently();
+        DeviceLabelPatch.TryApply(Harmony); // reflection-resolved target; applied conditionally, never aborts
         VanillaLobbyPatchDiagnostics.LogPatchState(Harmony);
         VoiceDiagnostics.DebugInfo("[VC] Perfect Comms loaded.");
+    }
+
+    // Patch each Harmony class independently. A single incompatible patch (a vanilla method
+    // renamed/removed by an Among Us update, or a minigame type missing an expected method
+    // such as FungleSurveillanceMinigame.OnDestroy) is logged and skipped instead of throwing
+    // out of Harmony.PatchAll — which aborts the whole pass and silently disables every later
+    // patch (that had taken out the lobby browser and other features).
+    private void ApplyHarmonyPatchesResiliently()
+    {
+        int skipped = 0;
+        foreach (var type in AccessTools.GetTypesFromAssembly(Assembly.GetExecutingAssembly()))
+        {
+            try
+            {
+                Harmony.CreateClassProcessor(type).Patch();
+            }
+            catch (Exception ex)
+            {
+                skipped++;
+                VoiceDiagnostics.DebugWarning($"[VC] Skipped Harmony patch class {type.FullName}: {ex.Message}");
+            }
+        }
+
+        if (skipped > 0)
+            VoiceDiagnostics.DebugWarning($"[VC] {skipped} Harmony patch class(es) were skipped (incompatible with this game version); the rest applied.");
     }
 }

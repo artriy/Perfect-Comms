@@ -49,7 +49,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private readonly Dictionary<string, int> _socketToClient = new();
     private readonly Dictionary<string, Queue<string>> _pendingSignalsBySocket = new();
     private readonly Dictionary<string, DateTime> _lastSignalRejectLogUtc = new();
-    private List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
+    // Reassigned from a background socket callback (clientPeerConfig) and read on the main
+    // thread when building peer connections; volatile publishes the new list reference safely.
+    private volatile List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
     private static readonly TimeSpan JoinRetryInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfferRetryInterval = TimeSpan.FromSeconds(3);
     private DateTime _lastStatsLogUtc = DateTime.MinValue;
@@ -831,8 +833,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _androidSpeaker = null;
 #endif
         _micPreprocessor.Dispose();
-        try { _socket?.DisconnectAsync(); } catch { }
+        var socket = _socket;
+        _socket = null;
+        if (socket != null)
+            _ = DisconnectAndDisposeSocketAsync(socket);
         ClearPeers();
+    }
+
+    private static async Task DisconnectAndDisposeSocketAsync(SocketIOClient.SocketIO socket)
+    {
+        try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
+        // Dispose releases the websocket, timers, and the unbounded reconnect loop's CTS,
+        // which DisconnectAsync alone leaks (the socket has no finalizer).
+        try { socket.Dispose(); } catch { }
     }
 
     private void ConnectSocket()
@@ -1365,16 +1378,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void OnDataChannelMessage(PeerConnection peer, byte[] data)
     {
-        if (data.Length >= DataControlPrefixLength && DataControlPrefix.SequenceEqual(data.Take(DataControlPrefixLength)))
+        if (HasDataControlPrefix(data))
         {
             var payload = data.Skip(DataControlPrefixLength).ToArray();
-            if (TryHandleRadioState(payload)) return;
+            if (TryHandleRadioState(payload, peer.PlayerId)) return;
             Interlocked.Increment(ref _customRx);
             CustomMessageReceived?.Invoke(new VoiceBackendCustomMessage(payload, peer.ClientId, peer.PlayerId, peer.SocketId));
             return;
         }
 
-        if (TryHandleRadioState(data)) return;
+        if (TryHandleRadioState(data, peer.PlayerId)) return;
 
         if (!peer.TryReceiveVoicePacket(data, out var error, out var decodedFrames))
         {
@@ -1389,7 +1402,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             Interlocked.Add(ref _encodedRx, decodedFrames);
     }
 
-    private bool TryHandleRadioState(byte[] payload)
+    // Direct byte compare — avoids the per-packet Take(4)+SequenceEqual iterator/closure
+    // allocations on every inbound data-channel message.
+    private static bool HasDataControlPrefix(byte[] data)
+        => data.Length >= DataControlPrefixLength
+           && data[0] == DataControlPrefix[0]
+           && data[1] == DataControlPrefix[1]
+           && data[2] == DataControlPrefix[2]
+           && data[3] == DataControlPrefix[3];
+
+    private bool TryHandleRadioState(byte[] payload, byte senderPlayerId)
     {
         if (payload.Length is not (6 or 7)
             || payload[0] != RadioStateMagic[0]
@@ -1401,6 +1423,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
 
         var playerId = payload[4];
+        // Bind to the authenticated transport peer: a peer may only set its OWN radio
+        // state. Consume (return true) spoofed/unmapped messages without applying them.
+        if (senderPlayerId == byte.MaxValue || playerId != senderPlayerId)
+        {
+            VoiceDiagnostics.Log("bcl.radio.reject", $"sender={senderPlayerId} claimed={playerId}");
+            return true;
+        }
+
         var active = payload[5] != 0;
         var channel = VoiceTeamRadioChannels.FromWire(active, payload.Length >= 7 ? payload[6] : null);
         ApplyRemoteRadioState(playerId, channel);
@@ -1614,6 +1644,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         return sample / 8388608f;
     }
 
+    // Reused encode scratch; all writes occur under _captureFrameSync and never escape.
+    private readonly short[] _encodePcm = new short[AudioHelpers.FrameSize];
+    private readonly byte[] _encodeScratch = new byte[1024];
+
     private void ProcessMicrophoneCaptureSamples(float[] floatPcm, int samples)
     {
         if (_disposed || samples <= 0 || floatPcm.Length == 0) return;
@@ -1631,10 +1665,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
                 if (_captureFrameSamples != AudioHelpers.FrameSize) continue;
 
-                var frame = new float[AudioHelpers.FrameSize];
-                Array.Copy(_captureFrameBuffer, frame, frame.Length);
+                // Encode directly from the reusable capture buffer: it holds the full frame,
+                // is only touched under _captureFrameSync, and is refilled from index 0 next.
                 _captureFrameSamples = 0;
-                ProcessMicrophoneFrameLocked(frame, frame.Length, "capture");
+                ProcessMicrophoneFrameLocked(_captureFrameBuffer, AudioHelpers.FrameSize, "capture");
             }
         }
     }
@@ -1712,13 +1746,20 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var frameTimestamp = _sendTimestamp;
         unchecked { _sendTimestamp += (uint)samples; }
 
+        // Silence suppression: when the gate says don't transmit (below threshold — the
+        // preprocessor's hangover keeps word-tails before this flips), skip encode+send
+        // entirely. _sendSequence advances only at Wrap below, so resumed packets stay
+        // sequence-contiguous and won't trigger spurious PLC on receivers.
+        if (!decision.ShouldTransmit)
+            return;
+
         var transmitPeak = 0f;
         double transmitSquareSum = 0.0;
-        var pcm = new short[samples];
+        var pcm = _encodePcm;
         for (var i = 0; i < samples; i++)
         {
             var scaled = Math.Clamp(floatPcm[i], -1f, 1f);
-            var pcmSample = (short)(scaled * short.MaxValue);
+            var pcmSample = (short)MathF.Round(scaled * short.MaxValue);
             pcm[i] = pcmSample;
             transmitSquareSum += (double)(scaled * short.MaxValue) * (scaled * short.MaxValue);
             var abs = Math.Abs(scaled);
@@ -1727,7 +1768,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _lastTransmitGain = transmitGain;
         _lastTransmitPeak = transmitPeak;
 
-        var packet = new byte[1024];
+        var packet = _encodeScratch;
         int encoded;
         try
         {
@@ -1974,7 +2015,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         encoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
         encoder.UseVBR = true;
         encoder.UseConstrainedVBR = BclOpusUseConstrainedVbr;
-        encoder.UseDTX = false;
+        encoder.UseDTX = true; // complement to ShouldTransmit gating: shrink any quiet transmitted frames
         encoder.UseInbandFEC = BclOpusUseInbandFec;
         encoder.PacketLossPercent = BclOpusPacketLossPercent;
         return encoder;
@@ -2009,8 +2050,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         private int _routeClearsSinceStats;
         private float _appliedPan;
         private readonly Timer _tailFlushTimer;
+        // Reused decode scratch (grow-on-demand). All decode callers hold _sync, and
+        // AddSamples copies synchronously, so these never escape or alias across threads.
+        private short[] _decodePcm = System.Array.Empty<short>();
+        private float[] _decodeFloat = System.Array.Empty<float>();
         private bool _disposed;
 
+        // Retained: constructed by the test harness via reflection (not dead despite having
+        // no compile-time call site). Forwards clientId as the playback group id.
         public PeerConnection(string socketId, int clientId, BclPeerPlaybackRoute leftRoute, BclPeerPlaybackRoute rightRoute)
             : this(socketId, clientId, clientId, leftRoute, rightRoute)
         {
@@ -2089,7 +2136,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             return true;
         }
 
-        public void ResetMappingNoMute() => PlayerId = byte.MaxValue;
+        public void ResetMappingNoMute()
+        {
+            // Clear per-mapping state too, so a slot remapped to another player mid-game
+            // doesn't inherit the previous player's radio channel or smoothed wall coefficient.
+            PlayerId = byte.MaxValue;
+            _radioChannel = VoiceTeamRadioChannel.None;
+            WallCoefficient = 1f;
+        }
         public void SetVolume(float volume)
         {
             var clamped = Mathf.Clamp(volume, 0f, 2f);
@@ -2165,7 +2219,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     return DecodeLegacyPacket(data, out error, out decodedFrames);
 
                 if (!BclVoicePacket.TryRead(data, out var packet))
-                    return DecodeLegacyPacket(data, out error, out decodedFrames);
+                {
+                    // Magic matched but the framed header failed to parse (wrong version/codec/
+                    // flags/duration). Do NOT fall back to legacy decode — that would feed the
+                    // header bytes into Opus as audio. Drop it as a parse error instead.
+                    error = "invalid-bcl-packet";
+                    return false;
+                }
 
                 RadioActive = packet.Flags.HasFlag(BclVoicePacketFlags.Radio);
                 var packetLevel = packet.Level / (float)byte.MaxValue;
@@ -2180,7 +2240,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 {
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    var frameSize = Math.Max(AudioHelpers.FrameSize, (int)frame.Duration);
+                    // For an FEC-reconstructed (lost) frame, decode at the standard frame size;
+                    // frame.Duration here is the successor's duration, not the lost frame's.
+                    var frameSize = decodeFec
+                        ? AudioHelpers.FrameSize
+                        : Math.Max(AudioHelpers.FrameSize, (int)frame.Duration);
                     if (!DecodeAndAddSamples(payload, decodeFec, frameSize, out error, out var decoded))
                         return false;
                     decodedFrames += decoded > 0 ? 1 : 0;
@@ -2203,7 +2267,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 {
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    var frameSize = Math.Max(AudioHelpers.FrameSize, (int)frame.Duration);
+                    // For an FEC-reconstructed (lost) frame, decode at the standard frame size;
+                    // frame.Duration here is the successor's duration, not the lost frame's.
+                    var frameSize = decodeFec
+                        ? AudioHelpers.FrameSize
+                        : Math.Max(AudioHelpers.FrameSize, (int)frame.Duration);
                     if (!DecodeAndAddSamples(payload, decodeFec, frameSize, out error, out var decoded))
                         return false;
                     decodedFrames += decoded > 0 ? 1 : 0;
@@ -2237,11 +2305,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             error = null;
             decodedFrames = 0;
 
-            var pcm = new short[Math.Max(AudioHelpers.FrameSize * 2, frameSize * AudioHelpers.Channels)];
+            int need = Math.Max(AudioHelpers.FrameSize * 2, frameSize * AudioHelpers.Channels);
+            if (_decodePcm.Length < need) _decodePcm = new short[need];
+            var pcm = _decodePcm;
             int decoded;
             try
             {
-                decoded = Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, pcm.Length), frameSize, decodeFec);
+                decoded = Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, need), frameSize, decodeFec);
             }
             catch (Exception ex)
             {
@@ -2250,7 +2320,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
 
             if (decoded <= 0) return false;
-            var samples = new float[decoded];
+            if (_decodeFloat.Length < decoded) _decodeFloat = new float[decoded];
+            var samples = _decodeFloat;
             var peak = 0f;
             for (var i = 0; i < decoded; i++)
             {
@@ -2260,8 +2331,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 if (abs > peak) peak = abs;
             }
             ObserveVoiceLevel(peak);
-            _leftRoute.AddSamples(samples, 0, samples.Length);
-            _rightRoute.AddSamples(samples, 0, samples.Length);
+            _leftRoute.AddSamples(samples, 0, decoded);
+            _rightRoute.AddSamples(samples, 0, decoded);
             decodedFrames = 1;
             return true;
         }

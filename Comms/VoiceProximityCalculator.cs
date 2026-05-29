@@ -7,9 +7,14 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class VoiceProximityCalculator
 {
     private const float GhostVisionRangeMultiplier = 1f;
+    private const float LowVolumeFloor = 0.06f;
     private static float _lastUnimpairedLocalLightRadius;
 
     internal static Func<bool>? LocalListenerBlindedOrFlashedProvider { get; set; }
+
+    // Reset transient per-process spatial state on game/lobby lifecycle transitions so a
+    // stale light radius from a prior game can't shrink hearing range in a new one.
+    internal static void ResetSightState() => _lastUnimpairedLocalLightRadius = 0f;
 
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
@@ -27,7 +32,7 @@ internal static class VoiceProximityCalculator
         float maxDistance = s.MaxChatDistance;
         float dist = Distance(target.Position, listenerPos.Value);
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
-        if (volume < 0.06f)
+        if (volume < LowVolumeFloor)
             volume = 0f;
         float pan = VoiceChatRoom.GetPan(listenerPos.Value.x, target.Position.x);
 
@@ -71,7 +76,10 @@ internal static class VoiceProximityCalculator
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
                     true, VoiceProximityReason.TeamRadio, 1f);
 
-            return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted);
+            // Living non-teammates are hard-muted from the radio channel; dead listeners
+            // fall through so ghosts still hear a living radio user normally.
+            if (!localDead)
+                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted);
         }
 
         if (localDead)
@@ -151,7 +159,10 @@ internal static class VoiceProximityCalculator
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
                     true, VoiceProximityReason.TeamRadio, previousWallCoefficient);
 
-            return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, previousWallCoefficient);
+            // Living non-teammates are hard-muted from the radio channel; dead listeners
+            // fall through so ghosts still hear a living radio user via proximity below.
+            if (!localDead)
+                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, previousWallCoefficient);
         }
 
         if (localDead)
@@ -200,11 +211,15 @@ internal static class VoiceProximityCalculator
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
         float pan = VoiceChatRoom.GetPan(localListenerPos.x, targetPos.x);
 
+        bool sightBlocked = false;
         if (s.OnlyHearInSight)
         {
             bool inSight = VoiceAudioOcclusion.Inspect(localListenerPos, targetPos).InSight;
             if (!inSight || dist > maxDistance)
+            {
                 volume = 0f;
+                sightBlocked = true;
+            }
         }
 
         float wallCoefficient = previousWallCoefficient;
@@ -236,10 +251,15 @@ internal static class VoiceProximityCalculator
         }
 
         float finalVolume = volume * wallCoefficient;
+        if (finalVolume < LowVolumeFloor)
+            finalVolume = 0f;
         var virtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, previousWallCoefficient);
+        VoiceProximityReason proximityReason = sightBlocked
+            ? VoiceProximityReason.SightBlocked
+            : (localDead ? VoiceProximityReason.LocalDeadHearsLiving : VoiceProximityReason.Proximity);
         var proximityRoute = new VoiceProximityResult(finalVolume, 0f, 0f, pan, filterMode,
             finalVolume > 0f,
-            localDead ? VoiceProximityReason.LocalDeadHearsLiving : VoiceProximityReason.Proximity,
+            proximityReason,
             wallCoefficient);
         var cameraRoute = hasCameraProxy
             ? CalculateCameraProxy(targetPos, cameraPosition, s, previousWallCoefficient)
@@ -390,7 +410,7 @@ internal static class VoiceProximityCalculator
     {
         float dist = Distance(sourcePos, listenerPos);
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, settings.MaxChatDistance, (VoiceFalloffMode)settings.FalloffMode);
-        if (volume < 0.06f)
+        if (volume < LowVolumeFloor)
             volume = 0f;
 
         float pan = VoiceChatRoom.GetPan(listenerPos.x, sourcePos.x);
@@ -404,10 +424,10 @@ internal static class VoiceProximityCalculator
         if (!local.IsLover || !target.IsLover)
             return false;
 
+        // Match only on explicit partner ids. byte.MaxValue is the "partner unresolved"
+        // sentinel; treating it as a wildcard let unrelated lover pairs hear each other.
         return local.LoverPartnerId == target.PlayerId ||
-               target.LoverPartnerId == local.PlayerId ||
-               local.LoverPartnerId == byte.MaxValue ||
-               target.LoverPartnerId == byte.MaxValue;
+               target.LoverPartnerId == local.PlayerId;
     }
 
     private static VoiceProximityResult CalculateVirtualRoute(

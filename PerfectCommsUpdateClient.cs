@@ -9,7 +9,6 @@ namespace VoiceChatPlugin;
 internal sealed class PerfectCommsUpdateInfo
 {
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-    [JsonPropertyName("test")] public bool Test { get; set; }
     [JsonPropertyName("latestVersion")] public string LatestVersion { get; set; } = "";
     [JsonPropertyName("title")] public string Title { get; set; } = "Perfect Comms update available";
     [JsonPropertyName("message")] public string Message { get; set; } = "";
@@ -47,8 +46,8 @@ internal static class PerfectCommsUpdateClient
         request.Headers.TryAddWithoutValidation("User-Agent", $"PerfectComms/{VoiceChatPluginMain.Version}");
 
         using var response = await Client.SendAsync(request).ConfigureAwait(false);
-        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         return ParseUpdateInfo(text);
     }
 

@@ -223,20 +223,3 @@ internal static class FungleCameraStatePatches
         SurveillanceCameraStatePatches.RestoreVoiceOverlayCameraMasks();
     }
 }
-
-[HarmonyPatch]
-internal static class FungleCameraOnDestroyPatch
-{
-    private static IEnumerable<MethodBase> TargetMethods()
-    {
-        var method = AccessTools.Method(typeof(FungleSurveillanceMinigame), "OnDestroy");
-        if (method != null)
-            yield return method;
-    }
-
-    private static void Prefix(FungleSurveillanceMinigame __instance)
-    {
-        VoiceCameraState.Close(__instance);
-        SurveillanceCameraStatePatches.RestoreVoiceOverlayCameraMasks();
-    }
-}

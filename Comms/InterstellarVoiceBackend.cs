@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -15,7 +16,10 @@ namespace VoiceChatPlugin.VoiceChat;
 internal sealed class InterstellarVoiceBackend : IVoiceBackend
 {
     private readonly VCRoom _room;
-    private readonly Dictionary<int, Peer> _peers = new();
+    // Concurrent: the Interstellar VCRoom invokes OnConnectClient/OnUpdateProfile/OnDisconnect
+    // on background relay/socket threads while the Unity main thread reads/iterates here.
+    // ConcurrentDictionary enumeration never throws on concurrent mutation (unlike Dictionary).
+    private readonly ConcurrentDictionary<int, Peer> _peers = new();
     private readonly StereoRouter _imager;
     private readonly VolumeRouter _normalVolume;
     private readonly VolumeRouter _ghostVolume;
@@ -206,7 +210,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
                 },
                 OnDisconnect = clientId =>
                 {
-                    _peers.Remove(clientId);
+                    _peers.TryRemove(clientId, out _);
                     VoiceDiagnostics.Log("interstellar.peer-disconnected", $"client={clientId}");
                 },
                 MessageHandler = HandleCustomMessage,
@@ -939,10 +943,10 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             && payload[2] == RadioStateMagic[2]
             && payload[3] == RadioStateMagic[3])
         {
-            var playerId = payload[4];
-            var active = payload[5] != 0;
-            var channel = VoiceTeamRadioChannels.FromWire(active, payload.Length >= 7 ? payload[6] : null);
-            ApplyRemoteRadioState(playerId, channel);
+            // The Interstellar message handler does not expose the sending client, so this
+            // custom-message copy cannot be authenticated against a sender. Ignore it and
+            // rely on the authenticated Hazel radio-state RPC (VoiceRadioStateRpc), which
+            // is sent in parallel and binds to the network sender.
             return;
         }
 

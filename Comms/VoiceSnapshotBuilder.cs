@@ -23,6 +23,8 @@ internal static class VoiceSnapshotBuilder
         var cameraView = ResolveCameraView(local, mapId);
 
         var players = new List<VoicePlayerSnapshot>(16);
+        try
+        {
         foreach (var player in PlayerControl.AllPlayerControls)
         {
             if (player == null) continue;
@@ -78,6 +80,12 @@ internal static class VoiceSnapshotBuilder
                 mediumSpiritPosition,
                 isMediatedGhost,
                 mediatingMediumId));
+        }
+        }
+        catch
+        {
+            // Scene transitions can momentarily invalidate AllPlayerControls; emit a
+            // snapshot with whatever was collected rather than dropping the whole frame.
         }
 
         return new VoiceGameStateSnapshot(

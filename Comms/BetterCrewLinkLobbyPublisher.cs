@@ -206,6 +206,8 @@ internal static class BetterCrewLinkLobbyPublisher
 
         try { await socket.EmitAsync("leave").ConfigureAwait(false); } catch { }
         try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
+        // Dispose releases the websocket, timers, and the unbounded reconnect loop's CTS.
+        try { socket.Dispose(); } catch { }
     }
 
     private static int ResolveLocalPlayerId()

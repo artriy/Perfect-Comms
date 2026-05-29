@@ -24,7 +24,25 @@ public static class MeetingSpeakingIndicatorPatch
     private static int _updateCalls;
 
     public static void Postfix(MeetingHud __instance)
-        => UpdateIndicators(VoiceOverlayState.Current(VoiceChatRoom.Current), __instance);
+    {
+        try
+        {
+            UpdateIndicators(VoiceOverlayState.Current(VoiceChatRoom.Current), __instance);
+        }
+        catch (Exception ex)
+        {
+            LogIndicatorError(ex);
+        }
+    }
+
+    private static float _lastIndicatorErrorTime = -999f;
+
+    private static void LogIndicatorError(Exception ex)
+    {
+        if (Time.time - _lastIndicatorErrorTime < 5f) return;
+        _lastIndicatorErrorTime = Time.time;
+        VoiceDiagnostics.DebugError("[VC] Meeting speaking overlay update failed: " + ex.Message);
+    }
 
     internal static void UpdateIndicators(VoiceOverlayState overlay)
     {
@@ -48,6 +66,7 @@ public static class MeetingSpeakingIndicatorPatch
     internal static void ClearAllIndicators()
     {
         _speakingLevels.Clear();
+        _playerColors.Clear(); // drop cached colors so they re-resolve after lifecycle resets
         DisableAll();
     }
 
@@ -561,23 +580,29 @@ public static class MeetingSpeakingIndicatorPatch
         if (_playerColors.TryGetValue(playerId, out var cached))
             return cached;
 
-        foreach (var pc in PlayerControl.AllPlayerControls)
+        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
+        try
         {
-            if (pc == null || pc.Data == null) continue;
-            if (pc.PlayerId != playerId) continue;
-
-            int colorId = pc.Data.DefaultOutfit.ColorId;
-            if (colorId >= 0 && colorId < Palette.PlayerColors.Length)
+            var players = PlayerControl.AllPlayerControls;
+            if (players == null) return fallback;
+            foreach (var pc in players)
             {
-                var color = (Color)Palette.PlayerColors[colorId];
-                _playerColors[playerId] = color;
+                if (pc == null || pc.Data == null) continue;
+                if (pc.PlayerId != playerId) continue;
+
+                // Share the bar's color source (live body color w/ transient-red guard)
+                // so the meeting overlay stays in parity with the speaking bar.
+                var color = CrewmateAvatarRenderer.GetPaletteColor(pc);
+                _playerColors[playerId] = color; // cache only a resolved color
                 return color;
             }
         }
+        catch
+        {
+            // AllPlayerControls can be null/throw during scene transitions.
+        }
 
-        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
-        _playerColors[playerId] = fallback;
-        return fallback;
+        return fallback; // not cached, so it re-resolves once player Data is available
     }
 
     private sealed class SmoothVisualState

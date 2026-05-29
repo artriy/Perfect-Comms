@@ -258,8 +258,9 @@ public class VolumeRouter : AbstractAudioNodeProvider<VolumeRouter.Property>
     public class Property : ISampleProvider
     {
         private readonly ISampleProvider _src;
-        private float _volume;
-        private float _limiterGain = 1f;
+        // _volume is set on the Unity main thread and read on the NAudio pull thread.
+        private volatile float _volume;
+        private float _limiterGain = 1f; // audio-thread only
 
         public float Volume
         {
@@ -351,8 +352,11 @@ public class MonoPanRouter : AbstractAudioNodeProvider<MonoPanRouter.Property>
         private readonly ISampleProvider _src;
         private readonly WaveFormat _format;
         private float[] _stereo = Array.Empty<float>();
-        public float Volume { get; set; } = 1f;
-        public float Pan { get; set; }
+        // Volume/Pan are set on the Unity main thread and read on the NAudio pull thread.
+        private volatile float _volume = 1f;
+        private volatile float _pan;
+        public float Volume { get => _volume; set => _volume = value; }
+        public float Pan { get => _pan; set => _pan = value; }
         public WaveFormat WaveFormat => _format;
         internal Property(ISampleProvider src)
         {
@@ -396,14 +400,19 @@ public class LevelMeterRouter : AbstractAudioNodeProvider<LevelMeterRouter.Prope
     {
         private readonly ISampleProvider _src;
         public float Decay { get; set; } = 0.5f;
-        public float Level { get; private set; }
+        // Level is written on the NAudio pull thread and read on the Unity main thread.
+        private volatile float _level;
+        public float Level { get => _level; private set => _level = value; }
         public WaveFormat WaveFormat => _src.WaveFormat;
         internal Property(ISampleProvider src) => _src = src;
 
         public int Read(float[] buffer, int offset, int count)
         {
             int r = _src.Read(buffer, offset, count);
-            Level -= Decay * ((float)count / AudioHelpers.ClockRate);
+            // Decay is per-second; convert element count to per-channel frame count so
+            // stereo branches don't decay twice as fast as mono ones.
+            int channels = WaveFormat.Channels > 0 ? WaveFormat.Channels : 1;
+            Level -= Decay * ((float)count / channels / AudioHelpers.ClockRate);
             if (Level < 0f) Level = 0f;
             for (int i = 0; i < r; i++)
             {
@@ -510,7 +519,8 @@ public class DistortionFilter : AbstractAudioNodeProvider<DistortionFilter.Prope
             int r = _src.Read(buf, off, cnt);
             if (Amplification)
             {
-                float amp = 1f / Threshold;
+                // Guard against a zero/near-zero threshold producing Inf/NaN.
+                float amp = 1f / Math.Max(Threshold, 1e-4f);
                 for (int i = 0; i < r; i++)
                 {
                     float s = buf[off + i];

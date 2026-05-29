@@ -38,7 +38,7 @@ internal static class VoiceRadioStateRpc
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
     private static class PlayerControlHandleRpcPatch
     {
-        public static void Postfix(byte callId, MessageReader reader)
+        public static void Postfix(PlayerControl __instance, byte callId, MessageReader reader)
         {
             if (callId != RpcId) return;
 
@@ -49,6 +49,15 @@ internal static class VoiceRadioStateRpc
                 var channel = VoiceTeamRadioChannels.FromWire(
                     active,
                     reader.BytesRemaining > 0 ? reader.ReadByte() : null);
+
+                // Bind to the network sender: a client may only set its OWN radio state.
+                if (__instance == null || __instance.PlayerId != playerId)
+                {
+                    VoiceDiagnostics.Log("radio.rpc.reject",
+                        $"sender={(__instance == null ? "null" : __instance.PlayerId.ToString())} claimed={playerId}");
+                    return;
+                }
+
                 VoiceChatRoom.ApplyRemoteRadioState(playerId, channel);
             }
             catch (Exception ex)
