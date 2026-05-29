@@ -70,7 +70,7 @@ internal static class VoiceProximityCalculator
         if (VoiceRoleMuteState.IsMeetingVoiceBlocked(target, phase))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetMeetingBlockReason(target, phase));
 
-        if (s.TeamRadio && targetRadioActive && !targetDead)
+        if (s.TeamRadio && s.TeamRadioInMeetings && targetRadioActive && !targetDead)
         {
             if (CanHearTeamRadio(localPlayer, target, s, targetRadioChannel))
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
@@ -93,6 +93,11 @@ internal static class VoiceProximityCalculator
         return new(1f, 0f, 0f, 0f, VoiceAudioFilterMode.None,
             true, VoiceProximityReason.MeetingLiving, 1f);
     }
+
+    // Team radio routing only applies during meetings when the host explicitly enables it.
+    // When disabled (default), CalculateMeeting ignores targetRadioActive entirely so a
+    // radio-holding teammate is heard via normal meeting audibility instead of being
+    // hard-muted to all non-teammates (and impostors get no private meeting channel).
 
     public static VoiceProximityResult CalculateTaskPhase(
         VoicePlayerSnapshot? localPlayer,

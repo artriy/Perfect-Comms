@@ -188,6 +188,12 @@ internal sealed class BclVoiceJitterBuffer
     private int _fecFrames;
     private int _maxDepth;
     private DateTime _lastEnqueueUtc = DateTime.MinValue;
+    // Reused per-buffer scratch lists for the returned playout frames. Enqueue and DrainDue are
+    // only ever called under PeerConnection._sync and their results are fully consumed (synchronous
+    // foreach) before the lock is released, so reusing a list avoids a List allocation on every
+    // received packet / tail-timer tick on the network/decode threads with no aliasing risk.
+    private readonly List<BclVoicePlayoutFrame> _enqueueScratch = new(MaxDrainFramesPerPacket);
+    private readonly List<BclVoicePlayoutFrame> _drainScratch = new(MaxDrainFramesPerPacket);
 
     public BclVoiceJitterBuffer(int targetDelayFrames = DefaultTargetDelayFrames, int maxBufferedFrames = DefaultMaxBufferedFrames)
     {
@@ -198,7 +204,8 @@ internal sealed class BclVoiceJitterBuffer
     public IReadOnlyList<BclVoicePlayoutFrame> Enqueue(BclVoicePacket packet)
     {
         _v2Packets++;
-        var frames = new List<BclVoicePlayoutFrame>();
+        var frames = _enqueueScratch;
+        frames.Clear();
         if (!_hasExpected)
         {
             _expectedSequence = packet.Sequence;
@@ -250,7 +257,8 @@ internal sealed class BclVoiceJitterBuffer
 
     public IReadOnlyList<BclVoicePlayoutFrame> DrainDue(DateTime nowUtc, TimeSpan quietDelay)
     {
-        var frames = new List<BclVoicePlayoutFrame>();
+        var frames = _drainScratch;
+        frames.Clear();
         if (!_hasExpected || _packets.Count == 0 || nowUtc - _lastEnqueueUtc < quietDelay)
             return frames;
 

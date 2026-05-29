@@ -19,6 +19,10 @@ public static class MeetingSpeakingIndicatorPatch
     private static readonly Dictionary<byte, float> _speakingLevels = new();
     private static readonly Dictionary<byte, SmoothVisualState> _visualStates = new();
     private static readonly Dictionary<byte, Color> _playerColors = new();
+    // Original vanilla HighlightedFX state captured before we tint it for the speaking overlay,
+    // so the vote-card selection outline (color/sorting/mask/enabled) is restored intact when the
+    // player stops speaking instead of being force-disabled and left re-sorted onto the UI layer.
+    private static readonly Dictionary<byte, BuiltInHighlightSnapshot> _highlightSnapshots = new();
     private static Sprite? _cardGlowSprite;
     private static DateTime _lastUpdateLogUtc;
     private static int _updateCalls;
@@ -268,6 +272,10 @@ public static class MeetingSpeakingIndicatorPatch
         var highlight = state.HighlightedFX;
         if (highlight == null) return;
 
+        // Remember the untouched vanilla state once, before the first tint, so it can be restored.
+        if (!_highlightSnapshots.ContainsKey(state.TargetPlayerId))
+            _highlightSnapshots[state.TargetPlayerId] = new BuiltInHighlightSnapshot(highlight);
+
         var highlightColor = color;
         highlightColor.a = Mathf.Lerp(0.20f, 0.95f, brightness) * visibility;
         highlight.color = highlightColor;
@@ -279,8 +287,21 @@ public static class MeetingSpeakingIndicatorPatch
 
     private static void ClearBuiltInHighlight(PlayerVoteArea state)
     {
-        if (state.HighlightedFX != null)
-            state.HighlightedFX.enabled = false;
+        var highlight = state.HighlightedFX;
+        if (highlight == null) return;
+
+        byte id = state.TargetPlayerId;
+        if (_highlightSnapshots.TryGetValue(id, out var snapshot))
+        {
+            // Hand the renderer back to the game exactly as we found it (color, sorting layer/order,
+            // mask interaction, enabled) so a live vote-target selection outline is not clobbered.
+            snapshot.Restore(highlight);
+            _highlightSnapshots.Remove(id);
+        }
+        else
+        {
+            highlight.enabled = false;
+        }
     }
 
     private static Vector3 GetCardLocalPosition(PlayerVoteArea state)
@@ -537,13 +558,20 @@ public static class MeetingSpeakingIndicatorPatch
     [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.OnDestroy))]
     private static class DestroyPatch
     {
-        private static void Postfix()
-        {
-            _cardGlows.Clear();
-            _speakingLevels.Clear();
-            _visualStates.Clear();
-            _playerColors.Clear();
-        }
+        // Use a finalizer (not a postfix) so meeting state is cleared even if vanilla OnDestroy
+        // throws — otherwise stale glows and highlight snapshots could leak into the next meeting.
+        [HarmonyFinalizer]
+        private static void Finalizer() => ClearDestroyedMeetingState();
+    }
+
+    internal static void ClearDestroyedMeetingState()
+    {
+        ClearAllBuiltInHighlights(); // best-effort restore of any live vote-card highlights
+        _cardGlows.Clear();
+        _speakingLevels.Clear();
+        _visualStates.Clear();
+        _playerColors.Clear();
+        _highlightSnapshots.Clear();
     }
 
     private static Sprite GetCardGlowSprite()
@@ -610,5 +638,34 @@ public static class MeetingSpeakingIndicatorPatch
         public float TargetLevel;
         public float SmoothedLevel;
         public float Visibility;
+    }
+
+    // Snapshot of a vanilla PlayerVoteArea.HighlightedFX renderer's visual state so the speaking
+    // overlay can tint it while a player talks and then restore it byte-for-byte afterwards.
+    private readonly struct BuiltInHighlightSnapshot
+    {
+        public readonly Color Color;
+        public readonly int SortingLayerID;
+        public readonly int SortingOrder;
+        public readonly SpriteMaskInteraction MaskInteraction;
+        public readonly bool Enabled;
+
+        public BuiltInHighlightSnapshot(SpriteRenderer highlight)
+        {
+            Color = highlight.color;
+            SortingLayerID = highlight.sortingLayerID;
+            SortingOrder = highlight.sortingOrder;
+            MaskInteraction = highlight.maskInteraction;
+            Enabled = highlight.enabled;
+        }
+
+        public void Restore(SpriteRenderer highlight)
+        {
+            highlight.color = Color;
+            highlight.sortingLayerID = SortingLayerID;
+            highlight.sortingOrder = SortingOrder;
+            highlight.maskInteraction = MaskInteraction;
+            highlight.enabled = Enabled;
+        }
     }
 }

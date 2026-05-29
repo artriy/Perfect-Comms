@@ -691,14 +691,10 @@ public static class PingTrackerPatch
     private static PlayerControl? FindPlayer(byte id)
         => _playerLookup.TryGetValue(id, out var pc) && pc != null ? pc : null;
 
+    // Shared with the meeting overlay so the bar ring, meeting glow, and synthetic body stay in
+    // parity — including the concealed-grey path and the out-of-range/modded color fallback.
     private static Color GetPaletteColor(PlayerControl? pc)
-    {
-        if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f);
-        int cid = GetPlayerColorId(pc);
-        return cid >= 0 && cid < Palette.PlayerColors.Length
-            ? (Color)Palette.PlayerColors[cid]
-            : Color.white;
-    }
+        => CrewmateAvatarRenderer.GetPaletteColor(pc);
 
     private static int GetPlayerColorId(PlayerControl pc)
     {
@@ -748,6 +744,9 @@ public static class PingTrackerPatch
     private static string GetDisplayName(PlayerControl? player)
     {
         if (player?.Data == null) return "?";
+        // Hide the real name of a concealed (camouflaged/mixed-up/swooped) speaker, matching how
+        // the game hides floating names so the overlay can't be used to identify them.
+        if (CrewmateAvatarRenderer.IsConcealed(player)) return string.Empty;
         try
         {
             var name = GetDisplayOutfit(player).PlayerName;

@@ -95,9 +95,24 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     public bool UsingMicrophone => _microphoneReady;
     public bool UsingSpeaker => _speakerReady;
 
-    public IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates => _peers.Values
-        .Where(peer => peer.PlayerId != byte.MaxValue)
-        .Select(peer => peer.ToOverlayState());
+    public IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates
+    {
+        get
+        {
+            // Enumerate the concurrent dictionary directly into one materialized list rather than
+            // _peers.Values.Where().Select() (which allocates a Values snapshot plus two LINQ
+            // iterators every overlay rebuild). ConcurrentDictionary enumeration is read-safe, and
+            // a freshly-built list is returned so there is no aliasing with the reused overlay buffer.
+            var states = new List<VoiceRemoteOverlayState>(_peers.Count);
+            foreach (var kv in _peers)
+            {
+                var peer = kv.Value;
+                if (peer.PlayerId == byte.MaxValue) continue;
+                states.Add(peer.ToOverlayState());
+            }
+            return states;
+        }
+    }
 
     public int PeerCount => _peers.Count;
 

@@ -30,6 +30,12 @@ internal static class CrewmateAvatarRenderer
     private static Color32[]? templatePixels;
     private static int templateWidth;
     private static int templateHeight;
+    private static Sprite? concealedBaseSprite;
+    // Neutral grey used to mirror the game hiding a player's identity (camouflage / Mushroom
+    // Mixup / swoop). When concealed the bar shows a grey body, no cosmetics, and no name so
+    // the overlay never reveals the real color/cosmetics/name of a concealed speaker.
+    private static readonly Color32 ConcealedColor = new(0x7f, 0x7f, 0x7f, 0xff);
+    private static readonly Color32 ConcealedShadowColor = new(0x4a, 0x4a, 0x4a, 0xff);
 
     public static void TrackIdlePose(PlayerControl? pc)
     {
@@ -64,9 +70,14 @@ internal static class CrewmateAvatarRenderer
         // lobby/game transitions, movement, intro, or late cosmetic loading.
         TrackIdlePose(pc);
 
+        // Concealed (camouflaged/mixed-up/swooped) players render as a neutral grey body with no
+        // rainbow animation and no cosmetic pose, mirroring how the game hides their identity.
+        bool concealed = IsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
-        bool isRainbow = IsRainbowColorId(colorId);
-        var baseSprite = isRainbow ? GetRainbowBaseSprite(0) : GetBaseSprite(colorId);
+        bool isRainbow = !concealed && IsRainbowColorId(colorId);
+        var baseSprite = concealed
+            ? GetConcealedBaseSprite()
+            : isRainbow ? GetRainbowBaseSprite(0) : GetBaseSprite(colorId);
         if (baseSprite == null) return false;
 
         var root = new GameObject($"VC_SpriteIcon_{playerId}");
@@ -76,7 +87,7 @@ internal static class CrewmateAvatarRenderer
 
         var bodyRenderer = AddSprite(root.transform, "VC_Body_Base", baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
         if (isRainbow) AddRainbowBodyAnimator(bodyRenderer);
-        if (HasCachedPose(playerId, pc))
+        if (!concealed && HasCachedPose(playerId, pc))
             _ = TryAddCachedPose(root.transform, playerId, pc);
         ApplySorting(root);
         VCOverlayCamera.EnsureOnTop(root);
@@ -100,6 +111,7 @@ internal static class CrewmateAvatarRenderer
     internal static bool TryUpgradeWithCachedPose(GameObject? iconRoot, byte playerId, PlayerControl? pc)
     {
         if (iconRoot == null || pc?.Data == null) return false;
+        if (IsConcealed(pc)) return false; // never attach real cosmetics onto a concealed body
         if (!HasCachedCosmeticPose(playerId, pc)) return false;
         if (!TryAddCachedPose(iconRoot.transform, playerId, pc)) return false;
         ApplySorting(iconRoot);
@@ -127,10 +139,37 @@ internal static class CrewmateAvatarRenderer
     internal static Color GetPaletteColor(PlayerControl? pc)
     {
         if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
-        int cid = GetPlayerColorId(pc);
-        return cid >= 0 && cid < Palette.PlayerColors.Length
-            ? (Color)Palette.PlayerColors[cid]
-            : Color.white;
+        if (IsConcealed(pc)) return (Color)ConcealedColor;
+        // Out-of-range / modded color ids fall back to the SAME palette index (red) that the body
+        // sprite uses via ClampColorId, so the ring/meeting glow never disagrees with the body
+        // (previously the body recolored to red while the ring/card glowed white).
+        return (Color)Palette.PlayerColors[ClampColorId(GetPlayerColorId(pc))];
+    }
+
+    // A player is "concealed" when the game hides their identity so others cannot tell who is
+    // speaking. The numeric CurrentOutfitType space is shared between vanilla PlayerOutfitType and
+    // Town of Us' TownOfUsAppearances: 3 = MushroomMixUp, 4 = Swooper, 6 = Camouflage — all grey
+    // every body. Disguises (Shapeshift=1, Mimic=5, Morph=7) intentionally show the disguised
+    // appearance and are NOT treated as concealed.
+    internal static bool IsConcealed(PlayerControl? pc)
+    {
+        if (pc?.Data == null) return false;
+        try
+        {
+            int outfitType = (int)pc.CurrentOutfitType;
+            return outfitType == 3 || outfitType == 4 || outfitType == 6;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static Sprite? GetConcealedBaseSprite()
+    {
+        if (concealedBaseSprite != null) return concealedBaseSprite;
+        concealedBaseSprite = CreateBaseSprite(ConcealedColor, ConcealedShadowColor);
+        return concealedBaseSprite;
     }
 
     private static bool DestroyIncompleteIcon(GameObject root)

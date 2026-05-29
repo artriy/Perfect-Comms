@@ -533,13 +533,22 @@ internal static partial class VoiceRoleMuteState
         if (local == null || !VoiceSceneState.IsMeetingVoicePhase(VoiceSceneState.ResolvePhase()) || local.Data?.IsDead == true || !IsJailor(local))
             return false;
 
-        foreach (var player in PlayerControl.AllPlayerControls)
+        try
         {
-            if (player == null || player.Data?.IsDead == true) continue;
-            if (!TryGetJailorId(player, out byte jailorId) || jailorId != local.PlayerId) continue;
-            if (!IsJailorValid(jailorId) || JailVoiceAllowed.Contains(player.PlayerId)) continue;
-            jailedPlayerId = player.PlayerId;
-            return true;
+            foreach (var player in PlayerControl.AllPlayerControls)
+            {
+                if (player == null || player.Data?.IsDead == true) continue;
+                if (!TryGetJailorId(player, out byte jailorId) || jailorId != local.PlayerId) continue;
+                if (!IsJailorValid(jailorId) || JailVoiceAllowed.Contains(player.PlayerId)) continue;
+                jailedPlayerId = player.PlayerId;
+                return true;
+            }
+        }
+        catch
+        {
+            // AllPlayerControls can be invalidated by a scene transition mid-enumeration. Fail
+            // closed (no jailor unmute available this frame) rather than let the throw escape into
+            // the unguarded UpdateHud path and strand the local mute state.
         }
 
         return false;

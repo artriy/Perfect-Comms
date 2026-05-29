@@ -46,6 +46,10 @@ public class VoiceChatGameOptions : AbstractOptionGroup
     {
         Visible = TeamRadioSubOptionsVisible
     };
+    public ModdedToggleOption TeamRadioInMeetings  { get; } = new("Team Radio - Usable in Meetings", false)
+    {
+        Visible = TeamRadioSubOptionsVisible
+    };
     public ModdedToggleOption OnlyGhostsCanTalk    { get; } = new("Only Ghosts can Talk/Hear",      false);
     public ModdedToggleOption OnlyMeetingOrLobby   { get; } = new("Meetings/Lobby Only",            false);
     public ModdedToggleOption OnlyMeetingOrLobbyAffectsGhosts { get; } = new("Ghosts Also Meeting/Lobby Only", false)

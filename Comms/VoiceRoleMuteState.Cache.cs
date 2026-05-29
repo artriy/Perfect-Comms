@@ -35,10 +35,19 @@ internal static partial class VoiceRoleMuteState
 
         _nextRoleStateRefreshTime = Time.time + RoleStateRefreshInterval;
         RoleStateCache.Clear();
-        foreach (var player in PlayerControl.AllPlayerControls)
+        try
         {
-            if (player == null) continue;
-            RoleStateCache[player.PlayerId] = ReadRoleState(player);
+            foreach (var player in PlayerControl.AllPlayerControls)
+            {
+                if (player == null) continue;
+                RoleStateCache[player.PlayerId] = ReadRoleState(player);
+            }
+        }
+        catch
+        {
+            // AllPlayerControls can be invalidated by a scene transition mid-enumeration. Keep the
+            // partial/empty cache and retry on the next refresh rather than throwing into the
+            // unguarded per-frame UpdateHud path.
         }
     }
 
@@ -302,9 +311,16 @@ internal static partial class VoiceRoleMuteState
 
     private static PlayerControl? FindPlayer(byte playerId)
     {
-        foreach (var player in PlayerControl.AllPlayerControls)
-            if (player != null && player.PlayerId == playerId)
-                return player;
+        try
+        {
+            foreach (var player in PlayerControl.AllPlayerControls)
+                if (player != null && player.PlayerId == playerId)
+                    return player;
+        }
+        catch
+        {
+            // AllPlayerControls can be invalidated mid-enumeration during scene transitions.
+        }
         return null;
     }
 }
