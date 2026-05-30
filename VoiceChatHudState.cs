@@ -29,9 +29,15 @@ public static class VoiceChatHudState
     private const float TooltipViewportPadding = 0.02f;
     private const float ButtonViewportDepth = 10f;
     private const float ButtonViewportPadding = 0.015f;
+    // Right-edge inset for the jail-unmute button on a meeting card, in multiples of the
+    // button's world size. Tuned so the icon sits in the empty area past the name without
+    // spilling into the gap between cards. Lower = nearer the right edge.
+    private const float JailCardRightInset = 0.37f;
     private static float _btnX = 0.99f;
     private static float _btnY = 0.10f;
     private static VoiceControlsLayout _controlsLayout = VoiceControlsLayout.Vertical;
+    private static JailUnmuteButtonPlacement _jailPlacement = JailUnmuteButtonPlacement.MeetingCard;
+    private static bool _jailOnCard;
     private static GameObject?  _micTooltip;
     private static GameObject?  _spkTooltip;
     private static TextMeshPro? _micTooltipTmp;
@@ -83,6 +89,22 @@ public static class VoiceChatHudState
         _btnX = settings.ButtonPositionX.Value;
         _btnY = settings.ButtonPositionY.Value;
         _controlsLayout = settings.VoiceControlsLayout.Value;
+        _jailPlacement = settings.JailUnmuteButtonPlacement.Value;
+        // Switching away from card mode: drop the card-placement guard now so PositionButtons
+        // restores the Voice-HUD spot this frame instead of waiting for the next HUD tick.
+        // Reparent the button back to the HUD root FIRST — otherwise PositionButtons would
+        // write HUD-root-relative local coordinates onto a button still childed to the
+        // jailee's card, flashing it to the wrong spot for one frame.
+        if (_jailPlacement != JailUnmuteButtonPlacement.MeetingCard)
+        {
+            _jailOnCard = false;
+            if (_jailButtonObj != null && _micButtonObj != null)
+            {
+                var hudRoot = _micButtonObj.transform.parent;
+                if (hudRoot != null && _jailButtonObj.transform.parent != hudRoot)
+                    _jailButtonObj.transform.SetParent(hudRoot, false);
+            }
+        }
         PositionButtons();
     }
     private static void PositionButtons()
@@ -110,6 +132,9 @@ public static class VoiceChatHudState
             jailPos = new Vector3(worldPt.x + spacing * 2f, worldPt.y, -100f);
         }
 
+        // When the jail button lives on a meeting card, keep it out of the button-group clamp
+        // so it can't drag the mic/speaker layout around.
+        if (_jailOnCard) jailPos = micPos;
         ClampVoiceButtonViewportPositions(cam, ref micPos, ref spkPos, ref jailPos);
 
         var parent = _micButtonObj.transform.parent;
@@ -117,14 +142,14 @@ public static class VoiceChatHudState
         {
             _micButtonObj.transform.localPosition = parent.InverseTransformPoint(micPos);
             _spkButtonObj.transform.localPosition = parent.InverseTransformPoint(spkPos);
-            if (_jailButtonObj != null)
+            if (_jailButtonObj != null && !_jailOnCard)
                 _jailButtonObj.transform.localPosition = parent.InverseTransformPoint(jailPos);
         }
         else
         {
             _micButtonObj.transform.position = micPos;
             _spkButtonObj.transform.position = spkPos;
-            if (_jailButtonObj != null)
+            if (_jailButtonObj != null && !_jailOnCard)
                 _jailButtonObj.transform.position = jailPos;
         }
     }
@@ -258,7 +283,8 @@ public static class VoiceChatHudState
         var root = ResolveHudRoot(hud);
         ReparentToRoot(_micButtonObj, root);
         ReparentToRoot(_spkButtonObj, root);
-        ReparentToRoot(_jailButtonObj, root);
+        // _jailButtonObj's parent is owned by UpdateHudButtonsVisibility (HUD root vs. the
+        // jailee's meeting card), so it is intentionally not reparented here.
         ReparentToRoot(_micTooltip, root);
         ReparentToRoot(_spkTooltip, root);
     }
@@ -288,12 +314,82 @@ public static class VoiceChatHudState
         if (_micButtonObj == null || _spkButtonObj == null) return;
         _micButtonObj.SetActive(true);
         _spkButtonObj.SetActive(true);
-        _jailButtonObj?.SetActive(VoiceRoleMuteState.CanLocalJailorUnmute(out _));
+
+        bool jailVisible = VoiceRoleMuteState.CanLocalJailorUnmute(out byte jailedId);
+        _jailButtonObj?.SetActive(jailVisible);
+
+        _jailOnCard = false;
+        if (jailVisible && _jailButtonObj != null &&
+            _jailPlacement == JailUnmuteButtonPlacement.MeetingCard &&
+            TryResolveJaileeCard(jailedId, out var jaileeCard))
+        {
+            PositionJailButtonOnCard(jaileeCard);
+            _jailOnCard = true;
+        }
+        else if (_jailButtonObj != null)
+        {
+            // Voice-HUD placement (and the fallback when no card resolves): ensure the button
+            // is back on the HUD root so PositionButtons can lay it out with mic/speaker.
+            var hudRoot = _micButtonObj.transform.parent;
+            if (hudRoot != null && _jailButtonObj.transform.parent != hudRoot)
+                _jailButtonObj.transform.SetParent(hudRoot, false);
+        }
+
         PositionButtons();
 
         KeepButtonOnTop(_micButtonObj);
         KeepButtonOnTop(_spkButtonObj);
         KeepButtonOnTop(_jailButtonObj);
+    }
+
+    // Finds the jailed player's meeting card so the unmute button can be attached to it.
+    // Returns false outside meetings or when the card/background isn't ready (→ HUD fallback).
+    private static bool TryResolveJaileeCard(byte jailedId, out PlayerVoteArea card)
+    {
+        card = null!;
+        if (jailedId == byte.MaxValue) return false;
+        var meeting = MeetingHud.Instance;
+        if (meeting == null || meeting.playerStates == null) return false;
+        foreach (var pva in meeting.playerStates)
+        {
+            if (pva == null || pva.TargetPlayerId != jailedId) continue;
+            if (pva.Background == null) return false;
+            card = pva;
+            return true;
+        }
+        return false;
+    }
+
+    // Parents the unmute button to the jailee's card and pins it at the card's RIGHT edge
+    // (same side as the jail/execute UI), vertically centered. The left edge sits in the gap
+    // between cards and reads as belonging to the neighbouring card, so the right edge is
+    // used. Scale is compensated for the card's world scale so the button is the same
+    // on-screen size as in the Voice HUD; draw order is handled by sorting.
+    private static void PositionJailButtonOnCard(PlayerVoteArea card)
+    {
+        if (_jailButtonObj == null) return;
+        var bg = card.Background;
+        if (bg == null) return;
+        var parentT = bg.transform;
+        if (_jailButtonObj.transform.parent != parentT)
+            _jailButtonObj.transform.SetParent(parentT, false);
+
+        float target = _overlayScale * ButtonScale;
+        var ls = parentT.lossyScale;
+        _jailButtonObj.transform.localScale = new Vector3(
+            Mathf.Approximately(ls.x, 0f) ? target : target / ls.x,
+            Mathf.Approximately(ls.y, 0f) ? target : target / ls.y,
+            1f);
+
+        var bounds = bg.bounds;
+        // Inset (world units) from the card's right edge. The Background sprite carries some
+        // transparent padding on the right, so the icon must sit a little inside max.x to
+        // land ON the card (in the empty area past the name) instead of hanging in the gap.
+        // Single tuning knob: larger = further left (toward the name); smaller = nearer the edge.
+        float inset = target * JailCardRightInset;
+        var worldPos = new Vector3(bounds.max.x - inset, bounds.center.y, bounds.center.z);
+        var local = parentT.InverseTransformPoint(worldPos);
+        _jailButtonObj.transform.localPosition = new Vector3(local.x, local.y, -1f);
     }
 
     private static void RefreshButtonVisuals()

@@ -81,11 +81,20 @@ public static class PingTrackerPatch
     private const float FadeInSpeed = 7f;
     private const float FadeOutSpeed = 5f;
     private const float StaleSlotTimeoutSeconds = 2f;
+    // Manual-layout mode: viewport placement + edge clamping, mirroring the voice buttons.
+    private const float ManualViewportDepth   = 10f;
+    private const float ManualViewportPadding = 0.015f;
+    // Footprint margin so the bar can hug the edge like the mic/speaker icons while keeping
+    // the icon fully on-screen. Larger = more of the icon stays in view near the edge.
+    private const float SlotFootprintHalfWorld = 0.16f;
     private static GameObject?       _barRoot;
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
     private static bool              _layoutAnchoredBottom;
     private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopRight;
+    private static bool              _manualLayout;
+    private static float             _manualX = 0.5f;
+    private static float             _manualY = 0.85f;
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
     private static readonly HashSet<byte> _activeSpeakerIds = new();
     private static readonly Dictionary<byte, float> _activeSpeakerLevels = new();
@@ -98,22 +107,68 @@ public static class PingTrackerPatch
 
     public static void ApplySpeakingBarPosition(SpeakingBarPosition pos)
     {
-        _barPosition    = pos;
-        _layoutVertical = pos is SpeakingBarPosition.TopLeft
-            or SpeakingBarPosition.TopRight
-            or SpeakingBarPosition.BottomLeft
-            or SpeakingBarPosition.BottomRight
-            or SpeakingBarPosition.MiddleLeft
-            or SpeakingBarPosition.MiddleRight;
-        _layoutAnchoredBottom = pos is SpeakingBarPosition.BottomLeft
-            or SpeakingBarPosition.BottomMiddle
-            or SpeakingBarPosition.BottomRight;
+        _barPosition = pos;
+        // Remember the preset even while manual mode owns placement, so toggling manual
+        // off later restores the last-chosen preset. Don't disturb manual layout here.
+        if (_manualLayout) return;
+
+        _layoutVertical       = IsVerticalPreset(pos);
+        _layoutAnchoredBottom = IsBottomAnchoredPreset(pos);
         if (_barAspect == null) return;
+        _barAspect.enabled = true;
         ApplyPositionToAspect(_barAspect, pos);
         _barAspect.AdjustPosition();
         _layoutDirty = true;
         LayoutSlotsIfDirty();
     }
+
+    // Re-reads the four manual-layout settings and switches the bar between preset mode
+    // (AspectPosition drives placement) and manual mode (X/Y sliders + edge clamping).
+    public static void ApplySpeakingBarLayoutSettings()
+    {
+        var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+        if (settings == null) return;
+
+        _manualLayout = settings.SpeakingBarManualLayout.Value;
+        _manualX      = settings.SpeakingBarX.Value;
+        _manualY      = settings.SpeakingBarY.Value;
+
+        if (_manualLayout)
+        {
+            _layoutVertical       = settings.SpeakingBarLayout.Value == VoiceControlsLayout.Vertical;
+            _layoutAnchoredBottom = false;
+            if (_barAspect != null) _barAspect.enabled = false;
+        }
+        else
+        {
+            _layoutVertical       = IsVerticalPreset(_barPosition);
+            _layoutAnchoredBottom = IsBottomAnchoredPreset(_barPosition);
+            // Drop any auto-fit shrink applied while manual mode was active.
+            if (_barRoot != null) _barRoot.transform.localScale = Vector3.one;
+            if (_barAspect != null)
+            {
+                _barAspect.enabled = true;
+                ApplyPositionToAspect(_barAspect, _barPosition);
+                _barAspect.AdjustPosition();
+            }
+        }
+
+        _layoutDirty = true;
+        LayoutSlotsIfDirty();
+    }
+
+    private static bool IsVerticalPreset(SpeakingBarPosition pos)
+        => pos is SpeakingBarPosition.TopLeft
+            or SpeakingBarPosition.TopRight
+            or SpeakingBarPosition.BottomLeft
+            or SpeakingBarPosition.BottomRight
+            or SpeakingBarPosition.MiddleLeft
+            or SpeakingBarPosition.MiddleRight;
+
+    private static bool IsBottomAnchoredPreset(SpeakingBarPosition pos)
+        => pos is SpeakingBarPosition.BottomLeft
+            or SpeakingBarPosition.BottomMiddle
+            or SpeakingBarPosition.BottomRight;
 
 
     static void Postfix(PingTracker __instance)
@@ -261,20 +316,31 @@ public static class PingTrackerPatch
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         if (settings != null)
         {
-            _barPosition    = settings.SpeakingBarPosition.Value;
-            _layoutVertical = _barPosition is SpeakingBarPosition.TopLeft
-                or SpeakingBarPosition.TopRight
-                or SpeakingBarPosition.BottomLeft
-                or SpeakingBarPosition.BottomRight
-                or SpeakingBarPosition.MiddleLeft
-                or SpeakingBarPosition.MiddleRight;
-            _layoutAnchoredBottom = _barPosition is SpeakingBarPosition.BottomLeft
-                or SpeakingBarPosition.BottomMiddle
-                or SpeakingBarPosition.BottomRight;
+            _barPosition  = settings.SpeakingBarPosition.Value;
+            _manualLayout = settings.SpeakingBarManualLayout.Value;
+            _manualX      = settings.SpeakingBarX.Value;
+            _manualY      = settings.SpeakingBarY.Value;
+            if (_manualLayout)
+            {
+                _layoutVertical       = settings.SpeakingBarLayout.Value == VoiceControlsLayout.Vertical;
+                _layoutAnchoredBottom = false;
+            }
+            else
+            {
+                _layoutVertical       = IsVerticalPreset(_barPosition);
+                _layoutAnchoredBottom = IsBottomAnchoredPreset(_barPosition);
+            }
         }
 
-        ApplyPositionToAspect(_barAspect, _barPosition);
-        _barAspect.AdjustPosition();
+        if (_manualLayout)
+        {
+            _barAspect.enabled = false;
+        }
+        else
+        {
+            ApplyPositionToAspect(_barAspect, _barPosition);
+            _barAspect.AdjustPosition();
+        }
         KeepSpeakingBarOnTop(template);
         _barRoot.SetActive(false);
     }
@@ -311,8 +377,15 @@ public static class PingTrackerPatch
         }
 
         _barRoot.transform.SetAsLastSibling();
-        var pos = _barRoot.transform.localPosition;
-        _barRoot.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
+        if (_manualLayout)
+        {
+            PositionSpeakingBarManual();
+        }
+        else
+        {
+            var pos = _barRoot.transform.localPosition;
+            _barRoot.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
+        }
         ApplySortingGroup(_barRoot, VCSorting.Ring);
         VCOverlayCamera.Sync(); // must follow the main camera every frame
         // Re-stamp allocates via GetComponentsInChildren; only run on actual change.
@@ -321,6 +394,135 @@ public static class PingTrackerPatch
             ApplySpeakingBarSorting();
             _sortingDirty = false;
         }
+    }
+
+    // Manual mode: reset to baseline scale, place the bar root at the viewport-relative
+    // slider position (mirrors VoiceChatHudState.PositionButtons), shrink to fit when there
+    // are too many speakers to fit on screen, then clamp so no slot leaves the screen.
+    private static void PositionSpeakingBarManual()
+    {
+        if (_barRoot == null) return;
+        var cam = Camera.main;
+        if (cam == null) return; // scene transition — keep last-known position this frame
+
+        // Baseline scale before measuring; auto-fit shrinks below this only when needed and
+        // restores to 1 automatically once the speaker count drops back down.
+        _barRoot.transform.localScale = Vector3.one;
+
+        var worldPt = cam.ViewportToWorldPoint(new Vector3(_manualX, _manualY, ManualViewportDepth));
+        var parent  = _barRoot.transform.parent;
+        Vector3 local = parent != null
+            ? parent.InverseTransformPoint(new Vector3(worldPt.x, worldPt.y, worldPt.z))
+            : new Vector3(worldPt.x, worldPt.y, worldPt.z);
+        _barRoot.transform.localPosition = new Vector3(local.x, local.y, -100f);
+
+        AutoFitSpeakingBar(cam);
+        ClampSpeakingBarToViewport(cam);
+    }
+
+    // When the bar's on-screen extent exceeds the viewport (e.g. a tall vertical stack of
+    // many simultaneous speakers), shrink the whole root uniformly so every icon stays
+    // fully visible. Content size scales linearly with root scale, so the needed factor is
+    // allowed / measured. Never enlarges; only shrinks.
+    private static void AutoFitSpeakingBar(Camera cam)
+    {
+        if (_barRoot == null) return;
+        if (!TryComputeSlotViewportBounds(cam, out float minX, out float maxX, out float minY, out float maxY))
+            return;
+
+        float allowed = 1f - 2f * ManualViewportPadding;
+        float sizeX = maxX - minX;
+        float sizeY = maxY - minY;
+
+        float scale = 1f;
+        if (sizeX > allowed) scale = Mathf.Min(scale, allowed / sizeX);
+        if (sizeY > allowed) scale = Mathf.Min(scale, allowed / sizeY);
+
+        if (scale < 0.999f)
+            _barRoot.transform.localScale = Vector3.one * scale;
+    }
+
+    // Generalizes VoiceChatHudState.ClampVoiceButtonViewportPositions from the 3 fixed
+    // buttons to N speaker slots: shift the whole bar root so every icon/ring/label stays
+    // inside the viewport padding. Only the root moves; child layout is preserved.
+    private static void ClampSpeakingBarToViewport(Camera cam)
+    {
+        if (_barRoot == null) return;
+        if (!TryComputeSlotViewportBounds(cam, out float minX, out float maxX, out float minY, out float maxY))
+            return;
+
+        float shiftX = CalculateManualViewportShift(minX, maxX);
+        float shiftY = CalculateManualViewportShift(minY, maxY);
+        if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f)) return;
+
+        var origin  = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ManualViewportDepth));
+        var shifted = cam.ViewportToWorldPoint(new Vector3(shiftX, shiftY, ManualViewportDepth));
+        var delta = shifted - origin;
+        delta.z = 0f;
+        _barRoot.transform.position += delta;
+    }
+
+    // Viewport-space bounding box of every slot's icon/ring/label, padded by the per-icon
+    // footprint. Shared by auto-fit (needs the size) and clamp (needs min/max to shift).
+    private static bool TryComputeSlotViewportBounds(Camera cam,
+        out float minX, out float maxX, out float minY, out float maxY)
+    {
+        minX = float.MaxValue; maxX = float.MinValue;
+        minY = float.MaxValue; maxY = float.MinValue;
+        if (_barRoot == null || _slots.Count == 0) return false;
+
+        var depthWorld = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ManualViewportDepth));
+        float depthZ = depthWorld.z;
+
+        // Per-element footprint half-extent, world → viewport.
+        var originVp = cam.WorldToViewportPoint(new Vector3(0f, 0f, depthZ));
+        var footVp   = cam.WorldToViewportPoint(new Vector3(SlotFootprintHalfWorld, SlotFootprintHalfWorld, depthZ));
+        float padX = Mathf.Abs(footVp.x - originVp.x);
+        float padY = Mathf.Abs(footVp.y - originVp.y);
+
+        bool any = false;
+        foreach (var kv in _slots)
+        {
+            var slot = kv.Value;
+            AccumulateSlotBounds(slot.IconGO, cam, depthZ, padX, padY, ref minX, ref maxX, ref minY, ref maxY, ref any);
+            AccumulateSlotBounds(slot.RingGO, cam, depthZ, padX, padY, ref minX, ref maxX, ref minY, ref maxY, ref any);
+            if (slot.LabelTMP != null)
+                AccumulateSlotBounds(slot.LabelTMP.gameObject, cam, depthZ, padX, padY,
+                    ref minX, ref maxX, ref minY, ref maxY, ref any);
+        }
+        return any;
+    }
+
+    private static void AccumulateSlotBounds(GameObject? go, Camera cam, float depthZ,
+        float padX, float padY,
+        ref float minX, ref float maxX, ref float minY, ref float maxY, ref bool any)
+    {
+        if (go == null) return;
+        var w  = go.transform.position;
+        var vp = cam.WorldToViewportPoint(new Vector3(w.x, w.y, depthZ));
+        minX = Mathf.Min(minX, vp.x - padX);
+        maxX = Mathf.Max(maxX, vp.x + padX);
+        minY = Mathf.Min(minY, vp.y - padY);
+        maxY = Mathf.Max(maxY, vp.y + padY);
+        any = true;
+    }
+
+    // Same logic as VoiceChatHudState.CalculateViewportShift, including the
+    // "content larger than the allowed area → center it" fallback.
+    private static float CalculateManualViewportShift(float min, float max)
+    {
+        float minAllowed = ManualViewportPadding;
+        float maxAllowed = 1f - ManualViewportPadding;
+        float allowedSize = maxAllowed - minAllowed;
+        float currentSize = max - min;
+
+        if (currentSize > allowedSize)
+            return (minAllowed + maxAllowed) * 0.5f - (min + max) * 0.5f;
+        if (min < minAllowed)
+            return minAllowed - min;
+        if (max > maxAllowed)
+            return maxAllowed - max;
+        return 0f;
     }
 
     private static void TrackAvatarIdlePoses()

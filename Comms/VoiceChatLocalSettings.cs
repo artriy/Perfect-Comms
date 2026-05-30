@@ -45,6 +45,12 @@ public enum VoiceControlsLayout
     Horizontal = 1,
 }
 
+public enum JailUnmuteButtonPlacement
+{
+    VoiceHud = 0,
+    MeetingCard = 1,
+}
+
 public enum VoiceMicMode
 {
     OpenMic = 0,
@@ -137,6 +143,23 @@ public class VoiceChatLocalSettings : LocalSettingsTab
 
     [LocalEnumSetting("Speaking Bar Position")]
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
+
+    [LocalToggleSetting("Manual Speaking Bar Layout")]
+    public ConfigEntry<bool> SpeakingBarManualLayout { get; }
+
+    [LocalSliderSetting("Speaking Bar X", min: 0f, max: 1f,
+        displayValue: true, formatString: "0.00")]
+    public ConfigEntry<float> SpeakingBarX { get; }
+
+    [LocalSliderSetting("Speaking Bar Y", min: 0f, max: 1f,
+        displayValue: true, formatString: "0.00")]
+    public ConfigEntry<float> SpeakingBarY { get; }
+
+    [LocalEnumSetting("Speaking Bar Layout")]
+    public ConfigEntry<VoiceControlsLayout> SpeakingBarLayout { get; }
+
+    [LocalEnumSetting("Jail Unmute Button")]
+    public ConfigEntry<JailUnmuteButtonPlacement> JailUnmuteButtonPlacement { get; }
 
     [LocalToggleSetting("Meeting Speaking Overlay")]
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
@@ -316,6 +339,25 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
             new ConfigDescription("Position of the speaking bar"));
 
+        SpeakingBarManualLayout = config.Bind("UI", "SpeakingBarManualLayout", false,
+            new ConfigDescription("Use the sliders and layout below instead of the position preset."));
+
+        SpeakingBarX = config.Bind("UI", "SpeakingBarX", 0.5f,
+            new ConfigDescription("Speaking bar horizontal position (0 = left, 1 = right).",
+                new AcceptableValueRange<float>(0f, 1f)));
+
+        SpeakingBarY = config.Bind("UI", "SpeakingBarY", 0.85f,
+            new ConfigDescription("Speaking bar vertical position (0 = bottom, 1 = top).",
+                new AcceptableValueRange<float>(0f, 1f)));
+
+        SpeakingBarLayout = config.Bind("UI", "SpeakingBarLayout",
+            VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Horizontal,
+            new ConfigDescription("Speaking bar icon direction."));
+
+        JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
+            VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
+            new ConfigDescription("Jailor unmute button: Voice HUD or the jailee's meeting card."));
+
         // Meeting overlay — on by default.
         MeetingSpeakingOverlay = config.Bind("UI", "MeetingSpeakingOverlay", true,
             new ConfigDescription(
@@ -490,6 +532,15 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         else if (configEntry == SpeakingBarPosition)
         {
             PingTrackerPatch.ApplySpeakingBarPosition(SpeakingBarPosition.Value);
+        }
+        else if (configEntry == SpeakingBarManualLayout || configEntry == SpeakingBarX ||
+                 configEntry == SpeakingBarY || configEntry == SpeakingBarLayout)
+        {
+            PingTrackerPatch.ApplySpeakingBarLayoutSettings();
+        }
+        else if (configEntry == JailUnmuteButtonPlacement)
+        {
+            VoiceChatHudState.RefreshButtonLayout();
         }
         else if (configEntry == OverlayScale)
         {
