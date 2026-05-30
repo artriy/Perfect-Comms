@@ -820,15 +820,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result);
-            if (!peer.TryFlushBufferedVoice(out var flushError, out var flushedFrames))
+            peer.TryFlushBufferedVoice(out var flushError, out var flushedFrames);
+            if (!string.IsNullOrEmpty(flushError))
             {
-                if (!string.IsNullOrEmpty(flushError))
-                {
-                    Interlocked.Increment(ref _audioDecodeFailures);
-                    VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes=0 error=\"{flushError}\"");
-                }
+                Interlocked.Increment(ref _audioDecodeFailures);
+                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes=0 error=\"{flushError}\"");
             }
-            else if (flushedFrames > 0)
+            if (flushedFrames > 0)
             {
                 Interlocked.Add(ref _encodedRx, flushedFrames);
             }
@@ -1597,14 +1595,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         if (TryHandleRadioState(data, peer.PlayerId)) return;
 
-        if (!peer.TryReceiveVoicePacket(data, out var error, out var decodedFrames))
+        peer.TryReceiveVoicePacket(data, out var error, out var decodedFrames);
+        if (!string.IsNullOrEmpty(error))
         {
-            if (!string.IsNullOrEmpty(error))
-            {
-                Interlocked.Increment(ref _audioDecodeFailures);
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={data.Length} error=\"{error}\"");
-            }
-            return;
+            Interlocked.Increment(ref _audioDecodeFailures);
+            VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={data.Length} error=\"{error}\"");
         }
         if (decodedFrames > 0)
             Interlocked.Add(ref _encodedRx, decodedFrames);
@@ -2471,9 +2466,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     var frameSize = decodeFec
                         ? AudioHelpers.FrameSize
                         : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
-                    if (!DecodeAndAddSamples(payload, decodeFec, frameSize, out error, out var decoded))
-                        return false;
-                    decodedFrames += decoded > 0 ? 1 : 0;
+                    // A single bad frame must NOT abandon the rest of the drained batch (up to
+                    // MaxDrainFramesPerPacket frames). DecodeAndAddSamples conceals the failed slot with
+                    // silence, so surface the first error for telemetry and keep draining the successors.
+                    if (DecodeAndAddSamples(payload, decodeFec, frameSize, out var frameError, out var decoded))
+                        decodedFrames += decoded > 0 ? 1 : 0;
+                    else if (string.IsNullOrEmpty(error))
+                        error = frameError;
                 }
 
                 return true;
@@ -2498,9 +2497,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     var frameSize = decodeFec
                         ? AudioHelpers.FrameSize
                         : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
-                    if (!DecodeAndAddSamples(payload, decodeFec, frameSize, out error, out var decoded))
-                        return false;
-                    decodedFrames += decoded > 0 ? 1 : 0;
+                    // Conceal a failed slot and keep draining instead of abandoning the rest of the tail batch.
+                    if (DecodeAndAddSamples(payload, decodeFec, frameSize, out var frameError, out var decoded))
+                        decodedFrames += decoded > 0 ? 1 : 0;
+                    else if (string.IsNullOrEmpty(error))
+                        error = frameError;
                 }
 
                 return true;
@@ -2533,7 +2534,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         private void FlushBufferedVoiceFromTimer()
         {
-            if (!TryFlushBufferedVoice(out var error, out _) && !string.IsNullOrEmpty(error))
+            TryFlushBufferedVoice(out var error, out _);
+            if (!string.IsNullOrEmpty(error))
                 VoiceDiagnostics.Log("bcl.audio.drop", $"client={ClientId} bytes=0 error=\"{error}\" source=tail-timer");
         }
 
@@ -2543,26 +2545,46 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             return DecodeAndAddSamples(data, false, AudioHelpers.FrameSize, out error, out decodedFrames);
         }
 
+        // 120 ms @ 48 kHz mono — the maximum Opus frame size. Decoding real packets into this much output
+        // space (and passing it as frame_size) means a non-conformant peer that sends a 40/60 ms frame or
+        // under-stamps its duration can never trip OPUS_BUFFER_TOO_SMALL / IndexOutOfRange inside Concentus.
+        private const int MaxDecodeCapacitySamples = 5760;
+
         private bool DecodeAndAddSamples(byte[] data, bool decodeFec, int frameSize, out string? error, out int decodedFrames)
         {
             error = null;
             decodedFrames = 0;
 
-            int need = Math.Max(AudioHelpers.FrameSize * 2, frameSize * AudioHelpers.Channels);
-            if (_decodePcm.Length < need) _decodePcm = new short[need];
+            // PLC (empty payload) and FEC require frame_size to equal the EXACT missing duration; a real
+            // packet is decoded at full capacity so its true (possibly larger) frame size always fits.
+            var conceal = data.Length == 0 || decodeFec;
+            int capacity = MaxDecodeCapacitySamples * AudioHelpers.Channels;
+            if (_decodePcm.Length < capacity) _decodePcm = new short[capacity];
             var pcm = _decodePcm;
+            int decodeFrameSize = conceal ? frameSize : MaxDecodeCapacitySamples;
             int decoded;
             try
             {
-                decoded = Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, need), frameSize, decodeFec);
+                decoded = Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, capacity), decodeFrameSize, decodeFec);
             }
             catch (Exception ex)
             {
+                // Concentus THROWS (it never returns an error code) on a malformed/edge Opus packet. Don't
+                // drop the slot: emit one frame of silence so the playout timeline stays aligned and the
+                // caller can keep draining the rest of the batch; the next real packet re-primes the decoder.
                 error = ex.Message;
+                RouteSilence(frameSize);
                 return false;
             }
 
-            if (decoded <= 0) return false;
+            if (decoded <= 0)
+            {
+                // Concentus normally throws on bad input; a non-positive return is anomalous, so surface it
+                // for telemetry (and conceal the slot) instead of silently injecting an untracked gap.
+                error = "decode-empty";
+                RouteSilence(frameSize);
+                return false;
+            }
             if (_decodeFloat.Length < decoded) _decodeFloat = new float[decoded];
             var samples = _decodeFloat;
             var peak = 0f;
@@ -2578,6 +2600,18 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _rightRoute.AddSamples(samples, 0, decoded);
             decodedFrames = 1;
             return true;
+        }
+
+        // Routes one frame of silence to keep the playout timeline aligned when a packet cannot be decoded,
+        // so a single bad/edge frame becomes a 20 ms blip instead of a gap that also re-prebuffers the ring.
+        private void RouteSilence(int frameSize)
+        {
+            int n = frameSize * AudioHelpers.Channels;
+            if (n <= 0) return;
+            if (_decodeFloat.Length < n) _decodeFloat = new float[n];
+            Array.Clear(_decodeFloat, 0, n);
+            _leftRoute.AddSamples(_decodeFloat, 0, n);
+            _rightRoute.AddSamples(_decodeFloat, 0, n);
         }
         public void Dispose()
         {

@@ -27,6 +27,12 @@ internal class BufferedSampleProvider : ISampleProvider
     private DateTime _prebufferFirstSampleUtc = DateTime.MinValue;
     private int _adaptiveRecoveryPrebufferSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
     private int _stableReadCycles;
+    private DateTime _lastWriteUtc = DateTime.MinValue;
+    // After this much wall-clock with no writes the talker has stopped (end-of-utterance / channel-reopen),
+    // not merely jittered, so any escalated recovery prebuffer is snapped back to baseline to keep the next
+    // talkspurt's onset latency low. It is comfortably longer than the cushion-drain-to-underrun time, so a
+    // mid-utterance jitter stall (which keeps writing within the window) still escalates normally.
+    private static readonly TimeSpan IdleRecoveryResetWindow = TimeSpan.FromMilliseconds(200);
 
     public bool ReadFully              { get; set; } = true;
     public bool EnableRecoveryPrebuffer { get; set; } = true;
@@ -91,6 +97,7 @@ internal class BufferedSampleProvider : ISampleProvider
         int beforeWrite = _ring.Count;
         int written = _ring.Write(buffer, offset, count);
         System.Threading.Interlocked.Add(ref _writtenSamples, written);
+        if (written > 0) _lastWriteUtc = DateTime.UtcNow;
         int afterWrite = _ring.Count;
         if (_isPrebuffering && beforeWrite == 0 && afterWrite > 0)
             _prebufferFirstSampleUtc = DateTime.UtcNow;
@@ -123,6 +130,7 @@ internal class BufferedSampleProvider : ISampleProvider
             _prebufferFirstSampleUtc = DateTime.MinValue;
             _adaptiveRecoveryPrebufferSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
             _stableReadCycles = 0;
+            _lastWriteUtc = DateTime.MinValue;
         }
     }
 
@@ -134,6 +142,18 @@ internal class BufferedSampleProvider : ISampleProvider
 
     private int ReadLocked(float[] buffer, int offset, int count)
     {
+        // End-of-talk / reopen: once the talker has been silent past the idle window, drop the escalated
+        // recovery prebuffer back to baseline so the next talkspurt resumes at minimal onset latency. A
+        // mid-utterance jitter stall keeps writing within the window, so its escalation is preserved.
+        if (EnableRecoveryPrebuffer
+            && _adaptiveRecoveryPrebufferSamples > AudioHelpers.PlaybackRecoveryPrebufferSamples
+            && _lastWriteUtc != DateTime.MinValue
+            && (DateTime.UtcNow - _lastWriteUtc) >= IdleRecoveryResetWindow)
+        {
+            _adaptiveRecoveryPrebufferSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
+            _stableReadCycles = 0;
+        }
+
         if (_ring == null)
         {
             System.Threading.Interlocked.Increment(ref _readRequests);
@@ -174,6 +194,8 @@ internal class BufferedSampleProvider : ISampleProvider
             System.Threading.Interlocked.Increment(ref _underruns);
             if (EnableRecoveryPrebuffer && _prebufferSamples > 0)
             {
+                // Grow the cushion on any starvation; a genuine end-of-talk idle is undone separately by the
+                // idle-reset at the top of ReadLocked once the talker has been silent past the idle window.
                 IncreaseRecoveryPrebufferLocked();
                 _isPrebuffering = true;
                 _prebufferFirstSampleUtc = (_ring?.Count ?? 0) > 0 ? DateTime.UtcNow : DateTime.MinValue;
