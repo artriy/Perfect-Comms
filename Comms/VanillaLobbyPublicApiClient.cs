@@ -267,35 +267,12 @@ internal static class VanillaLobbyMetadataCache
             return true;
         }
 
-        lock (Gate)
-        {
-            VanillaLobbyMetadata? match = null;
-            foreach (var game in Games.Values)
-            {
-                if (game.MapId != listing.MapId) continue;
-                if (game.PlayerCount != listing.PlayerCount) continue;
-                if (game.MaxPlayers > 0 && listing.MaxPlayers > 0 && game.MaxPlayers != listing.MaxPlayers) continue;
-                if (match != null)
-                {
-                    VanillaLobbyDiagnostics.Limited("cache.tryget.listing.ambiguous", "cache", $"ambiguous fallback code={code} map={listing.MapId} players={listing.PlayerCount}/{listing.MaxPlayers} cached={Games.Count}", first: 20, every: 120);
-                    metadata = null!;
-                    return false;
-                }
-
-                match = game;
-            }
-
-            if (match == null)
-            {
-                VanillaLobbyDiagnostics.Limited("cache.tryget.listing.miss", "cache", $"miss code={code} gameId={listing.GameId} map={listing.MapId} players={listing.PlayerCount}/{listing.MaxPlayers} cached={Games.Count}", first: 20, every: 120);
-                metadata = null!;
-                return false;
-            }
-
-            VanillaLobbyDiagnostics.Limited("cache.tryget.listing.fallback", "cache", $"fallback code={code} -> apiCode={match.Code} host={match.HostName} status={match.StatusLabel}", first: 20, every: 120);
-            metadata = match;
-            return true;
-        }
+        // No fuzzy map+player-count fallback: a coincidental match (e.g. a Skeld 1/15 lobby) would
+        // attach an unrelated lobby's host/status to this row. Only exact game-code matches are
+        // trusted; on a miss the caller falls back to neutral metadata.
+        VanillaLobbyDiagnostics.Limited("cache.tryget.listing.miss", "cache", $"miss code={code} gameId={listing.GameId} map={listing.MapId} players={listing.PlayerCount}/{listing.MaxPlayers} cached={Games.Count}", first: 20, every: 120);
+        metadata = null!;
+        return false;
     }
 
     internal static bool ConsumeDirty()

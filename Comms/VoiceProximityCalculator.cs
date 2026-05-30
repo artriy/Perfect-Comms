@@ -533,7 +533,7 @@ internal static class VoiceProximityCalculator
         float cameraRange = s.MaxChatDistance;
         float cameraDist = Distance(targetPos, cameraPosition);
         float cameraVolume = VoiceAudioOcclusion.ApplyFalloff(cameraDist, cameraRange, (VoiceFalloffMode)s.FalloffMode) * 0.8f;
-        if (cameraVolume <= 0f)
+        if (cameraVolume < LowVolumeFloor)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
 
         float pan = VoiceChatRoom.GetPan(cameraPosition.x, targetPos.x);

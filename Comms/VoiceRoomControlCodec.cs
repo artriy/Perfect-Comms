@@ -134,11 +134,15 @@ public static class VoiceRoomControlCodec
         var serverUrlLength = BinaryPrimitives.ReadUInt16LittleEndian(buffer[fixedSettingsBytes..]);
         if (serverUrlLength > MaxServerUrlBytes || buffer.Length != fixedSettingsBytes + 2 + serverUrlLength) return false;
         var serverUrl = System.Text.Encoding.UTF8.GetString(buffer.Slice(fixedSettingsBytes + 2, serverUrlLength));
-        bool hasTeamRadioSubSettings = version == Version || version == LegacyVersion9 || version == LegacyVersion8 || version == LegacyVersion7 || version == LegacyVersion6;
+        // Version 10 shares V11's exact byte layout minus the final TeamRadioInMeetings byte, so it
+        // carries the team-radio sub-settings, MediumGhostVoice, MuteGlitchHacked and listener-muffle
+        // bytes (tailOffset 27). The earlier flags omitted V10 from all of these, decoding it with the
+        // pre-subsettings offset (24) and 3-byte field shift; that mis-aligned every trailing setting.
+        bool hasTeamRadioSubSettings = version == Version || version == LegacyVersion10 || version == LegacyVersion9 || version == LegacyVersion8 || version == LegacyVersion7 || version == LegacyVersion6;
         int tailOffset = hasTeamRadioSubSettings ? 27 : 24;
-        bool hasMediumGhostVoice = version == Version || version == LegacyVersion9 || version == LegacyVersion8 || version == LegacyVersion7;
-        bool hasMuteGlitchHacked = version == Version || version == LegacyVersion9 || version == LegacyVersion8;
-        bool hasListenerMuffleSettings = version == Version || version == LegacyVersion9;
+        bool hasMediumGhostVoice = version == Version || version == LegacyVersion10 || version == LegacyVersion9 || version == LegacyVersion8 || version == LegacyVersion7;
+        bool hasMuteGlitchHacked = version == Version || version == LegacyVersion10 || version == LegacyVersion9 || version == LegacyVersion8;
+        bool hasListenerMuffleSettings = version == Version || version == LegacyVersion10 || version == LegacyVersion9;
         bool hasMeetingLobbyGhostSetting = version == Version || version == LegacyVersion10;
         bool hasTeamRadioInMeetings = version == Version;
         settings = new VoiceRoomSettingsSnapshot(

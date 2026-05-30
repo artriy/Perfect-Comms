@@ -112,8 +112,10 @@ internal static class VoiceHostAuthority
         return VoiceBackendCustomMessage.UnknownClientId;
     }
 
-    // HostId member name varies across Among Us/IL2CPP rebuilds: try candidates, cache the hit,
-    // log once on total failure (otherwise every host snapshot is rejected as "unknown-sender").
+    // HostId member name varies across Among Us/IL2CPP rebuilds: try candidates, cache the hit, log
+    // once on total failure (otherwise every host snapshot is rejected as "unknown-sender"). Each
+    // candidate is probed as a FIELD as well as a property: HostId is a public field on the GameLibs
+    // InnerNetClient, so the previous property-only lookup never matched and always returned -1.
     private static readonly string[] HostIdPropertyNames = { "HostId", "HostClientId", "hostId" };
     private static string? _cachedHostIdPropertyName;
     private static bool _hostIdReflectionFailureLogged;
@@ -127,12 +129,12 @@ internal static class VoiceHostAuthority
 
             var type = client.GetType();
             if (_cachedHostIdPropertyName != null
-                && type.GetProperty(_cachedHostIdPropertyName)?.GetValue(client) is int cachedHostId)
+                && TryReadHostIdMember(client, type, _cachedHostIdPropertyName, out int cachedHostId))
                 return cachedHostId;
 
             foreach (var name in HostIdPropertyNames)
             {
-                if (type.GetProperty(name)?.GetValue(client) is int hostId)
+                if (TryReadHostIdMember(client, type, name, out int hostId))
                 {
                     _cachedHostIdPropertyName = name;
                     return hostId;
@@ -143,7 +145,7 @@ internal static class VoiceHostAuthority
             {
                 _hostIdReflectionFailureLogged = true;
                 VoiceDiagnostics.Log("host.resolve.failed",
-                    $"reason=no-hostid-property type=\"{type.FullName}\"");
+                    $"reason=no-hostid-member type=\"{type.FullName}\"");
             }
         }
         catch
@@ -151,6 +153,24 @@ internal static class VoiceHostAuthority
         }
 
         return VoiceBackendCustomMessage.UnknownClientId;
+    }
+
+    private static bool TryReadHostIdMember(object client, Type type, string name, out int hostId)
+    {
+        hostId = 0;
+        if (type.GetProperty(name)?.GetValue(client) is int propertyHostId)
+        {
+            hostId = propertyHostId;
+            return true;
+        }
+
+        if (type.GetField(name)?.GetValue(client) is int fieldHostId)
+        {
+            hostId = fieldHostId;
+            return true;
+        }
+
+        return false;
     }
 
     private static byte ResolveHostPlayerId(VoiceGameStateSnapshot? snapshot, int hostClientId)

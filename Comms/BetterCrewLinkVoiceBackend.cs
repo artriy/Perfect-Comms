@@ -2422,7 +2422,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     return false;
                 }
 
-                RadioActive = packet.Flags.HasFlag(BclVoicePacketFlags.Radio);
+                // Radio channel/active state is governed solely by the validated PCRD control packet
+                // (ApplyRadioChannel) and the reliable radio-state RPC. Do NOT derive it from the
+                // per-packet audio Radio flag: the true case is a no-op while the false case cleared
+                // _radioChannel, so a reordered pre-radio audio frame arriving after a PCRD would wipe
+                // the freshly validated channel and briefly drop the speaker off team radio.
                 var packetLevel = packet.Level / (float)byte.MaxValue;
                 _packetLevelPeakSinceStats = Math.Max(_packetLevelPeakSinceStats, packetLevel);
                 ObserveVoiceLevel(packetLevel);

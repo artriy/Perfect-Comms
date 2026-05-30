@@ -564,6 +564,15 @@ internal static partial class VoiceRoleMuteState
 
     internal static void ApplyRemoteJailVoice(byte jailorId, byte jailedPlayerId, bool allowed)
     {
+        // The RPC sender's netId is forgeable on a relay, so we cannot fully authenticate that the
+        // sender really is the jailor. We re-derive authority from live state below, but additionally
+        // only honour the permissive direction (unmute): a spoofed "re-mute" (allowed=false) is
+        // ignored so a forger cannot silence a jailee the jailor chose to keep audible. The jailee is
+        // muted by default in meetings and the local jailor never sends a re-mute over the wire, so
+        // ignoring allowed=false removes no legitimate behaviour.
+        if (!allowed)
+            return;
+
         RefreshRoleStateCacheIfNeeded(force: true);
         var settings = VoiceRoomSettingsState.Current;
         if (!settings.MuteJailedInMeetings || !settings.JailorCanUnmuteJailed)

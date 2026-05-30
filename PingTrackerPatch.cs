@@ -745,7 +745,12 @@ public static class PingTrackerPatch
         try
         {
             var name = GetDisplayOutfit(player).PlayerName;
-            return string.IsNullOrWhiteSpace(name) ? player.Data.PlayerName : name;
+            if (!string.IsNullOrWhiteSpace(name)) return name;
+            // The game blanks the outfit name when concealing identity (Morph/Mimic disguises used by
+            // Hysteria, Ambusher, Chameleon, etc. set PlayerName empty and toggle the nameplate off).
+            // Only fall back to the real name for the default outfit, so a concealed speaker is never
+            // de-anonymized in the bar; a Morphling disguise still shows its (non-empty) target name.
+            return GetDisplayOutfitId(player) == 0 ? (player.Data.PlayerName ?? "?") : string.Empty;
         }
         catch
         {

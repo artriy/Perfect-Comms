@@ -291,7 +291,10 @@ internal static class VoiceSnapshotBuilder
                     : default;
             case PlanetSurveillanceMinigame planet:
             {
-                int index = Mathf.Clamp(planet.currentCamera, 0, 5);
+                // Clamp against the live camera count, not a hardcoded 5, so Sentry-added cameras on
+                // the single-camera (Polus) surveillance view are addressable.
+                int camCount = ResolveCameraCount();
+                int index = Mathf.Clamp(planet.currentCamera, 0, Math.Max(0, camCount - 1));
                 if (VoiceAudioOcclusion.TryGetFixedCameraPosition(mapId, index, out var position))
                     return new CameraView(true, index, position);
 

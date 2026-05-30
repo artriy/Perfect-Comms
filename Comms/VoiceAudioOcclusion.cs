@@ -77,7 +77,14 @@ internal static class VoiceAudioOcclusion
         if (!cameraViewActive) return false;
 
         if (IsAllCameraView(mapId, activeCameraIndex, out var allCameras))
-            return TryGetNearestCameraPosition(allCameras, targetPos, out position);
+        {
+            // Prefer the map's hardcoded camera coordinates (deterministic, unit-testable); only
+            // consult the live ShipStatus.AllCameras list when the map exposes no hardcoded cameras
+            // (e.g. dynamic/Sentry-only camera maps).
+            if (allCameras.Length > 0)
+                return TryGetNearestCameraPosition(allCameras, targetPos, out position);
+            return TryGetNearestShipCameraPosition(targetPos, out position);
+        }
 
         if (activeCameraPosition.HasValue)
         {
@@ -91,6 +98,8 @@ internal static class VoiceAudioOcclusion
     public static bool TryGetFixedCameraPosition(int mapId, int cameraIndex, out Vector2 position)
     {
         position = default;
+        if (cameraIndex < 0) return false;
+
         var cameras = mapId switch
         {
             2 => PolusCameras,
@@ -98,9 +107,82 @@ internal static class VoiceAudioOcclusion
             _ => null,
         };
 
-        if (cameras == null || cameraIndex < 0 || cameraIndex >= cameras.Length) return false;
-        position = cameras[cameraIndex];
-        return true;
+        // Hardcoded coordinate for known vanilla indices; live ShipStatus camera for indices beyond
+        // the hardcoded set (Sentry/dynamic cameras) or maps with no hardcoded list.
+        if (cameras != null && cameraIndex < cameras.Length)
+        {
+            position = cameras[cameraIndex];
+            return true;
+        }
+
+        return TryGetShipCameraPosition(cameraIndex, out position);
+    }
+
+    // True when ShipStatus exposes at least one camera (vanilla or Town of Us Sentry-placed). Guarded
+    // and main-thread only, mirroring the existing door/linecast occlusion reads.
+    public static bool HasShipCameras()
+    {
+        try
+        {
+            var cameras = ShipStatus.Instance?.AllCameras;
+            return cameras != null && cameras.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Live world position of a specific camera index from ShipStatus.AllCameras, so Sentry/dynamic
+    // cameras appended at runtime resolve on every map. Called from the game-thread snapshot path and
+    // the index fallback above; never invoked on the static-camera unit-test paths.
+    public static bool TryGetShipCameraPosition(int cameraIndex, out Vector2 position)
+    {
+        position = default;
+        if (cameraIndex < 0) return false;
+        try
+        {
+            var cameras = ShipStatus.Instance?.AllCameras;
+            if (cameras == null || cameraIndex >= cameras.Length) return false;
+            var camera = cameras[cameraIndex];
+            if (camera == null) return false;
+            position = camera.transform.position;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetNearestShipCameraPosition(Vector2 targetPos, out Vector2 position)
+    {
+        position = default;
+        try
+        {
+            var cameras = ShipStatus.Instance?.AllCameras;
+            if (cameras == null || cameras.Length == 0) return false;
+
+            float bestDistance = float.MaxValue;
+            bool found = false;
+            foreach (var camera in cameras)
+            {
+                if (camera == null) continue;
+                Vector2 cameraPos = camera.transform.position;
+                float dx = targetPos.x - cameraPos.x;
+                float dy = targetPos.y - cameraPos.y;
+                float distance = dx * dx + dy * dy;
+                if (distance >= bestDistance) continue;
+                bestDistance = distance;
+                position = cameraPos;
+                found = true;
+            }
+            return found;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static readonly Vector2[] SkeldCameras =
@@ -166,7 +248,9 @@ internal static class VoiceAudioOcclusion
             4 when activeCameraIndex == 6 => AirshipCameras,
             _ => Array.Empty<Vector2>(),
         };
-        return cameras.Length > 0;
+        // Recognize the all-camera view even on maps with no hardcoded camera list when dynamic
+        // (Sentry) cameras are registered on ShipStatus.
+        return activeCameraIndex == 6 && (cameras.Length > 0 || HasShipCameras());
     }
 
     private static float SmoothStep(float t)

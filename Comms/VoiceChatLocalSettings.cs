@@ -586,6 +586,16 @@ public static class DeviceLabelPatch
         return null;
     }
 
+    private static DateTime _nextDeviceRefreshUtc = DateTime.MinValue;
+
+    private static void MaybeRefreshDeviceLists()
+    {
+        var now = DateTime.UtcNow;
+        if (now < _nextDeviceRefreshUtc) return;
+        _nextDeviceRefreshUtc = now.AddSeconds(2);
+        VoiceChatLocalSettings.RefreshDeviceLists();
+    }
+
     static void Postfix(object __instance, ref string __result)
     {
         try
@@ -621,7 +631,18 @@ public static class DeviceLabelPatch
 
             int idx = Convert.ToInt32(entry.BoxedValue);
 
-            if (entry.SettingType == typeof(MicDeviceEnum))
+            bool isMic = entry.SettingType == typeof(MicDeviceEnum);
+#if WINDOWS
+            bool isSpk = entry.SettingType == typeof(SpkDeviceEnum);
+#else
+            const bool isSpk = false;
+#endif
+            // Re-enumerate devices (throttled) whenever a device dropdown is rendered so hot-plugged
+            // or removed mics/speakers are reflected without a game restart.
+            if (isMic || isSpk)
+                MaybeRefreshDeviceLists();
+
+            if (isMic)
             {
                 var names = VoiceChatLocalSettings.MicDeviceNames;
                 __result = idx == 0           ? "Default"
@@ -629,7 +650,7 @@ public static class DeviceLabelPatch
                          : "Default";
             }
 #if WINDOWS
-            else if (entry.SettingType == typeof(SpkDeviceEnum))
+            else if (isSpk)
             {
                 var names = VoiceChatLocalSettings.SpkDeviceNames;
                 __result = idx == 0           ? "Default"

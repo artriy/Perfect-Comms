@@ -239,6 +239,11 @@ internal static class VoiceLobbyBrowserUi
     {
         _panelVisible = false;
         _editorOpen = false;
+        // Release the live BCL browser socket when the panel is dismissed; otherwise the Socket.IO
+        // connection and its reconnect loop leak on the main menu until a scene change or source
+        // switch (EnsureBclLive reconnects it when the panel is reopened).
+        BetterCrewLinkLobbyBrowserClient.Disconnect();
+        _lastBclLiveListings = Array.Empty<VoiceLobbyListing>();
         _panelClosing = _panelRoot != null && _panelAnimation > 0f;
         if (_panelRoot == null) return;
 

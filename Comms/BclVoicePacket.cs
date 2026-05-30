@@ -216,6 +216,16 @@ internal sealed class BclVoiceJitterBuffer
             return frames;
         }
 
+        // Large forward gap (e.g. after a data-channel rebuild where the sender's sequence advanced
+        // across the closed-channel outage): the absent intermediate frames can never arrive within
+        // the buffer window, so treat it as a stream discontinuity and snap to the new sequence
+        // instead of synthesizing a multi-second PLC concealment catch-up one frame at a time.
+        if (Distance(_expectedSequence, packet.Sequence) > _maxBufferedFrames)
+        {
+            _packets.Clear();
+            _expectedSequence = packet.Sequence;
+        }
+
         if (_packets.ContainsKey(packet.Sequence))
         {
             _duplicateDrops++;

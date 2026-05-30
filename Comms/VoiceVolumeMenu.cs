@@ -29,6 +29,9 @@ public static class VoiceVolumeMenu
     private static readonly List<PlayerVolumeSlider> _sliders = new();
     private static PlayerVolumeSlider? _activeSlider;
     private static bool _savedVolumesLoaded;
+    // Cache solid-colour 1x1 sprites so RebuildRows (run on every open/scroll) reuses textures
+    // instead of leaking a fresh Texture2D+Sprite per row per rebuild.
+    private static readonly Dictionary<uint, Sprite> _solidSprites = new();
 
 
     public static void Toggle()
@@ -657,9 +660,16 @@ public static class VoiceVolumeMenu
 
     private static Sprite Create1x1Sprite(Color32 c)
     {
-        var tex = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+        uint key = ((uint)c.r << 24) | ((uint)c.g << 16) | ((uint)c.b << 8) | c.a;
+        if (_solidSprites.TryGetValue(key, out var cached) && cached != null)
+            return cached;
+
+        var tex = new Texture2D(1, 1, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
         tex.SetPixel(0, 0, c);
         tex.Apply();
-        return Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
+        var sprite = Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
+        sprite.hideFlags |= HideFlags.HideAndDontSave;
+        _solidSprites[key] = sprite;
+        return sprite;
     }
 }

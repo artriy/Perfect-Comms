@@ -44,14 +44,10 @@ internal static class VoiceHudWarnings
         if (!room.UsingSpeaker && !VoiceChatHudState.IsSpeakerMuted)
             return "speaker unavailable";
 
-        VoiceClientRegistry.GetCompatibilitySummary(out int voiceClientCount, out bool hasCompatible, out bool hasIncompatible);
-        if (hasIncompatible)
-            return "protocol mismatch";
-
-        bool hasOtherClients = AmongUsClient.Instance?.allClients?.Count > 1;
-        if (hasOtherClients && voiceClientCount > 0 && !hasCompatible)
-            return "no compatible voice clients";
-
+        // Protocol-mismatch / no-compatible-clients warnings were removed: VoiceClientRegistry is not
+        // populated in the current transport (no live handshake feeds it), so GetCompatibilitySummary
+        // always reported zero clients and these branches could never fire. Re-add only together with
+        // a real, sender-authenticated compatibility handshake that actually populates the registry.
         return "";
     }
 }
