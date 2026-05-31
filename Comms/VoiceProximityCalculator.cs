@@ -493,7 +493,7 @@ internal static class VoiceProximityCalculator
         float dx = targetPos.x - listenerPos.x;
         float dy = targetPos.y - listenerPos.y;
         float distance = MathF.Sqrt(dx * dx + dy * dy);
-        float volume = ApplyGhostFalloff(distance, maxDistance, (VoiceFalloffMode)s.FalloffMode);
+        float volume = VoiceAudioOcclusion.ApplyFalloff(distance, maxDistance, (VoiceFalloffMode)s.FalloffMode);
         if (volume <= 0f)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, wallCoefficient);
 
@@ -510,18 +510,6 @@ internal static class VoiceProximityCalculator
                 VoiceRoomSettingsSnapshot.MaxChatDistanceLimit);
 
         return fallbackDistance;
-    }
-
-    private static float ApplyGhostFalloff(float distance, float maxDistance, VoiceFalloffMode mode)
-    {
-        if (maxDistance <= 0f) return 0f;
-        float t = Math.Clamp(distance / maxDistance, 0f, 1f);
-        return mode switch
-        {
-            VoiceFalloffMode.Smooth => 1f - t * t * (3f - 2f * t),
-            VoiceFalloffMode.VoiceFocused => t < 0.35f ? 1f : MathF.Pow(1f - t, 1.35f),
-            _ => 1f - t,
-        };
     }
 
     private static VoiceProximityResult CalculateCameraProxy(

@@ -97,6 +97,10 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         displayValue: true, formatString: "0.00")]
     public ConfigEntry<float> MasterVolume { get; }
 
+    [LocalSliderSetting("Voice Falloff Softness", min: 0f, max: 1f,
+        displayValue: true, formatString: "0%")]
+    public ConfigEntry<float> VoiceFalloffSoftness { get; }
+
     [LocalEnumSetting("Mic Mode")]
     public ConfigEntry<VoiceMicMode> MicMode { get; }
 
@@ -230,6 +234,12 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         MasterVolume = config.Bind("Audio", "MasterVolume", 1f,
             new ConfigDescription("Master output volume",
                 new AcceptableValueRange<float>(0.1f, 2f)));
+
+        VoiceFalloffSoftness = config.Bind("Audio", "VoiceFalloffSoftness", 0.30f,
+            new ConfigDescription(
+                "How gently voices fade near the edge of vision/range. 0% keeps the original fade; higher keeps voices clear across most of your vision and fades only near the edge. Layers on top of the host's falloff and never extends hearing range.",
+                new AcceptableValueRange<float>(0f, 1f)));
+        VoiceAudioOcclusion.ProximitySoftness01 = VoiceFalloffSoftness.Value;
 
         MicMode = config.Bind("Audio", "MicMode", VoiceMicMode.OpenMic,
             new ConfigDescription("Microphone activation mode"));
@@ -494,6 +504,10 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         else if (configEntry == MasterVolume)
         {
             VoiceChatHudState.ApplySpeakerState();
+        }
+        else if (configEntry == VoiceFalloffSoftness)
+        {
+            VoiceAudioOcclusion.ProximitySoftness01 = VoiceFalloffSoftness.Value;
         }
         else if (configEntry == MicMode)
         {

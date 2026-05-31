@@ -18,10 +18,19 @@ internal static class VoiceAudioOcclusion
         return new VoiceOcclusionDiagnostics(occlusion.HasWall, occlusion.HasClosedDoor, !occlusion.IsOccluded);
     }
 
+    // Local, per-player listener preference (0 = host falloff unchanged, 1 = flattest).
+    // Set from VoiceChatLocalSettings; read here so it layers on top of any host curve.
+    private static float _proximitySoftness01;
+    internal static float ProximitySoftness01
+    {
+        get => _proximitySoftness01;
+        set => _proximitySoftness01 = Math.Clamp(value, 0f, 1f);
+    }
+
     public static float ApplyFalloff(float distance, float maxDistance, VoiceFalloffMode mode)
     {
         if (maxDistance <= 0f) return 0f;
-        float t = Math.Clamp(distance / maxDistance, 0f, 1f);
+        float t = SoftenDistance(Math.Clamp(distance / maxDistance, 0f, 1f));
         return mode switch
         {
             VoiceFalloffMode.Smooth => 1f - SmoothStep(t),
@@ -255,6 +264,17 @@ internal static class VoiceAudioOcclusion
 
     private static float SmoothStep(float t)
         => t * t * (3f - 2f * t);
+
+    // Local listener softening: pull the normalized distance toward 0 so the host curve stays
+    // near its loud end across most of the range and the fade compresses toward the edge.
+    // Endpoints are preserved (0 -> 0, 1 -> 1), so hearing range is never extended or shrunk.
+    // gamma = 1 + s*3 stays in [1..4]; Pow(t in [0,1], gamma) is always finite in [0,1].
+    internal static float SoftenDistance(float t)
+    {
+        float s = _proximitySoftness01;
+        if (s <= 0f) return t;
+        return MathF.Pow(t, 1f + s * 3f);
+    }
 
     private static bool IsClosedDoorBetween(Vector2 listenerPos, Vector2 targetPos)
     {
