@@ -13,7 +13,9 @@ public class VoiceRoleIntegrationOptions : AbstractOptionGroup
     public ModdedToggleOption MuteBlackmailedInMeetings { get; } = new("<color=#FF0000><b>Blackmailer</b></color>: Mute Blackmailed in Meetings", true);
     public ModdedToggleOption MuteBlackmailedNextRound { get; } = new("<color=#FF0000><b>Blackmailer</b></color>: Mute Blackmailed Next Round", false);
     public ModdedToggleOption MuteParasiteControlled { get; } = new("<color=#FF0000><b>Parasite</b></color>: Mute Controlled Victim", true);
+    public ModdedToggleOption ParasiteHearFromVictim { get; } = new("<color=#FF0000><b>Parasite</b></color>: Also Hear Controlled Victim", true);
     public ModdedToggleOption MutePuppeteerControlled { get; } = new("<color=#FF0000><b>Puppeteer</b></color>: Mute Controlled Victim", true);
+    public ModdedToggleOption PuppeteerHearFromVictim { get; } = new("<color=#FF0000><b>Puppeteer</b></color>: Hear From Controlled Victim", true);
     public ModdedToggleOption MuteSwooperWhileSwooped { get; } = new("<color=#FF0000><b>Swooper</b></color>: Mute While Swooped", true);
     public ModdedToggleOption MuffleBlindedOrFlashedHearing { get; } = new("<color=#FF0000><b>Eclipsal/Grenadier</b></color>: Muffle Blinded/Flashed Hearing", true);
     public ModdedToggleOption MuffleHypnotizedDuringHysteria { get; } = new("<color=#FF0000><b>Hypnotist</b></color>: Muffle Hypnotized During Hysteria", true);

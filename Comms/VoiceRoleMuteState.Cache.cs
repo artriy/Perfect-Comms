@@ -332,4 +332,60 @@ internal static partial class VoiceRoleMuteState
         }
         return null;
     }
+
+    // For the LOCAL player only: if they are actively controlling another player as a Puppeteer or Parasite, returns
+    // the control-hearing mode and the controlled victim. The controlling player is read by reflection from the
+    // victim's <Control>Modifier.Controller property (PerfectComms has no compile-time TOU reference). Fails closed
+    // to None so a missing/garbage controller never relocates the listener.
+    internal static bool TryGetLocalControlledVictim(PlayerControl? local, out VoiceControlHearingMode mode, out PlayerControl victim)
+    {
+        mode = VoiceControlHearingMode.None;
+        victim = null!;
+        if (local == null) return false;
+        try
+        {
+            RefreshSupportedModTypesIfNeeded();
+            if (_puppeteerControlModifierType == null && _parasiteInfectedModifierType == null)
+                return false;
+            byte localId = local.PlayerId;
+            foreach (var player in PlayerControl.AllPlayerControls)
+            {
+                if (player == null) continue;
+                // Puppeteer (swap) takes precedence; one player can't hold both control modifiers at once.
+                if (ControllerMatches(player, _puppeteerControlModifierType, localId))
+                {
+                    mode = VoiceControlHearingMode.PuppeteerSwap;
+                    victim = player;
+                    return true;
+                }
+                if (ControllerMatches(player, _parasiteInfectedModifierType, localId))
+                {
+                    mode = VoiceControlHearingMode.ParasiteAdditive;
+                    victim = player;
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            mode = VoiceControlHearingMode.None;
+            victim = null!;
+        }
+        return false;
+    }
+
+    private static bool ControllerMatches(PlayerControl victim, Type? modifierType, byte controllerId)
+    {
+        var modifier = GetModifier(victim, modifierType);
+        if (modifier == null) return false;
+        try
+        {
+            object? value = modifier.GetType().GetProperty("Controller")?.GetValue(modifier);
+            return value is PlayerControl controller && controller != null && controller.PlayerId == controllerId;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

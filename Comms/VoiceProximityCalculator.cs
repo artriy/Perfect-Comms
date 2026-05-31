@@ -95,7 +95,63 @@ internal static class VoiceProximityCalculator
     // Meeting radio routing requires the host opt-in; when off, radio is ignored and teammates
     // are heard via normal meeting audibility (no private meeting channel).
 
+    // Public entry. Applies Town of Us control-hearing for the LOCAL player, then defers to CalculateTaskPhaseSingle:
+    //   PuppeteerSwap    — hear ENTIRELY from the controlled victim's body (origin + sight swapped to the victim).
+    //   ParasiteAdditive — hear normally AND from the victim's surroundings; per target keep whichever is louder.
+    // Both are gated on the host toggle; everyone else hears from their own body exactly as before.
     public static VoiceProximityResult CalculateTaskPhase(
+        VoicePlayerSnapshot? localPlayer,
+        VoicePlayerSnapshot? targetPlayer,
+        Vector2? listenerPos,
+        float localLightRadius,
+        int mapId,
+        bool cameraViewActive,
+        int activeCameraIndex,
+        Vector2? activeCameraPosition,
+        IEnumerable<VoiceChatRoom.SpeakerCache> speakers,
+        IEnumerable<IVoiceComponent> virtualMics,
+        bool localInVent,
+        bool targetRadioActive,
+        bool commsSabActive,
+        float previousWallCoefficient,
+        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All)
+    {
+        var mode = localPlayer.HasValue ? localPlayer.Value.ControlHearingMode : VoiceControlHearingMode.None;
+        if (mode != VoiceControlHearingMode.None)
+        {
+            var cs = VoiceRoomSettingsState.Current;
+            if (mode == VoiceControlHearingMode.PuppeteerSwap && cs.PuppeteerHearFromVictim)
+                return CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
+                    localPlayer.Value.ControlledVictimLightRadius, mapId, cameraViewActive, activeCameraIndex,
+                    activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
+                    previousWallCoefficient, targetRadioChannel);
+            if (mode == VoiceControlHearingMode.ParasiteAdditive && cs.ParasiteHearFromVictim)
+            {
+                var fromSelf = CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
+                    cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
+                    targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel);
+                var fromVictim = CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
+                    localPlayer.Value.ControlledVictimLightRadius, mapId, cameraViewActive, activeCameraIndex,
+                    activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
+                    previousWallCoefficient, targetRadioChannel);
+                return Louder(fromSelf, fromVictim);
+            }
+        }
+        return CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
+            cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
+            targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel);
+    }
+
+    // Picks the more-audible of two proximity results (used to merge a Parasite's own-body and victim-surroundings
+    // hearing into a union). Ties favour the first (own-body) result.
+    private static VoiceProximityResult Louder(VoiceProximityResult a, VoiceProximityResult b)
+    {
+        float la = a.NormalVolume + a.GhostVolume + a.RadioVolume;
+        float lb = b.NormalVolume + b.GhostVolume + b.RadioVolume;
+        return lb > la ? b : a;
+    }
+
+    private static VoiceProximityResult CalculateTaskPhaseSingle(
         VoicePlayerSnapshot? localPlayer,
         VoicePlayerSnapshot? targetPlayer,
         Vector2? listenerPos,

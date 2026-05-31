@@ -77,6 +77,13 @@ public static class PingTrackerPatch
     // (outer half-height ~0.236 at RingScale) clears the name of the slot above it (name sits at -LabelOffset).
     private const float SlotHeight  = 0.64f;
     private const float LabelOffset = 0.34f;
+    // Distance from the icon CENTRE to the icon-facing edge of a Left/Right name. The label's rect pivot is set to
+    // that facing edge, so this value is the exact text-edge position; kept just outside the ring (~0.24 half-width)
+    // so the name sits snug against the ring without overlapping it.
+    private const float LabelSideOffset = 0.30f;
+    // Extra vertical-stack pitch added ONLY when the name sits ABOVE the icon (Top), so an above-name never
+    // collides with the slot above it (the default SlotHeight is tuned for names BELOW the icon).
+    private const float TopNameExtraPitch = 0.30f;
     private const float BottomNameLift = 0.12f;
     private const float RingScale   = 0.48f;
     private const float LevelSmoothSpeed = 12f;
@@ -97,6 +104,7 @@ public static class PingTrackerPatch
     private static bool              _manualLayout;
     private static float             _manualX = 0.5f;
     private static float             _manualY = 0.85f;
+    private static SpeakingBarNamePosition _namePosition = SpeakingBarNamePosition.Bottom;
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
     private static readonly HashSet<byte> _activeSpeakerIds = new();
     private static readonly Dictionary<byte, float> _activeSpeakerLevels = new();
@@ -134,6 +142,7 @@ public static class PingTrackerPatch
         _manualLayout = settings.SpeakingBarManualLayout.Value;
         _manualX      = settings.SpeakingBarX.Value;
         _manualY      = settings.SpeakingBarY.Value;
+        _namePosition = settings.SpeakingBarNamePosition.Value;
 
         if (_manualLayout)
         {
@@ -318,6 +327,7 @@ public static class PingTrackerPatch
             _manualLayout = settings.SpeakingBarManualLayout.Value;
             _manualX      = settings.SpeakingBarX.Value;
             _manualY      = settings.SpeakingBarY.Value;
+            _namePosition = settings.SpeakingBarNamePosition.Value;
             if (_manualLayout)
             {
                 _layoutVertical       = settings.SpeakingBarLayout.Value == VoiceControlsLayout.Vertical;
@@ -742,17 +752,27 @@ public static class PingTrackerPatch
         {
             float totalH = _slots.Count * SlotHeight;
             float startY = totalH * 0.5f - SlotHeight * 0.5f;
+            // Names ABOVE icons need extra pitch so an above-name can't touch the slot above it; other
+            // positions keep the historic SlotHeight pitch (pinned y line below stays the actual placement).
+            bool topNames = _namePosition == SpeakingBarNamePosition.Top;
+            float pitch = topNames ? SlotHeight + TopNameExtraPitch : SlotHeight;
+            if (topNames)
+            {
+                totalH = _slots.Count * pitch;
+                startY = totalH * 0.5f - pitch * 0.5f;
+            }
             int i = 0;
             foreach (var kv in _slots)
             {
                 float y = _layoutAnchoredBottom ? i * SlotHeight + BottomNameLift : startY - i * SlotHeight;
+                if (topNames) y = _layoutAnchoredBottom ? i * pitch + BottomNameLift : startY - i * pitch;
                 float labelY = y - LabelOffset;
                 if (kv.Value.IconGO   != null)
                     kv.Value.IconGO.transform.localPosition  = new Vector3(0f, y, -100f);
                 if (kv.Value.RingGO   != null)
                     kv.Value.RingGO.transform.localPosition  = new Vector3(0f, y, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(0f, labelY, -102f);
+                    ApplyLabelPlacement(kv.Value.LabelTMP, 0f, y, labelY);
                 i++;
             }
         }
@@ -771,10 +791,42 @@ public static class PingTrackerPatch
                 if (kv.Value.RingGO   != null)
                     kv.Value.RingGO.transform.localPosition  = new Vector3(x, iconY, -101f);
                 if (kv.Value.LabelTMP != null)
-                    kv.Value.LabelTMP.transform.localPosition = new Vector3(x, labelY, -102f);
+                    ApplyLabelPlacement(kv.Value.LabelTMP, x, iconY, labelY);
                 i++;
             }
         }
+    }
+
+    // Places a slot's name label relative to its icon per the local SpeakingBarNamePosition setting. Bottom (default)
+    // keeps the historic below-icon spot; Top sits above; Left/Right sit beside the icon with the label's rect pivot
+    // anchored to the icon-facing edge (so LabelSideOffset is the exact gap and long names grow away from the icon).
+    private static void ApplyLabelPlacement(TextMeshPro tmp, float iconX, float iconCentreY, float bottomLabelY)
+    {
+        Vector3 pos;
+        TextAlignmentOptions align;
+        Vector2 pivot;
+        switch (_namePosition)
+        {
+            case SpeakingBarNamePosition.Top:
+                pos = new Vector3(iconX, iconCentreY + LabelOffset, -102f);
+                align = TextAlignmentOptions.Center; pivot = new Vector2(0.5f, 0.5f);
+                break;
+            case SpeakingBarNamePosition.Left:
+                pos = new Vector3(iconX - LabelSideOffset, iconCentreY, -102f);
+                align = TextAlignmentOptions.Right; pivot = new Vector2(1f, 0.5f);
+                break;
+            case SpeakingBarNamePosition.Right:
+                pos = new Vector3(iconX + LabelSideOffset, iconCentreY, -102f);
+                align = TextAlignmentOptions.Left; pivot = new Vector2(0f, 0.5f);
+                break;
+            default: // Bottom
+                pos = new Vector3(iconX, bottomLabelY, -102f);
+                align = TextAlignmentOptions.Center; pivot = new Vector2(0.5f, 0.5f);
+                break;
+        }
+        tmp.transform.localPosition = pos;
+        tmp.alignment = align;
+        tmp.rectTransform.pivot = pivot;
     }
 
     private static void LayoutSlotsIfDirty()

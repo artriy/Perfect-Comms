@@ -22,6 +22,25 @@ internal static class VoiceSnapshotBuilder
         int mapId = ResolveMapId();
         var cameraView = ResolveCameraView(local, mapId);
 
+        // Resolve once: is the LOCAL player controlling a victim (Puppeteer/Parasite)? Used to relocate/augment
+        // their proximity hearing to the victim's surroundings when the host has the matching toggle on.
+        VoiceControlHearingMode localControlMode = VoiceControlHearingMode.None;
+        Vector2 localControlledVictimPos = default;
+        float localControlledVictimLight = -1f;
+        if (local != null && VoiceRoleMuteState.TryGetLocalControlledVictim(local, out var ctrlMode, out var ctrlVictim))
+        {
+            try
+            {
+                localControlledVictimPos = (Vector2)ctrlVictim.transform.position;
+                localControlledVictimLight = ResolveLocalLightRadius(ctrlVictim);
+                localControlMode = ctrlMode;
+            }
+            catch
+            {
+                localControlMode = VoiceControlHearingMode.None;
+            }
+        }
+
         var players = new List<VoicePlayerSnapshot>(16);
         try
         {
@@ -79,7 +98,10 @@ internal static class VoiceSnapshotBuilder
                 hasMediumSpirit,
                 mediumSpiritPosition,
                 isMediatedGhost,
-                mediatingMediumId));
+                mediatingMediumId,
+                player.PlayerId == localPlayerId ? localControlMode : VoiceControlHearingMode.None,
+                player.PlayerId == localPlayerId ? localControlledVictimPos : default,
+                player.PlayerId == localPlayerId ? localControlledVictimLight : -1f));
         }
         }
         catch

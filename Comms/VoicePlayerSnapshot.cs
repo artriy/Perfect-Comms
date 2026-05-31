@@ -2,6 +2,17 @@ using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+// How the LOCAL player's proximity-hearing origin is affected by a Town of Us control ability they are using.
+//   None             — normal: hear from your own body.
+//   PuppeteerSwap    — Puppeteer drives the victim (own body frozen): hear ENTIRELY from the victim's surroundings.
+//   ParasiteAdditive — Parasite plays normally but ALSO hears the infected victim's surroundings (union, louder wins).
+internal enum VoiceControlHearingMode
+{
+    None = 0,
+    PuppeteerSwap = 1,
+    ParasiteAdditive = 2,
+}
+
 internal readonly record struct VoicePlayerSnapshot(
     byte PlayerId,
     int ClientId,
@@ -28,4 +39,8 @@ internal readonly record struct VoicePlayerSnapshot(
     bool HasMediumSpirit,
     Vector2 MediumSpiritPosition,
     bool IsMediatedGhost,
-    byte MediatingMediumId);
+    byte MediatingMediumId,
+    // Local-player-only control-hearing fields (default None/zero for everyone else).
+    VoiceControlHearingMode ControlHearingMode,
+    Vector2 ControlledVictimPosition,
+    float ControlledVictimLightRadius);

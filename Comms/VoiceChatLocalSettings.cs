@@ -45,6 +45,14 @@ public enum VoiceControlsLayout
     Horizontal = 1,
 }
 
+public enum SpeakingBarNamePosition
+{
+    Bottom = 0,
+    Top    = 1,
+    Left   = 2,
+    Right  = 3,
+}
+
 public enum JailUnmuteButtonPlacement
 {
     VoiceHud = 0,
@@ -161,6 +169,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
 
     [LocalEnumSetting("Speaking Bar Layout")]
     public ConfigEntry<VoiceControlsLayout> SpeakingBarLayout { get; }
+
+    [LocalEnumSetting("Speaking Bar Name Position")]
+    public ConfigEntry<SpeakingBarNamePosition> SpeakingBarNamePosition { get; }
 
     [LocalEnumSetting("Jail Unmute Button")]
     public ConfigEntry<JailUnmuteButtonPlacement> JailUnmuteButtonPlacement { get; }
@@ -364,6 +375,10 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Horizontal,
             new ConfigDescription("Speaking bar icon direction."));
 
+        SpeakingBarNamePosition = config.Bind("UI", "SpeakingBarNamePosition",
+            VoiceChatPlugin.VoiceChat.SpeakingBarNamePosition.Bottom,
+            new ConfigDescription("Where the player name sits relative to its speaking-bar icon."));
+
         JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
             VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
             new ConfigDescription("Jailor unmute button: Voice HUD or the jailee's meeting card."));
@@ -548,7 +563,8 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             PingTrackerPatch.ApplySpeakingBarPosition(SpeakingBarPosition.Value);
         }
         else if (configEntry == SpeakingBarManualLayout || configEntry == SpeakingBarX ||
-                 configEntry == SpeakingBarY || configEntry == SpeakingBarLayout)
+                 configEntry == SpeakingBarY || configEntry == SpeakingBarLayout ||
+                 configEntry == SpeakingBarNamePosition)
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();
         }

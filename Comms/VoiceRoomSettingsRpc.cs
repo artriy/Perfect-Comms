@@ -81,6 +81,8 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.MuffleHypnotizedDuringHysteria);
         writer.Write(settings.OnlyMeetingOrLobbyAffectsGhosts);
         writer.Write(settings.TeamRadioInMeetings);
+        writer.Write(settings.PuppeteerHearFromVictim);
+        writer.Write(settings.ParasiteHearFromVictim);
     }
 
     private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
@@ -127,6 +129,8 @@ internal static class VoiceRoomSettingsRpc
         bool muffleHypnotizedDuringHysteria = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
         bool onlyMeetingOrLobbyAffectsGhosts = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
         bool teamRadioInMeetings = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
+        bool puppeteerHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
+        bool parasiteHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
 
         return new VoiceRoomSettingsSnapshot(
             backend,
@@ -160,7 +164,9 @@ internal static class VoiceRoomSettingsRpc
             muteGlitchHacked,
             muffleBlindedOrFlashedHearing,
             muffleHypnotizedDuringHysteria,
-            teamRadioInMeetings).Clamp();
+            teamRadioInMeetings,
+            puppeteerHearFromVictim,
+            parasiteHearFromVictim).Clamp();
     }
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
