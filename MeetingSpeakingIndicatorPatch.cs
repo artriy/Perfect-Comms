@@ -26,6 +26,7 @@ public static class MeetingSpeakingIndicatorPatch
 
     public static void Postfix(MeetingHud __instance)
     {
+        long overlayTicks = VoiceFrameProfiler.Begin();
         try
         {
             UpdateIndicators(VoiceOverlayState.Current(VoiceChatRoom.Current), __instance);
@@ -34,6 +35,7 @@ public static class MeetingSpeakingIndicatorPatch
         {
             LogIndicatorError(ex);
         }
+        VoiceFrameProfiler.End("overlay.meeting", overlayTicks);
     }
 
     private static float _lastIndicatorErrorTime = -999f;
@@ -602,30 +604,51 @@ public static class MeetingSpeakingIndicatorPatch
         return _cardGlowSprite;
     }
 
-    private static Color GetPlayerColor(byte playerId)
+    // PlayerId -> PlayerControl lookup rebuilt at most once per frame. Replaces the previous per-visible-
+    // speaker AllPlayerControls scan (O(speakers x players) every meeting frame) with one walk per frame
+    // (O(players)) plus O(1) lookups. Built lazily on first GetPlayerColor call, so an idle meeting (no
+    // visible speakers, hence no GetPlayerColor calls) does no walk at all.
+    private static int _lookupFrame = -1;
+    private static readonly Dictionary<byte, PlayerControl> _playerLookup = new();
+
+    private static void EnsurePlayerLookup()
     {
-        // Resolve live every call (no persistent cache): the glow color must follow conceal-state
-        // changes mid-meeting (camouflage on/off) so it never shows a stale real color for a now-
-        // concealed speaker, nor a stale grey for one whose camo ended. Only called for visible
-        // speakers (Visibility > 0.01f), so the per-call player scan is cheap.
-        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
+        int frame = Time.frameCount;
+        if (_lookupFrame == frame) return;
+        _lookupFrame = frame;
+        _playerLookup.Clear();
         try
         {
             var players = PlayerControl.AllPlayerControls;
-            if (players == null) return fallback;
+            if (players == null) return;
             foreach (var pc in players)
             {
+                // Match the original GetPlayerColor scan: skip half-initialized players (Data == null) so a
+                // transient duplicate PlayerId (join/respawn) can't evict the valid instance from the lookup
+                // and flash the fallback colour for a frame.
                 if (pc == null || pc.Data == null) continue;
-                if (pc.PlayerId != playerId) continue;
-
-                // Same color source as the speaking bar (live body color w/ transient-red guard,
-                // concealed-aware grey) for parity.
-                return CrewmateAvatarRenderer.GetPaletteColor(pc);
+                _playerLookup[pc.PlayerId] = pc;
             }
         }
         catch
         {
             // AllPlayerControls can be null/throw during scene transitions.
+        }
+    }
+
+    private static Color GetPlayerColor(byte playerId)
+    {
+        // Resolve the palette color live every call (no persistent color cache): the glow must follow
+        // conceal-state changes mid-meeting (camouflage on/off). Only the *player lookup* is cached
+        // per-frame; GetPaletteColor still runs fresh so the color is never stale.
+        var fallback = new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
+        EnsurePlayerLookup();
+        if (_playerLookup.TryGetValue(playerId, out var pc) && pc != null && pc.Data != null)
+        {
+            // Same color source as the speaking bar (live body color w/ transient-red guard,
+            // concealed-aware grey) for parity.
+            try { return CrewmateAvatarRenderer.GetPaletteColor(pc); }
+            catch { /* transient interop failure during scene transitions */ }
         }
 
         return fallback;

@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Concentus.Enums;
 using Concentus.Structs;
+using MiraAPI.LocalSettings;
 using NAudio.Wave;
 using SIPSorcery.Net;
 using SocketIOClient;
@@ -49,8 +50,23 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private readonly Dictionary<string, int> _socketToClient = new();
     private readonly Dictionary<string, Queue<string>> _pendingSignalsBySocket = new();
     private readonly Dictionary<string, DateTime> _lastSignalRejectLogUtc = new();
+    // Reused by the per-frame Update loop so it doesn't allocate a PeerConnection[] every frame. Only
+    // touched on the Unity main thread (Update), so no extra synchronization beyond the _peerSync snapshot.
+    private readonly List<PeerConnection> _updatePeerScratch = new();
     // volatile: reassigned on a background socket callback, read on the main thread.
     private volatile List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
+    // Pre-built RTCPeerConnections. `new RTCPeerConnection` generates a self-signed DTLS certificate, which
+    // costs ~300-500ms in IL2CPP — and it used to run on the Unity main thread (via _mainThreadActions ->
+    // MapClient -> EnsurePeer -> WireNewPeerConnection) under _peerSync, freezing rendering AND the audio
+    // threads when a peer joined. We now keep a tiny background-filled pool so WireNewPeerConnection rents a
+    // ready connection instantly; the cert generation happens on a ThreadPool thread. Built with the current
+    // _iceServers and invalidated when those change (clientPeerConfig). Thread-safe (ConcurrentQueue).
+    private readonly ConcurrentQueue<RTCPeerConnection> _pcPool = new();
+    private const int PcPoolTarget = 2;
+    private int _pcPoolRefilling;
+    // Config the pooled connections were built with; if Nat Fix or the ICE/TURN servers change, the pooled
+    // connections are stale and must be discarded so the next connect uses the new policy.
+    private volatile string _pooledIceSignature = "";
     private static readonly TimeSpan JoinRetryInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfferRetryInterval = TimeSpan.FromSeconds(3);
     // Stuck in 'connecting' past this = failed handshake; re-offer on a fresh connection.
@@ -160,7 +176,32 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _playbackProvider = new BclStereoPlaybackProvider(_leftPlayback.Endpoint, _rightPlayback.Endpoint);
 
         ConnectSocket();
+        WarmOpusCodec();
         VoiceDiagnostics.Log("bcl.created", $"room={RoomCode} region={Region} endpoint={ServerUrl}");
+    }
+
+    // Prime the Concentus Opus codec off the main thread at startup. The first OpusDecoder construction JITs
+    // the codec and initialises its shared (process-wide) static tables — tens of ms that otherwise landed on
+    // the Unity main thread inside the first peer-join (new PeerConnection -> new OpusDecoder). Runs once per
+    // process, and long before any peer can connect (socket connect + signaling take far longer), so there's
+    // no construction race with a real peer decoder.
+    private static int _opusWarmed;
+    private static void WarmOpusCodec()
+    {
+        if (Interlocked.Exchange(ref _opusWarmed, 1) == 1) return;
+        Task.Run(() =>
+        {
+            try
+            {
+#pragma warning disable CS0618
+                _ = new OpusDecoder(AudioHelpers.ClockRate, AudioHelpers.Channels);
+#pragma warning restore CS0618
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("bcl.codec.warm.error", $"error=\"{ex.Message}\"");
+            }
+        });
     }
 
     public string RoomCode { get; }
@@ -172,10 +213,35 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     public bool Mute { get; private set; }
     public float LocalLevel => _localLevel;
     public bool LocalSpeaking => _localSpeaking;
-    public int PeerCount => SnapshotPeers().Length;
-    public IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates => SnapshotPeers()
-        .Where(peer => peer.PlayerId != byte.MaxValue)
-        .Select(peer => peer.ToOverlayState());
+    public int PeerCount
+    {
+        get { lock (_peerSync) return _peersBySocket.Count; }
+    }
+
+    public IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates
+    {
+        get
+        {
+            var list = new List<VoiceRemoteOverlayState>();
+            AppendRemoteOverlayStates(list);
+            return list;
+        }
+    }
+
+    // Per-frame overlay path: fill the caller's buffer under the peer lock instead of the old
+    // SnapshotPeers().Where().Select() chain, which allocated a PeerConnection[] plus LINQ enumerators
+    // every frame. Mirrors the allocation-free CountMappedRemotePeers pattern.
+    public void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer)
+    {
+        lock (_peerSync)
+        {
+            foreach (var peer in _peersBySocket.Values)
+            {
+                if (peer.PlayerId == byte.MaxValue) continue;
+                buffer.Add(peer.ToOverlayState());
+            }
+        }
+    }
 
     // Per-frame on the recovery hot path: kept allocation-free (no snapshot array, no LINQ closure).
     public int CountMappedRemotePeers(VoiceGameStateSnapshot snapshot)
@@ -780,10 +846,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         bool localInVent,
         bool commsSabActive)
     {
+        // backend.mainactions is where peer-join work (MapClient -> WireNewPeerConnection -> RentPeerConnection)
+        // runs; timing it confirms the pooled connection keeps the connect off the main-thread critical path.
+        long mainActionsTicks = VoiceFrameProfiler.Begin();
         while (_mainThreadActions.TryDequeue(out var action))
         {
             try { action(); } catch (Exception ex) { VoiceDiagnostics.Log("bcl.error", $"stage=mainThread error=\"{ex.Message}\""); }
         }
+        VoiceFrameProfiler.End("backend.mainactions", mainActionsTicks);
 
 #if ANDROID
         _androidMicrophone?.Tick();
@@ -791,18 +861,25 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         if (snapshot == null)
         {
-            foreach (var peer in SnapshotPeers()) peer.MuteAll();
+            SnapshotPeersInto(_updatePeerScratch);
+            foreach (var peer in _updatePeerScratch) peer.MuteAll();
             MaybeLogStats(snapshot, "no-snapshot");
             return;
         }
 
+        long joinTicks = VoiceFrameProfiler.Begin();
         _ = JoinAsync(snapshot);
+        VoiceFrameProfiler.End("backend.join", joinTicks);
+        long retryTicks = VoiceFrameProfiler.Begin();
         RetryClosedDataChannels();
+        VoiceFrameProfiler.End("backend.retry", retryTicks);
 
         var localPlayer = snapshot.TryGetLocalPlayer(out var local) ? local : (VoicePlayerSnapshot?)null;
         var listenerPos = localPlayer?.Position;
 
-        foreach (var peer in SnapshotPeers())
+        long proxTicks = VoiceFrameProfiler.Begin();
+        SnapshotPeersInto(_updatePeerScratch);
+        foreach (var peer in _updatePeerScratch)
         {
             var target = FindTarget(snapshot, peer);
             if (target.HasValue && VoiceProximityCalculator.IsUnavailableTarget(target.Value))
@@ -819,19 +896,17 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
-            peer.Apply(result);
-            peer.TryFlushBufferedVoice(out var flushError, out var flushedFrames);
-            if (!string.IsNullOrEmpty(flushError))
-            {
-                Interlocked.Increment(ref _audioDecodeFailures);
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes=0 error=\"{flushError}\"");
-            }
-            if (flushedFrames > 0)
-            {
-                Interlocked.Add(ref _encodedRx, flushedFrames);
-            }
+            peer.Apply(result); // proximity volumes only — volatile route writes, no _sync, no decode
+            // Deliberately NOT calling peer.TryFlushBufferedVoice here. Doing so held the per-peer _sync lock
+            // across the Concentus Opus decode ON THE UNITY MAIN/RENDER THREAD, so a packet arriving on the
+            // WebRTC receive thread (or the tail-flush timer firing) could block rendering — a frame-stutter
+            // vector that scaled with talker count. The quiet tail is already drained off the render thread by
+            // the per-peer 40 ms _tailFlushTimer (re-armed on every received packet in TryReceiveVoicePacket),
+            // so all Opus decode now happens on the receive/timer threads only. Worst case: ~40 ms extra tail
+            // latency on the final frames of a talkspurt, which is imperceptible.
             peer.SampleDiagnostics();
         }
+        VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
 
         MaybeLogStats(snapshot, "ok");
     }
@@ -855,6 +930,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (socket != null)
             _ = DisconnectAndDisposeSocketAsync(socket);
         ClearPeers();
+        DrainPeerConnectionPool();
     }
 
     private static async Task DisconnectAndDisposeSocketAsync(SocketIOClient.SocketIO socket)
@@ -942,11 +1018,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     username = server.username,
                     credential = server.credential,
                 }).ToList();
+                // Pooled connections were built with the previous ICE servers; rebuild them.
+                DrainPeerConnectionPool();
+                RefillPeerConnectionPool();
             }
             await Task.CompletedTask;
         });
         _socket.On("VAD", async _ => await Task.CompletedTask);
         _ = _socket.ConnectAsync();
+        // Warm the pool so the first peer-join doesn't generate a DTLS certificate on the main thread.
+        RefillPeerConnectionPool();
     }
 
     private async Task JoinAsync(VoiceGameStateSnapshot? snapshot = null)
@@ -1187,6 +1268,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var peers = SnapshotPeers();
         var retryPeers = peers
             .Where(peer => ShouldInitiateOffer(peer.SocketId)
+                && now >= peer.NextRetryUtc
                 && (IsRetryableDataChannelState(peer.DataChannel?.readyState) || IsStuckConnecting(peer, now)))
             .ToArray();
         // Answerer side can't offer (would glare) and OnPeerConnectionDied only fires its one-shot
@@ -1200,6 +1282,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             .Where(peer =>
             {
                 if (ShouldInitiateOffer(peer.SocketId) || IsLocalSocket(peer.SocketId)) return false;
+                if (now < peer.NextRetryUtc) return false;
                 var conn = peer.Connection;
                 return conn != null
                     && conn.connectionState is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed;
@@ -1215,11 +1298,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // first so StartOfferAsync sees a null channel and proceeds.
             if (stuck) RecreatePeerConnection(peer.SocketId);
             _ = StartOfferAsync(peer.SocketId);
+            peer.RecoveryAttempts++;
+            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
         }
         foreach (var peer in rerequestPeers)
         {
             VoiceDiagnostics.Log("bcl.offer", $"reason=re-request socket={peer.SocketId} client={peer.ClientId} state=connection-{peer.Connection?.connectionState.ToString().ToLowerInvariant() ?? "none"}");
             RequestOfferFromPeer(peer.SocketId);
+            peer.RecoveryAttempts++;
+            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
         }
     }
 
@@ -1242,24 +1329,167 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
+    // Constructs an RTCPeerConnection (the expensive DTLS self-signed-cert step). Safe to call off the
+    // Unity main thread — SIPSorcery is pure managed networking and ICE gathering only starts later, at
+    // setLocalDescription, not at construction.
+    private RTCPeerConnection BuildPeerConnection()
+    {
+        var cfg = ResolveIceConfiguration();
+        long t = System.Diagnostics.Stopwatch.GetTimestamp();
+        var pc = new RTCPeerConnection(cfg);
+        if (VoiceDiagnostics.IsEnabled)
+        {
+            bool hasTurn = cfg.iceServers.Any(s => s.urls != null && s.urls.StartsWith("turn", StringComparison.OrdinalIgnoreCase));
+            VoiceDiagnostics.Log("bcl.pcpool.built",
+                $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} poolSize={_pcPool.Count} thread={Environment.CurrentManagedThreadId} policy={cfg.iceTransportPolicy} iceServers={cfg.iceServers.Count} turn={hasTurn}");
+        }
+        return pc;
+    }
+
+    // Resolve the ICE configuration for a new peer connection from the current ICE servers (default STUN, or
+    // whatever the signaling server sent via clientPeerConfig) plus the Nat Fix setting + configured TURN relay.
+    private RTCConfiguration ResolveIceConfiguration()
+    {
+        bool natFix = true;
+        string turnUrl = "turn:turn.bettercrewl.ink:3478";
+        string turnUser = "";
+        string turnCred = "";
+        try
+        {
+            var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+            if (settings != null)
+            {
+                natFix = settings.NatFix.Value;
+                turnUrl = settings.TurnServerUrl.Value;
+                turnUser = settings.TurnUsername.Value;
+                turnCred = settings.TurnCredential.Value;
+            }
+        }
+        catch { /* settings not ready; fall back to defaults (Nat Fix on) */ }
+
+        return BuildIceConfiguration(_iceServers, natFix, turnUrl, turnUser, turnCred);
+    }
+
+    // Pure ICE-config builder (unit-testable). With Nat Fix on, guarantees a STUN entry AND the configured TURN
+    // relay are present so a NAT-blocked peer can fall back to relay; iceTransportPolicy stays 'all', so ICE
+    // uses a direct path when it can and relays ONLY the peers that need it. With Nat Fix off, the base servers
+    // are used unchanged (legacy STUN-only behaviour, no relay).
+    internal static RTCConfiguration BuildIceConfiguration(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUsername, string turnCredential)
+    {
+        var servers = new List<RTCIceServer>();
+        if (baseServers != null) servers.AddRange(baseServers);
+
+        if (natFix && !string.IsNullOrWhiteSpace(turnUrl))
+        {
+            if (!servers.Any(s => s.urls != null && s.urls.StartsWith("stun:", StringComparison.OrdinalIgnoreCase)))
+                servers.Add(new RTCIceServer { urls = "stun:stun.l.google.com:19302" });
+            if (!servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
+                servers.Add(new RTCIceServer { urls = turnUrl, username = turnUsername, credential = turnCredential });
+        }
+
+        return new RTCConfiguration { iceServers = servers, iceTransportPolicy = RTCIceTransportPolicy.all };
+    }
+
+    // Cheap signature of everything that affects the resolved ICE config, used to invalidate the pre-built
+    // connection pool when Nat Fix / the TURN server / the signaling-provided ICE servers change.
+    private string IceConfigSignature()
+    {
+        bool natFix = true;
+        string turnUrl = "";
+        try
+        {
+            var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
+            if (settings != null) { natFix = settings.NatFix.Value; turnUrl = settings.TurnServerUrl.Value; }
+        }
+        catch { }
+        var baseUrls = _iceServers == null ? "" : string.Join(",", _iceServers.Select(s => s.urls));
+        return natFix + "|" + turnUrl + "|" + baseUrls;
+    }
+
+    // Rent a pre-built connection (instant) or, on a pool miss, build inline (the old behaviour — rare).
+    // Always kicks a background refill so the next join stays off the main thread. The rent log shows
+    // hit=true when the pool absorbed the cost off-thread (no main-thread cert generation).
+    private RTCPeerConnection RentPeerConnection()
+    {
+        // Discard any pooled connections built with a now-stale ICE config (Nat Fix toggled, TURN server
+        // changed, or the signaling server sent new ICE servers) so this connect uses the current policy.
+        if (IceConfigSignature() != _pooledIceSignature)
+            DrainPeerConnectionPool();
+        bool hit = _pcPool.TryDequeue(out var pooled);
+        var pc = hit ? pooled! : BuildPeerConnection();
+        if (VoiceDiagnostics.IsEnabled)
+            VoiceDiagnostics.Log("bcl.pcpool.rent", $"hit={(hit ? "true" : "false")} poolSize={_pcPool.Count}");
+        RefillPeerConnectionPool();
+        return pc;
+    }
+
+    // Top the pool up to PcPoolTarget on a ThreadPool thread (one refiller at a time). The DTLS cert
+    // generation therefore happens off the Unity main thread, ahead of when a peer actually joins.
+    private void RefillPeerConnectionPool()
+    {
+        if (_disposed) return;
+        if (Interlocked.Exchange(ref _pcPoolRefilling, 1) == 1) return;
+        // Stamp the config this batch is built for, so RentPeerConnection can detect a later config change.
+        _pooledIceSignature = IceConfigSignature();
+        Task.Run(() =>
+        {
+            try
+            {
+                while (!_disposed && _pcPool.Count < PcPoolTarget)
+                    _pcPool.Enqueue(BuildPeerConnection());
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("bcl.pcpool.error", $"stage=refill error=\"{ex.Message}\"");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pcPoolRefilling, 0);
+                if (_disposed) DrainPeerConnectionPool(); // close any straggler enqueued during teardown
+            }
+        });
+    }
+
+    // Close and discard every pooled (never-wired) connection — used when _iceServers change (the pooled
+    // connections carry stale ICE config) and on dispose.
+    private void DrainPeerConnectionPool()
+    {
+        while (_pcPool.TryDequeue(out var pc))
+            try { pc.close(); } catch { }
+    }
+
     // Fresh RTCPeerConnection + handlers, shared by EnsurePeer and RecreatePeerConnection.
     // Caller MUST hold _peerSync.
     private void WireNewPeerConnection(PeerConnection peer, string socketId)
     {
-        var pc = new RTCPeerConnection(new RTCConfiguration { iceServers = _iceServers });
+        var pc = RentPeerConnection();
         peer.Connection = pc;
         pc.ondatachannel += dc =>
         {
             lock (_peerSync)
                 peer.DataChannel = dc;
-            dc.onopen += () => VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=true");
+            dc.onopen += () =>
+            {
+                peer.RecoveryAttempts = 0;
+                peer.NextRetryUtc = DateTime.MinValue;
+                VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=true");
+            };
             dc.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
         };
         pc.onicecandidate += candidate =>
         {
             if (candidate == null || _socket == null) return;
+            // Diagnostic: candidate type (host/srflx/relay) proves whether TURN relay candidates were
+            // gathered for this peer — i.e. whether Nat Fix is actually reaching the relay.
+            if (VoiceDiagnostics.IsEnabled)
+                VoiceDiagnostics.Log("bcl.ice.candidate", $"socket={socketId} type={candidate.type} protocol={candidate.protocol}");
             var signalData = JsonSerializer.Serialize(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
             _ = _socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
+        };
+        pc.oniceconnectionstatechange += iceState =>
+        {
+            if (VoiceDiagnostics.IsEnabled)
+                VoiceDiagnostics.Log("bcl.ice.state", $"socket={socketId} client={peer.ClientId} iceState={iceState}");
         };
         // Background-thread liveness from SIPSorcery: marshal recovery to the main thread.
         // Captured pc lets the handler ignore events from a connection we already replaced.
@@ -1342,15 +1572,24 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         VoiceDiagnostics.Log("bcl.offer", $"reason=request socket={socketId}");
     }
 
-    // Per-peer recovery debounce shared by the state handler and request-offer path, against storms.
+    // Exponential reconnect backoff: 3s, 6s, 12s, 24s, capped at 30s. The first retries stay fast so a one-off
+    // glitch heals quickly; only a persistently-failing peer backs off, which stops an unreachable peer from
+    // re-offering/recreating every 3s for the entire session (the storm seen in the field logs).
+    private static TimeSpan RecoveryBackoff(int attempts)
+        => TimeSpan.FromSeconds(Math.Min(30.0, PeerRecoveryDebounce.TotalSeconds * Math.Pow(2, Math.Max(0, attempts - 1))));
+
+    // Per-peer recovery gate shared by the state handler and request-offer path, against storms. Honors the
+    // exponential backoff so a peer that keeps failing isn't recreated on a tight loop.
     private bool TryBeginRecovery(string socketId)
     {
         lock (_peerSync)
         {
             if (!_peersBySocket.TryGetValue(socketId, out var peer)) return false;
             var now = DateTime.UtcNow;
-            if (now - peer.LastRecoveryUtc < PeerRecoveryDebounce) return false;
+            if (now < peer.NextRetryUtc) return false;
             peer.LastRecoveryUtc = now;
+            peer.RecoveryAttempts++;
+            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
             return true;
         }
     }
@@ -1385,7 +1624,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 peer.DataChannel = channel;
                 peer.OfferStartedUtc = DateTime.UtcNow;
             }
-            channel.onopen += () => VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=false");
+            channel.onopen += () =>
+            {
+                peer.RecoveryAttempts = 0;
+                peer.NextRetryUtc = DateTime.MinValue;
+                VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=false");
+            };
             channel.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
             var offer = conn.createOffer(null);
             await conn.setLocalDescription(offer);
@@ -1579,6 +1823,22 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         VoiceDiagnostics.Log("bcl.signal.rejected", $"fromSocket={fromSocketId} reason={reason}");
     }
 
+    // Caller must hold _peerSync. Removes every "socketId:reason" entry for a departed socket.
+    private void RemoveSignalRejectLogEntriesLocked(string socketId)
+    {
+        if (_lastSignalRejectLogUtc is null || _lastSignalRejectLogUtc.Count == 0) return;
+        var prefix = socketId + ":";
+        List<string>? toRemove = null;
+        foreach (var key in _lastSignalRejectLogUtc.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+                (toRemove ??= new List<string>()).Add(key);
+        }
+        if (toRemove == null) return;
+        foreach (var key in toRemove)
+            _lastSignalRejectLogUtc.Remove(key);
+    }
+
     private bool ShouldLogSignalRejected(string fromSocketId, string reason)
     {
         var key = $"{fromSocketId}:{reason}";
@@ -1598,7 +1858,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         if (HasDataControlPrefix(data))
         {
-            var payload = data.Skip(DataControlPrefixLength).ToArray();
+            var payload = new byte[data.Length - DataControlPrefixLength];
+            Array.Copy(data, DataControlPrefixLength, payload, 0, payload.Length);
             if (TryHandleRadioState(payload, peer.PlayerId)) return;
             Interlocked.Increment(ref _customRx);
             // Side-channel is untrusted for authority (self-asserted id); also avoids a torn
@@ -1699,7 +1960,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int ConvertIeeeFloat32ToMonoFloat(byte[] buffer, int recordedBytes, int channels, out float[] floatPcm)
     {
         var frames = recordedBytes / (sizeof(float) * channels);
-        floatPcm = new float[frames];
+        floatPcm = EnsureMicConvertCapacity(frames);
         var dominantChannel = SelectDominantIeeeFloat32Channel(buffer, frames, channels);
         for (var frame = 0; frame < frames; frame++)
         {
@@ -1712,7 +1973,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int ConvertPcm16ToMonoFloat(byte[] buffer, int recordedBytes, int channels, out float[] floatPcm)
     {
         var frames = recordedBytes / (sizeof(short) * channels);
-        floatPcm = new float[frames];
+        floatPcm = EnsureMicConvertCapacity(frames);
         var dominantChannel = SelectDominantPcm16Channel(buffer, frames, channels);
         for (var frame = 0; frame < frames; frame++)
         {
@@ -1727,7 +1988,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         const int bytesPerSample = 3;
         var frames = recordedBytes / (bytesPerSample * channels);
-        floatPcm = new float[frames];
+        floatPcm = EnsureMicConvertCapacity(frames);
         var dominantChannel = SelectDominantPcm24Channel(buffer, frames, channels);
         for (var frame = 0; frame < frames; frame++)
         {
@@ -1741,7 +2002,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int ConvertPcm32ToMonoFloat(byte[] buffer, int recordedBytes, int channels, out float[] floatPcm)
     {
         var frames = recordedBytes / (sizeof(int) * channels);
-        floatPcm = new float[frames];
+        floatPcm = EnsureMicConvertCapacity(frames);
         var dominantChannel = SelectDominantPcm32Channel(buffer, frames, channels);
         for (var frame = 0; frame < frames; frame++)
         {
@@ -1862,6 +2123,23 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // Reused encode scratch; all writes occur under _captureFrameSync and never escape.
     private readonly short[] _encodePcm = new short[AudioHelpers.FrameSize];
     private readonly byte[] _encodeScratch = new byte[1024];
+    // Reused open-channel list for the send loop. Only used inside ProcessMicrophoneFrameLocked, which
+    // always runs under _captureFrameSync, so it is effectively single-threaded; holds channel references
+    // (not audio data), so no aliasing concern. Replaces the per-frame SnapshotOpenChannels LINQ array.
+    private readonly List<RTCDataChannel> _openChannelScratch = new();
+
+    // Reused mono-downmix buffer for mic capture conversion. Only touched on the single NAudio capture
+    // thread (OnMicrophoneData), and its contents are copied into the reused _captureFrameBuffer by
+    // ProcessMicrophoneCaptureSamples (which bounds reads by the sample count), so reuse is safe and the
+    // per-callback float[] allocation is eliminated. Grows on demand, never shrinks.
+    private float[] _micConvertScratch = Array.Empty<float>();
+
+    private float[] EnsureMicConvertCapacity(int frames)
+    {
+        if (_micConvertScratch is null || _micConvertScratch.Length < frames)
+            _micConvertScratch = new float[frames];
+        return _micConvertScratch;
+    }
 
     private void ProcessMicrophoneCaptureSamples(float[] floatPcm, int samples)
     {
@@ -2011,15 +2289,18 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _txSquareSumSinceStats += transmitSquareSum;
             _txSamplesSinceStats += samples;
         }
-        var trimmed = new byte[encoded];
-        Array.Copy(packet, trimmed, encoded);
         var voiceFlags = BclVoicePacketFlags.None;
         if (VoiceTeamRadioChannels.IsActive(_lastLocalRadioChannel)) voiceFlags |= BclVoicePacketFlags.Radio;
         if (BclOpusUseInbandFec) voiceFlags |= BclVoicePacketFlags.LossResistant;
         if (IsSyntheticSource(source)) voiceFlags |= BclVoicePacketFlags.Synthetic;
-        var framed = BclVoicePacket.Wrap(trimmed, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, BclVoicePacket.QuantizeLevel(transmitPeak));
+        // Wrap directly from the reusable encode scratch (first `encoded` bytes), skipping the old
+        // intermediate trimmed byte[] copy. The framed buffer itself stays a fresh per-frame allocation
+        // because channel.send queues it for asynchronous SCTP transmission (reusing it would corrupt
+        // in-flight data).
+        var framed = BclVoicePacket.Wrap(packet, encoded, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, BclVoicePacket.QuantizeLevel(transmitPeak));
         var sent = false;
-        foreach (var channel in SnapshotOpenChannels())
+        SnapshotOpenChannelsInto(_openChannelScratch);
+        foreach (var channel in _openChannelScratch)
         {
             try
             {
@@ -2055,6 +2336,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             return _peersBySocket.Values.ToArray();
     }
 
+    // Allocation-free snapshot for the per-frame Update loop: refills a caller-owned reusable buffer under
+    // _peerSync instead of allocating a new array. Same concurrency semantics as SnapshotPeers (a stable
+    // copy taken under the lock, then iterated outside it).
+    private void SnapshotPeersInto(List<PeerConnection> buffer)
+    {
+        buffer.Clear();
+        lock (_peerSync)
+        {
+            foreach (var peer in _peersBySocket.Values)
+                buffer.Add(peer);
+        }
+    }
+
     private string[] SnapshotMappedSocketIds()
     {
         // Every mapped socket, not just the newest per client: _clientToSocket.Values keeps only the latest
@@ -2064,14 +2358,20 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             return _socketToClient.Keys.ToArray();
     }
 
-    private RTCDataChannel[] SnapshotOpenChannels()
+    // Fill a caller-owned reusable buffer with the currently-open data channels instead of allocating a
+    // LINQ Select/Where/Cast/ToArray per transmitted 20 ms voice frame.
+    private void SnapshotOpenChannelsInto(List<RTCDataChannel> buffer)
     {
+        buffer.Clear();
         lock (_peerSync)
-            return _peersBySocket.Values
-                .Select(peer => peer.DataChannel)
-                .Where(channel => channel?.readyState == RTCDataChannelState.open)
-                .Cast<RTCDataChannel>()
-                .ToArray();
+        {
+            foreach (var peer in _peersBySocket.Values)
+            {
+                var channel = peer.DataChannel;
+                if (channel != null && channel.readyState == RTCDataChannelState.open)
+                    buffer.Add(channel);
+            }
+        }
     }
 
     private void RemovePeer(string socketId)
@@ -2089,6 +2389,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 && string.Equals(mappedSocket, socketId, StringComparison.Ordinal))
                 _clientToSocket.Remove(clientId);
             _pendingSignalsBySocket.Remove(socketId);
+            // Evict this socket's signal-reject-log timestamps. Without this, _lastSignalRejectLogUtc
+            // (keyed "socketId:reason") grew without bound across a session as peers connect/disconnect,
+            // slowly raising the GC heap and worsening lag spikes the longer a lobby stayed up.
+            RemoveSignalRejectLogEntriesLocked(socketId);
         }
         if (peer == null) return;
         _leftPlayback.Remove(peer.PlaybackGroupId);
@@ -2107,6 +2411,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _clientToSocket.Clear();
             _socketToClient.Clear();
             _pendingSignalsBySocket.Clear();
+            _lastSignalRejectLogUtc.Clear();
         }
         foreach (var peer in peers)
         {
@@ -2272,6 +2577,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         private readonly Timer _tailFlushTimer;
         // Reused grow-on-demand decode scratch; all callers hold _sync, AddSamples copies synchronously.
         private short[] _decodePcm = System.Array.Empty<short>();
+        // Decode-failure suppression. A peer whose packets keep failing to decode (e.g. an incompatible
+        // client/codec sharing the same public room) is taken off the Opus decode path after a threshold —
+        // each failure THROWS a Concentus exception — and just routed silence, re-probing on a growing
+        // interval in case the stream recovers. Accessed only under _sync (the decode lock).
+        private int _decodeFailures;
+        private bool _decodeSuppressed;
+        private DateTime _decodeReprobeUtc;
+        private const int DecodeFailureSuppressThreshold = 10;
         private float[] _decodeFloat = System.Array.Empty<float>();
         private bool _disposed;
 
@@ -2301,6 +2614,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         public DateTime OfferStartedUtc { get; set; } = DateTime.MinValue;
         // Last recovery rebuild time; debounces re-offer storms.
         public DateTime LastRecoveryUtc { get; set; } = DateTime.MinValue;
+        // Exponential reconnect backoff. A peer that keeps failing to connect (e.g. genuinely unreachable even
+        // via relay) backs off its offer/recovery cadence instead of retrying every 3s for the whole session.
+        // Reset to zero the instant its data channel opens, so a recovered peer that later glitches retries fast.
+        public int RecoveryAttempts { get; set; }
+        public DateTime NextRetryUtc { get; set; } = DateTime.MinValue;
 #pragma warning disable CS0618
         public OpusDecoder Decoder { get; } = new(AudioHelpers.ClockRate, AudioHelpers.Channels);
 #pragma warning restore CS0618
@@ -2572,10 +2890,47 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         // under-stamps its duration can never trip OPUS_BUFFER_TOO_SMALL / IndexOutOfRange inside Concentus.
         private const int MaxDecodeCapacitySamples = 5760;
 
+        // Suppress a peer that keeps failing to decode: after the threshold, stop calling Opus.Decode (which
+        // throws per bad packet) and route silence; re-probe on a growing 5s..60s interval. Returns true while
+        // suppressed (silence routed, no decode, no log).
+        private bool TryHandleSuppressedDecode(int frameSize)
+        {
+            if (!_decodeSuppressed || DateTime.UtcNow >= _decodeReprobeUtc) return false;
+            RouteSilence(frameSize);
+            return true;
+        }
+
+        private void NoteDecodeFailure()
+        {
+            _decodeFailures++;
+            if (_decodeFailures < DecodeFailureSuppressThreshold) return;
+            bool wasSuppressed = _decodeSuppressed;
+            _decodeSuppressed = true;
+            // Grow the re-probe interval (5s, 10s, 20s, 40s, 60s cap) so a permanently-incompatible peer is
+            // probed rarely while a transient glitch still recovers within a few seconds.
+            int over = _decodeFailures - DecodeFailureSuppressThreshold;
+            double sec = Math.Min(60.0, 5.0 * Math.Pow(2, Math.Min(over, 4)));
+            _decodeReprobeUtc = DateTime.UtcNow + TimeSpan.FromSeconds(sec);
+            if (!wasSuppressed)
+                VoiceDiagnostics.Log("bcl.decode.suppressed", $"client={ClientId} failures={_decodeFailures} reprobeSec={sec:0}");
+        }
+
+        private void NoteDecodeSuccess()
+        {
+            if (_decodeSuppressed)
+                VoiceDiagnostics.Log("bcl.decode.resumed", $"client={ClientId} afterFailures={_decodeFailures}");
+            _decodeFailures = 0;
+            _decodeSuppressed = false;
+        }
+
         private bool DecodeAndAddSamples(byte[] data, bool decodeFec, int frameSize, out string? error, out int decodedFrames)
         {
             error = null;
             decodedFrames = 0;
+
+            // Suppressed stream: skip the decode entirely (no throw, no drop log), just keep the timeline aligned.
+            if (TryHandleSuppressedDecode(frameSize))
+                return false;
 
             // PLC (empty payload) and FEC require frame_size to equal the EXACT missing duration; a real
             // packet is decoded at full capacity so its true (possibly larger) frame size always fits.
@@ -2596,6 +2951,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 // caller can keep draining the rest of the batch; the next real packet re-primes the decoder.
                 error = ex.Message;
                 RouteSilence(frameSize);
+                if (!conceal) NoteDecodeFailure(); // only real-packet failures drive suppression, not PLC/FEC
                 return false;
             }
 
@@ -2605,8 +2961,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 // for telemetry (and conceal the slot) instead of silently injecting an untracked gap.
                 error = "decode-empty";
                 RouteSilence(frameSize);
+                if (!conceal) NoteDecodeFailure();
                 return false;
             }
+            if (!conceal) NoteDecodeSuccess();
             if (_decodeFloat.Length < decoded) _decodeFloat = new float[decoded];
             var samples = _decodeFloat;
             var peak = 0f;

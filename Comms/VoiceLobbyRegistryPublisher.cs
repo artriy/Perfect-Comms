@@ -11,6 +11,15 @@ internal static class VoiceLobbyRegistryPublisher
 {
     private const int PublishIntervalSeconds = 10;
     private const int TtlSeconds = 35;
+
+    // The per-frame body below (TryBuildRequest -> CountPlayers AllPlayerControls scan + string Clamps
+    // + BuildSignature string.Join, and the BetterCrewLink publisher it drives) is host-side bookkeeping
+    // that has no reason to run at frame rate. Throttle the whole thing to ~4 Hz; the actual network
+    // publishes/deletes are independently gated to 5-10 s, so this changes nothing functionally while
+    // removing ~93% of the per-frame allocations on a public-lobby host.
+    private const double RefreshIntervalSeconds = 0.25;
+    private static DateTime _nextRefreshUtc = DateTime.MinValue;
+
     private static string? _listingId;
     private static string? _ownerToken;
     private static string? _lastCode;
@@ -20,6 +29,10 @@ internal static class VoiceLobbyRegistryPublisher
 
     internal static void Update()
     {
+        var now = DateTime.UtcNow;
+        if (now < _nextRefreshUtc) return;
+        _nextRefreshUtc = now.AddSeconds(RefreshIntervalSeconds);
+
         var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
         var options = VoiceChatGameOptions.GetInstance();
         if (settings == null || !options.PublicVoiceLobby.Value || !TryBuildRequest(settings, out var request))

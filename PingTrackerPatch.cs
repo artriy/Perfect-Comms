@@ -97,6 +97,9 @@ public static class PingTrackerPatch
     // the icon fully on-screen. Larger = more of the icon stays in view near the edge.
     private const float SlotFootprintHalfWorld = 0.16f;
     private static GameObject?       _barRoot;
+    private static SortingGroup?     _barSortingGroup; // cached so KeepSpeakingBarOnTop avoids a per-frame GetComponent
+    private static float             _nextColorPrewarmTime;
+    private const float              ColorPrewarmInterval = 0.25f; // warm one uncached avatar colour per quarter-second
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
     private static bool              _layoutAnchoredBottom;
@@ -186,14 +189,24 @@ public static class PingTrackerPatch
     {
         if (__instance?.text == null) return;
 
+        long overlayTicks = VoiceFrameProfiler.Begin();
+        long ensureBarTicks = VoiceFrameProfiler.Begin();
         EnsureBar(__instance);
-        if (_barRoot == null) return;
+        VoiceFrameProfiler.End("overlay.ensurebar", ensureBarTicks);
+        if (_barRoot == null) { VoiceFrameProfiler.End("overlay.pingtracker", overlayTicks); return; }
 
         try
         {
-            RebuildPlayerLookup();
-
             var room = VoiceChatRoom.Current;
+            // Warm one not-yet-cached avatar colour per quarter-second so the ~60-75ms base-sprite build
+            // happens during idle time, not the instant a new-coloured player first speaks.
+            if (room != null && Time.time >= _nextColorPrewarmTime)
+            {
+                _nextColorPrewarmTime = Time.time + ColorPrewarmInterval;
+                long pwTicks = VoiceFrameProfiler.Begin();
+                CrewmateAvatarRenderer.PrewarmNextColor();
+                VoiceFrameProfiler.End("overlay.prewarm", pwTicks);
+            }
             var overlay = VoiceOverlayState.Current(room);
             _activeSpeakerIds.Clear();
             _activeSpeakerLevels.Clear();
@@ -216,6 +229,15 @@ public static class PingTrackerPatch
                     _activeSpeakerLevels[lid] = overlay.Local.Level;
                 }
             }
+
+            // Rebuild the FindPlayer lookup only when it will actually be read this frame — i.e. when
+            // someone is speaking (the active-speaker loop calls FindPlayer/GetFingerprint) or slots are
+            // still fading out. When the overlay is idle (nobody speaking, no slots), skip the per-frame
+            // AllPlayerControls IL2CPP walk entirely.
+            if (_activeSpeakerIds.Count > 0 || _slots.Count > 0)
+                RebuildPlayerLookup();
+            else
+                _playerLookup.Clear();
 
             if (MeetingHud.Instance == null)
                 MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
@@ -300,6 +322,7 @@ public static class PingTrackerPatch
         {
             LogOverlayError("PingTracker overlay update", ex);
         }
+        VoiceFrameProfiler.End("overlay.pingtracker", overlayTicks);
     }
 
     private static float _lastOverlayErrorLog = -999f;
@@ -394,7 +417,13 @@ public static class PingTrackerPatch
             var pos = _barRoot.transform.localPosition;
             _barRoot.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
         }
-        ApplySortingGroup(_barRoot, VCSorting.Ring);
+        // Cache the bar's SortingGroup instead of GetComponent/AddComponent every frame. The Unity
+        // null-check re-acquires it if the bar GameObject was destroyed and recreated.
+        if (_barSortingGroup == null)
+            _barSortingGroup = _barRoot.GetComponent<SortingGroup>() ?? _barRoot.AddComponent<SortingGroup>();
+        _barSortingGroup.sortingLayerName = VCSorting.Layer;
+        _barSortingGroup.sortingOrder = VCSorting.Ring;
+
         VCOverlayCamera.Sync(); // must follow the main camera every frame
         // Re-stamp allocates via GetComponentsInChildren; only run on actual change.
         if (_sortingDirty)
@@ -644,7 +673,12 @@ public static class PingTrackerPatch
         if (_barRoot == null) return false;
         if (slot.IconGO != null && !replaceExisting) return true;
 
+        // overlay.iconcreate = the speaker avatar build (CrewmateAvatarRenderer.TryCreate -> base sprite +
+        // ring sprite + cosmetic layers). This is the first-speaker hitch; timing it confirms the ring-sprite
+        // bulk-upload fix and surfaces any remaining first-build cost.
+        long iconTicks = VoiceFrameProfiler.Begin();
         var player = FindPlayer(playerId);
+        bool created = false;
         if (player != null && CrewmateAvatarRenderer.TryCreate(playerId, player, _barRoot.transform, out var iconGO))
         {
             if (slot.IconGO != null) Object.Destroy(slot.IconGO);
@@ -654,9 +688,10 @@ public static class PingTrackerPatch
             slot.PendingFingerprint = default;
             _layoutDirty = true;
             _sortingDirty = true;
-            return true;
+            created = true;
         }
-        return false;
+        VoiceFrameProfiler.End("overlay.iconcreate", iconTicks);
+        return created;
     }
 
     private static void UpdateSlotLabel(SpeakerSlot slot, PlayerControl? player)
@@ -872,7 +907,7 @@ public static class PingTrackerPatch
             CrewmateAvatarRenderer.ClearCache();
             _layoutDirty = false;
             _sortingDirty = false;
-            if (_barRoot != null) { Object.Destroy(_barRoot); _barRoot = null; }
+            if (_barRoot != null) { Object.Destroy(_barRoot); _barRoot = null; _barSortingGroup = null; }
             _barAspect = null;
         }
     }
@@ -1022,6 +1057,10 @@ public static class PingTrackerPatch
         float outerR = center - 1f;
         float innerR = outerR * inner;
 
+        // Fill a Color32[] and upload in ONE SetPixels32 call instead of 16384 individual SetPixel interop
+        // calls (each crossing the IL2CPP boundary and allocating a Color) — this one-time build dropped from
+        // a multi-tens-of-ms main-thread hitch on first speaker to a tight managed loop + a single upload.
+        var pixels = new Color32[size * size];
         for (int y = 0; y < size; y++)
         for (int x = 0; x < size; x++)
         {
@@ -1030,9 +1069,11 @@ public static class PingTrackerPatch
             float d = Mathf.Sqrt(dx * dx + dy * dy);
             float outerA = Mathf.Clamp01((outerR - d) / feather);
             float innerA = Mathf.Clamp01((d - innerR) / feather);
-            tex.SetPixel(x, y, new Color(1f, 1f, 1f, outerA * innerA));
+            byte a = (byte)(Mathf.Clamp01(outerA * innerA) * 255f);
+            pixels[y * size + x] = new Color32(255, 255, 255, a);
         }
 
+        tex.SetPixels32(pixels);
         tex.Apply();
         _ringSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
         _ringSprite.hideFlags |= HideFlags.HideAndDontSave;

@@ -136,7 +136,8 @@ internal static class VoiceDiagnostics
         if (_writer == null) return;
 
         var now = DateTime.UtcNow;
-        if (category is "diagnostics.start" or "room.close" or "transition.perf.slowUpdate" or "transition.audio.clip" ||
+        if (category is "diagnostics.start" or "room.close" or "transition.perf.slowUpdate" or "transition.audio.clip"
+                or "frame.slow" or "frame.window" ||
             category.StartsWith("audio.buffer.", StringComparison.Ordinal) ||
             (now - _lastFlushUtc).TotalSeconds >= FlushIntervalSeconds)
         {

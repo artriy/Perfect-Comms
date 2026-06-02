@@ -26,12 +26,19 @@ internal sealed class VoiceOverlayState
         []);
 
     public VoiceLocalOverlayState Local { get; }
+    // NOTE: for a non-Empty state this aliases a shared static scratch buffer that the next cache-miss
+    // Build() clears and refills. It is valid ONLY within the current frame — copy the values you need into
+    // your own storage before calling VoiceOverlayState.Current()/Build() again. Do not retain it across
+    // frames. (Today all consumers iterate it synchronously within the frame and copy out.)
     public IReadOnlyList<VoiceRemoteOverlayState> RemotePlayers { get; }
     private static int _cachedFrame = -1;
     private static VoiceChatRoom? _cachedRoom;
     private static VoiceOverlayState _cachedState = Empty;
-    // Scratch reused per frame (Build runs only on cache miss); ToArray copies out so the
-    // cached state never aliases next frame's refill.
+    // Scratch reused per frame. Build runs at most once per frame (frame-cached by Current) and is
+    // always invoked on the Unity main thread. The cached state exposes this buffer directly as its
+    // RemotePlayers (no per-frame array copy); this is safe because (a) consumers iterate RemotePlayers
+    // synchronously within the same frame and never retain it, and (b) the next cache-miss frame clears
+    // and refills the buffer before any new consumer reads it.
     private static readonly List<VoiceRemoteOverlayState> _remoteBuffer = new(16);
 
     private VoiceOverlayState(VoiceLocalOverlayState local, IReadOnlyList<VoiceRemoteOverlayState> remotePlayers)
@@ -66,13 +73,18 @@ internal sealed class VoiceOverlayState
 
         var snapshot = room.CurrentSnapshot;
         _remoteBuffer.Clear();
-        foreach (var remote in room.InterstellarRemoteOverlayStates)
+        // Fill directly into the reused buffer (no per-frame List/array allocation in the backend getter).
+        room.AppendRemoteOverlayStates(_remoteBuffer);
+
+        // Only suppress positively not-live remotes; a briefly-null snapshot (one tick after
+        // Rejoin/transport switch) keeps speakers rather than dropping all for a frame. Filter in place.
+        if (snapshot != null)
         {
-            // Only suppress positively not-live remotes; a briefly-null snapshot (one tick after
-            // Rejoin/transport switch) keeps speakers rather than dropping all for a frame.
-            if (snapshot != null && !IsLiveRemoteSpeaker(remote.PlayerId, snapshot))
-                continue;
-            _remoteBuffer.Add(remote);
+            for (int i = _remoteBuffer.Count - 1; i >= 0; i--)
+            {
+                if (!IsLiveRemoteSpeaker(_remoteBuffer[i].PlayerId, snapshot))
+                    _remoteBuffer.RemoveAt(i);
+            }
         }
 
         var local = new VoiceLocalOverlayState(
@@ -83,7 +95,7 @@ internal sealed class VoiceOverlayState
             room.UsingMicrophone,
             room.UsingSpeaker);
 
-        return new VoiceOverlayState(local, _remoteBuffer.ToArray());
+        return new VoiceOverlayState(local, _remoteBuffer);
     }
 
     private static bool IsLiveRemoteSpeaker(byte playerId, VoiceGameStateSnapshot? snapshot)

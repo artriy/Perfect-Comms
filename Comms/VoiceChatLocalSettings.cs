@@ -186,6 +186,12 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     [LocalToggleSetting("Noise Suppression")]
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
 
+    // User-facing toggle (default on). When on, the BetterCrewLink backend offers a TURN relay alongside
+    // STUN so peers that can't establish a direct connection (strict/symmetric NAT, firewalls) still get
+    // audio. Only the peers that actually need it relay; everyone else stays direct. BCL backend only.
+    [LocalToggleSetting("Nat Fix")]
+    public ConfigEntry<bool> NatFix { get; }
+
     [LocalToggleSetting("Debug Voice Stats")]
     public ConfigEntry<bool> DebugVoiceStats { get; }
 
@@ -200,6 +206,12 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     public ConfigEntry<string> LobbyRegistryUrl { get; }
     public ConfigEntry<string> BetterCrewLinkServerUrl { get; }
     public ConfigEntry<string> InterstellarServerUrl { get; }
+
+    // Config-file only (not shown in the in-game menu): the TURN relay used by Nat Fix. Defaults to
+    // BetterCrewLink's public relay; power users can point these at their own coturn server.
+    public ConfigEntry<string> TurnServerUrl { get; }
+    public ConfigEntry<string> TurnUsername { get; }
+    public ConfigEntry<string> TurnCredential { get; }
     public ConfigEntry<bool> UpdateNotificationsEnabled { get; }
     public ConfigEntry<string> UpdateNotificationUrl { get; }
 
@@ -420,6 +432,19 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         BetterCrewLinkServerUrl = config.Bind("Voice Server", "BetterCrewLinkServerUrl",
             VoiceEndpointSettings.DefaultBetterCrewLinkServerUrl,
             new ConfigDescription("BetterCrewLink Socket.IO signaling server URL."));
+
+        NatFix = config.Bind("Voice Server", "NatFix", true,
+            new ConfigDescription("Route voice through a TURN relay when a direct peer-to-peer connection can't be established (fixes no/garbled audio behind strict or symmetric NATs and firewalls). Only peers that actually need it relay; everyone else stays direct. BetterCrewLink backend only."));
+
+        TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
+            "turn:turn.bettercrewl.ink:3478",
+            new ConfigDescription("TURN relay server used by Nat Fix (BetterCrewLink backend). Default is BetterCrewLink's public relay; override with your own coturn server if desired."));
+        TurnUsername = config.Bind("Voice Server", "TurnUsername",
+            "M9DRVaByiujoXeuYAAAG",
+            new ConfigDescription("Username for the Nat Fix TURN relay."));
+        TurnCredential = config.Bind("Voice Server", "TurnCredential",
+            "TpHR9HQNZ8taxjb3",
+            new ConfigDescription("Credential (password) for the Nat Fix TURN relay."));
 
         InterstellarServerUrl = config.Bind("Voice Server", "InterstellarServerUrl",
             VoiceEndpointSettings.DefaultInterstellarServerUrl,

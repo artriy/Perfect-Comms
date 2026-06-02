@@ -336,6 +336,35 @@ internal static class CrewmateAvatarRenderer
         return sprite;
     }
 
+    // Proactively build + cache the base sprite for ONE not-yet-cached player colour currently present in
+    // the lobby/game. Called at a low cadence from the speaking-bar overlay so the ~60-75ms avatar texture
+    // build (per-pixel recolor + Texture2D upload + Sprite.Create) happens during idle lobby/task time
+    // instead of the first frame that colour's player speaks — which is exactly when it was most noticeable.
+    // Returns true if it built one. Cheap after every present colour is cached.
+    internal static bool PrewarmNextColor()
+    {
+        try
+        {
+            var players = PlayerControl.AllPlayerControls;
+            if (players == null) return false;
+            foreach (var pc in players)
+            {
+                if (pc == null || pc.Data == null) continue;
+                int colorId = ClampColorId(GetPlayerColorId(pc));
+                if (!BaseSpriteCache.ContainsKey(colorId))
+                {
+                    GetBaseSprite(colorId); // builds + caches it now, off the speaking path
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // AllPlayerControls / cosmetics can be null or mid-init during scene transitions.
+        }
+        return false;
+    }
+
     internal static Sprite? GetRainbowBaseSprite(int frameIndex)
     {
         frameIndex %= RainbowFrameCount;

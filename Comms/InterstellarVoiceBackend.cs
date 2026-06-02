@@ -98,26 +98,47 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     {
         get
         {
-            // Build a fresh list directly to avoid the Values snapshot + LINQ allocations per rebuild.
             var states = new List<VoiceRemoteOverlayState>(_peers.Count);
-            foreach (var kv in _peers)
-            {
-                var peer = kv.Value;
-                if (peer.PlayerId == byte.MaxValue) continue;
-                states.Add(peer.ToOverlayState());
-            }
+            AppendRemoteOverlayStates(states);
             return states;
+        }
+    }
+
+    // Per-frame overlay path: fill the caller's buffer instead of allocating a fresh List on every
+    // access. ConcurrentDictionary enumeration is safe against concurrent connect/disconnect.
+    public void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer)
+    {
+        foreach (var kv in _peers)
+        {
+            var peer = kv.Value;
+            if (peer.PlayerId == byte.MaxValue) continue;
+            buffer.Add(peer.ToOverlayState());
         }
     }
 
     public int PeerCount => _peers.Count;
 
+    // Per-frame on the recovery path: manual nested loops instead of Count(...Any(...)) to avoid the
+    // per-call enumerator + closure allocations (mirrors the BCL backend's allocation-free version).
     public int CountMappedRemotePeers(VoiceGameStateSnapshot snapshot)
-        => _peers.Values.Count(peer => snapshot.Players.Any(player =>
-            !player.IsLocal &&
-            !player.Disconnected &&
-            !player.IsDummy &&
-            player.PlayerId == peer.PlayerId));
+    {
+        var players = snapshot.Players;
+        int count = 0;
+        foreach (var kvp in _peers)
+        {
+            var peer = kvp.Value;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var player = players[i];
+                if (!player.IsLocal && !player.Disconnected && !player.IsDummy && player.PlayerId == peer.PlayerId)
+                {
+                    count++;
+                    break;
+                }
+            }
+        }
+        return count;
+    }
 
     public bool TrySetRemoteVolume(byte playerId, string playerName, float volume)
     {
@@ -797,8 +818,9 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
 #endif
         if (snapshot == null)
         {
-            foreach (var peer in _peers.Values)
-                peer.MuteAll();
+            // Iterate the ConcurrentDictionary directly; _peers.Values allocates a snapshot List every call.
+            foreach (var kvp in _peers)
+                kvp.Value.MuteAll();
             MaybeLogStats(snapshot, "no-snapshot");
             return;
         }
@@ -806,8 +828,13 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         var localPlayer = snapshot.TryGetLocalPlayer(out var local) ? local : (VoicePlayerSnapshot?)null;
         var listenerPos = localPlayer?.Position;
 
-        foreach (var peer in _peers.Values.ToArray())
+        // ConcurrentDictionary enumeration is safe against concurrent connect/disconnect (the loop body
+        // never adds/removes peers), so iterate it directly instead of allocating _peers.Values.ToArray()
+        // (a snapshot List PLUS an array) every frame on the Unity main thread.
+        long proxTicks = VoiceFrameProfiler.Begin();
+        foreach (var kvp in _peers)
         {
+            var peer = kvp.Value;
             var target = FindTarget(snapshot, peer);
             if (!target.HasValue && TryApplySingleRemoteFallback(snapshot, peer, out var fallback))
                 target = fallback;
@@ -829,6 +856,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             peer.Apply(result);
             peer.SampleDiagnostics();
         }
+        VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
 
         MaybeLogStats(snapshot, "ok");
     }
@@ -839,16 +867,32 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         if (peer.PlayerId != byte.MaxValue)
             return false;
 
-        var remotePlayers = snapshot.Players
-            .Where(player => !player.IsLocal && !VoiceProximityCalculator.IsUnavailableTarget(player) && player.ClientId >= 0)
-            .ToArray();
-        if (remotePlayers.Length != 1)
+        // Manual scans with early-exit instead of Where().ToArray() + Count(predicate): this runs per
+        // unmapped peer per frame during join/churn, and the LINQ allocated an array + enumerators + closures.
+        VoicePlayerSnapshot single = default;
+        int remoteCount = 0;
+        var players = snapshot.Players;
+        for (int i = 0; i < players.Count; i++)
+        {
+            var player = players[i];
+            if (player.IsLocal || VoiceProximityCalculator.IsUnavailableTarget(player) || player.ClientId < 0)
+                continue;
+            if (++remoteCount > 1) return false;
+            single = player;
+        }
+        if (remoteCount != 1)
             return false;
 
-        if (_peers.Values.Count(candidate => candidate.PlayerId == byte.MaxValue) != 1)
+        int unprofiledPeers = 0;
+        foreach (var kvp in _peers)
+        {
+            if (kvp.Value.PlayerId == byte.MaxValue && ++unprofiledPeers > 1)
+                return false;
+        }
+        if (unprofiledPeers != 1)
             return false;
 
-        target = remotePlayers[0];
+        target = single;
         if (peer.UpdateProfile(target.PlayerId, target.PlayerName))
         {
             ApplySavedVolume(peer);

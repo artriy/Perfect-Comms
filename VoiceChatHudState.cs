@@ -20,6 +20,15 @@ public static class VoiceChatHudState
     private static GameObject?     _spkButtonObj;
     private static PassiveButton?  _jailButton;
     private static GameObject?     _jailButtonObj;
+
+    // Cached child SpriteRenderers so the per-frame refresh/sort paths avoid Transform.Find + GetComponent
+    // and GetComponentsInChildren (managed array alloc + IL2CPP interop) every frame. Captured when the
+    // (one-time) buttons are created; re-acquired automatically if a cache entry is null.
+    private static SpriteRenderer? _micIconSr;
+    private static SpriteRenderer? _spkIconSr;
+    private static SpriteRenderer[]? _micButtonSrs;
+    private static SpriteRenderer[]? _spkButtonSrs;
+    private static SpriteRenderer[]? _jailButtonSrs;
     private const float ButtonScale = 0.42f;
     private const int   ButtonSortOrder = 32760;
     private const int   TooltipSortOrder = 32767;
@@ -201,13 +210,19 @@ public static class VoiceChatHudState
         var hud = HudManager.Instance;
         if (hud == null) return;
 
+        long bTicks = VoiceFrameProfiler.Begin();
         EnsureHudButtons(hud);
+        VoiceFrameProfiler.End("hud.buttons", bTicks);
+        long tTicks = VoiceFrameProfiler.Begin();
         EnsureTooltips(hud);
+        VoiceFrameProfiler.End("hud.tooltips", tTicks);
         EnsureHudParent(hud);
         VoiceRoleMuteState.Update();
         ApplyMicState();
         UpdateHudButtonsVisibility();
+        long vTicks = VoiceFrameProfiler.Begin();
         RefreshButtonVisuals();
+        VoiceFrameProfiler.End("hud.visuals", vTicks);
     }
 
     private static void EnsureHudButtons(HudManager hud)
@@ -221,8 +236,9 @@ public static class VoiceChatHudState
             _micButtonObj.name = "VC_MicButton";
             _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
             ClearButtonBG(_micButtonObj);
-            CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
-            KeepButtonOnTop(_micButtonObj);
+            _micIconSr = CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
+            _micButtonSrs = null;
+            KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
 
             _micButton = _micButtonObj.GetComponent<PassiveButton>();
             _micButton.OnClick = new ButtonClickedEvent();
@@ -231,6 +247,7 @@ public static class VoiceChatHudState
             _micButton.OnMouseOver.AddListener((Action)ShowMicTooltip);
             _micButton.OnMouseOut = new UnityEvent();
             _micButton.OnMouseOut.AddListener((Action)HideTooltips);
+            return; // build at most one button per frame: spreads the Instantiate + icon PNG-decode cost
         }
 
         if (_spkButtonObj == null)
@@ -239,8 +256,9 @@ public static class VoiceChatHudState
             _spkButtonObj.name = "VC_SpkButton";
             _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
             ClearButtonBG(_spkButtonObj);
-            CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
-            KeepButtonOnTop(_spkButtonObj);
+            _spkIconSr = CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
+            _spkButtonSrs = null;
+            KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
 
             _spkButton = _spkButtonObj.GetComponent<PassiveButton>();
             _spkButton.OnClick = new ButtonClickedEvent();
@@ -249,6 +267,7 @@ public static class VoiceChatHudState
             _spkButton.OnMouseOver.AddListener((Action)ShowSpeakerTooltip);
             _spkButton.OnMouseOut = new UnityEvent();
             _spkButton.OnMouseOut.AddListener((Action)HideTooltips);
+            return; // build at most one button per frame
         }
 
         if (_jailButtonObj == null)
@@ -258,7 +277,8 @@ public static class VoiceChatHudState
             _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
             ClearButtonBG(_jailButtonObj);
             CreateIconChild(_jailButtonObj, "VoiceChatPlugin.Resources.JailUnmute.png");
-            KeepButtonOnTop(_jailButtonObj);
+            _jailButtonSrs = null;
+            KeepButtonOnTop(_jailButtonObj, ref _jailButtonSrs);
 
             _jailButton = _jailButtonObj.GetComponent<PassiveButton>();
             _jailButton.OnClick = new ButtonClickedEvent();
@@ -337,9 +357,9 @@ public static class VoiceChatHudState
 
         PositionButtons();
 
-        KeepButtonOnTop(_micButtonObj);
-        KeepButtonOnTop(_spkButtonObj);
-        KeepButtonOnTop(_jailButtonObj);
+        KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
+        KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
+        KeepButtonOnTop(_jailButtonObj, ref _jailButtonSrs);
     }
 
     // Finds the jailed player's meeting card so the unmute button can be attached to it.
@@ -397,7 +417,7 @@ public static class VoiceChatHudState
         // ── Mic button ────────────────────────────────────────────────────────
         if (_micButtonObj != null)
         {
-            var sr = _micButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
+            var sr = ResolveIconSr(_micButtonObj, ref _micIconSr);
 
             if (TryGetLocalTransmitBlockReason(out _))
             {
@@ -422,7 +442,7 @@ public static class VoiceChatHudState
         }
         if (_spkButtonObj != null)
         {
-            var sr = _spkButtonObj.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
+            var sr = ResolveIconSr(_spkButtonObj, ref _spkIconSr);
 
             if (_speakerMuted)
             {
@@ -802,7 +822,7 @@ public static class VoiceChatHudState
             sr.color = Color.clear;
     }
 
-    private static void CreateIconChild(GameObject parent, string resource)
+    private static SpriteRenderer CreateIconChild(GameObject parent, string resource)
     {
         var go = new GameObject("VCIcon");
         go.transform.SetParent(parent.transform, false);
@@ -812,16 +832,30 @@ public static class VoiceChatHudState
         sr.sprite = LoadSprite(resource);
         sr.sortingLayerName = VCSorting.Layer;
         sr.sortingOrder = ButtonSortOrder;
+        return sr;
     }
 
-    private static void KeepButtonOnTop(GameObject? button)
+    // Returns the cached "VCIcon" SpriteRenderer for a button, re-acquiring (Transform.Find + GetComponent)
+    // only when the cache is empty, so RefreshButtonVisuals does no per-frame interop in the common case.
+    private static SpriteRenderer? ResolveIconSr(GameObject button, ref SpriteRenderer? cached)
+    {
+        if (cached == null)
+            cached = button.transform.Find("VCIcon")?.GetComponent<SpriteRenderer>();
+        return cached;
+    }
+
+    private static void KeepButtonOnTop(GameObject? button, ref SpriteRenderer[]? cachedSrs)
     {
         if (button == null) return;
         button.transform.SetAsLastSibling();
         var pos = button.transform.localPosition;
         button.transform.localPosition = new Vector3(pos.x, pos.y, -100f);
-        foreach (var sr in button.GetComponentsInChildren<SpriteRenderer>(true))
+        // GetComponentsInChildren allocates a fresh managed array every call; the button hierarchy is
+        // static, so cache it once. (Reset to null at button (re)creation so a new button re-caches.)
+        cachedSrs ??= button.GetComponentsInChildren<SpriteRenderer>(true);
+        foreach (var sr in cachedSrs)
         {
+            if (sr == null) continue;
             sr.sortingLayerName = VCSorting.Layer;
             sr.sortingOrder = ButtonSortOrder;
         }

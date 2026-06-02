@@ -15,6 +15,7 @@ internal static class SurveillanceCameraStatePatches
     private const float CullingFailureLogThrottleSeconds = 5f;
     private static float _lastDeepScanTime = float.NegativeInfinity;
     private static float _lastCullingFailureLogTime = float.NegativeInfinity;
+    private static int _lastCameraCount = -1;
     private static readonly Dictionary<int, CameraMaskSnapshot> _changedCameraMasks = new();
 
     [HarmonyPostfix, HarmonyPatch(nameof(SurveillanceMinigame.Begin))]
@@ -47,16 +48,25 @@ internal static class SurveillanceCameraStatePatches
 
     internal static void ExcludeVoiceOverlayFromSurveillanceCameras(object? minigame, bool forceDeepScan = false)
     {
-        // Cheap path every frame, isolated so the reflection walk below can't suppress it.
-        try
+        // Re-apply the overlay-exclusion mask only when the set of cameras actually changed.
+        // Camera.allCameras allocates a fresh Camera[] on every access; walking it every frame while a
+        // surveillance view was open was a steady GC source. Masks persist once applied, so we only need
+        // to re-walk when a camera appears/disappears (count change) or on the forced scan from Begin.
+        // Camera.allCamerasCount is a cheap no-alloc property.
+        int cameraCount = Camera.allCamerasCount;
+        if (forceDeepScan || cameraCount != _lastCameraCount)
         {
-            foreach (var camera in Camera.allCameras)
+            _lastCameraCount = cameraCount;
+            try
             {
-                if (camera == null || camera.targetTexture == null) continue;
-                ExcludeVoiceOverlay(camera);
+                foreach (var camera in Camera.allCameras)
+                {
+                    if (camera == null || camera.targetTexture == null) continue;
+                    ExcludeVoiceOverlay(camera);
+                }
             }
+            catch (Exception ex) { ReportCullingFailure(ex); }
         }
-        catch (Exception ex) { ReportCullingFailure(ex); }
 
         // Reflection walk for cameras not yet in Camera.allCameras; throttled to ~1/s (forced on Begin).
         float now = Time.unscaledTime;

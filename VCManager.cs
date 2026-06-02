@@ -10,6 +10,11 @@ internal class VCManager : MonoBehaviour
     private static bool _sceneHookRegistered;
     private static GameObject? _managerObject;
 
+    // Cached active scene name. Reading SceneManager.GetActiveScene().name marshals a fresh managed
+    // string across the IL2CPP boundary on every access; doing that per-frame in Update() was a steady
+    // GC contributor. We update this only on scene load / active-scene change instead.
+    private static string _activeSceneName = "";
+
     static VCManager()
     {
         ClassInjector.RegisterTypeInIl2Cpp<VCManager>();
@@ -20,12 +25,23 @@ internal class VCManager : MonoBehaviour
         if (_sceneHookRegistered) return;
         _sceneHookRegistered = true;
 
+        _activeSceneName = SceneManager.GetActiveScene().name;
         SceneManager.sceneLoaded +=
             (UnityEngine.Events.UnityAction<Scene, LoadSceneMode>)OnSceneLoaded;
+        SceneManager.activeSceneChanged +=
+            (UnityEngine.Events.UnityAction<Scene, Scene>)OnActiveSceneChanged;
+    }
+
+    private static void OnActiveSceneChanged(Scene previous, Scene next)
+    {
+        _activeSceneName = next.name;
     }
 
     private static void OnSceneLoaded(Scene scene, LoadSceneMode _)
     {
+        // Among Us transitions are single-mode loads, so the loaded scene becomes the active one.
+        // Refresh the cache here too in case activeSceneChanged ordering differs across the boundary.
+        _activeSceneName = scene.name;
         EnsureManagerObject();
         switch (scene.name)
         {
@@ -52,13 +68,20 @@ internal class VCManager : MonoBehaviour
 
     void Update()
     {
-        switch (SceneManager.GetActiveScene().name)
+        switch (_activeSceneName)
         {
             case "OnlineGame":
             case "EndGame":
+                VoiceFrameProfiler.Tick();
+                long vcTicks = VoiceFrameProfiler.Begin();
+                long hudTicks = VoiceFrameProfiler.Begin();
                 SafeUpdateHud();
+                VoiceFrameProfiler.End("hud", hudTicks);
                 VoiceChatRoomDriver.Update();
+                long pubTicks = VoiceFrameProfiler.Begin();
                 VoiceLobbyRegistryPublisher.Update();
+                VoiceFrameProfiler.End("publisher", pubTicks);
+                VoiceFrameProfiler.End("vc.tick", vcTicks);
                 break;
         }
     }

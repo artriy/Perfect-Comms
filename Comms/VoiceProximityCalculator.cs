@@ -108,8 +108,8 @@ internal static class VoiceProximityCalculator
         bool cameraViewActive,
         int activeCameraIndex,
         Vector2? activeCameraPosition,
-        IEnumerable<VoiceChatRoom.SpeakerCache> speakers,
-        IEnumerable<IVoiceComponent> virtualMics,
+        IReadOnlyList<VoiceChatRoom.SpeakerCache> speakers,
+        IReadOnlyList<IVoiceComponent> virtualMics,
         bool localInVent,
         bool targetRadioActive,
         bool commsSabActive,
@@ -160,8 +160,8 @@ internal static class VoiceProximityCalculator
         bool cameraViewActive,
         int activeCameraIndex,
         Vector2? activeCameraPosition,
-        IEnumerable<VoiceChatRoom.SpeakerCache> speakers,
-        IEnumerable<IVoiceComponent> virtualMics,
+        IReadOnlyList<VoiceChatRoom.SpeakerCache> speakers,
+        IReadOnlyList<IVoiceComponent> virtualMics,
         bool localInVent,
         bool targetRadioActive,
         bool commsSabActive,
@@ -488,19 +488,29 @@ internal static class VoiceProximityCalculator
     private static VoiceProximityResult CalculateVirtualRoute(
         VoicePlayerSnapshot target,
         Vector2 targetPos,
-        IEnumerable<VoiceChatRoom.SpeakerCache> speakers,
-        IEnumerable<IVoiceComponent> virtualMics,
+        IReadOnlyList<VoiceChatRoom.SpeakerCache> speakers,
+        IReadOnlyList<IVoiceComponent> virtualMics,
         float previousWallCoefficient)
     {
+        // Index with for-loops over IReadOnlyList rather than foreach over IEnumerable: the latter
+        // boxes a heap enumerator per call (twice, nested) even when the lists are empty, and this
+        // runs per peer per frame. Short-circuit the common empty case up front.
+        int speakerCount = speakers.Count;
+        int micCount = virtualMics.Count;
+        if (speakerCount == 0 || micCount == 0)
+            return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
+
         float bestVolume = 0f;
         float bestPan = 0f;
 
-        foreach (var speaker in speakers)
+        for (int si = 0; si < speakerCount; si++)
         {
+            var speaker = speakers[si];
             if (speaker.Volume <= 0f || speaker.Speaker.Volume <= 0f) continue;
 
-            foreach (var mic in virtualMics)
+            for (int mi = 0; mi < micCount; mi++)
             {
+                var mic = virtualMics[mi];
                 if (mic.Volume <= 0f || mic.Radious <= 0f) continue;
                 if (!speaker.Speaker.CanPlaySoundFrom(mic)) continue;
 

@@ -75,6 +75,13 @@ public class VoiceChatRoom
     private string? _activeRoomCode;
     private string? _activeRegion;
     internal IEnumerable<VoiceRemoteOverlayState> InterstellarRemoteOverlayStates => _voiceBackend?.RemoteOverlayStates ?? Enumerable.Empty<VoiceRemoteOverlayState>();
+
+    // Allocation-free per-frame path used by VoiceOverlayState.Build.
+    internal void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer)
+        => _voiceBackend?.AppendRemoteOverlayStates(buffer);
+
+    // For VoiceFrameProfiler context only.
+    internal int BackendPeerCount => _voiceBackend?.PeerCount ?? -1;
     internal bool TrySetRemoteVolume(byte playerId, string playerName, float volume)
         => _voiceBackend?.TrySetRemoteVolume(playerId, playerName, volume) == true;
     internal int ResetRemotePeerMappingsNoMute()
@@ -283,11 +290,16 @@ public class VoiceChatRoom
         if (refreshSnapshot)
         {
             _snapshotRefreshTimer = StateRefreshInterval;
+            long __snapTicks = VoiceFrameProfiler.Begin();
             CurrentSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive);
+            VoiceFrameProfiler.End("room.snapshot", __snapTicks);
         }
 
         var snapshot = CurrentSnapshot;
         Vector2? listenerPos = snapshot?.LocalPosition;
+        // One-time-per-map occlusion warm-up so the first in-range speaker doesn't pay the physics-broadphase
+        // build + door-cache scan (~70-100ms) mid-round. No-op after the first call for a given map.
+        if (listenerPos.HasValue) VoiceAudioOcclusion.WarmUp(listenerPos.Value);
         TrackTransitionPhase(snapshot);        bool localInVent = snapshot != null &&
                             snapshot.TryGetLocalPlayer(out var localSnapshot) &&
                             localSnapshot.InVent;
@@ -312,10 +324,14 @@ public class VoiceChatRoom
 
         if (_voiceBackend != null)
         {
+            long __backendTicks = VoiceFrameProfiler.Begin();
             _voiceBackend.Update(snapshot, speakerCache, _virtualMics, localInVent, _commsSabActive);
+            VoiceFrameProfiler.End("room.backend", __backendTicks);
             if (snapshot != null)
                 SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+            long __recoveryTicks = VoiceFrameProfiler.Begin();
             TryRecoverMissingBackendPeers(snapshot);
+            VoiceFrameProfiler.End("room.recovery", __recoveryTicks);
         }
 
         updateStep = "diagnostics";
@@ -666,7 +682,20 @@ public class VoiceChatRoom
     }
 
     private static int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
-        => snapshot.Players.Count(player => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0);
+    {
+        // Indexed loop over IReadOnlyList instead of LINQ .Count(predicate): the latter boxes a heap
+        // enumerator on every call, and this runs per-frame via TryRecoverMissingBackendPeers (before its
+        // time gates). The predicate is unchanged.
+        var players = snapshot.Players;
+        int count = 0;
+        for (int i = 0; i < players.Count; i++)
+        {
+            var player = players[i];
+            if (!player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+                count++;
+        }
+        return count;
+    }
 
     private static string DescribeExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
         => string.Join(",", snapshot.Players
@@ -1045,10 +1074,14 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("transport.refresh", reason);
     }
 
-    private bool IsTransitionTraceActive => DateTime.UtcNow <= _transitionTraceUntilUtc;
+    // Also requires diagnostics to be enabled: this single gate short-circuits MaybeLogTransitionTraceState
+    // (the ~0.25s state dump), TraceUpdateCost and TraceOperationCost, so their string/LINQ snapshot
+    // construction never runs during the 45s post-transition window when logging is off (the default).
+    private bool IsTransitionTraceActive => VoiceDiagnostics.IsEnabled && DateTime.UtcNow <= _transitionTraceUntilUtc;
 
     private void StartTransitionTrace(string reason, VoiceGameStateSnapshot? snapshot)
     {
+        if (!VoiceDiagnostics.IsEnabled) return;
         _transitionTraceUntilUtc = DateTime.UtcNow.AddSeconds(TransitionTraceSeconds);
         _transitionTraceStateTimer = 0f;
         _tracePerfEventsRemaining = TransitionTracePerfEvents;
@@ -1069,6 +1102,10 @@ public class VoiceChatRoom
 
     private void TrackTransitionPhase(VoiceGameStateSnapshot? snapshot)
     {
+        // Purely diagnostic phase tracking; skip entirely (incl. the initial-phase snapshot string build)
+        // when diagnostics are disabled so no per-phase-change LINQ/string.Join runs in normal play.
+        if (!VoiceDiagnostics.IsEnabled) return;
+
         var phase = snapshot?.Phase ?? VoiceGamePhase.Unknown;
         if (!_haveTracePhase)
         {

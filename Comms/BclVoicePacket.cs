@@ -54,12 +54,19 @@ internal readonly struct BclVoicePacket
         => packet.Length >= 2 && packet[0] == Magic0 && packet[1] == Magic1;
 
     public static byte[] Wrap(byte[] opusPayload, ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level)
+        => Wrap(opusPayload, opusPayload.Length, sequence, timestamp, duration, flags, level);
+
+    // Length-aware overload: frames only the first payloadLength bytes of opusPayload. Lets the sender wrap
+    // directly from its reusable encode scratch buffer (which is larger than the encoded frame) without an
+    // intermediate trimmed-copy allocation per transmitted frame.
+    public static byte[] Wrap(byte[] opusPayload, int payloadLength, ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level)
     {
-        if (opusPayload.Length == 0) throw new ArgumentException("Payload must not be empty.", nameof(opusPayload));
+        if (payloadLength <= 0) throw new ArgumentException("Payload must not be empty.", nameof(opusPayload));
+        if (payloadLength > opusPayload.Length) throw new ArgumentOutOfRangeException(nameof(payloadLength));
         if ((flags & ~AllowedFlags) != 0) throw new ArgumentOutOfRangeException(nameof(flags));
         duration = duration == 0 ? (ushort)AudioHelpers.FrameSize : duration;
 
-        var packet = new byte[HeaderBytes + opusPayload.Length];
+        var packet = new byte[HeaderBytes + payloadLength];
         packet[0] = Magic0;
         packet[1] = Magic1;
         packet[2] = Version;
@@ -69,7 +76,7 @@ internal readonly struct BclVoicePacket
         WriteUInt16(packet, 10, duration);
         packet[12] = (byte)flags;
         packet[13] = level;
-        Array.Copy(opusPayload, 0, packet, HeaderBytes, opusPayload.Length);
+        Array.Copy(opusPayload, 0, packet, HeaderBytes, payloadLength);
         return packet;
     }
 

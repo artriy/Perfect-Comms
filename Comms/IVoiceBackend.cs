@@ -19,6 +19,10 @@ internal interface IVoiceBackend : IDisposable
     int PeerCount { get; }
     IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates { get; }
 
+    // Allocation-free variant for the per-frame overlay path: append remote overlay states into the
+    // caller-owned buffer instead of allocating a fresh List/array (and LINQ) on every access.
+    void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer);
+
     void SetMute(bool mute);
     void ToggleMute();
     void SetLoopBack(bool loopBack);
