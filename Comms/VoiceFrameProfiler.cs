@@ -31,6 +31,10 @@ internal static class VoiceFrameProfiler
     private const double SlowFrameMs = 33.0;
     // ...also log any frame where our own voice code exceeds this budget, even if the frame wasn't slow.
     private const double VoiceBudgetMs = 8.0;
+    // A gen-1-only GC counts as "slow" only on a frame at least this long (~below 50fps). Isolated gen-1
+    // collections on healthy frames are routine in a voice session and aren't stutters, so this stops the
+    // full breakdown (and its logging cost) from firing on a large fraction of normal frames.
+    private const double GcFrameElevatedMs = 20.0;
     private const double WindowSeconds = 5.0;
 
     private static bool Enabled => VoiceDiagnostics.IsEnabled;
@@ -54,6 +58,10 @@ internal static class VoiceFrameProfiler
 
     // ---- reusable scratch for logging (main thread only) ----
     private static readonly List<KeyValuePair<string, double>> _sortScratch = new(24);
+    // Reused by DescribeSegments/DescribeWindowTop so a slow frame doesn't allocate a fresh StringBuilder
+    // (and its backing char[]) each time. They never run concurrently (both on the main thread, sequential
+    // within FlushFrame), and each Clears before use, so one shared builder is safe.
+    private static readonly System.Text.StringBuilder _segScratch = new(256);
 
     // Start timing a segment. Returns 0 when profiling is disabled so End() is a no-op.
     public static long Begin() => Enabled ? Stopwatch.GetTimestamp() : 0L;
@@ -72,6 +80,22 @@ internal static class VoiceFrameProfiler
     {
         if (!Enabled) return;
         EnsureFrame();
+    }
+
+    // Flush the final pending frame and the open rolling window when the per-frame Tick/End calls stop (e.g.
+    // on scene exit / leaving OnlineGame). Without this the last frame's breakdown and the partial window are
+    // stranded until the next session. Safe to call every frame from a non-profiled scene: once flushed there
+    // is nothing pending, so it no-ops until new data accumulates.
+    public static void Flush()
+    {
+        if (!Enabled) return;
+        if (_frame < 0) return; // nothing accumulated since the last flush
+        FlushFrame();           // emit the final frame and fold it into the window
+        if (!float.IsNaN(_windowStart) && _windowFrametimes.Count > 0)
+            FlushWindow(SafeTime(), SafeHeap()); // emit the partial window (FlushFrame only flushes a full one)
+        _frame = -1;
+        _seg.Clear();
+        _windowStart = float.NaN; // force a fresh window when profiling resumes
     }
 
     private static void EnsureFrame()
@@ -108,7 +132,10 @@ internal static class VoiceFrameProfiler
             if (!_windowSegMax.TryGetValue(kv.Key, out var m) || kv.Value > m) _windowSegMax[kv.Key] = kv.Value;
         }
 
-        bool slow = _frameDeltaMs >= SlowFrameMs || vcTotal >= VoiceBudgetMs || g1 > 0 || g2 > 0;
+        // A gen-2 collection is rare and always worth a full breakdown; a gen-1-only collection is only
+        // treated as slow when it coincides with an elevated frame time (see GcFrameElevatedMs).
+        bool slow = _frameDeltaMs >= SlowFrameMs || vcTotal >= VoiceBudgetMs || g2 > 0
+                    || (g1 > 0 && _frameDeltaMs >= GcFrameElevatedMs);
         if (slow)
         {
             _windowSlowFrames++;
@@ -178,7 +205,8 @@ internal static class VoiceFrameProfiler
         _sortScratch.Clear();
         foreach (var kv in _seg) _sortScratch.Add(kv);
         _sortScratch.Sort((a, b) => b.Value.CompareTo(a.Value));
-        var sb = new System.Text.StringBuilder(_sortScratch.Count * 16);
+        var sb = _segScratch;
+        sb.Clear();
         for (int i = 0; i < _sortScratch.Count; i++)
         {
             if (i > 0) sb.Append(' ');
@@ -193,7 +221,8 @@ internal static class VoiceFrameProfiler
         _sortScratch.Clear();
         foreach (var kv in _windowSegSum) _sortScratch.Add(kv);
         _sortScratch.Sort((a, b) => b.Value.CompareTo(a.Value));
-        var sb = new System.Text.StringBuilder(128);
+        var sb = _segScratch;
+        sb.Clear();
         int shown = 0;
         for (int i = 0; i < _sortScratch.Count && shown < 5; i++, shown++)
         {

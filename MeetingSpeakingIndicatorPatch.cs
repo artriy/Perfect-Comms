@@ -625,9 +625,12 @@ public static class MeetingSpeakingIndicatorPatch
             {
                 // Match the original GetPlayerColor scan: skip half-initialized players (Data == null) so a
                 // transient duplicate PlayerId (join/respawn) can't evict the valid instance from the lookup
-                // and flash the fallback colour for a frame.
+                // and flash the fallback colour for a frame. Keep the FIRST match for a given PlayerId (the
+                // original used AllPlayerControls.FirstOrDefault), so a transient duplicate can't override the
+                // already-resolved valid instance either.
                 if (pc == null || pc.Data == null) continue;
-                _playerLookup[pc.PlayerId] = pc;
+                if (!_playerLookup.ContainsKey(pc.PlayerId))
+                    _playerLookup[pc.PlayerId] = pc;
             }
         }
         catch

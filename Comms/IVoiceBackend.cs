@@ -37,6 +37,10 @@ internal interface IVoiceBackend : IDisposable
     void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel);
     void SendCustomMessage(byte[] payload);
     void Rejoin();
+    // Rebuild any pre-built ICE/peer-connection pool after a Nat Fix / TURN setting change, so the next
+    // peer-join uses the new policy without generating a DTLS certificate on the main thread. Backends with
+    // no such pool (e.g. Interstellar) implement this as a no-op.
+    void RebuildIceConnectionPool();
     void Update(
         VoiceGameStateSnapshot? snapshot,
         IReadOnlyList<VoiceChatRoom.SpeakerCache> speakerCache,

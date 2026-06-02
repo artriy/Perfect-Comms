@@ -58,15 +58,17 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // Pre-built RTCPeerConnections. `new RTCPeerConnection` generates a self-signed DTLS certificate, which
     // costs ~300-500ms in IL2CPP — and it used to run on the Unity main thread (via _mainThreadActions ->
     // MapClient -> EnsurePeer -> WireNewPeerConnection) under _peerSync, freezing rendering AND the audio
-    // threads when a peer joined. We now keep a tiny background-filled pool so WireNewPeerConnection rents a
-    // ready connection instantly; the cert generation happens on a ThreadPool thread. Built with the current
-    // _iceServers and invalidated when those change (clientPeerConfig). Thread-safe (ConcurrentQueue).
-    private readonly ConcurrentQueue<RTCPeerConnection> _pcPool = new();
-    private const int PcPoolTarget = 2;
+    // threads when a peer joined. We now keep a background-filled pool so WireNewPeerConnection rents a ready
+    // connection instantly; the cert generation happens on a ThreadPool thread. Thread-safe (ConcurrentQueue).
+    // Each entry carries the ICE-config signature it was built with, so a config change (Nat Fix / TURN /
+    // signaling ICE servers) invalidates exactly the stale entries at rent time — there is no shared signature
+    // stamp that can fall out of sync with the pool's actual contents.
+    private readonly ConcurrentQueue<PooledPeerConnection> _pcPool = new();
+    // Keep a few warm connections so a lobby filling with several near-simultaneous joins is far less likely
+    // to drain the pool and force an inline (main-thread) build. The background refiller tops it up after
+    // every rent and on every ICE-config change.
+    private const int PcPoolTarget = 4;
     private int _pcPoolRefilling;
-    // Config the pooled connections were built with; if Nat Fix or the ICE/TURN servers change, the pooled
-    // connections are stale and must be discarded so the next connect uses the new policy.
-    private volatile string _pooledIceSignature = "";
     private static readonly TimeSpan JoinRetryInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfferRetryInterval = TimeSpan.FromSeconds(3);
     // Stuck in 'connecting' past this = failed handshake; re-offer on a fresh connection.
@@ -153,7 +155,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private float _lastGateThreshold;
     private float _lastTransmitGain = 1f;
     private float _lastTransmitPeak;
-    private bool _disposed;
+    // volatile: written on the Unity main thread (Dispose) and read on background ThreadPool threads (the pool
+    // refill loop) without any other barrier, so teardown is observed promptly and the refiller stops building.
+    private volatile bool _disposed;
 
     public event Action<VoiceBackendCustomMessage>? CustomMessageReceived;
 
@@ -1329,12 +1333,28 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
+    // A pooled, pre-built connection paired with the ICE-config signature it was constructed from. The pool
+    // compares each entry's signature against the live config at rent time, so there is no shared stamp that
+    // can disagree with the pool's contents (which a config change racing the refiller used to cause).
+    private readonly struct PooledPeerConnection
+    {
+        public readonly RTCPeerConnection Connection;
+        public readonly string Signature;
+        public PooledPeerConnection(RTCPeerConnection connection, string signature)
+        {
+            Connection = connection;
+            Signature = signature;
+        }
+    }
+
     // Constructs an RTCPeerConnection (the expensive DTLS self-signed-cert step). Safe to call off the
     // Unity main thread — SIPSorcery is pure managed networking and ICE gathering only starts later, at
-    // setLocalDescription, not at construction.
-    private RTCPeerConnection BuildPeerConnection()
+    // setLocalDescription, not at construction. The connection is paired with the signature of the exact
+    // config it was built from (one settings snapshot drives both), so a pooled entry's recorded signature
+    // can never disagree with the policy it actually carries.
+    private PooledPeerConnection BuildPeerConnection()
     {
-        var cfg = ResolveIceConfiguration();
+        var (cfg, signature) = ResolveIce();
         long t = System.Diagnostics.Stopwatch.GetTimestamp();
         var pc = new RTCPeerConnection(cfg);
         if (VoiceDiagnostics.IsEnabled)
@@ -1343,17 +1363,17 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("bcl.pcpool.built",
                 $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} poolSize={_pcPool.Count} thread={Environment.CurrentManagedThreadId} policy={cfg.iceTransportPolicy} iceServers={cfg.iceServers.Count} turn={hasTurn}");
         }
-        return pc;
+        return new PooledPeerConnection(pc, signature);
     }
 
-    // Resolve the ICE configuration for a new peer connection from the current ICE servers (default STUN, or
-    // whatever the signaling server sent via clientPeerConfig) plus the Nat Fix setting + configured TURN relay.
-    private RTCConfiguration ResolveIceConfiguration()
+    // Read the Nat Fix / TURN settings once into locals so the resolved config and its signature are always
+    // derived from the SAME snapshot — there is no torn read between "what we built" and "what we stamped".
+    private static void ReadIceSettings(out bool natFix, out string turnUrl, out string turnUser, out string turnCred)
     {
-        bool natFix = true;
-        string turnUrl = "turn:turn.bettercrewl.ink:3478";
-        string turnUser = "";
-        string turnCred = "";
+        natFix = true;
+        turnUrl = "turn:turn.bettercrewl.ink:3478";
+        turnUser = "";
+        turnCred = "";
         try
         {
             var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
@@ -1366,8 +1386,25 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
         }
         catch { /* settings not ready; fall back to defaults (Nat Fix on) */ }
+    }
 
-        return BuildIceConfiguration(_iceServers, natFix, turnUrl, turnUser, turnCred);
+    // Resolve the ICE configuration AND its signature from one settings snapshot + one read of the (volatile)
+    // _iceServers, so a pooled connection's recorded signature always matches the config it was built with.
+    private (RTCConfiguration Config, string Signature) ResolveIce()
+    {
+        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred);
+        var servers = _iceServers;
+        var cfg = BuildIceConfiguration(servers, natFix, turnUrl, turnUser, turnCred);
+        var sig = ComputeIceSignature(servers, natFix, turnUrl, turnUser, turnCred);
+        return (cfg, sig);
+    }
+
+    // The signature of the CURRENTLY desired ICE config (read live). Compared against each pooled connection's
+    // recorded signature at rent time to discard stale entries.
+    private string CurrentIceSignature()
+    {
+        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred);
+        return ComputeIceSignature(_iceServers, natFix, turnUrl, turnUser, turnCred);
     }
 
     // Pure ICE-config builder (unit-testable). With Nat Fix on, guarantees a STUN entry AND the configured TURN
@@ -1383,40 +1420,49 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             if (!servers.Any(s => s.urls != null && s.urls.StartsWith("stun:", StringComparison.OrdinalIgnoreCase)))
                 servers.Add(new RTCIceServer { urls = "stun:stun.l.google.com:19302" });
-            if (!servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
+            // Only add the TURN relay if it can actually authenticate. A long-term-credential TURN allocation
+            // with a blank username/credential is unusable and would just add a dead ICE server, so skip it
+            // (the peer falls back to STUN-only for this connection) when either credential is missing.
+            if (!string.IsNullOrWhiteSpace(turnUsername) && !string.IsNullOrWhiteSpace(turnCredential)
+                && !servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
                 servers.Add(new RTCIceServer { urls = turnUrl, username = turnUsername, credential = turnCredential });
         }
 
         return new RTCConfiguration { iceServers = servers, iceTransportPolicy = RTCIceTransportPolicy.all };
     }
 
-    // Cheap signature of everything that affects the resolved ICE config, used to invalidate the pre-built
-    // connection pool when Nat Fix / the TURN server / the signaling-provided ICE servers change.
-    private string IceConfigSignature()
+    // Cheap signature of everything that affects the resolved ICE config: Nat Fix, the TURN server URL AND its
+    // credentials, and the signaling-provided base ICE servers. The TURN credentials are included so that a
+    // credential-only change still invalidates the pool.
+    private static string ComputeIceSignature(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUser, string turnCred)
     {
-        bool natFix = true;
-        string turnUrl = "";
-        try
-        {
-            var settings = LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance;
-            if (settings != null) { natFix = settings.NatFix.Value; turnUrl = settings.TurnServerUrl.Value; }
-        }
-        catch { }
-        var baseUrls = _iceServers == null ? "" : string.Join(",", _iceServers.Select(s => s.urls));
-        return natFix + "|" + turnUrl + "|" + baseUrls;
+        var baseUrls = baseServers == null ? "" : string.Join(",", baseServers.Select(s => s.urls));
+        // The signature must mirror exactly the inputs BuildIceConfiguration actually consumes. With Nat Fix
+        // OFF the TURN fields are ignored by the builder, so leaving them out keeps an edit to an unused TURN
+        // setting from needlessly invalidating the warm pool. The "1|" / "0|" prefixes keep the two forms
+        // distinct so a Nat-Fix-on config can never collide with a Nat-Fix-off one.
+        return natFix
+            ? "1|" + turnUrl + "|" + turnUser + "|" + turnCred + "|" + baseUrls
+            : "0|" + baseUrls;
     }
 
-    // Rent a pre-built connection (instant) or, on a pool miss, build inline (the old behaviour — rare).
-    // Always kicks a background refill so the next join stays off the main thread. The rent log shows
-    // hit=true when the pool absorbed the cost off-thread (no main-thread cert generation).
+    // Rent a pre-built connection (instant) or, on a pool miss, build inline (the old behaviour — now rare:
+    // only a cold start before the warm pool fills, or a burst that drains it). Stale-config entries are
+    // discarded per-entry here (no shared stamp), so a config change can never hand out a wrong-policy
+    // connection. Always kicks a background refill so the next join stays off the main thread.
     private RTCPeerConnection RentPeerConnection()
     {
-        // Discard any pooled connections built with a now-stale ICE config (Nat Fix toggled, TURN server
-        // changed, or the signaling server sent new ICE servers) so this connect uses the current policy.
-        if (IceConfigSignature() != _pooledIceSignature)
-            DrainPeerConnectionPool();
-        bool hit = _pcPool.TryDequeue(out var pooled);
-        var pc = hit ? pooled! : BuildPeerConnection();
+        var liveSignature = CurrentIceSignature();
+        RTCPeerConnection? pc = null;
+        while (_pcPool.TryDequeue(out var pooled))
+        {
+            if (pooled.Signature == liveSignature) { pc = pooled.Connection; break; }
+            // Built with a now-stale ICE config (Nat Fix toggled, TURN changed, or new signaling ICE
+            // servers); close and skip it.
+            try { pooled.Connection.close(); } catch { }
+        }
+        bool hit = pc != null;
+        pc ??= BuildPeerConnection().Connection;
         if (VoiceDiagnostics.IsEnabled)
             VoiceDiagnostics.Log("bcl.pcpool.rent", $"hit={(hit ? "true" : "false")} poolSize={_pcPool.Count}");
         RefillPeerConnectionPool();
@@ -1424,13 +1470,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     }
 
     // Top the pool up to PcPoolTarget on a ThreadPool thread (one refiller at a time). The DTLS cert
-    // generation therefore happens off the Unity main thread, ahead of when a peer actually joins.
+    // generation therefore happens off the Unity main thread, ahead of when a peer actually joins. Each entry
+    // carries its own build-time signature, so no shared stamp can be left stale by a config change that
+    // races this refiller.
     private void RefillPeerConnectionPool()
     {
         if (_disposed) return;
         if (Interlocked.Exchange(ref _pcPoolRefilling, 1) == 1) return;
-        // Stamp the config this batch is built for, so RentPeerConnection can detect a later config change.
-        _pooledIceSignature = IceConfigSignature();
         Task.Run(() =>
         {
             try
@@ -1446,16 +1492,33 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             {
                 Interlocked.Exchange(ref _pcPoolRefilling, 0);
                 if (_disposed) DrainPeerConnectionPool(); // close any straggler enqueued during teardown
+                // Close the check-then-act window: if a concurrent rent dequeued an entry after our loop saw
+                // the pool full but before we cleared the flag above, that rent's RefillPeerConnectionPool was
+                // a no-op (flag still 1), leaving the pool one short with no active refiller. Now that the flag
+                // is clear, re-check and reschedule if still below target. Bounded: a successful fill leaves
+                // count == target, so the next pass does not reschedule.
+                else if (_pcPool.Count < PcPoolTarget) RefillPeerConnectionPool();
             }
         });
     }
 
-    // Close and discard every pooled (never-wired) connection — used when _iceServers change (the pooled
-    // connections carry stale ICE config) and on dispose.
+    // Close and discard every pooled (never-wired) connection — used when the ICE config changes (the pooled
+    // connections carry stale config) and on dispose.
     private void DrainPeerConnectionPool()
     {
-        while (_pcPool.TryDequeue(out var pc))
-            try { pc.close(); } catch { }
+        while (_pcPool.TryDequeue(out var pooled))
+            try { pooled.Connection.close(); } catch { }
+    }
+
+    // Rebuild the warm pool off the main thread when a Nat Fix / TURN setting changes (invoked from the
+    // settings dispatch). Doing this proactively means the next peer-join rents a current-config connection
+    // instead of generating a DTLS cert inline on the Unity render thread — the exact stall the pool exists
+    // to avoid. Pool ops are thread-safe, so this is safe to call from the settings/UI thread.
+    public void RebuildIceConnectionPool()
+    {
+        if (_disposed) return;
+        DrainPeerConnectionPool();
+        RefillPeerConnectionPool();
     }
 
     // Fresh RTCPeerConnection + handlers, shared by EnsurePeer and RecreatePeerConnection.
@@ -1463,41 +1526,53 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private void WireNewPeerConnection(PeerConnection peer, string socketId)
     {
         var pc = RentPeerConnection();
-        peer.Connection = pc;
-        pc.ondatachannel += dc =>
+        // The rented connection is reachable for teardown only once it is stored on a peer that is in
+        // _peersBySocket. If anything below throws before wiring completes, close it here so a still-open
+        // DTLS connection can't be orphaned (nothing else would ever close it).
+        bool wired = false;
+        try
         {
-            lock (_peerSync)
-                peer.DataChannel = dc;
-            dc.onopen += () =>
+            peer.Connection = pc;
+            pc.ondatachannel += dc =>
             {
-                peer.RecoveryAttempts = 0;
-                peer.NextRetryUtc = DateTime.MinValue;
-                VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=true");
+                lock (_peerSync)
+                    peer.DataChannel = dc;
+                dc.onopen += () =>
+                {
+                    peer.RecoveryAttempts = 0;
+                    peer.NextRetryUtc = DateTime.MinValue;
+                    VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=true");
+                };
+                dc.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
             };
-            dc.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
-        };
-        pc.onicecandidate += candidate =>
+            pc.onicecandidate += candidate =>
+            {
+                if (candidate == null || _socket == null) return;
+                // Diagnostic: candidate type (host/srflx/relay) proves whether TURN relay candidates were
+                // gathered for this peer — i.e. whether Nat Fix is actually reaching the relay.
+                if (VoiceDiagnostics.IsEnabled)
+                    VoiceDiagnostics.Log("bcl.ice.candidate", $"socket={socketId} type={candidate.type} protocol={candidate.protocol}");
+                var signalData = JsonSerializer.Serialize(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
+                _ = _socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
+            };
+            pc.oniceconnectionstatechange += iceState =>
+            {
+                if (VoiceDiagnostics.IsEnabled)
+                    VoiceDiagnostics.Log("bcl.ice.state", $"socket={socketId} client={peer.ClientId} iceState={iceState}");
+            };
+            // Background-thread liveness from SIPSorcery: marshal recovery to the main thread.
+            // Captured pc lets the handler ignore events from a connection we already replaced.
+            pc.onconnectionstatechange += state =>
+            {
+                if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
+                    _mainThreadActions.Enqueue(() => OnPeerConnectionDied(socketId, pc, state));
+            };
+            wired = true;
+        }
+        finally
         {
-            if (candidate == null || _socket == null) return;
-            // Diagnostic: candidate type (host/srflx/relay) proves whether TURN relay candidates were
-            // gathered for this peer — i.e. whether Nat Fix is actually reaching the relay.
-            if (VoiceDiagnostics.IsEnabled)
-                VoiceDiagnostics.Log("bcl.ice.candidate", $"socket={socketId} type={candidate.type} protocol={candidate.protocol}");
-            var signalData = JsonSerializer.Serialize(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
-            _ = _socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
-        };
-        pc.oniceconnectionstatechange += iceState =>
-        {
-            if (VoiceDiagnostics.IsEnabled)
-                VoiceDiagnostics.Log("bcl.ice.state", $"socket={socketId} client={peer.ClientId} iceState={iceState}");
-        };
-        // Background-thread liveness from SIPSorcery: marshal recovery to the main thread.
-        // Captured pc lets the handler ignore events from a connection we already replaced.
-        pc.onconnectionstatechange += state =>
-        {
-            if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
-                _mainThreadActions.Enqueue(() => OnPeerConnectionDied(socketId, pc, state));
-        };
+            if (!wired) { try { pc.close(); } catch { } }
+        }
     }
 
     // Includes 'disconnected' on purpose: used by the offer-gate (LocalLinkNeedsRebuild) and the

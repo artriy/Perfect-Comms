@@ -83,6 +83,11 @@ internal class VCManager : MonoBehaviour
                 VoiceFrameProfiler.End("publisher", pubTicks);
                 VoiceFrameProfiler.End("vc.tick", vcTicks);
                 break;
+            default:
+                // Left the profiled scenes: flush the final frame + open window so they aren't stranded.
+                // No-ops when profiling is disabled or nothing is pending.
+                VoiceFrameProfiler.Flush();
+                break;
         }
     }
 

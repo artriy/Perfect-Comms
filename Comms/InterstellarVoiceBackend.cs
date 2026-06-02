@@ -806,6 +806,10 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         VoiceDiagnostics.Log("interstellar.rejoin", "state=cleared");
     }
 
+    // No-op: Interstellar does not pre-build a peer-connection / ICE pool, so there is nothing to rebuild
+    // when the Nat Fix / TURN settings change (those settings are BetterCrewLink-backend only).
+    public void RebuildIceConnectionPool() { }
+
     public void Update(
         VoiceGameStateSnapshot? snapshot,
         IReadOnlyList<VoiceChatRoom.SpeakerCache> speakerCache,

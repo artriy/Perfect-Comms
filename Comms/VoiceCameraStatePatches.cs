@@ -48,13 +48,19 @@ internal static class SurveillanceCameraStatePatches
 
     internal static void ExcludeVoiceOverlayFromSurveillanceCameras(object? minigame, bool forceDeepScan = false)
     {
-        // Re-apply the overlay-exclusion mask only when the set of cameras actually changed.
-        // Camera.allCameras allocates a fresh Camera[] on every access; walking it every frame while a
-        // surveillance view was open was a steady GC source. Masks persist once applied, so we only need
-        // to re-walk when a camera appears/disappears (count change) or on the forced scan from Begin.
-        // Camera.allCamerasCount is a cheap no-alloc property.
+        // The reflection deep-scan below is throttled to ~1/s (forced on Begin); decide it up front so the
+        // cheap Camera.allCameras walk can piggy-back on the same cadence.
+        float now = Time.unscaledTime;
+        bool doDeepScan = forceDeepScan || now - _lastDeepScanTime >= DeepScanIntervalSeconds;
+
+        // Re-apply the overlay-exclusion mask when the set of cameras may have changed. Camera.allCameras
+        // allocates a fresh Camera[] on every access, so we avoid walking it every frame. A count change is
+        // the cheap common trigger, but a same-frame swap (one camera appears as another disappears) or a
+        // targetTexture null->non-null toggle leaves the count unchanged — so also re-walk on the throttled
+        // deep-scan cadence (~1/s) and on the forced scan from Begin, which bounds the worst-case miss to
+        // ~1s instead of "until the next count change". Camera.allCamerasCount is a cheap no-alloc property.
         int cameraCount = Camera.allCamerasCount;
-        if (forceDeepScan || cameraCount != _lastCameraCount)
+        if (doDeepScan || cameraCount != _lastCameraCount)
         {
             _lastCameraCount = cameraCount;
             try
@@ -69,8 +75,7 @@ internal static class SurveillanceCameraStatePatches
         }
 
         // Reflection walk for cameras not yet in Camera.allCameras; throttled to ~1/s (forced on Begin).
-        float now = Time.unscaledTime;
-        if (!forceDeepScan && now - _lastDeepScanTime < DeepScanIntervalSeconds) return;
+        if (!doDeepScan) return;
         _lastDeepScanTime = now;
 
         try { ApplyToObject(minigame, 0); } catch (Exception ex) { ReportCullingFailure(ex); }
@@ -164,6 +169,8 @@ internal static class SurveillanceCameraStatePatches
 
     internal static void RestoreVoiceOverlayCameraMasks()
     {
+        // Reset so the next Begin re-walks from scratch even if the camera count happens to be unchanged.
+        _lastCameraCount = -1;
         if (_changedCameraMasks.Count == 0) return;
 
         var keys = new List<int>(_changedCameraMasks.Keys);

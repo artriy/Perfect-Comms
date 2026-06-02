@@ -965,6 +965,11 @@ public class VoiceChatRoom
     public void Rejoin()
         => Rejoin("manual rejoin");
 
+    // Forward a Nat Fix / TURN setting change to the active backend so it can rebuild its warm peer-connection
+    // pool off the main thread (no rejoin needed; existing peers keep their connections).
+    public void RebuildIceConnectionPool()
+        => _voiceBackend?.RebuildIceConnectionPool();
+
     private void Rejoin(string reason)
     {
         ClearVoiceUiForLifecycleReset(reason);

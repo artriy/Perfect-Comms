@@ -12,15 +12,16 @@ internal static class VoiceAudioOcclusion
     private static readonly int ShadowMask = LayerMask.GetMask("Shadow");
     private static readonly Dictionary<OcclusionCacheKey, OcclusionCacheEntry> Cache = new();
 
-    // Closed-door world positions, refreshed at most every DoorCacheSeconds. Previously IsClosedDoorBetween
-    // read door.transform.position (an IL2CPP managed/native boundary crossing) for EVERY door on EVERY
+    // Closed-door world positions, rebuilt at most ONCE per frame. Previously IsClosedDoorBetween read
+    // door.transform.position (an IL2CPP managed/native boundary crossing) for EVERY door on EVERY
     // listener/target pair that missed the occlusion cache — an O(peers x doors) burst of interop on the
-    // Unity main thread during crowded movement. Caching the positions makes the per-pair check pure float
-    // math over a small Vector2 list, and an empty list short-circuits the whole check. All access is on the
-    // Unity main thread (same as the occlusion Cache), so no synchronization is needed.
-    private const float DoorCacheSeconds = 0.2f;
+    // Unity main thread during crowded movement. Collapsing all of a frame's per-pair calls into a single
+    // per-frame rebuild keeps the per-pair check pure float math over a small Vector2 list (an empty list
+    // short-circuits the whole check) while reflecting the CURRENT frame's door state — so a door opening or
+    // closing changes occlusion as fast as it did before the cache existed, with no extra staleness stacked
+    // on top of the occlusion result cache. All access is on the Unity main thread, so no sync is needed.
     private static readonly List<Vector2> _closedDoorPositions = new();
-    private static float _lastDoorScanTime = float.NegativeInfinity;
+    private static int _lastDoorScanFrame = -1;
 
     public static VoiceOcclusionDiagnostics Inspect(Vector2 listenerPos, Vector2 targetPos)
     {
@@ -304,7 +305,7 @@ internal static class VoiceAudioOcclusion
         long t = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            _lastDoorScanTime = float.NegativeInfinity; // force the door cache to build now
+            _lastDoorScanFrame = -1; // force the door cache to build now
             RefreshClosedDoorCacheIfNeeded();
             Physics2D.Linecast(around, around + new Vector2(0.1f, 0f), ShadowMask); // build the physics broadphase
         }
@@ -321,9 +322,11 @@ internal static class VoiceAudioOcclusion
 
     private static void RefreshClosedDoorCacheIfNeeded()
     {
-        float now = Time.time;
-        if (now - _lastDoorScanTime <= DoorCacheSeconds) return;
-        _lastDoorScanTime = now;
+        // Rebuild at most once per frame: every per-pair caller in the same frame shares one scan, but the
+        // cached door state is never more than the current frame old.
+        int frame = Time.frameCount;
+        if (frame == _lastDoorScanFrame) return;
+        _lastDoorScanFrame = frame;
 
         _closedDoorPositions.Clear();
         var doors = ShipStatus.Instance?.AllDoors;
