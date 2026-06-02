@@ -415,6 +415,13 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         MicCalibrationDiagnostics = config.Bind("Debug", "MicCalibrationDiagnostics", false,
             new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for BetterCrewLink."));
 
+        // Debug toggles always start OFF on every game launch, even if a previous session left one on. They
+        // still work when turned on mid-session; they just never persist across a restart, so diagnostic
+        // logging, the frame profiler, and the synthetic test tone can't be accidentally left running.
+        DebugVoiceStats.Value = false;
+        MicCalibrationDiagnostics.Value = false;
+        SyntheticMicTone.Value = false;
+
         LobbyBrowserTitle = config.Bind("Lobby Browser", "Title", "Perfect Comms",
             new ConfigDescription("Title shown in the voice lobby browser"));
 
