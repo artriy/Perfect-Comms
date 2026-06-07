@@ -733,18 +733,16 @@ public class VoiceChatRoom
         if (collapsed)
         {
             ClearVoiceUiForLifecycleReset("missing peer recovery");
-            if (_activeBackend == VoiceTransportBackend.Interstellar)
-            {
-                // Interstellar's VCRoom.Rejoin only sends RequestReload and never clears the library's
-                // audioInstances, so onConnectClient never re-fires and the cleared peers are never
-                // repopulated (every remote peer stays silent permanently). Force a full backend rebuild
-                // instead, which re-establishes the connection and recreates each peer via onConnectClient.
-                _forceBackendRebuild = true;
-            }
-            else
-            {
-                _voiceBackend.Rejoin();
-            }
+            // Force a full backend rebuild (dispose + reconnect => NEW socket id) rather than the backend's
+            // light Rejoin(), which reuses the socket. Both backends need this on a collapse:
+            //  - Interstellar's VCRoom.Rejoin only sends RequestReload and never clears the library's
+            //    audioInstances, so onConnectClient never re-fires and peers stay silent.
+            //  - BetterCrewLink's Rejoin() keeps the SAME socket id, so a split-brained peer (its channel reads
+            //    'open' while ours never opened) never sees us reconnect, never supersedes its stale connection,
+            //    and the collapse persists (the "two clients can't hear each other until one presses refresh"
+            //    bug). A new socket id forces the remote to supersede and renegotiate clean — exactly what the
+            //    manual voice-refresh keybind does.
+            _forceBackendRebuild = true;
             ResetSettingsSyncState();
             StartBootstrapWindow("missing voice backend peer");
             ForceUpdateLocalProfile();
@@ -758,10 +756,9 @@ public class VoiceChatRoom
             if (recovered < 0)
             {
                 ClearVoiceUiForLifecycleReset("missing peer recovery");
-                if (_activeBackend == VoiceTransportBackend.Interstellar)
-                    _forceBackendRebuild = true;
-                else
-                    _voiceBackend.Rejoin();
+                // Same rationale as the collapse path: a full backend rebuild (new socket id) is what clears a
+                // split-brain; the backend's light Rejoin() reuses the socket and cannot.
+                _forceBackendRebuild = true;
                 ResetSettingsSyncState();
                 StartBootstrapWindow("missing voice backend peer");
                 ForceUpdateLocalProfile();
