@@ -372,8 +372,8 @@ internal class BufferedSampleProvider : ISampleProvider
     // per-peer link-aware ceiling escalation (P0.2): the UNCLAMPED target (before clamping to the ceiling) is what
     // reveals that the link genuinely wants more depth than the ceiling allows. A sustained streak of clamped
     // recomputes (this method runs on every underrun, so the streak counts clamped underruns accrued within a
-    // talkspurt) ratchets THIS peer's ceiling one frame-step toward 200 ms; a recompute that is NOT clamped resets
-    // the streak right here, so a single transient spike never deepens a healthy peer. Idle-reset also clears it.
+    // talkspurt) ratchets THIS peer's ceiling one frame-step toward the hard cap; a recompute that is NOT clamped
+    // decays the streak by one (floored at 0), so a single transient spike is not enough to deepen a healthy peer. Idle-reset also clears it.
     private void RecomputeSetpointLocked()
     {
         double j = _jitterSamplesProvider?.Invoke() ?? 0.0;
