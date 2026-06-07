@@ -22,8 +22,9 @@ internal static class AudioHelpers
     // Sustained-clamp streak (CLAMPED RecomputeSetpointLocked calls — i.e. clamped underruns accrued within a
     // talkspurt, since a recompute runs on every underrun — whose UNCLAMPED jitter target is at/above the current
     // per-peer ceiling) required before the per-peer ceiling ratchets up one frame-step. A single unclamped
-    // recompute (or an idle-reset) clears the streak, so a transient jitter spike never deepens a healthy peer;
-    // only a genuinely jittery link sustains the clamp long enough to earn the extra latency.
+    // recompute decays the streak by one (floored at 0); only an idle-reset / Clear fully clears it. So a
+    // transient jitter spike does not deepen a healthy peer, while a genuinely jittery link sustains the clamp
+    // long enough to earn the extra latency.
     public const int PerPeerCeilingClampStreakToGrow = 2;
     public const int JitterDepthMarginSamples = FrameSize * 2; // 40 ms safety margin above measured jitter
     public const float JitterGain = 2.5f;                       // target ~= baseline + gain*jitterStdev + margin
