@@ -33,7 +33,7 @@ internal class BufferedSampleProvider : ISampleProvider
     // the SAME reachable ceiling so growth is never trimmed and prebuffer-release can never stall.
     private int _maxAdaptivePrebufferSamples = AudioHelpers.PlaybackMaxRecoveryPrebufferSamples;
     private int _jitterSetpointSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
-    // Per-peer link-aware ceiling escalation (P0.2). Only THIS peer's ceiling deepens toward 200 ms, and only
+    // Per-peer link-aware ceiling escalation (P0.2). Only THIS peer's ceiling deepens toward 240 ms, and only
     // when its UNCLAMPED jitter target stays pinned at/above the current ceiling for a sustained streak. The cut
     // sizes (BufferCutToSize/BufferCutSize) are recomputed in lockstep so the ring actually lets the deeper
     // cushion fill instead of discarding everything above the old 180 ms trim. Decay lowers the ceiling too.
@@ -127,7 +127,7 @@ internal class BufferedSampleProvider : ISampleProvider
     }
 
     // Per-peer ceiling escalation (P0.2). When the unclamped jitter target has stayed pinned at/above the current
-    // ceiling for a sustained streak, ratchet THIS peer's ceiling one frame-step toward the 200 ms hard cap and
+    // ceiling for a sustained streak, ratchet THIS peer's ceiling one frame-step toward the 240 ms hard cap and
     // move the cut sizes with it. Returns true when the ceiling actually grew (caller resets the streak).
     private bool TryGrowPerPeerCeilingLocked()
     {
@@ -140,7 +140,7 @@ internal class BufferedSampleProvider : ISampleProvider
     }
 
     // Per-peer ceiling decay (P0.2): lower the ceiling one frame-step toward the 160 ms start (never below it) so
-    // a one-time bad spell does not strand the peer at 200 ms forever. Cut sizes follow.
+    // a one-time bad spell does not strand the peer at 240 ms forever. Cut sizes follow.
     private void LowerPerPeerCeilingLocked()
     {
         int next = AudioHelpers.NextPeerCeilingOnDecay(_maxAdaptivePrebufferSamples);
@@ -449,8 +449,8 @@ internal class BufferedSampleProvider : ISampleProvider
         if (_adaptiveRecoveryPrebufferSamples <= floor)
         {
             // Recovery is fully settled at its floor: the link is healthy. If THIS peer's ceiling was ratcheted up
-            // toward 200 ms by a prior bad spell, walk it back down one frame-step toward the 160 ms start so a
-            // one-time bad spell does not strand it at 200 ms forever (P0.2). Gated on the live jitter no longer
+            // toward 240 ms by a prior bad spell, walk it back down one frame-step toward the 160 ms start so a
+            // one-time bad spell does not strand it at 240 ms forever (P0.2). Gated on the live jitter no longer
             // wanting the elevated ceiling, and on a sustained run of clean reads, so it never thrashes a peer that
             // still needs the depth. Pull the latest jitter first so the decision tracks current conditions.
             if (_maxAdaptivePrebufferSamples > AudioHelpers.PlaybackMaxRecoveryPrebufferSamples)
@@ -460,7 +460,7 @@ internal class BufferedSampleProvider : ISampleProvider
                 // latest recompute was NOT clamped at the ceiling) AND the live setpoint is comfortably below the
                 // current per-peer cap, i.e. the cap now carries more headroom than the link needs. Earlier this
                 // only fired when the setpoint fell below the 160 ms START, so a peer that settled steady at e.g.
-                // ~170 ms kept its earned 200 ms cap forever. One frame-step per decay tick, monotone toward the
+                // ~170 ms kept its earned 240 ms cap forever. One frame-step per decay tick, monotone toward the
                 // 160 ms floor (NextPeerCeilingOnDecay never goes below it), so it can't oscillate against grow.
                 if (_clampStreak == 0
                     && _jitterSetpointSamples <= _maxAdaptivePrebufferSamples - AudioHelpers.FrameSize)
