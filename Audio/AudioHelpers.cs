@@ -16,9 +16,9 @@ internal static class AudioHelpers
     public const int PlaybackMaxRecoveryPrebufferSamples = FrameSize * 8; // 160 ms per-peer STARTING ceiling; < 300 ms ring
     // Per-peer link-aware HARD cap (Fix 2a / P0.2). Only a peer whose UNCLAMPED jitter target stays pinned at its
     // current ceiling for a sustained streak ratchets its OWN ceiling one frame-step at a time from the 160 ms
-    // start toward this 200 ms hard max; healthy peers never move off 160 ms (or lower) and pay no extra latency.
-    // The 200 ms cap + 2-frame trim headroom (240 ms) fits under the 300 ms (FrameSize*15) ring.
-    public const int PlaybackMaxRecoveryPrebufferSamplesHard = FrameSize * 10; // 200 ms hard per-peer escalation cap
+    // start toward this 240 ms hard max; healthy peers never move off 160 ms (or lower) and pay no extra latency.
+    // The 240 ms cap + 2-frame trim headroom (280 ms) fits under the 300 ms (FrameSize*15) ring.
+    public const int PlaybackMaxRecoveryPrebufferSamplesHard = FrameSize * 12; // 240 ms hard per-peer escalation cap
     // Sustained-clamp streak (CLAMPED RecomputeSetpointLocked calls — i.e. clamped underruns accrued within a
     // talkspurt, since a recompute runs on every underrun — whose UNCLAMPED jitter target is at/above the current
     // per-peer ceiling) required before the per-peer ceiling ratchets up one frame-step. A single unclamped
@@ -50,7 +50,7 @@ internal static class AudioHelpers
     public static bool PeerCeilingIsClamped(int unclampedTargetSamples, int currentCeilingSamples)
         => unclampedTargetSamples >= currentCeilingSamples;
 
-    // The next per-peer ceiling. Grows exactly ONE frame-step (toward the 200 ms hard cap) only once the
+    // The next per-peer ceiling. Grows exactly ONE frame-step (toward the 240 ms hard cap) only once the
     // sustained-clamp streak has reached PerPeerCeilingClampStreakToGrow; otherwise unchanged. Never exceeds the
     // hard cap and never drops below the 160 ms start. Caller resets the streak after a grow.
     public static int NextPeerCeilingOnGrow(int currentCeilingSamples, int clampStreak)
@@ -62,7 +62,7 @@ internal static class AudioHelpers
     }
 
     // The next per-peer ceiling on decay: lower ONE frame-step toward the 160 ms start (never below it), so a
-    // one-time bad spell that ratcheted a peer up to 200 ms does not strand it there forever once jitter falls.
+    // one-time bad spell that ratcheted a peer up to 240 ms does not strand it there forever once jitter falls.
     public static int NextPeerCeilingOnDecay(int currentCeilingSamples)
     {
         int lowered = currentCeilingSamples - FrameSize;
