@@ -3425,7 +3425,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 // Concentus THROWS (it never returns an error code) on a malformed/edge Opus packet. Don't
                 // drop the slot: emit one frame of silence so the playout timeline stays aligned and the
                 // caller can keep draining the rest of the batch; the next real packet re-primes the decoder.
-                error = ex.Message;
+                // Capture the Opus TOC byte + payload length + path so a recurring throw burst can be traced to
+                // the exact frame config (bandwidth/mode/frame-count) that trips the decoder.
+                error = data.Length > 0
+                    ? $"{ex.Message} toc=0x{data[0]:X2} len={data.Length} fec={decodeFec} legacy={isLegacy}"
+                    : $"{ex.Message} len=0 fec={decodeFec} legacy={isLegacy}";
                 RouteSilence(frameSize);
                 // Count a throw toward suppression only for a real PV2 packet or a foreign legacy datagram,
                 // and only after a SUSTAINED run (debounced) — never for genuine PV2 PLC/FEC concealment.
