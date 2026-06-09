@@ -276,6 +276,7 @@ public static class VoiceChatHudState
     {
         var hud = HudManager.Instance;
         if (hud == null) return;
+        if (PlayerControl.LocalPlayer == null) return;
 
         long bTicks = VoiceFrameProfiler.Begin();
         EnsureHudButtons(hud);

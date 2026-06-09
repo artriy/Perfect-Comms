@@ -24,7 +24,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly bool BclOpusUseInbandFec = true;   // arm LossResistant flag (sender) + the jitter-buffer Fec drain arm
     private static readonly int BclOpusPacketLossPercent = 15; // non-zero PLP so Opus embeds FEC redundancy in the wire frame
     private const int BclPlaybackLatencyMs = 60;
-    private const int BclJitterTargetDelayFrames = 2;
+    private const int BclJitterTargetDelayFrames = 4;
     private const int BclJitterMaxBufferedFrames = 8;
     private const float RemoteSpeakingThreshold = 0.004f;
     private const double SyntheticToneFrequency = 220.0;
@@ -1484,7 +1484,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         if (data == null || data.Length == 0) return true; // R1: an Opus packet must be at least one byte (the TOC)
         int code = data[0] & 0x3;          // low 2 bits of the TOC = frame-count code
-        if (code == 0) return false;       // single-frame packet: 1 byte (TOC only) is already valid — never reject
+        if (code == 0)
+        {
+            if (data.Length > 1) return false;
+            return ((data[0] >> 3) & 0x1F) >= 12; // bare TOC is valid DTX only for SILK (config<12); Hybrid/CELT throw
+        }
         // Code 1 (two CBR frames of EQUAL size) is also valid as a bare 1-byte packet per RFC 6716: it encodes two
         // zero-length frames (silence), so the TOC alone is structurally fine — let Concentus decode it to silence.
         if (code == 1) return false;
@@ -3022,8 +3026,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private static VoicePlayerSnapshot? FindTarget(VoiceGameStateSnapshot snapshot, PeerConnection peer)
     {
-        if (peer.PlayerId != byte.MaxValue && snapshot.TryGetPlayer(peer.PlayerId, out var byPlayer)) return byPlayer;
-        if (snapshot.TryGetClient(peer.ClientId, out var byClient)) return byClient;
+        int clientId = peer.ClientId;
+        byte playerId = peer.PlayerId;
+        if (clientId >= 0 && snapshot.TryGetClient(clientId, out var byClient)) return byClient;
+        if (playerId != byte.MaxValue
+            && snapshot.TryGetPlayer(playerId, out var byPlayer)
+            && byPlayer.ClientId == clientId) return byPlayer;
         return null;
     }
 

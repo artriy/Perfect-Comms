@@ -1086,11 +1086,15 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
 
     private static VoicePlayerSnapshot? FindTarget(VoiceGameStateSnapshot snapshot, Peer peer)
     {
-        if (peer.PlayerId != byte.MaxValue && snapshot.TryGetPlayer(peer.PlayerId, out var byPlayer))
-            return byPlayer;
-
-        if (snapshot.TryGetClient(peer.ClientId, out var byClient))
+        int clientId = peer.ClientId;
+        byte playerId = peer.PlayerId;
+        if (clientId >= 0 && snapshot.TryGetClient(clientId, out var byClient))
             return byClient;
+
+        if (playerId != byte.MaxValue
+            && snapshot.TryGetPlayer(playerId, out var byPlayer)
+            && byPlayer.ClientId == clientId)
+            return byPlayer;
 
         return null;
     }

@@ -44,7 +44,7 @@ internal static class VoiceProximityCalculator
     // EndGame is already a global voice phase, so treat it like a post-game group call: every connected peer is
     // heard at full volume, centered, letting players react to the result (e.g. a jester win) together.
     public static VoiceProximityResult CalculateEndGame()
-        => new(1f, 0f, 0f, 0f, VoiceAudioFilterMode.None, true, VoiceProximityReason.Lobby, 1f);
+        => new(0.7f, 0f, 0f, 0f, VoiceAudioFilterMode.None, true, VoiceProximityReason.Lobby, 1f);
 
     public static VoiceProximityResult CalculateMeeting(
         VoicePlayerSnapshot? localPlayer,
