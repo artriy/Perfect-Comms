@@ -28,9 +28,8 @@ public static class VoiceVolumeMenu
     private const float KnobScale       = 0.16f;
     private const float KnobScaleActive = 0.21f;
 
-    private const float ListTopY    = 1.08f;
-    private const float MaskH       = 3.52f;
-    private const float MaskCenterY = -0.34f;
+    private const float ListTopY = 1.08f;
+    private const float ListH    = 3.52f;
 
     private const float MeterW     = 1.30f;
     private const float MeterH     = 0.06f;
@@ -164,14 +163,6 @@ public static class VoiceVolumeMenu
         contentGO.transform.SetParent(_window.transform, false);
         contentGO.transform.localPosition = new Vector3(0f, ListTopY, -0.1f);
 
-        // Add a SpriteMask so rows outside the window are clipped
-        var maskGO = new GameObject("Mask");
-        maskGO.transform.SetParent(_window.transform, false);
-        maskGO.transform.localPosition = new Vector3(0f, MaskCenterY, -0.05f);
-        var mask = maskGO.AddComponent<SpriteMask>();
-        mask.sprite = Create1x1Sprite(Color.white);
-        maskGO.transform.localScale = new Vector3(WindowW - 0.2f, MaskH, 1f);
-
         _window.SetActive(true);
         RebuildRows();
     }
@@ -193,7 +184,7 @@ public static class VoiceVolumeMenu
         var players = CollectPlayers();
         _rosterSignature = ComputeRosterSignature(players);
 
-        int maxRows  = Mathf.FloorToInt(MaskH / RowH);
+        int maxRows  = Mathf.FloorToInt(ListH / RowH);
         _rowsMaxStart = Mathf.Max(0, players.Count - maxRows);
         int startIdx = Mathf.Clamp(Mathf.FloorToInt(_scrollOffset / RowH), 0, _rowsMaxStart);
         _scrollOffset = startIdx * RowH;
@@ -258,7 +249,6 @@ public static class VoiceVolumeMenu
         glowSr.sprite       = GetGlowSprite();
         glowSr.color        = new Color(paletteColor.r, paletteColor.g, paletteColor.b, 0f);
         glowSr.sortingOrder = 22;
-        glowSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         var bodySprite = CrewmateAvatarRenderer.GetBodySpriteFor(pc);
         var avatarGO = new GameObject("Avatar");
@@ -266,7 +256,6 @@ public static class VoiceVolumeMenu
         avatarGO.transform.localPosition = new Vector3(-2.42f, 0f, -0.1f);
         var avatarSr = avatarGO.AddComponent<SpriteRenderer>();
         avatarSr.sortingOrder = 23;
-        avatarSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
         if (bodySprite != null)
         {
             avatarSr.sprite = bodySprite;
@@ -303,7 +292,6 @@ public static class VoiceVolumeMenu
         meterTrackSr.drawMode    = SpriteDrawMode.Sliced;
         meterTrackSr.size        = new Vector2(MeterW, MeterH);
         meterTrackSr.sortingOrder = 22;
-        meterTrackSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         var meterFillGO = new GameObject("MeterFill");
         meterFillGO.transform.SetParent(rowGO.transform, false);
@@ -313,7 +301,6 @@ public static class VoiceVolumeMenu
         meterFillSr.sprite       = fillSprite;
         meterFillSr.color        = MeterGreen;
         meterFillSr.sortingOrder = 23;
-        meterFillSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
         if (_fillUnit <= 0f && fillSprite.bounds.size.x > 0f)
             _fillUnit = 1f / fillSprite.bounds.size.x;
         meterFillGO.transform.localScale = new Vector3(0f, MeterH * _fillUnit, 1f);
@@ -357,7 +344,6 @@ public static class VoiceVolumeMenu
         trackSr.drawMode    = SpriteDrawMode.Sliced;
         trackSr.size        = new Vector2(SliderW, 0.10f);
         trackSr.sortingOrder = 22;
-        trackSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         // 50% mark (visual guide for 100%)
         var midGO = new GameObject("Mid");
@@ -368,7 +354,6 @@ public static class VoiceVolumeMenu
         midSr.drawMode    = SpriteDrawMode.Sliced;
         midSr.size        = new Vector2(0.02f, 0.20f);
         midSr.sortingOrder = 22;
-        midSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         // Fill (coloured portion)
         var fillGO  = new GameObject("Fill");
@@ -378,7 +363,6 @@ public static class VoiceVolumeMenu
         fillSr.color       = FillFull;
         fillSr.drawMode    = SpriteDrawMode.Sliced;
         fillSr.sortingOrder = 23;
-        fillSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         // Knob
         var knobGO = new GameObject("Knob");
@@ -387,7 +371,6 @@ public static class VoiceVolumeMenu
         knobSr.sprite       = GetCircleSprite();
         knobSr.color        = Color.white;
         knobSr.sortingOrder = 24;
-        knobSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
         knobGO.transform.localScale = Vector3.one * KnobScale;
 
         void PositionSlider(float v)
@@ -423,7 +406,6 @@ public static class VoiceVolumeMenu
         divSr.drawMode    = SpriteDrawMode.Sliced;
         divSr.size        = new Vector2(WindowW - 0.4f, 0.012f);
         divSr.sortingOrder = 21;
-        divSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
     }
 
     private static Color SliderFillColor(float v)
@@ -884,7 +866,6 @@ public static class VoiceVolumeMenu
         sr.drawMode = SpriteDrawMode.Sliced;
         sr.size = new Vector2(0.34f, 0.30f);
         sr.sortingOrder = 23;
-        sr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         var iconGO = new GameObject("ResetIcon");
         iconGO.transform.SetParent(go.transform, false);
@@ -893,7 +874,6 @@ public static class VoiceVolumeMenu
         var iconSr = iconGO.AddComponent<SpriteRenderer>();
         iconSr.sprite = ResetIconSprite;
         iconSr.sortingOrder = 24;
-        iconSr.maskInteraction = SpriteMaskInteraction.VisibleInsideMask;
 
         var col = go.AddComponent<BoxCollider2D>();
         col.size = new Vector2(0.34f, 0.30f);
