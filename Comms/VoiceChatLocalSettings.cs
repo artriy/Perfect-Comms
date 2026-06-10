@@ -176,6 +176,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     [LocalToggleSetting("Manual Bar")]
     public ConfigEntry<bool> SpeakingBarManualLayout { get; }
 
+    [LocalToggleSetting("Bar Backdrop")]
+    public ConfigEntry<bool> SpeakingBarBackdrop { get; }
+
     [LocalToggleSetting("Meeting Overlay")]
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
 
@@ -402,6 +405,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatPlugin.VoiceChat.SpeakingBarNamePosition.Bottom,
             new ConfigDescription("Where the player name sits relative to its speaking-bar icon."));
 
+        SpeakingBarBackdrop = config.Bind("UI", "SpeakingBarBackdrop", false,
+            new ConfigDescription("Show a translucent dark backdrop behind the speaking bar."));
+
         JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
             VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
             new ConfigDescription("Jailor unmute button: Voice HUD or the jailee's meeting card."));
@@ -607,7 +613,7 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         }
         else if (configEntry == SpeakingBarManualLayout || configEntry == SpeakingBarX ||
                  configEntry == SpeakingBarY || configEntry == SpeakingBarLayout ||
-                 configEntry == SpeakingBarNamePosition)
+                 configEntry == SpeakingBarNamePosition || configEntry == SpeakingBarBackdrop)
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();
         }

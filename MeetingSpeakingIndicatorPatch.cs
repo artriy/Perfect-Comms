@@ -11,9 +11,6 @@ namespace VoiceChatPlugin;
 [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.Update))]
 public static class MeetingSpeakingIndicatorPatch
 {
-    private const float LevelSmoothSpeed = 12f;
-    private const float FadeInSpeed = 7f;
-    private const float FadeOutSpeed = 5f;
     private static readonly Vector3 CardGlowScale = new(0.92f, 0.66f, 1f);
     private static readonly Dictionary<byte, SpriteRenderer> _cardGlows = new();
     private static readonly Dictionary<byte, float> _speakingLevels = new();
@@ -148,14 +145,8 @@ public static class MeetingSpeakingIndicatorPatch
             bool isTalking = _speakingLevels.TryGetValue(pid, out float level);
             var visual = GetVisualState(pid);
             visual.TargetLevel = isTalking ? level : 0f;
-            visual.SmoothedLevel = Mathf.Lerp(
-                visual.SmoothedLevel,
-                NormalizeVoiceLevel(visual.TargetLevel),
-                Mathf.Clamp01(Time.deltaTime * LevelSmoothSpeed));
-            visual.Visibility = Mathf.MoveTowards(
-                visual.Visibility,
-                isTalking ? 1f : 0f,
-                Time.deltaTime * (isTalking ? FadeInSpeed : FadeOutSpeed));
+            visual.SmoothedLevel = VoiceLevelVisual.SmoothLevel(visual.SmoothedLevel, visual.TargetLevel, Time.deltaTime);
+            visual.Visibility = VoiceLevelVisual.StepVisibility(visual.Visibility, isTalking, Time.deltaTime);
 
             if (!_cardGlows.TryGetValue(pid, out var cardGlowSr) || cardGlowSr == null)
                 cardGlowSr = CreateCardGlow(meetingHud, state, pid);
@@ -551,13 +542,6 @@ public static class MeetingSpeakingIndicatorPatch
 
     private static string DescribeColor(Color color)
         => $"({color.r:0.00},{color.g:0.00},{color.b:0.00},{color.a:0.00})";
-
-    private static float NormalizeVoiceLevel(float level)
-    {
-        if (level <= 0.003f) return 0f;
-        float normalized = Mathf.InverseLerp(0.003f, 0.55f, level);
-        return Mathf.Pow(Mathf.Clamp01(normalized), 0.65f);
-    }
 
     private static SpriteRenderer? CreateCardGlow(MeetingHud meetingHud, PlayerVoteArea state, byte playerId)
     {
