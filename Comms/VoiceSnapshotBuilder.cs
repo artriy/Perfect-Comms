@@ -72,13 +72,16 @@ internal static class VoiceSnapshotBuilder
                 out bool isMediatedGhost,
                 out byte mediatingMediumId);
 
+            bool dataDead = data?.IsDead == true;
+            bool roleOnlyDead = !dataDead && data?.Role?.IsDead == true;
             players.Add(new VoicePlayerSnapshot(
                 player.PlayerId,
                 clientId,
                 name,
                 (Vector2)player.transform.position,
                 player.PlayerId == localPlayerId,
-                data?.IsDead == true,
+                dataDead || roleOnlyDead,
+                roleOnlyDead,
                 VoiceRoleMuteState.IsVoiceImpostor(player),
                 isVampire,
                 isLover,

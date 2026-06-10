@@ -236,7 +236,7 @@ internal static class VoiceProximityCalculator
                 return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
         }
 
-        if (localImp && targetDead && s.ImpostorHearGhosts)
+        if (localImp && targetDead && !target.IsSpectator && s.ImpostorHearGhosts)
         {
             float ghostDist = Distance(targetPos, localListenerPos);
             float ghostVolume = VoiceAudioOcclusion.ApplyFalloff(

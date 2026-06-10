@@ -903,7 +903,8 @@ public static class VoiceChatHudState
 
     private static bool CanUseTeamRadio()
         => PlayerControl.LocalPlayer != null
-        && PlayerControl.LocalPlayer.Data?.IsDead == false
+        && PlayerControl.LocalPlayer.Data != null
+        && !VoiceRoleMuteState.IsVoiceDead(PlayerControl.LocalPlayer)
         && VoiceRoleMuteState.CanUseTeamRadio(PlayerControl.LocalPlayer);
 
     private static bool CanUseImpostorRadio()
@@ -928,7 +929,7 @@ public static class VoiceChatHudState
     internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase)
     {
         var local = PlayerControl.LocalPlayer;
-        return IsLocalRoomPolicyVoiceBlocked(phase, local?.Data?.IsDead == true, out _);
+        return IsLocalRoomPolicyVoiceBlocked(phase, VoiceRoleMuteState.IsVoiceDead(local), out _);
     }
 
     internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead)
@@ -937,7 +938,7 @@ public static class VoiceChatHudState
     private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, out string reason)
     {
         var local = PlayerControl.LocalPlayer;
-        return IsLocalRoomPolicyVoiceBlocked(phase, local?.Data?.IsDead == true, out reason);
+        return IsLocalRoomPolicyVoiceBlocked(phase, VoiceRoleMuteState.IsVoiceDead(local), out reason);
     }
 
     private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead, out string reason)

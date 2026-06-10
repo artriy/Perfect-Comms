@@ -20,6 +20,7 @@ internal readonly record struct VoicePlayerSnapshot(
     Vector2 Position,
     bool IsLocal,
     bool IsDead,
+    bool IsSpectator,
     bool IsImpostor,
     bool IsVampire,
     bool IsLover,

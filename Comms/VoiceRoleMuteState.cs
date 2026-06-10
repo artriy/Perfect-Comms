@@ -174,6 +174,12 @@ internal static partial class VoiceRoleMuteState
             ? result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle }
             : result;
 
+    internal static bool IsVoiceDead(PlayerControl? player)
+    {
+        var data = player?.Data;
+        return data != null && (data.IsDead || data.Role?.IsDead == true);
+    }
+
     internal static bool TryGetLocalVoiceBlockReason(out string reason)
         => TryGetLocalVoiceBlockReason(VoiceSceneState.ResolvePhase(), out reason);
 
@@ -183,7 +189,7 @@ internal static partial class VoiceRoleMuteState
         Update();
 
         var local = PlayerControl.LocalPlayer;
-        if (local == null || local.Data?.IsDead == true)
+        if (local == null || IsVoiceDead(local))
             return false;
 
         GetPlayerRoleState(local, out bool isBlackmailed, out bool isJailed, out byte jailorId,
@@ -242,7 +248,7 @@ internal static partial class VoiceRoleMuteState
 
         var local = PlayerControl.LocalPlayer;
         var phase = VoiceSceneState.ResolvePhase();
-        if (local == null || !VoiceSceneState.IsMeetingVoicePhase(phase) || local.Data?.IsDead == true)
+        if (local == null || !VoiceSceneState.IsMeetingVoicePhase(phase) || IsVoiceDead(local))
             return false;
 
         GetPlayerRoleState(local, out bool isBlackmailed, out bool isJailed, out byte jailorId,
