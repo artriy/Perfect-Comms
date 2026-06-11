@@ -22,6 +22,9 @@ internal class BufferedSampleProvider : ISampleProvider
     private long _prebufferSilenceReads;
     private DateTime _lastBufferEventLogUtc = DateTime.MinValue;
     private DateTime _lastBufferWriteLogUtc = DateTime.MinValue;
+    private bool _prebufferLogEmitted;
+    private long _prebufferLogSuppressed;
+    private DateTime _prebufferStateEnteredUtc = DateTime.MinValue;
     private bool _lastReadEndedSilent = true;
     private bool _hasPlayedAudio;
     private DateTime _prebufferFirstSampleUtc = DateTime.MinValue;
@@ -75,6 +78,7 @@ internal class BufferedSampleProvider : ISampleProvider
             {
                 _prebufferSamples = Math.Max(0, value);
                 _isPrebuffering = EnableRecoveryPrebuffer && _prebufferSamples > 0;
+                ResetPrebufferLogStateLocked();
                 _adaptiveRecoveryPrebufferSamples = EnableRecoveryPrebuffer ? AudioHelpers.PlaybackRecoveryPrebufferSamples : 0;
                 _stableReadCycles = 0;
                 _jitterSetpointSamples = AudioHelpers.PlaybackRecoveryPrebufferSamples;
@@ -208,7 +212,7 @@ internal class BufferedSampleProvider : ISampleProvider
 
             _isPrebuffering = false;
             _prebufferFirstSampleUtc = DateTime.MinValue;
-            LogBufferEvent("audio.buffer.prebufferRelease", $"reason=target-reached buffered={_ring.Count} target={target} startup={!_hasPlayedAudio}");
+            LogBufferEvent("audio.buffer.prebufferRelease", $"reason=target-reached buffered={_ring.Count} target={target} startup={!_hasPlayedAudio} suppressed={_prebufferLogSuppressed} waitedMs={PrebufferWaitedMsLocked()}");
         }
     }
 
@@ -218,6 +222,7 @@ internal class BufferedSampleProvider : ISampleProvider
         {
             _ring?.Reset();
             _isPrebuffering = EnableRecoveryPrebuffer && _prebufferSamples > 0;
+            ResetPrebufferLogStateLocked();
             _lastReadEndedSilent = true;
             _hasPlayedAudio = false;
             _prebufferFirstSampleUtc = DateTime.MinValue;
@@ -272,7 +277,13 @@ internal class BufferedSampleProvider : ISampleProvider
             System.Threading.Interlocked.Increment(ref _readRequests);
             System.Threading.Interlocked.Add(ref _requestedSamples, count);
             System.Threading.Interlocked.Increment(ref _prebufferSilenceReads);
-            LogBufferEvent("audio.buffer.prebuffer", $"requested={count} buffered={_ring?.Count ?? 0} prebuffer={_prebufferSamples}");
+            if (!_prebufferLogEmitted && ShouldLogBufferEvent())
+            {
+                WriteBufferEvent("audio.buffer.prebuffer", $"requested={count} buffered={_ring?.Count ?? 0} prebuffer={_prebufferSamples}");
+                _prebufferLogEmitted = true;
+            }
+            else
+                _prebufferLogSuppressed++;
             return CompleteRead(buffer, offset, count, 0);
         }
 
@@ -292,13 +303,19 @@ internal class BufferedSampleProvider : ISampleProvider
                 System.Threading.Interlocked.Increment(ref _readRequests);
                 System.Threading.Interlocked.Add(ref _requestedSamples, count);
                 System.Threading.Interlocked.Increment(ref _prebufferSilenceReads);
-                LogBufferEvent("audio.buffer.prebuffer", $"requested={count} buffered={buffered} prebuffer={target} startup={!_hasPlayedAudio}");
+                if (!_prebufferLogEmitted && ShouldLogBufferEvent())
+                {
+                    WriteBufferEvent("audio.buffer.prebuffer", $"requested={count} buffered={buffered} prebuffer={target} startup={!_hasPlayedAudio}");
+                    _prebufferLogEmitted = true;
+                }
+                else
+                    _prebufferLogSuppressed++;
                 return CompleteRead(buffer, offset, count, 0);
             }
 
             _isPrebuffering = false;
             _prebufferFirstSampleUtc = DateTime.MinValue;
-            LogBufferEvent("audio.buffer.prebufferRelease", $"requested={count} buffered={buffered} target={target} waitExpired={waitExpired} startup={!_hasPlayedAudio}");
+            LogBufferEvent("audio.buffer.prebufferRelease", $"requested={count} buffered={buffered} target={target} waitExpired={waitExpired} startup={!_hasPlayedAudio} suppressed={_prebufferLogSuppressed} waitedMs={PrebufferWaitedMsLocked()}");
         }
 
         System.Threading.Interlocked.Increment(ref _readRequests);
@@ -346,6 +363,7 @@ internal class BufferedSampleProvider : ISampleProvider
                 IncreaseRecoveryPrebufferLocked();
                 _isPrebuffering = true;
                 _prebufferFirstSampleUtc = (_ring?.Count ?? 0) > 0 ? DateTime.UtcNow : DateTime.MinValue;
+                ResetPrebufferLogStateLocked();
             }
             LogBufferEvent("audio.buffer.underrun",
                 $"requested={count} actual={num} bufferedBefore={bufferedBeforeRead} buffered={_ring?.Count ?? 0} prebuffer={_prebufferSamples} recovery={_adaptiveRecoveryPrebufferSamples} jitter={_jitterSetpointSamples} ceiling={ReachableCeilingLocked()} cap={_maxAdaptivePrebufferSamples} cutTo={BufferCutToSize} hasPlayed={_hasPlayedAudio} readEndedSilent={_lastReadEndedSilent}");
@@ -512,15 +530,42 @@ internal class BufferedSampleProvider : ISampleProvider
         return num;
     }
 
-    private void LogBufferEvent(string category, string message)
+    private bool ShouldLogBufferEvent()
     {
+        if (!VoiceChatPlugin.VoiceChat.VoiceDiagnostics.IsEnabled)
+            return false;
+
         var now = DateTime.UtcNow;
         if ((now - _lastBufferEventLogUtc).TotalSeconds < 0.5)
-            return;
+            return false;
 
         _lastBufferEventLogUtc = now;
-        VoiceChatPlugin.VoiceChat.VoiceDiagnostics.Log(category, $"group={DebugGroupId} {message}");
+        return true;
     }
+
+    private void WriteBufferEvent(string category, string message)
+        => VoiceChatPlugin.VoiceChat.VoiceDiagnostics.Log(category, $"group={DebugGroupId} {message}");
+
+    private bool LogBufferEvent(string category, string message)
+    {
+        if (!ShouldLogBufferEvent())
+            return false;
+
+        WriteBufferEvent(category, message);
+        return true;
+    }
+
+    private void ResetPrebufferLogStateLocked()
+    {
+        _prebufferLogEmitted = false;
+        _prebufferLogSuppressed = 0;
+        _prebufferStateEnteredUtc = _isPrebuffering ? DateTime.UtcNow : DateTime.MinValue;
+    }
+
+    private int PrebufferWaitedMsLocked()
+        => _prebufferStateEnteredUtc == DateTime.MinValue
+            ? 0
+            : (int)(DateTime.UtcNow - _prebufferStateEnteredUtc).TotalMilliseconds;
 
     private void LogBufferWrite(int before, int after, int written, int requested)
     {

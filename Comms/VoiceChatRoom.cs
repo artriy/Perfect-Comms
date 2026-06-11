@@ -26,6 +26,8 @@ public class VoiceChatRoom
     private const float MissingPeerRecoveryGraceSeconds = 8f;
     private const float InterstellarSwitchPeerRecoveryGraceSeconds = 2f;
     private const float MissingPeerRecoveryIntervalSeconds = 5f;
+    private const float PeerEscalationDeferralRecheckSeconds = 3f;
+    private const int PeerEscalationDeferralMaxConsecutive = 4;
     private const double RadioStateRpcHeartbeatSeconds = 1.0;
     private const float TransitionTraceSeconds = 45f;
     private const float TransitionTraceStateInterval = 0.25f;
@@ -124,6 +126,7 @@ public class VoiceChatRoom
     private int _lastHealthyMappedPeers;                // best mappedPeers ever seen this session (diagnostics only)
     private int _lastRecoveryRemoteSignature;           // cheap hash of the expected-remote set at the previous attempt
     private bool _missingPeerRecoveryLatched;           // true once capped; cleared when the set/count changes
+    private int _consecutivePeerEscalationDeferrals;
     private const int MissingPeerRecoveryMaxAttempts = 3;        // non-improving attempts before latching
     private const int MissingPeerRecoveryBackoffShiftCap = 4;    // max backoff doublings (5s base -> ~80s cap on the global path)
     private bool _haveTracePhase;
@@ -708,13 +711,14 @@ public class VoiceChatRoom
             // Fully healthy (or no remotes). Reset the grace timer AND the storm guard so the next genuine
             // shortfall starts a fresh capped/back-off cycle.
             _missingPeerRecoveryReadyTime = Time.time + MissingPeerRecoveryGraceSeconds;
-            if (_missingPeerRecoveryAttempts != 0 || _missingPeerRecoveryLatched || _globalRebuildAttempts != 0)
+            if (_missingPeerRecoveryAttempts != 0 || _missingPeerRecoveryLatched || _globalRebuildAttempts != 0 || _consecutivePeerEscalationDeferrals != 0)
             {
                 _missingPeerRecoveryAttempts = 0;
                 _globalRebuildAttempts = 0;
                 _missingPeerRecoveryLatched = false;
                 _lastRecoveryOpenPeers = -1;
                 _lastRecoveryRemoteSignature = 0;
+                _consecutivePeerEscalationDeferrals = 0;
             }
             return;
         }
@@ -741,7 +745,7 @@ public class VoiceChatRoom
         if (_missingPeerRecoveryLatched)
             return;
 
-        // Escalate to a global rebuild ONLY on a real collapse — no peers mapped at all, or mapped count fell
+        // Classify a real collapse — no peers mapped at all, or mapped count fell
         // below half of the CURRENTLY-expected remote count. A small shortfall (most peers mapped) takes the
         // targeted, non-destructive path so already-open peers keep their channels. The threshold is relative
         // to the live roster (NOT a stale healthy peak) so a roster shrink can't be misread as a collapse and
@@ -756,16 +760,36 @@ public class VoiceChatRoom
         if (Time.time - _lastMissingPeerRecoveryTime < backoff)
             return;
 
+        bool deferRequested = _betterCrewLinkVoice?.ShouldDeferPeerEscalation == true;
+        if (deferRequested && _consecutivePeerEscalationDeferrals < PeerEscalationDeferralMaxConsecutive)
+        {
+            _consecutivePeerEscalationDeferrals++;
+            _missingPeerRecoveryReadyTime = Time.time + PeerEscalationDeferralRecheckSeconds;
+            VoiceDiagnostics.Log("transport.peer-recovery.deferred",
+                $"backend={_activeBackend} reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
+                $"collapsed={collapsed} recheckSec={PeerEscalationDeferralRecheckSeconds:0.0} deferrals={_consecutivePeerEscalationDeferrals}/{PeerEscalationDeferralMaxConsecutive}");
+            return;
+        }
+        if (deferRequested)
+        {
+            VoiceDiagnostics.Log("transport.peer-recovery.deferred",
+                $"backend={_activeBackend} reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
+                $"collapsed={collapsed} deferred=overridden deferrals={_consecutivePeerEscalationDeferrals}/{PeerEscalationDeferralMaxConsecutive}");
+        }
+        _consecutivePeerEscalationDeferrals = 0;
+
+        bool finalCollapseAttempt = collapsed && (openChannelsRaw == 0 || backoffAttempts + 1 >= MissingPeerRecoveryMaxAttempts);
+
         _lastMissingPeerRecoveryTime = Time.time;
         string remoteSignatureText = DescribeExpectedRemotePlayers(snapshot);
         VoiceDiagnostics.Log("transport.peer-recovery",
             $"backend={_activeBackend} reason=missing-peer remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} rawPeers={_voiceBackend.PeerCount} " +
-            $"mode={(collapsed ? "global" : "targeted")} attempt={(collapsed ? _globalRebuildAttempts + 1 : _missingPeerRecoveryAttempts + 1)}/{MissingPeerRecoveryMaxAttempts} healthyPeak={_lastHealthyMappedPeers} backoffSec={backoff:0.0} " +
+            $"mode={(finalCollapseAttempt ? "global" : collapsed ? "collapse-targeted" : "targeted")} attempt={(collapsed ? _globalRebuildAttempts + 1 : _missingPeerRecoveryAttempts + 1)}/{MissingPeerRecoveryMaxAttempts} healthyPeak={_lastHealthyMappedPeers} backoffSec={backoff:0.0} " +
             $"room={_activeRoomCode ?? "unknown"} region={_activeRegion ?? "unknown"} " +
             $"liveClients=[{remoteSignatureText}]");
 
         bool didGlobal = false;
-        if (collapsed)
+        if (finalCollapseAttempt)
         {
             ClearVoiceUiForLifecycleReset("missing peer recovery");
             // Force a full backend rebuild (dispose + reconnect => NEW socket id) rather than the backend's
@@ -810,7 +834,7 @@ public class VoiceChatRoom
         // non-improving tries it LATCHES so we stop firing on a permanent shortfall. The global/collapse path
         // does NOT latch (a total collapse must keep retrying), but it grows its OWN backoff counter so it
         // can't re-fire a destructive global Rejoin every interval forever — the interval grows to the cap.
-        if (didGlobal)
+        if (didGlobal || collapsed)
         {
             if (_globalRebuildAttempts < int.MaxValue)
                 _globalRebuildAttempts++;
@@ -1184,6 +1208,7 @@ public class VoiceChatRoom
         _lastHealthyMappedPeers = 0;
         _lastRecoveryRemoteSignature = 0;
         _missingPeerRecoveryLatched = false;
+        _consecutivePeerEscalationDeferrals = 0;
     }
 
     private void ResetSettingsSyncState()
@@ -1475,11 +1500,13 @@ public class VoiceChatRoom
     private static string DescribeGameOptions()
     {
         var o = VoiceChatGameOptions.GetInstance();
+        var roomSettings = VoiceRoomSettingsState.Current;
         return
             $"publicLobby={o.PublicVoiceLobby.Value} maxDistance={o.MaxChatDistance.Value:0.000} falloff={(VoiceFalloffMode)o.FalloffMode.Value} occlusion={(VoiceOcclusionMode)o.OcclusionMode.Value} " +
             $"wallsBlock={o.WallsBlockSound.Value} onlySight={o.OnlyHearInSight.Value} cameraCanHear={o.CameraCanHear.Value} " +
             $"hearInVent={o.HearInVent.Value} ventPrivate={o.VentPrivateChat.Value} commsDisable={o.CommsSabDisables.Value} " +
-            $"impHearGhosts={o.ImpostorHearGhosts.Value} teamRadio={o.TeamRadio.Value} teamRadioImps={o.TeamRadioImpostors.Value} teamRadioVamps={o.TeamRadioVampires.Value} teamRadioLovers={o.TeamRadioLovers.Value} onlyGhosts={o.OnlyGhostsCanTalk.Value} onlyMeetingLobby={o.OnlyMeetingOrLobby.Value}";
+            $"impHearGhosts={o.ImpostorHearGhosts.Value} teamRadio={o.TeamRadio.Value} teamRadioImps={o.TeamRadioImpostors.Value} teamRadioVamps={o.TeamRadioVampires.Value} teamRadioLovers={o.TeamRadioLovers.Value} onlyGhosts={o.OnlyGhostsCanTalk.Value} onlyMeetingLobby={o.OnlyMeetingOrLobby.Value} " +
+            $"muteJailed={roomSettings.MuteJailedInMeetings} jailorCanUnmute={roomSettings.JailorCanUnmuteJailed}";
     }
 
     private static string DescribePlayer(VoicePlayerSnapshot? player)

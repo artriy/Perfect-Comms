@@ -24,6 +24,7 @@ internal static partial class VoiceRoleMuteState
     private const string MediumRoleName = "TownOfUs.Roles.Crewmate.MediumRole";
     private const string MediatedModifierName = "TownOfUs.Modifiers.Crewmate.MediatedModifier";
     private const float RoleStateRefreshInterval = 0.25f;
+    private const float JailVoiceGateLogInterval = 2f;
 
     private static readonly HashSet<byte> JailVoiceAllowed = new();
     private static readonly HashSet<byte> MeetingBlackmailedPlayers = new();
@@ -49,6 +50,8 @@ internal static partial class VoiceRoleMuteState
     private static VoiceGamePhase _resolvedPhase = VoiceGamePhase.Unknown;
     private static float _nextRoleStateRefreshTime;
     private static bool _wasInMeeting;
+    private static DateTime _nextJailVoiceGateLogUtc = DateTime.MinValue;
+    private static bool _lastJailVoiceUnmuteAvailable;
 
     private readonly record struct CachedRoleState(
         bool IsBlackmailed,
@@ -528,6 +531,21 @@ internal static partial class VoiceRoleMuteState
 
     internal static bool CanLocalJailorUnmute(out byte jailedPlayerId)
     {
+        bool available = CanLocalJailorUnmuteCore(out jailedPlayerId);
+        if (available != _lastJailVoiceUnmuteAvailable)
+        {
+            _lastJailVoiceUnmuteAvailable = available;
+            VoiceDiagnostics.Log("jailvoice.available", $"available={available} jailee={jailedPlayerId}");
+        }
+
+        if (!available)
+            LogJailVoiceGateThrottled();
+
+        return available;
+    }
+
+    private static bool CanLocalJailorUnmuteCore(out byte jailedPlayerId)
+    {
         jailedPlayerId = byte.MaxValue;
         Update();
 
@@ -559,10 +577,60 @@ internal static partial class VoiceRoleMuteState
         return false;
     }
 
+    private static void LogJailVoiceGateThrottled()
+    {
+        if (DateTime.UtcNow < _nextJailVoiceGateLogUtc) return;
+        if (!VoiceDiagnostics.IsEnabled) return;
+
+        _nextJailVoiceGateLogUtc = DateTime.UtcNow.AddSeconds(JailVoiceGateLogInterval);
+
+        var phase = VoiceSceneState.ResolvePhase();
+        if (!VoiceSceneState.IsMeetingVoicePhase(phase)) return;
+
+        int jailedCount = 0;
+        byte jaileeId = byte.MaxValue;
+        byte jaileeJailorId = byte.MaxValue;
+        foreach (var pair in RoleStateCache)
+        {
+            if (!pair.Value.IsJailed) continue;
+            jailedCount++;
+            if (jaileeId == byte.MaxValue)
+            {
+                jaileeId = pair.Key;
+                jaileeJailorId = pair.Value.JailorId;
+            }
+        }
+
+        if (jailedCount == 0) return;
+
+        var settings = VoiceRoomSettingsState.Current;
+        if (!settings.MuteJailedInMeetings || !settings.JailorCanUnmuteJailed)
+        {
+            VoiceDiagnostics.Log("jailvoice.gate", $"gate=settings muteJailed={settings.MuteJailedInMeetings} canUnmute={settings.JailorCanUnmuteJailed}");
+            return;
+        }
+
+        var local = PlayerControl.LocalPlayer;
+        if (local == null || local.Data?.IsDead == true || !IsJailor(local))
+        {
+            VoiceDiagnostics.Log("jailvoice.gate", $"gate=localRole jailor={IsJailor(local)} dead={local?.Data?.IsDead == true} phase={phase}");
+            return;
+        }
+
+        var jailee = FindPlayer(jaileeId);
+        VoiceDiagnostics.Log("jailvoice.gate", $"gate=candidate jailedCount={jailedCount} jailorIdMismatch={jaileeJailorId}vs{local.PlayerId} alreadyAllowed={JailVoiceAllowed.Contains(jaileeId)} jaileeDead={jailee == null || jailee.Data?.IsDead == true}");
+    }
+
     internal static void LocalJailorAllowVoice()
     {
         RefreshRoleStateCacheIfNeeded(force: true);
-        if (!CanLocalJailorUnmute(out byte jailedPlayerId)) return;
+        if (!CanLocalJailorUnmute(out byte jailedPlayerId))
+        {
+            VoiceDiagnostics.Log("jailvoice.local", "rejected=true");
+            return;
+        }
+
+        VoiceDiagnostics.Log("jailvoice.local", $"allowed=true jailee={jailedPlayerId}");
         SetJailVoiceAllowed(jailedPlayerId, true);
         SendJailVoiceAllowed(jailedPlayerId, true);
         VoiceChatHudState.ApplyMicState();
@@ -582,15 +650,32 @@ internal static partial class VoiceRoleMuteState
         RefreshRoleStateCacheIfNeeded(force: true);
         var settings = VoiceRoomSettingsState.Current;
         if (!settings.MuteJailedInMeetings || !settings.JailorCanUnmuteJailed)
+        {
+            VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=false reason=settings-off jailor={jailorId} jailee={jailedPlayerId}");
             return;
+        }
 
         var jailed = FindPlayer(jailedPlayerId);
-        if (jailed == null || !TryGetJailorId(jailed, out byte actualJailorId) || actualJailorId != jailorId)
+        if (jailed == null || !TryGetJailorId(jailed, out byte actualJailorId))
+        {
+            VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=false reason=no-jailed-player jailor={jailorId} jailee={jailedPlayerId}");
             return;
+        }
+
+        if (actualJailorId != jailorId)
+        {
+            VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=false reason=jailor-mismatch jailor={jailorId} actualJailor={actualJailorId} jailee={jailedPlayerId}");
+            return;
+        }
+
         if (!IsJailorValid(jailorId))
+        {
+            VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=false reason=jailor-invalid jailor={jailorId} jailee={jailedPlayerId}");
             return;
+        }
 
         SetJailVoiceAllowed(jailedPlayerId, allowed);
+        VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=true jailor={jailorId} jailee={jailedPlayerId}");
         VoiceChatHudState.ApplyMicState();
     }
 
@@ -698,6 +783,7 @@ internal static partial class VoiceRoleMuteState
         try
         {
             VoiceChatRoom.SendJailVoicePacket(jailedPlayerId, allowed);
+            VoiceDiagnostics.Log("jailvoice.rpc.sent", $"jailee={jailedPlayerId} allowed={allowed}");
         }
         catch (Exception ex)
         {

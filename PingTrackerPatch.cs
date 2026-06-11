@@ -12,7 +12,7 @@ namespace VoiceChatPlugin;
 internal static class VCSorting
 {
     public const string Layer = "UI";
-    public const int    Backdrop = 32764;
+    public const int    Backdrop = -32768;
     public const int    Glow  = 32765;
     public const int    Base  = 32766;
     public const int    Ring  = 32767;

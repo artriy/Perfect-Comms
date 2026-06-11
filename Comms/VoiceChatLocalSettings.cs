@@ -127,6 +127,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
     [LocalToggleSetting("Noise Suppression")]
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
 
+    [LocalToggleSetting("Auto Mic Gain")]
+    public ConfigEntry<bool> AutoMicGain { get; }
+
     [LocalToggleSetting("Start Muted")]
     public ConfigEntry<bool> StartMuted { get; }
 
@@ -424,6 +427,9 @@ public class VoiceChatLocalSettings : LocalSettingsTab
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
             new ConfigDescription("Use RNNoise to suppress outgoing microphone background noise."));
 
+        AutoMicGain = config.Bind("Audio", "AutoMicGain", true,
+            new ConfigDescription("Automatically boost quiet microphones toward a consistent speech level before noise suppression and the noise gate."));
+
         DebugVoiceStats = config.Bind("Debug", "DebugVoiceStats", false,
             new ConfigDescription("Enable Perfect Comms diagnostic files and debug log output."));
 
@@ -583,7 +589,7 @@ public class VoiceChatLocalSettings : LocalSettingsTab
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
-                 configEntry == NoiseSuppressionEnabled ||
+                 configEntry == NoiseSuppressionEnabled || configEntry == AutoMicGain ||
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {

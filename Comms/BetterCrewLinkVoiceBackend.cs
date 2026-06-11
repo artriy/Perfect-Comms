@@ -31,6 +31,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private const float SyntheticToneAmplitude = 0.012f;
     private static readonly TimeSpan RemoteActivityHold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MicCalibrationLogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RnNoiseStatsLogInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan BclQuietTailFlushDelay = TimeSpan.FromMilliseconds(30);
     private static readonly TimeSpan BclQuietTailFlushTimerDelay = BclQuietTailFlushDelay + TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan SignalRejectLogInterval = TimeSpan.FromSeconds(5);
@@ -50,9 +51,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private readonly Dictionary<string, int> _socketToClient = new();
     private readonly Dictionary<string, Queue<string>> _pendingSignalsBySocket = new();
     private readonly Dictionary<string, DateTime> _lastSignalRejectLogUtc = new();
+    private readonly Dictionary<string, DateTime> _recentConnectionFailureUtcBySocket = new();
+    private DateTime _lastMassConnectionFailureUtc = DateTime.MinValue;
+    private DateTime _deferralEpisodeStartUtc = DateTime.MinValue;
     // Reused by the per-frame Update loop so it doesn't allocate a PeerConnection[] every frame. Only
     // touched on the Unity main thread (Update), so no extra synchronization beyond the _peerSync snapshot.
     private readonly List<PeerConnection> _updatePeerScratch = new();
+    private readonly Dictionary<int, PeerConnection> _routeClientScratch = new();
+    private readonly Dictionary<int, DateTime> _duplicateRouteLogUtcByClient = new();
+    private static readonly TimeSpan DuplicateRouteLogInterval = TimeSpan.FromSeconds(2);
     // volatile: reassigned on a background socket callback, read on the main thread.
     private volatile List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
     // Pre-built RTCPeerConnections. `new RTCPeerConnection` generates a self-signed DTLS certificate, which
@@ -76,6 +83,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly TimeSpan StuckConnectingTimeout = TimeSpan.FromSeconds(8);
     // Min spacing between per-peer recovery attempts so a failing peer can't storm re-offers.
     private static readonly TimeSpan PeerRecoveryDebounce = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan MassConnectionFailureWindow = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MassConnectionFailureRearmInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PeerEscalationDeferralWindow = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PeerEscalationDeferralEpisodeMax = TimeSpan.FromSeconds(15);
+    private const int PeerRecoveryInFlightMaxAttempts = 2;
     // Receive-side watchdog: how long a peer's data channel may stay non-open while its connection is alive
     // (it contributes to openChannels < peers) before we proactively re-request/re-offer for THAT peer
     // regardless of role. Targets the one-directional "hears nobody / hears most" signature directly and
@@ -155,6 +167,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private float _micVolume = 1f;
     private float _noiseGateThreshold;
     private float _vadThreshold = 0.004f;
+    private bool _autoMicGain = true;
     private float _localLevel;
     private bool _localSpeaking;
     private bool _microphoneReady;
@@ -163,6 +176,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private double _syntheticTonePhase;
     private int _syntheticFrames;
     private DateTime _lastMicCalibrationLogUtc = DateTime.MinValue;
+    private DateTime _lastRnNoiseStatsLogUtc = DateTime.MinValue;
     private string _lastGateReason = "none";
     private float _lastGatePeak;
     private float _lastGateRms;
@@ -422,6 +436,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         var restartCapture = _captureOptions.SyntheticMicToneEnabled != options.SyntheticMicToneEnabled;
         _captureOptions = options;
+        _autoMicGain = ReadAutoMicGainSetting();
         lock (_captureFrameSync)
             _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
 
@@ -433,7 +448,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             StartAndroidMicrophone("capture-options");
 #endif
         VoiceDiagnostics.Log("bcl.capture-options",
-            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
+            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} autoMicGain={_autoMicGain} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
+    }
+
+    private static bool ReadAutoMicGainSetting()
+    {
+        try
+        {
+            return LocalSettingsTabSingleton<VoiceChatLocalSettings>.Instance?.AutoMicGain.Value ?? true;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     public void SetMicrophone(string deviceName, float volume)
@@ -1049,8 +1076,22 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         long proxTicks = VoiceFrameProfiler.Begin();
         SnapshotPeersInto(_updatePeerScratch);
+        _routeClientScratch.Clear();
         foreach (var peer in _updatePeerScratch)
         {
+            if (peer.ClientId >= 0)
+            {
+                if (_routeClientScratch.TryGetValue(peer.ClientId, out var rival))
+                {
+                    var kept = ChooseDuplicateRouteWinner(rival, peer);
+                    var muted = ReferenceEquals(kept, peer) ? rival : peer;
+                    _routeClientScratch[peer.ClientId] = kept;
+                    SuppressDuplicateRoutePeer(kept, muted);
+                    if (ReferenceEquals(muted, peer)) continue;
+                }
+                else
+                    _routeClientScratch[peer.ClientId] = peer;
+            }
             var target = FindTarget(snapshot, peer);
             if (target.HasValue && VoiceProximityCalculator.IsUnavailableTarget(target.Value))
                 peer.ResetMappingNoMute();
@@ -1085,6 +1126,62 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         MaybeFollowDefaultSpeaker();
 #endif
         MaybeLogStats(snapshot, "ok");
+    }
+
+    private PeerConnection ChooseDuplicateRouteWinner(PeerConnection first, PeerConnection second)
+    {
+        string? mappedSocket;
+        lock (_peerSync)
+            _clientToSocket.TryGetValue(second.ClientId, out mappedSocket);
+        if (mappedSocket != null)
+        {
+            var firstMapped = string.Equals(mappedSocket, first.SocketId, StringComparison.Ordinal);
+            var secondMapped = string.Equals(mappedSocket, second.SocketId, StringComparison.Ordinal);
+            if (firstMapped != secondMapped) return firstMapped ? first : second;
+        }
+        var firstOpen = first.DataChannel?.readyState == RTCDataChannelState.open;
+        var secondOpen = second.DataChannel?.readyState == RTCDataChannelState.open;
+        if (firstOpen != secondOpen) return firstOpen ? first : second;
+        return ConnectionRecencyUtc(second) >= ConnectionRecencyUtc(first) ? second : first;
+    }
+
+    private static DateTime ConnectionRecencyUtc(PeerConnection peer)
+    {
+        var recency = peer.LastConnectionRebuildUtc > peer.LastRecoveryUtc ? peer.LastConnectionRebuildUtc : peer.LastRecoveryUtc;
+        return peer.OfferStartedUtc > recency ? peer.OfferStartedUtc : recency;
+    }
+
+    private void SuppressDuplicateRoutePeer(PeerConnection kept, PeerConnection muted)
+    {
+        muted.Apply(VoiceProximityResult.Muted(VoiceProximityReason.Unmapped));
+        var now = DateTime.UtcNow;
+        if (_duplicateRouteLogUtcByClient.TryGetValue(muted.ClientId, out var lastLog) && now - lastLog < DuplicateRouteLogInterval) return;
+        _duplicateRouteLogUtcByClient[muted.ClientId] = now;
+        var keptOpen = kept.DataChannel?.readyState == RTCDataChannelState.open;
+        var mutedOpen = muted.DataChannel?.readyState == RTCDataChannelState.open;
+        VoiceDiagnostics.Log("bcl.peer.duplicate", $"client={muted.ClientId} keptSocket={kept.SocketId} mutedSocket={muted.SocketId} keptOpen={keptOpen} mutedOpen={mutedOpen}");
+        if (keptOpen && !mutedOpen)
+        {
+            var mutedSocket = muted.SocketId;
+            var keptSocket = kept.SocketId;
+            _mainThreadActions.Enqueue(() => RemoveDuplicateRoutePeer(mutedSocket, keptSocket));
+        }
+    }
+
+    private void RemoveDuplicateRoutePeer(string mutedSocketId, string keptSocketId)
+    {
+        lock (_peerSync)
+        {
+            if (!_peersBySocket.TryGetValue(mutedSocketId, out var muted)) return;
+            if (!_peersBySocket.TryGetValue(keptSocketId, out var kept)) return;
+            if (muted.ClientId < 0 || muted.ClientId != kept.ClientId) return;
+            if (_clientToSocket.TryGetValue(muted.ClientId, out var mappedSocket)
+                && string.Equals(mappedSocket, mutedSocketId, StringComparison.Ordinal)) return;
+            if (muted.DataChannel?.readyState == RTCDataChannelState.open) return;
+            if (kept.DataChannel?.readyState != RTCDataChannelState.open) return;
+            VoiceDiagnostics.Log("bcl.peer.superseded", $"oldSocket={mutedSocketId} newSocket={keptSocketId} client={muted.ClientId} reason=route-duplicate");
+            RemovePeer(mutedSocketId);
+        }
     }
 
     public void Dispose()
@@ -1497,6 +1594,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         // that is exactly the TOC for either of these is structurally impossible.
         return data.Length < 2;
     }
+
+    internal static bool IsOpusDtxSilencePacket(byte[] data)
+        => data != null && data.Length == 1 && (data[0] & 0x3) <= 1 && ((data[0] >> 3) & 0x1F) >= 12;
 
     private void RetryClosedDataChannels()
     {
@@ -1953,6 +2053,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             try { peer.Connection?.close(); } catch { }
             peer.DataChannel = null;
             peer.OfferStartedUtc = DateTime.MinValue;
+            peer.LastConnectionRebuildUtc = DateTime.UtcNow;
             WireNewPeerConnection(peer, socketId);
         }
         VoiceDiagnostics.Log("bcl.peer.recreated", $"socket={socketId}");
@@ -1966,6 +2067,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             if (!_peersBySocket.TryGetValue(socketId, out var peer)) return;
             if (!ReferenceEquals(peer.Connection, pc)) return; // event from a connection we already replaced
+            NoteConnectionFailureLocked(socketId);
         }
         if (!TryBeginRecovery(socketId)) return;
 
@@ -2017,6 +2119,66 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
             return true;
         }
+    }
+
+    private void NoteConnectionFailureLocked(string socketId)
+    {
+        var now = DateTime.UtcNow;
+        List<string>? stale = null;
+        foreach (var pair in _recentConnectionFailureUtcBySocket)
+        {
+            if (now - pair.Value >= MassConnectionFailureWindow)
+                (stale ??= new List<string>()).Add(pair.Key);
+        }
+        if (stale != null)
+            foreach (var key in stale)
+                _recentConnectionFailureUtcBySocket.Remove(key);
+        _recentConnectionFailureUtcBySocket[socketId] = now;
+
+        int remotePeers = 0;
+        foreach (var peer in _peersBySocket.Values)
+        {
+            if (!IsLocalSocket(peer.SocketId)) remotePeers++;
+        }
+        if (remotePeers == 0 || _recentConnectionFailureUtcBySocket.Count < 2 || _recentConnectionFailureUtcBySocket.Count * 2 < remotePeers) return;
+        if (now - _lastMassConnectionFailureUtc < MassConnectionFailureRearmInterval) return;
+        _lastMassConnectionFailureUtc = now;
+        VoiceDiagnostics.Log("bcl.peer.massfailure", $"failed={_recentConnectionFailureUtcBySocket.Count} remotePeers={remotePeers}");
+    }
+
+    public bool ShouldDeferPeerEscalation
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            lock (_peerSync)
+            {
+                if (!HasPeerEscalationDeferralLocked(now))
+                {
+                    _deferralEpisodeStartUtc = DateTime.MinValue;
+                    return false;
+                }
+                if (_deferralEpisodeStartUtc == DateTime.MinValue)
+                    _deferralEpisodeStartUtc = now;
+                return now - _deferralEpisodeStartUtc <= PeerEscalationDeferralEpisodeMax;
+            }
+        }
+    }
+
+    private bool HasPeerEscalationDeferralLocked(DateTime now)
+    {
+        if (_lastMassConnectionFailureUtc != DateTime.MinValue && now - _lastMassConnectionFailureUtc < PeerEscalationDeferralWindow)
+            return true;
+        foreach (var peer in _peersBySocket.Values)
+        {
+            if (IsLocalSocket(peer.SocketId)) continue;
+            if (peer.DataChannel?.readyState == RTCDataChannelState.open) continue;
+            if (peer.RecoveryAttempts > PeerRecoveryInFlightMaxAttempts) continue;
+            var anchor = peer.LastConnectionRebuildUtc > peer.LastRecoveryUtc ? peer.LastConnectionRebuildUtc : peer.LastRecoveryUtc;
+            if (anchor != DateTime.MinValue && now - anchor < PeerEscalationDeferralWindow)
+                return true;
+        }
+        return false;
     }
 
     private async Task StartOfferAsync(string socketId)
@@ -2324,7 +2486,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (!string.IsNullOrEmpty(error))
         {
             Interlocked.Increment(ref _audioDecodeFailures);
-            VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={data.Length} error=\"{error}\"");
+            if (peer.ShouldLogAudioDrop(out var suppressed))
+                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={data.Length} error=\"{error}\" suppressed={suppressed}");
         }
         if (decodedFrames > 0)
             Interlocked.Add(ref _encodedRx, decodedFrames);
@@ -2653,6 +2816,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             return;
         }
 
+        var agcGain = _micPreprocessor.ApplyAutoGain(floatPcm, samples, _autoMicGain && !IsSyntheticSource(source), out var preSuppressionPeak);
+
         if (_captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
@@ -2694,14 +2859,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _micZeroCrossingsSinceStats += zeroCrossings;
         }
 
-        var decision = _micPreprocessor.PrepareFrameForEncode(floatPcm, samples, _noiseGateThreshold, _vadThreshold);
+        var decision = _micPreprocessor.PrepareFrameForEncode(floatPcm, samples, _noiseGateThreshold, _vadThreshold, preSuppressionPeak);
         _lastGateReason = decision.Reason;
         _lastGatePeak = decision.Peak;
         _lastGateRms = decision.Rms;
         _lastGateThreshold = decision.Threshold;
 
         if (_captureOptions.MicCalibrationDiagnostics)
-            MaybeLogMicCalibration(source, decision, false, speakingThreshold, nearClipSamples, zeroCrossings, samples);
+            MaybeLogMicCalibration(source, decision, false, speakingThreshold, nearClipSamples, zeroCrossings, samples, agcGain);
 
         var frameTimestamp = _sendTimestamp;
         unchecked { _sendTimestamp += (uint)samples; }
@@ -2787,7 +2952,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static bool IsSyntheticSource(string source)
         => string.Equals(source, "synthetic", StringComparison.OrdinalIgnoreCase);
 
-    private void MaybeLogMicCalibration(string source, MicFrameDecision decision, bool bypassGate, float speakingThreshold, int nearClipSamples, int zeroCrossings, int samples)
+    private void MaybeLogMicCalibration(string source, MicFrameDecision decision, bool bypassGate, float speakingThreshold, int nearClipSamples, int zeroCrossings, int samples, float agcGain)
     {
         var now = DateTime.UtcNow;
         if (now - _lastMicCalibrationLogUtc < MicCalibrationLogInterval) return;
@@ -2795,7 +2960,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var zeroCrossRate = samples <= 1 ? 0f : zeroCrossings / (float)(samples - 1);
         var crest = decision.Rms <= 0f ? 0f : decision.Peak / decision.Rms;
         VoiceDiagnostics.Log("bcl.mic.calibration",
-            $"source={source} peak={decision.Peak:0.000000} rms={decision.Rms:0.000000} crest={crest:0.00} nearClipSamples={nearClipSamples} zeroCrossRate={zeroCrossRate:0.0000} gateThreshold={decision.Threshold:0.000000} vadThreshold={_vadThreshold:0.000000} effectiveSpeakingThreshold={speakingThreshold:0.000000} reason={decision.Reason} bypass={bypassGate} syntheticFrames={Volatile.Read(ref _syntheticFrames)}");
+            $"source={source} peak={decision.Peak:0.000000} rms={decision.Rms:0.000000} crest={crest:0.00} nearClipSamples={nearClipSamples} zeroCrossRate={zeroCrossRate:0.0000} gateThreshold={decision.Threshold:0.000000} vadThreshold={_vadThreshold:0.000000} effectiveSpeakingThreshold={speakingThreshold:0.000000} agcGain={agcGain:0.00} reason={decision.Reason} bypass={bypassGate} syntheticFrames={Volatile.Read(ref _syntheticFrames)}");
     }
 
     private PeerConnection[] SnapshotPeers()
@@ -2978,21 +3143,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             $"micMutedDrops={Volatile.Read(ref _micMutedDrops)} micEncodeFailures={Volatile.Read(ref _micEncodeFailures)} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} micNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} audioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} txPeak={_lastTransmitPeak:0.000000} txPeakMax={txPeakMax:0.000000} txRms={txRms:0.000000} txSamples={txSamples} opusBytesAvg={opusAvgBytes:0.0} opusBytesMin={opusMinBytes} opusBytesMax={opusMaxBytes} " +
             $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} {rnnoiseSummary} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady}");
-        if (_captureOptions.NoiseSuppressionEnabled || rnnoise.Attempts > 0 || rnnoise.UnavailableFrames > 0)
+        if ((_captureOptions.NoiseSuppressionEnabled || rnnoise.Attempts > 0 || rnnoise.UnavailableFrames > 0)
+            && now - _lastRnNoiseStatsLogUtc >= RnNoiseStatsLogInterval)
+        {
+            _lastRnNoiseStatsLogUtc = now;
             LogNoiseSuppressionStats(rnnoiseSummary);
+        }
     }
 
     private static void LogNoiseSuppressionStats(string message)
-    {
-        VoiceDiagnostics.Log("bcl.rnnoise.stats", message);
-        try
-        {
-            global::VoiceChatPlugin.VoiceChatPluginMain.Logger.LogInfo("[VC] bcl.rnnoise.stats " + message);
-        }
-        catch
-        {
-        }
-    }
+        => VoiceDiagnostics.Log("bcl.rnnoise.stats", message);
 
     private string DescribeCaptureMode()
     {
@@ -3038,23 +3198,25 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private static readonly Dictionary<int, DateTime> _lastCenteredLoudLogUtc = new();
 
-    // Diagnostic for the "loud + both-sides-centered" report: logs resolved positions when an AUDIBLE peer lands at
-    // ~zero pan AND high volume, so a capture distinguishes genuine same-X co-location from a degenerate/stale target.
+    // Diagnostic for the "loud + both-sides-centered" report: a proximity- or lobby-routed peer that is loud and centered while far away or positionless.
     private static void LogCenteredLoudRoute(PeerConnection peer, VoicePlayerSnapshot? target, UnityEngine.Vector2? listenerPos, VoiceProximityResult result, VoiceGamePhase phase)
     {
         if (!VoiceDiagnostics.IsEnabled || !result.Audible) return;
-        if (Math.Abs(result.Pan) >= 0.06f) return;
-        if (result.NormalVolume + result.GhostVolume + result.RadioVolume < 0.5f) return;
-
-        var now = DateTime.UtcNow;
-        if (_lastCenteredLoudLogUtc.TryGetValue(peer.ClientId, out var last) && (now - last).TotalSeconds < 1.0) return;
-        _lastCenteredLoudLogUtc[peer.ClientId] = now;
+        if (result.Reason != VoiceProximityReason.Proximity && result.Reason != VoiceProximityReason.Lobby) return;
+        if (Math.Abs(result.Pan) > 0.10f) return;
+        if (result.NormalVolume < 0.7f) return;
 
         var tpos = target?.Position ?? new UnityEngine.Vector2(float.NaN, float.NaN);
         var lpos = listenerPos ?? new UnityEngine.Vector2(float.NaN, float.NaN);
         float dx = tpos.x - lpos.x;
         float dy = tpos.y - lpos.y;
         float dist = (float)Math.Sqrt((double)dx * dx + (double)dy * dy);
+        if (!float.IsNaN(dist) && dist < 3.0f) return;
+
+        var now = DateTime.UtcNow;
+        if (_lastCenteredLoudLogUtc.TryGetValue(peer.ClientId, out var last) && (now - last).TotalSeconds < 1.0) return;
+        _lastCenteredLoudLogUtc[peer.ClientId] = now;
+
         VoiceDiagnostics.Log("bcl.route.centeredloud",
             $"client={peer.ClientId} player={peer.PlayerId} name=\"{peer.PlayerName}\" phase={phase} reason={result.Reason} " +
             $"pan={result.Pan:0.000} normal={result.NormalVolume:0.000} ghost={result.GhostVolume:0.000} radio={result.RadioVolume:0.000} " +
@@ -3095,6 +3257,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         private DateTime _firstThrowUtc;
         private const int ConsecutiveThrowSuppressRun = 8;
         private static readonly TimeSpan ThrowSuppressWindow = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan AudioDropLogInterval = TimeSpan.FromSeconds(5);
+        private DateTime _lastAudioDropLogUtc = DateTime.MinValue;
+        private int _suppressedAudioDropLogs;
+        private static readonly TimeSpan RouteDivergenceLogInterval = TimeSpan.FromSeconds(2);
+        private DateTime _lastRouteDivergenceLogUtc = DateTime.MinValue;
         private float[] _decodeFloat = System.Array.Empty<float>();
         // Latest Opus-PLC concealment frame, synthesized on the DECODE thread (under _sync) after each real
         // decode and published atomically. The ring's trailing-stall bridge (Fix 2b-3) reads it on the NAudio
@@ -3163,6 +3330,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         public DateTime OfferStartedUtc { get; set; } = DateTime.MinValue;
         // Last recovery rebuild time; debounces re-offer storms.
         public DateTime LastRecoveryUtc { get; set; } = DateTime.MinValue;
+        public DateTime LastConnectionRebuildUtc { get; set; } = DateTime.MinValue;
         // Exponential reconnect backoff. A peer that keeps failing to connect (e.g. genuinely unreachable even
         // via relay) backs off its offer/recovery cadence instead of retrying every 3s for the whole session.
         // Reset to zero the instant its data channel opens, so a recovered peer that later glitches retries fast.
@@ -3182,6 +3350,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         // PlayerId the cached _radioChannel was applied for; a transient unmap+remap to the same
         // player keeps the channel, a genuine remap to another player drops it (see UpdateProfile).
         private byte _radioChannelOwner = byte.MaxValue;
+        private int _consecutiveNonRadioVoicePackets;
+        private DateTime _radioChannelAppliedUtc = DateTime.MinValue;
+        private const int RadioStaleClearPacketThreshold = 5;
+        private static readonly TimeSpan RadioStaleClearActivationGrace = TimeSpan.FromMilliseconds(500);
         public bool RadioActive
         {
             get => VoiceTeamRadioChannels.IsActive(_radioChannel);
@@ -3201,6 +3373,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             _radioChannel = VoiceTeamRadioChannels.Normalize(channel);
             _radioChannelOwner = PlayerId;
+            _consecutiveNonRadioVoicePackets = 0;
+            if (VoiceTeamRadioChannels.IsActive(_radioChannel))
+                _radioChannelAppliedUtc = DateTime.UtcNow;
         }
         public float WallCoefficient { get; private set; } = 1f;
         public VoiceProximityResult CurrentRoute => _currentRoute;
@@ -3269,6 +3444,18 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
         public void Apply(VoiceProximityResult result)
         {
+            if (VoiceDiagnostics.IsEnabled && IsSpeaking
+                && Math.Abs(_appliedPan) <= 0.1f && _currentRoute.NormalVolume >= 0.7f
+                && ((result.Reason == VoiceProximityReason.Proximity && Math.Abs(result.Pan) > 0.25f) || result.NormalVolume <= 0.3f))
+            {
+                var now = DateTime.UtcNow;
+                if (now - _lastRouteDivergenceLogUtc >= RouteDivergenceLogInterval)
+                {
+                    _lastRouteDivergenceLogUtc = now;
+                    VoiceDiagnostics.Log("bcl.route.applied-divergence",
+                        $"client={ClientId} player={PlayerId} reason={result.Reason} pan={result.Pan:0.000} normal={result.NormalVolume:0.000} appliedReason={_currentRoute.Reason} appliedPan={_appliedPan:0.000} appliedNormal={_currentRoute.NormalVolume:0.000}");
+                }
+            }
             var wasAudible = _currentRoute.Audible;
             _currentRoute = result;
             WallCoefficient = result.WallCoefficient;
@@ -3346,6 +3533,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 // per-packet audio Radio flag: the true case is a no-op while the false case cleared
                 // _radioChannel, so a reordered pre-radio audio frame arriving after a PCRD would wipe
                 // the freshly validated channel and briefly drop the speaker off team radio.
+                if ((packet.Flags & BclVoicePacketFlags.Radio) != 0)
+                    _consecutiveNonRadioVoicePackets = 0;
+                else if (RadioActive
+                         && DateTime.UtcNow - _radioChannelAppliedUtc > RadioStaleClearActivationGrace
+                         && ++_consecutiveNonRadioVoicePackets >= RadioStaleClearPacketThreshold)
+                {
+                    var staleChannel = _radioChannel;
+                    ApplyRadioChannel(VoiceTeamRadioChannel.None);
+                    VoiceDiagnostics.Log("bcl.radio.stale-cleared", $"client={ClientId} player={PlayerId} channel={staleChannel} packets={RadioStaleClearPacketThreshold}");
+                }
                 var packetLevel = packet.Level / (float)byte.MaxValue;
                 _packetLevelPeakSinceStats = Math.Max(_packetLevelPeakSinceStats, packetLevel);
                 ObserveVoiceLevel(packetLevel);
@@ -3387,6 +3584,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 var frames = _jitterBuffer.DrainDue(DateTime.UtcNow, BclQuietTailFlushDelay);
                 foreach (var frame in frames)
                 {
+                    if (frame.Kind == BclVoicePlayoutKind.Plc)
+                    {
+                        RouteSilence(NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration)));
+                        continue;
+                    }
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
                     // FEC-reconstructed frame: decode at standard size; frame.Duration here is the
@@ -3432,8 +3634,26 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         private void FlushBufferedVoiceFromTimer()
         {
             TryFlushBufferedVoice(out var error, out _);
-            if (!string.IsNullOrEmpty(error))
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={ClientId} bytes=0 error=\"{error}\" source=tail-timer");
+            if (!string.IsNullOrEmpty(error) && ShouldLogAudioDrop(out var suppressed))
+                VoiceDiagnostics.Log("bcl.audio.drop", $"client={ClientId} error=\"{error}\" source=tail-timer suppressed={suppressed}");
+        }
+
+        public bool ShouldLogAudioDrop(out int suppressed)
+        {
+            lock (_sync)
+            {
+                var now = DateTime.UtcNow;
+                if (_lastAudioDropLogUtc != DateTime.MinValue && now - _lastAudioDropLogUtc < AudioDropLogInterval)
+                {
+                    _suppressedAudioDropLogs++;
+                    suppressed = 0;
+                    return false;
+                }
+                suppressed = _suppressedAudioDropLogs;
+                _suppressedAudioDropLogs = 0;
+                _lastAudioDropLogUtc = now;
+                return true;
+            }
         }
 
         // < this many bytes cannot be a useful legacy Opus frame. Empty / sub-minimal datagrams (foreign,
@@ -3521,6 +3741,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // Suppressed stream: skip the decode entirely (no throw, no drop log), just keep the timeline aligned.
             if (TryHandleSuppressedDecode(frameSize))
                 return false;
+
+            if (IsOpusDtxSilencePacket(data))
+            {
+                RouteSilence(frameSize);
+                NoteDecodeSuccess();
+                return true;
+            }
 
             // PLC (empty payload) and FEC require frame_size to equal the EXACT missing duration; a real
             // packet is decoded at full capacity so its true (possibly larger) frame size always fits.
