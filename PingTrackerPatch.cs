@@ -761,8 +761,56 @@ public static class PingTrackerPatch
     private static void UpdateSlotLabel(SpeakerSlot slot, PlayerControl? player)
     {
         if (slot.LabelTMP == null) return;
+        if (!slot.VanillaStyleApplied)
+            slot.VanillaStyleApplied = ApplyVanillaNameStyle(slot.LabelTMP, player);
         slot.LabelTMP.text = GetDisplayName(player);
         slot.LabelMeasurePending = true;
+    }
+
+    private static TMPro.TMP_FontAsset? _vanillaNameFont;
+    private static Material? _vanillaNameMaterial;
+    private static TMPro.FontStyles _vanillaFontStyle;
+    private static float _vanillaOutlineWidth;
+    private static Color32 _vanillaOutlineColor;
+    private static bool _vanillaStyleBroken;
+
+    // set_font is only safe once the label is active in hierarchy; earlier it NREs inside LoadFontAsset under IL2CPP.
+    private static bool ApplyVanillaNameStyle(TextMeshPro tmp, PlayerControl? player)
+    {
+        if (_vanillaStyleBroken) return true;
+        try
+        {
+            if (!tmp.gameObject.activeInHierarchy) return false;
+            if (_vanillaNameFont == null || _vanillaNameMaterial == null)
+            {
+                var source = player != null ? player.cosmetics?.nameText : null;
+                if (source == null || source.font == null || source.fontSharedMaterial == null)
+                    source = HudManager.Instance?.TaskPanel?.taskText;
+                if (source == null || source.font == null || source.fontSharedMaterial == null) return false;
+                _vanillaNameFont = source.font;
+                _vanillaNameMaterial = source.fontSharedMaterial;
+                _vanillaFontStyle = source.fontStyle;
+                _vanillaOutlineWidth = source.outlineWidth;
+                _vanillaOutlineColor = source.outlineColor;
+                VoiceDiagnostics.Log("overlay.namestyle",
+                    $"srcFont=\"{_vanillaNameFont.name}\" srcMat=\"{_vanillaNameMaterial.name}\" srcSize={source.fontSize:0.00} srcStyle={_vanillaFontStyle} srcOutlineW={_vanillaOutlineWidth:0.000} srcOutlineC={_vanillaOutlineColor} labelSize={LabelSize:0.00}");
+            }
+            tmp.font = _vanillaNameFont;
+            tmp.fontSharedMaterial = _vanillaNameMaterial;
+            tmp.fontStyle = _vanillaFontStyle;
+            if (Mathf.Abs(tmp.outlineWidth - _vanillaOutlineWidth) > 0.001f)
+            {
+                tmp.outlineWidth = _vanillaOutlineWidth;
+                tmp.outlineColor = _vanillaOutlineColor;
+            }
+            return true;
+        }
+        catch (System.Exception ex)
+        {
+            _vanillaStyleBroken = true;
+            VoiceDiagnostics.DebugWarning($"[VC] Vanilla name style unavailable, keeping default label style: {ex.Message}");
+            return true;
+        }
     }
 
     private static void RemoveSlot(byte id)
@@ -819,6 +867,8 @@ public static class PingTrackerPatch
             var slot = kv.Value;
             if (slot.LabelMeasurePending && slot.LabelTMP != null && slot.LabelTMP.gameObject.activeInHierarchy)
             {
+                if (!slot.VanillaStyleApplied)
+                    slot.VanillaStyleApplied = ApplyVanillaNameStyle(slot.LabelTMP, FindPlayer(kv.Key));
                 float w = slot.LabelTMP.preferredWidth;
                 float h = slot.LabelTMP.preferredHeight;
                 if (!float.IsNaN(w) && !float.IsInfinity(w) && w >= 0f &&
@@ -1315,5 +1365,6 @@ public static class PingTrackerPatch
         public float             LabelWidth;
         public float             LabelHeight;
         public bool              LabelMeasurePending;
+        public bool              VanillaStyleApplied;
     }
 }
