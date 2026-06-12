@@ -67,6 +67,9 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private int _speakerReopenRequestedFlag;
     private DateTime _lastFlagReopenUtc = DateTime.MinValue;
     private readonly Audio.MicPreprocessor _micPreprocessor = new();
+    private readonly object _micProcessSync = new();
+    private int _openedSpeakerDeviceNumber = int.MinValue;
+    private string _openedSpeakerProductName = string.Empty;
     private bool _autoMicGain = true;
     private float _transmitLimiterGain = 1f;
     private int _latchedMicChannel;
@@ -326,7 +329,8 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         _autoMicGain = ReadAutoMicGainSetting();
         try
         {
-            _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
+            lock (_micProcessSync)
+                _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
         }
         catch (Exception ex)
         {
@@ -443,14 +447,17 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private void MaybeFollowSpeakerTopology()
     {
         if (!_speakerRequested) return;
-        if (Interlocked.Exchange(ref _speakerReopenRequestedFlag, 0) == 1)
+        if (Volatile.Read(ref _speakerReopenRequestedFlag) == 1)
         {
             var reopenNow = DateTime.UtcNow;
-            if (reopenNow - _lastFlagReopenUtc < TimeSpan.FromSeconds(1)) return;
-            _lastFlagReopenUtc = reopenNow;
-            VoiceDiagnostics.Log("interstellar.speaker", "reason=playback-stopped-reopen");
-            SetSpeaker(_lastSpeakerDeviceName);
-            return;
+            if (reopenNow - _lastFlagReopenUtc >= TimeSpan.FromSeconds(1))
+            {
+                Interlocked.Exchange(ref _speakerReopenRequestedFlag, 0);
+                _lastFlagReopenUtc = reopenNow;
+                VoiceDiagnostics.Log("interstellar.speaker", "reason=playback-stopped-reopen");
+                SetSpeaker(_lastSpeakerDeviceName);
+                return;
+            }
         }
 
         var now = DateTime.UtcNow;
@@ -474,10 +481,15 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         }
 
         bool pinned = !string.IsNullOrWhiteSpace(_lastSpeakerDeviceName);
-        if (pinned && _speakerReady && !fastWindow)
+        if (pinned && _speakerReady)
         {
-            _speakerTopologySignature = signature;
-            return;
+            var resolved = ResolveWindowsWaveOutDevice(_lastSpeakerDeviceName);
+            if (resolved == _openedSpeakerDeviceNumber
+                && string.Equals(DescribeWindowsWaveOutDevice(resolved), _openedSpeakerProductName, StringComparison.Ordinal))
+            {
+                _speakerTopologySignature = signature;
+                return;
+            }
         }
 
         VoiceDiagnostics.Log("interstellar.speaker", $"ready={_speakerReady} reason={(pinned ? "pinned-follow" : "default-follow")} oldDevices=\"{_speakerTopologySignature}\" newDevices=\"{signature}\"");
@@ -555,10 +567,13 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             Volatile.Write(ref _windowsMicLastSamples, samples);
             try
             {
-                _micPreprocessor.ApplyHighPass(floatPcm, samples);
-                _micPreprocessor.ApplyAutoGain(floatPcm, samples, _autoMicGain, out _);
-                if (_captureOptions.NoiseSuppressionEnabled)
-                    _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
+                lock (_micProcessSync)
+                {
+                    _micPreprocessor.ApplyHighPass(floatPcm, samples);
+                    _micPreprocessor.ApplyAutoGain(floatPcm, samples, _autoMicGain, out _);
+                    if (_captureOptions.NoiseSuppressionEnabled)
+                        _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
+                }
             }
             catch (Exception ex)
             {
@@ -885,6 +900,8 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             _windowsSpeakerOutput.Init(provider.ToWaveProvider());
             _windowsSpeakerOutput.Play();
             _speakerReady = _windowsSpeakerOutput.PlaybackState == PlaybackState.Playing;
+            _openedSpeakerDeviceNumber = outputDevice;
+            _openedSpeakerProductName = DescribeWindowsWaveOutDevice(outputDevice);
             VoiceDiagnostics.Log("interstellar.speaker", $"ready={_speakerReady} device=\"{deviceName}\" outputDevice=\"{DescribeWindowsWaveOutDevice(outputDevice)}\" outputDeviceNumber={outputDevice} sourceFormat=\"{provider.WaveFormat}\" graphFormat=\"{provider.WaveFormat}\" outputDevices=\"{DescribeWindowsWaveOutDevices()}\" latencyMs=60 manualSpeaker=true");
 #else
             try { _room.Speaker = null; } catch { }
@@ -1090,7 +1107,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         _peers.Clear();
 #if WINDOWS
         _speakerRequested = false;
-        try { _micPreprocessor.Dispose(); } catch { }
+        try { lock (_micProcessSync) _micPreprocessor.Dispose(); } catch { }
 #endif
 #if ANDROID
         _androidSpeaker?.Dispose();

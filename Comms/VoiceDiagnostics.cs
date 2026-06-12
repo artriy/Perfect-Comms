@@ -27,6 +27,8 @@ internal static class VoiceDiagnostics
 
     public static void Init()
     {
+        if (_mainThreadId == -1)
+            _mainThreadId = Environment.CurrentManagedThreadId;
         if (!IsEnabled) return;
 
         lock (Lock)
@@ -35,6 +37,8 @@ internal static class VoiceDiagnostics
 
     public static void SetEnabled(bool enabled)
     {
+        if (_mainThreadId == -1)
+            _mainThreadId = Environment.CurrentManagedThreadId;
         Volatile.Write(ref _enabled, enabled ? 1 : 0);
         lock (Lock)
         {

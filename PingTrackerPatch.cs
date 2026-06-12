@@ -761,8 +761,8 @@ public static class PingTrackerPatch
     private static void UpdateSlotLabel(SpeakerSlot slot, PlayerControl? player)
     {
         if (slot.LabelTMP == null) return;
-        if (!slot.VanillaStyleApplied)
-            slot.VanillaStyleApplied = ApplyVanillaNameStyle(slot.LabelTMP, player);
+        if (slot.VanillaStyleVersion != _vanillaNameStyleVersion && ApplyVanillaNameStyle(slot.LabelTMP, player))
+            slot.VanillaStyleVersion = _vanillaNameStyleVersion;
         slot.LabelTMP.text = GetDisplayName(player);
         slot.LabelMeasurePending = true;
     }
@@ -772,7 +772,11 @@ public static class PingTrackerPatch
     private static TMPro.FontStyles _vanillaFontStyle;
     private static float _vanillaOutlineWidth;
     private static Color32 _vanillaOutlineColor;
+    private static int _vanillaNameStyleVersion = 1;
+    private static int _vanillaStyleFailures;
+    private static bool _vanillaCachePopulated;
     private static bool _vanillaStyleBroken;
+    private const int VanillaStyleFailureLimit = 5;
 
     // set_font is only safe once the label is active in hierarchy; earlier it NREs inside LoadFontAsset under IL2CPP.
     private static bool ApplyVanillaNameStyle(TextMeshPro tmp, PlayerControl? player)
@@ -792,8 +796,10 @@ public static class PingTrackerPatch
                 _vanillaFontStyle = source.fontStyle;
                 _vanillaOutlineWidth = source.outlineWidth;
                 _vanillaOutlineColor = source.outlineColor;
+                _vanillaCachePopulated = true;
+                _vanillaNameStyleVersion++;
                 VoiceDiagnostics.Log("overlay.namestyle",
-                    $"srcFont=\"{_vanillaNameFont.name}\" srcMat=\"{_vanillaNameMaterial.name}\" srcSize={source.fontSize:0.00} srcStyle={_vanillaFontStyle} srcOutlineW={_vanillaOutlineWidth:0.000} srcOutlineC={_vanillaOutlineColor} labelSize={LabelSize:0.00}");
+                    $"srcFont=\"{_vanillaNameFont.name}\" srcMat=\"{_vanillaNameMaterial.name}\" srcSize={source.fontSize:0.00} srcStyle={_vanillaFontStyle} srcOutlineW={_vanillaOutlineWidth:0.000} srcOutlineC={_vanillaOutlineColor} labelSize={LabelSize:0.00} version={_vanillaNameStyleVersion}");
             }
             tmp.font = _vanillaNameFont;
             tmp.fontSharedMaterial = _vanillaNameMaterial;
@@ -803,13 +809,18 @@ public static class PingTrackerPatch
                 tmp.outlineWidth = _vanillaOutlineWidth;
                 tmp.outlineColor = _vanillaOutlineColor;
             }
+            _vanillaStyleFailures = 0;
             return true;
         }
         catch (System.Exception ex)
         {
-            _vanillaStyleBroken = true;
-            VoiceDiagnostics.DebugWarning($"[VC] Vanilla name style unavailable, keeping default label style: {ex.Message}");
-            return true;
+            if (++_vanillaStyleFailures >= VanillaStyleFailureLimit)
+            {
+                _vanillaStyleBroken = true;
+                VoiceDiagnostics.DebugWarning($"[VC] Vanilla name style unavailable, keeping default label style: {ex.Message}");
+                return true;
+            }
+            return false;
         }
     }
 
@@ -861,14 +872,22 @@ public static class PingTrackerPatch
 
     private static void UpdateSlotRings()
     {
+        if (_vanillaCachePopulated && (_vanillaNameFont == null || _vanillaNameMaterial == null))
+        {
+            _vanillaCachePopulated = false;
+            _vanillaNameFont = null;
+            _vanillaNameMaterial = null;
+            _vanillaNameStyleVersion++;
+        }
+
         float maxVis = 0f;
         foreach (var kv in _slots)
         {
             var slot = kv.Value;
             if (slot.LabelMeasurePending && slot.LabelTMP != null && slot.LabelTMP.gameObject.activeInHierarchy)
             {
-                if (!slot.VanillaStyleApplied)
-                    slot.VanillaStyleApplied = ApplyVanillaNameStyle(slot.LabelTMP, FindPlayer(kv.Key));
+                if (slot.VanillaStyleVersion != _vanillaNameStyleVersion && ApplyVanillaNameStyle(slot.LabelTMP, FindPlayer(kv.Key)))
+                    slot.VanillaStyleVersion = _vanillaNameStyleVersion;
                 float w = slot.LabelTMP.preferredWidth;
                 float h = slot.LabelTMP.preferredHeight;
                 if (!float.IsNaN(w) && !float.IsInfinity(w) && w >= 0f &&
@@ -1365,6 +1384,6 @@ public static class PingTrackerPatch
         public float             LabelWidth;
         public float             LabelHeight;
         public bool              LabelMeasurePending;
-        public bool              VanillaStyleApplied;
+        public int               VanillaStyleVersion;
     }
 }

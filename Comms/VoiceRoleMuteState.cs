@@ -679,10 +679,8 @@ internal static partial class VoiceRoleMuteState
 
         bool added = JailVoiceAllowed.Add(jailedPlayerId);
         if (added)
-        {
             VoiceDiagnostics.Log("jailvoice.rpc.apply", $"applied=true jailor={jailorId} jailee={jailedPlayerId}");
-            VoiceChatHudState.ApplyMicState();
-        }
+        VoiceChatHudState.ApplyMicState();
     }
 
     internal static bool IsJailVoiceAllowed(byte playerId)

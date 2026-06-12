@@ -300,8 +300,10 @@ internal sealed class BclVoiceJitterBuffer
         // instead of synthesizing a multi-second PLC concealment catch-up one frame at a time.
         if (Distance(_expectedSequence, packet.Sequence) > _maxBufferedFrames)
         {
-            System.Threading.Interlocked.Add(ref _cumulativeLostFrames,
-                Math.Min(Distance(_expectedSequence, packet.Sequence), SnapLossReportCapFrames));
+            int snapSkipped = Distance(_expectedSequence, packet.Sequence) - _packets.Count;
+            if (snapSkipped > 0)
+                System.Threading.Interlocked.Add(ref _cumulativeLostFrames,
+                    Math.Min(snapSkipped, SnapLossReportCapFrames));
             _packets.Clear();
             _expectedSequence = packet.Sequence;
             _consecutiveConcealed = 0; // real-frame resume after a discontinuity snap (Fix 2b-2)

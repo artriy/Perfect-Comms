@@ -172,6 +172,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private bool _speakerRequested;
     private bool _btProfileConflict;
     private bool _btMuteReleaseRequested;
+    private const int SpeakerRetryFailureLimit = 3;
+    private int _speakerRetryFailures;
+    private string _speakerRetryExhaustedSignature = string.Empty;
     private int _openedSpeakerDeviceNumber = int.MinValue;
     private string _openedSpeakerProductName = string.Empty;
     private string _lastSpeakerDeviceName = string.Empty;
@@ -694,6 +697,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _captureFrameSamples = 0;
             _captureLiveSignalSeen = false;
             _deadInputFrames = 0;
+            Interlocked.Exchange(ref _deadInputDetected, 0);
             _micPreprocessor.Reset(preserveAutoGain: true);
         }
         _localLevel = 0f;
@@ -934,6 +938,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #if WINDOWS
         try
         {
+            if (!string.Equals(_lastSpeakerDeviceName, deviceName ?? string.Empty, StringComparison.Ordinal))
+                _btProfileConflict = false;
             _lastSpeakerDeviceName = deviceName ?? string.Empty;
             _speakerRequested = true;
             _speakerTopologySignature = DescribeWaveOutDevices();
@@ -1014,6 +1020,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             if (_disposed) return;
             SetSpeaker(_lastSpeakerDeviceName);
+            // The rings kept filling while playback was stalled; drop that backlog or it replays late.
+            foreach (var peer in SnapshotPeers())
+                peer.FadeClearRoutes();
         });
     }
 
@@ -1033,14 +1042,29 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         if (signature == _speakerTopologySignature)
         {
-            if (_speakerReady) return;
+            if (_speakerReady)
+            {
+                _speakerRetryFailures = 0;
+                return;
+            }
+            if (_speakerRetryFailures >= SpeakerRetryFailureLimit && signature == _speakerRetryExhaustedSignature) return;
             if (now - _lastSpeakerRetryUtc < SpeakerRetryInterval) return;
             _lastSpeakerRetryUtc = now;
-            VoiceDiagnostics.Log("bcl.speaker", $"ready=false reason=retry devices=\"{signature}\"");
+            VoiceDiagnostics.Log("bcl.speaker", $"ready=false reason=retry attempt={_speakerRetryFailures + 1} devices=\"{signature}\"");
             SetSpeaker(_lastSpeakerDeviceName);
+            if (_speakerReady)
+            {
+                _speakerRetryFailures = 0;
+            }
+            else if (++_speakerRetryFailures >= SpeakerRetryFailureLimit)
+            {
+                _speakerRetryExhaustedSignature = signature;
+                VoiceDiagnostics.Log("bcl.speaker", $"ready=false reason=retry-exhausted devices=\"{signature}\"");
+            }
             return;
         }
 
+        _speakerRetryFailures = 0;
         bool pinned = !string.IsNullOrWhiteSpace(_lastSpeakerDeviceName);
         if (pinned && _speakerReady)
         {
@@ -1061,6 +1085,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _btProfileConflict = true;
             VoiceDiagnostics.Log("bcl.speaker.profile-conflict",
                 $"mic=\"{_lastMicDeviceName}\" speaker=\"{_lastSpeakerDeviceName}\" oldDevices=\"{_speakerTopologySignature}\" newDevices=\"{signature}\"");
+        }
+        else if (_btProfileConflict && !openedEndpointVanished)
+        {
+            _btProfileConflict = false;
+            VoiceDiagnostics.Log("bcl.speaker.profile-conflict", "resolved=true");
         }
         VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} reason={(pinned ? "pinned-follow" : "default-follow")} oldDevices=\"{_speakerTopologySignature}\" newDevices=\"{signature}\"");
         SetSpeaker(_lastSpeakerDeviceName); // re-resolves against the new device list; refreshes signature
@@ -3034,6 +3063,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (!IsSyntheticSource(source))
             _micPreprocessor.ApplyHighPass(floatPcm, samples);
 
+        var rawCapturePeak = AudioHelpers.MeasurePeak(floatPcm, samples);
         var agcGain = _micPreprocessor.ApplyAutoGain(floatPcm, samples, _autoMicGain && !IsSyntheticSource(source), out var preSuppressionPeak);
 
         var preSuppressionGuardGain = AudioHelpers.GetCaptureEncodeLimiterGain(preSuppressionPeak);
@@ -3044,7 +3074,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
 
         if (!IsSyntheticSource(source))
-            TrackCaptureHealthLocked(preSuppressionPeak);
+            TrackCaptureHealthLocked(rawCapturePeak);
 
         if (_captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
@@ -3593,6 +3623,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         private object _lrSync = new();
         public void SetInterleaveSync(object sync) => _lrSync = sync;
 
+        public void FadeClearRoutes()
+        {
+            _leftRoute.FadeClearBufferedSamples();
+            _rightRoute.FadeClearBufferedSamples();
+        }
+
         private const int MinPacketsForLossReport = 25;
         private static readonly TimeSpan LossReportInterval = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan LossReportFreshness = TimeSpan.FromSeconds(6);
@@ -3626,16 +3662,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             long lost = _jitterBuffer.CumulativeLostFrames;
             long deltaAccepted = accepted - _lastReportedAcceptedPackets;
             long deltaLost = lost - _lastReportedLostFrames;
-            _lastReportedAcceptedPackets = accepted;
-            _lastReportedLostFrames = lost;
             long total = deltaAccepted + deltaLost;
             if (total < MinPacketsForLossReport) return;
-            int lossPermille = (int)Math.Clamp(deltaLost * 1000 / total, 0, 1000);
             var channel = DataChannel;
             if (channel?.readyState != RTCDataChannelState.open) return;
+            int lossPermille = (int)Math.Clamp(deltaLost * 1000 / total, 0, 1000);
             try
             {
                 channel.send(BuildLossReportMessage(lossPermille));
+                _lastReportedAcceptedPackets = accepted;
+                _lastReportedLostFrames = lost;
                 if (VoiceDiagnostics.IsEnabled)
                     VoiceDiagnostics.Log("bcl.lossreport.tx",
                         $"client={ClientId} permille={lossPermille} lostDelta={deltaLost} acceptedDelta={deltaAccepted}");

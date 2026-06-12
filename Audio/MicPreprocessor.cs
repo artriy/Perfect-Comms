@@ -114,10 +114,21 @@ internal sealed class MicPreprocessor : IDisposable
 
         if (!enabled || count <= 0)
         {
+            float previousDisabledGain = _agcLastAppliedGain;
             _agcGain = 1f;
             _agcLastAppliedGain = 1f;
             _agcRecentSpeechPeak = 0f;
-            postGainPeak = peak;
+            postGainPeak = peak * Math.Max(previousDisabledGain, 1f);
+            if (count > 0 && Math.Abs(previousDisabledGain - 1f) > 0.0001f)
+            {
+                float step = (1f - previousDisabledGain) / count;
+                float rampGain = previousDisabledGain;
+                for (int i = 0; i < count; i++)
+                {
+                    rampGain += step;
+                    pcm[i] *= rampGain;
+                }
+            }
             return 1f;
         }
 
@@ -139,7 +150,8 @@ internal sealed class MicPreprocessor : IDisposable
         if (peak * gain > AgcPeakCeiling)
             gain = AgcPeakCeiling / peak;
 
-        _agcGain = gain;
+        // Ceiling ducking is transient: never let it drag the rise-cap baseline below unity for ~0.5s.
+        _agcGain = Math.Max(1f, gain);
         float previousGain = _agcLastAppliedGain;
         _agcLastAppliedGain = gain;
         postGainPeak = peak * Math.Max(previousGain, gain);
