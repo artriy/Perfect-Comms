@@ -328,11 +328,17 @@ internal sealed class BclVoiceJitterBuffer
             {
                 double elapsedSamples  = (nowTicks - _lastArrivalTicks) * TicksToSeconds * AudioHelpers.ClockRate;
                 double expectedSamples = (double)seqGap * packet.Duration; // Duration is per-frame sample count
-                double deviation       = Math.Abs(elapsedSamples - expectedSamples);
-                const double deadbandSamples = AudioHelpers.ClockRate * 0.005; // ~5 ms dead-band kills clock-tick noise
-                if (deviation < deadbandSamples) deviation = 0;
-                // RFC3550 EWMA, 1/16 smoothing. Volatile.Write pairs with the Volatile.Read in CurrentJitterSamples.
-                System.Threading.Volatile.Write(ref _jitterSamples, _jitterSamples + (deviation - _jitterSamples) / 16.0);
+                // Sequences stay contiguous across gated silence, so an arrival gap far beyond any real
+                // network jitter is a speech pause — measuring it would pin onset prebuffers at the ceiling.
+                const double pauseGuardSamples = AudioHelpers.ClockRate * 0.25;
+                if (elapsedSamples - expectedSamples < pauseGuardSamples)
+                {
+                    double deviation = Math.Abs(elapsedSamples - expectedSamples);
+                    const double deadbandSamples = AudioHelpers.ClockRate * 0.005; // ~5 ms dead-band kills clock-tick noise
+                    if (deviation < deadbandSamples) deviation = 0;
+                    // RFC3550 EWMA, 1/16 smoothing. Volatile.Write pairs with the Volatile.Read in CurrentJitterSamples.
+                    System.Threading.Volatile.Write(ref _jitterSamples, _jitterSamples + (deviation - _jitterSamples) / 16.0);
+                }
             }
         }
         _lastArrivalTicks = nowTicks;
