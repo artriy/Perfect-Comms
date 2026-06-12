@@ -192,6 +192,37 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private bool _microphoneReady;
     private bool _speakerReady;
     private VoiceCaptureRuntimeOptions _captureOptions;
+    private const float DeadInputPeakThreshold = 0.00012f;
+    private const float LiveSignalPeakThreshold = 0.005f;
+    private const int DeadInputTriggerFrames = 500;
+    private bool _captureLiveSignalSeen;
+    private int _deadInputFrames;
+    private int _deadInputDetected;
+    private int _lastOpenedWaveInDevice = -1;
+
+    // Never-live + 10s of pure quantization noise = dead feed; a device that produced speech once is trusted (quiet != dead).
+    // Diagnostics only — device choice is always the user's; the app never switches capture devices on its own.
+    private void TrackCaptureHealthLocked(float peak)
+    {
+        if (peak >= LiveSignalPeakThreshold)
+        {
+            _captureLiveSignalSeen = true;
+            _deadInputFrames = 0;
+            Interlocked.Exchange(ref _deadInputDetected, 0);
+            return;
+        }
+        if (_captureLiveSignalSeen) return;
+        if (peak >= DeadInputPeakThreshold)
+        {
+            _deadInputFrames = 0;
+            return;
+        }
+        if (++_deadInputFrames < DeadInputTriggerFrames) return;
+        _deadInputFrames = 0;
+        Interlocked.Exchange(ref _deadInputDetected, 1);
+        VoiceDiagnostics.Log("bcl.mic.dead-input",
+            $"device=\"{_lastMicDeviceName}\" openedWaveInDevice={Volatile.Read(ref _lastOpenedWaveInDevice)} peak={peak:0.000000}");
+    }
     private double _syntheticTonePhase;
     private int _syntheticFrames;
     private DateTime _lastMicCalibrationLogUtc = DateTime.MinValue;
@@ -601,6 +632,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (!_captureOptions.SyntheticMicToneEnabled)
             {
                 waveInDevice = ResolveWaveInDevice(_lastMicDeviceName);
+                Volatile.Write(ref _lastOpenedWaveInDevice, waveInDevice);
                 var waveIn = new WaveInEvent
                 {
                     BufferMilliseconds = 20,
@@ -660,6 +692,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             _captureEpoch++;
             _captureFrameSamples = 0;
+            _captureLiveSignalSeen = false;
+            _deadInputFrames = 0;
             _micPreprocessor.Reset(preserveAutoGain: true);
         }
         _localLevel = 0f;
@@ -3009,6 +3043,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             preSuppressionPeak *= preSuppressionGuardGain;
         }
 
+        if (!IsSyntheticSource(source))
+            TrackCaptureHealthLocked(preSuppressionPeak);
+
         if (_captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
@@ -3333,7 +3370,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             $"micCallbacks={Volatile.Read(ref _micCallbacks)} micBytes={Volatile.Read(ref _micBytes)} micSamples={Volatile.Read(ref _micSamples)} micWindowSamples={micWindowSamples} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micCrest={micCrest:0.00} micNonZeroSamples={micNonZeroSamples} micSilentCallbacks={micSilentCallbacks} micNearClipSamples={micNearClipSamples} micClipPct={micClipPct:0.000} micZeroCrossRate={micZeroCrossRate:0.0000} " +
             $"micMutedDrops={Volatile.Read(ref _micMutedDrops)} micEncodeFailures={Volatile.Read(ref _micEncodeFailures)} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} micNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} audioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} txPeak={_lastTransmitPeak:0.000000} txPeakMax={txPeakMax:0.000000} txRms={txRms:0.000000} txSamples={txSamples} opusBytesAvg={opusAvgBytes:0.0} opusBytesMin={opusMinBytes} opusBytesMax={opusMaxBytes} " +
-            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} {rnnoiseSummary} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate}");
+            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} {rnnoiseSummary} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} micOpened={Volatile.Read(ref _lastOpenedWaveInDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
         if ((_captureOptions.NoiseSuppressionEnabled || rnnoise.Attempts > 0 || rnnoise.UnavailableFrames > 0)
             && now - _lastRnNoiseStatsLogUtc >= RnNoiseStatsLogInterval)
         {
