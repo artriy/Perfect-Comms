@@ -30,11 +30,21 @@ internal sealed class VoiceClientInfo
 
 internal static class VoiceClientRegistry
 {
+    // Handshake/profile/audio-bootstrap marks arrive on the data-channel receive thread while the HUD and
+    // recovery logic read on the Unity main thread, so the backing dictionary must be serialized. Sync is
+    // re-entrant, so composite helpers can call the locked primitives without deadlocking.
+    private static readonly object Sync = new();
     private static readonly Dictionary<int, VoiceClientInfo> Clients = new();
 
-    public static IReadOnlyCollection<VoiceClientInfo> Snapshot => Clients.Values.ToArray();
+    public static IReadOnlyCollection<VoiceClientInfo> Snapshot
+    {
+        get { lock (Sync) return Clients.Values.ToArray(); }
+    }
 
-    public static void Reset() => Clients.Clear();
+    public static void Reset()
+    {
+        lock (Sync) Clients.Clear();
+    }
 
     public static bool MarkHandshake(
         int clientId,
@@ -46,82 +56,97 @@ internal static class VoiceClientRegistry
         int minCompatibleVersion,
         VoiceFeatureFlags features)
     {
-        Clients.TryGetValue(clientId, out var previous);
-        string? oldKey = previous?.StatusKey;
+        lock (Sync)
+        {
+            Clients.TryGetValue(clientId, out var previous);
+            string? oldKey = previous?.StatusKey;
 
-        var info = previous ?? new VoiceClientInfo { ClientId = clientId };
-        info.PlayerId = playerId;
-        info.PlayerName = string.IsNullOrWhiteSpace(playerName) ? info.PlayerName : playerName!;
-        info.ProtocolVersion = protocolVersion;
-        info.MinCompatibleVersion = minCompatibleVersion;
-        info.Features = features;
-        info.LastSeenUtc = DateTime.UtcNow;
+            var info = previous ?? new VoiceClientInfo { ClientId = clientId };
+            info.PlayerId = playerId;
+            info.PlayerName = string.IsNullOrWhiteSpace(playerName) ? info.PlayerName : playerName!;
+            info.ProtocolVersion = protocolVersion;
+            info.MinCompatibleVersion = minCompatibleVersion;
+            info.Features = features;
+            info.LastSeenUtc = DateTime.UtcNow;
 
-        if (receivedGuid != expectedGuid)
-        {
-            info.Compatibility = VoiceClientCompatibility.Incompatible;
-            info.Reason = "mod guid mismatch";
-        }
-        else if (!features.HasFlag(VoiceFeatureFlags.CompatibilityHandshake))
-        {
-            info.Compatibility = VoiceClientCompatibility.Incompatible;
-            info.Reason = "legacy handshake";
-        }
-        else if (!VoiceProtocol.IsCompatible(protocolVersion, minCompatibleVersion))
-        {
-            info.Compatibility = VoiceClientCompatibility.Incompatible;
-            info.Reason = $"protocol {protocolVersion} outside {VoiceProtocol.MinCompatibleVersion}-{VoiceProtocol.ProtocolVersion}";
-        }
-        else
-        {
-            info.Compatibility = VoiceClientCompatibility.Compatible;
-            info.Reason = "compatible";
-        }
+            if (receivedGuid != expectedGuid)
+            {
+                info.Compatibility = VoiceClientCompatibility.Incompatible;
+                info.Reason = "mod guid mismatch";
+            }
+            else if (!features.HasFlag(VoiceFeatureFlags.CompatibilityHandshake))
+            {
+                info.Compatibility = VoiceClientCompatibility.Incompatible;
+                info.Reason = "legacy handshake";
+            }
+            else if (!VoiceProtocol.IsCompatible(protocolVersion, minCompatibleVersion))
+            {
+                info.Compatibility = VoiceClientCompatibility.Incompatible;
+                info.Reason = $"protocol {protocolVersion} outside {VoiceProtocol.MinCompatibleVersion}-{VoiceProtocol.ProtocolVersion}";
+            }
+            else
+            {
+                info.Compatibility = VoiceClientCompatibility.Compatible;
+                info.Reason = "compatible";
+            }
 
-        Clients[clientId] = info;
-        return oldKey != info.StatusKey;
+            Clients[clientId] = info;
+            return oldKey != info.StatusKey;
+        }
     }
 
     public static void MarkProfile(int clientId, byte playerId, string playerName)
     {
-        if (!Clients.TryGetValue(clientId, out var info))
+        lock (Sync)
         {
-            info = new VoiceClientInfo { ClientId = clientId };
-            Clients[clientId] = info;
-        }
+            if (!Clients.TryGetValue(clientId, out var info))
+            {
+                info = new VoiceClientInfo { ClientId = clientId };
+                Clients[clientId] = info;
+            }
 
-        info.PlayerId = playerId;
-        info.PlayerName = string.IsNullOrWhiteSpace(playerName) ? info.PlayerName : playerName;
-        info.LastSeenUtc = DateTime.UtcNow;
+            info.PlayerId = playerId;
+            info.PlayerName = string.IsNullOrWhiteSpace(playerName) ? info.PlayerName : playerName;
+            info.LastSeenUtc = DateTime.UtcNow;
+        }
     }
 
     public static bool IsCompatible(int clientId)
-        => Clients.TryGetValue(clientId, out var info) &&
-           info.Compatibility == VoiceClientCompatibility.Compatible;
+    {
+        lock (Sync)
+            return Clients.TryGetValue(clientId, out var info) &&
+                   info.Compatibility == VoiceClientCompatibility.Compatible;
+    }
 
     public static bool IsKnownIncompatible(int clientId)
-        => Clients.TryGetValue(clientId, out var info) &&
-           info.Compatibility == VoiceClientCompatibility.Incompatible;
+    {
+        lock (Sync)
+            return Clients.TryGetValue(clientId, out var info) &&
+                   info.Compatibility == VoiceClientCompatibility.Incompatible;
+    }
 
     public static void MarkAudioBootstrap(int clientId)
     {
-        if (Clients.TryGetValue(clientId, out var existing))
+        lock (Sync)
         {
-            if (existing.Compatibility != VoiceClientCompatibility.Unknown)
-                return;
-        }
-        else
-        {
-            existing = new VoiceClientInfo { ClientId = clientId };
-            Clients[clientId] = existing;
-        }
+            if (Clients.TryGetValue(clientId, out var existing))
+            {
+                if (existing.Compatibility != VoiceClientCompatibility.Unknown)
+                    return;
+            }
+            else
+            {
+                existing = new VoiceClientInfo { ClientId = clientId };
+                Clients[clientId] = existing;
+            }
 
-        existing.ProtocolVersion = VoiceProtocol.ProtocolVersion;
-        existing.MinCompatibleVersion = VoiceProtocol.MinCompatibleVersion;
-        existing.Features = VoiceProtocol.CurrentFeatures;
-        existing.Compatibility = VoiceClientCompatibility.Compatible;
-        existing.Reason = "audio bootstrap";
-        existing.LastSeenUtc = DateTime.UtcNow;
+            existing.ProtocolVersion = VoiceProtocol.ProtocolVersion;
+            existing.MinCompatibleVersion = VoiceProtocol.MinCompatibleVersion;
+            existing.Features = VoiceProtocol.CurrentFeatures;
+            existing.Compatibility = VoiceClientCompatibility.Compatible;
+            existing.Reason = "audio bootstrap";
+            existing.LastSeenUtc = DateTime.UtcNow;
+        }
     }
 
     public static bool AreAllLiveRemoteClientsCompatible()
@@ -161,18 +186,24 @@ internal static class VoiceClientRegistry
 
     public static void MarkRadioActive(int clientId, bool active)
     {
-        if (!Clients.TryGetValue(clientId, out var info))
+        lock (Sync)
         {
-            info = new VoiceClientInfo { ClientId = clientId };
-            Clients[clientId] = info;
-        }
+            if (!Clients.TryGetValue(clientId, out var info))
+            {
+                info = new VoiceClientInfo { ClientId = clientId };
+                Clients[clientId] = info;
+            }
 
-        info.IsRadioActive = active;
-        info.LastSeenUtc = DateTime.UtcNow;
+            info.IsRadioActive = active;
+            info.LastSeenUtc = DateTime.UtcNow;
+        }
     }
 
     public static bool IsRadioActive(int clientId)
-        => Clients.TryGetValue(clientId, out var info) && info.IsRadioActive;
+    {
+        lock (Sync)
+            return Clients.TryGetValue(clientId, out var info) && info.IsRadioActive;
+    }
 
     public static int[] GetCompatibleClientIds()
     {
@@ -196,13 +227,16 @@ internal static class VoiceClientRegistry
         hasCompatible = false;
         hasIncompatible = false;
 
-        foreach (var client in Clients.Values)
+        lock (Sync)
         {
-            count++;
-            if (client.Compatibility == VoiceClientCompatibility.Compatible)
-                hasCompatible = true;
-            else if (client.Compatibility == VoiceClientCompatibility.Incompatible)
-                hasIncompatible = true;
+            foreach (var client in Clients.Values)
+            {
+                count++;
+                if (client.Compatibility == VoiceClientCompatibility.Compatible)
+                    hasCompatible = true;
+                else if (client.Compatibility == VoiceClientCompatibility.Incompatible)
+                    hasIncompatible = true;
+            }
         }
     }
 
@@ -210,7 +244,7 @@ internal static class VoiceClientRegistry
     {
         if (AmongUsClient.Instance == null)
         {
-            Clients.Clear();
+            lock (Sync) Clients.Clear();
             return;
         }
 
@@ -218,18 +252,24 @@ internal static class VoiceClientRegistry
         foreach (var client in AmongUsClient.Instance.allClients)
             liveClientIds.Add(client.Id);
 
-        foreach (var id in Clients.Keys.ToArray())
-            if (!liveClientIds.Contains(id))
-                Clients.Remove(id);
+        lock (Sync)
+        {
+            foreach (var id in Clients.Keys.ToArray())
+                if (!liveClientIds.Contains(id))
+                    Clients.Remove(id);
+        }
     }
 
     public static string Describe(int clientId)
     {
-        if (!Clients.TryGetValue(clientId, out var info))
-            return $"client={clientId} compatibility=unknown reason=no handshake";
+        lock (Sync)
+        {
+            if (!Clients.TryGetValue(clientId, out var info))
+                return $"client={clientId} compatibility=unknown reason=no handshake";
 
-        return $"client={clientId} player={info.PlayerId}:{info.PlayerName} " +
-               $"compatibility={info.Compatibility} protocol={info.ProtocolVersion} " +
-               $"min={info.MinCompatibleVersion} features={info.Features} reason={info.Reason}";
+            return $"client={clientId} player={info.PlayerId}:{info.PlayerName} " +
+                   $"compatibility={info.Compatibility} protocol={info.ProtocolVersion} " +
+                   $"min={info.MinCompatibleVersion} features={info.Features} reason={info.Reason}";
+        }
     }
 }

@@ -111,7 +111,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int _publicLobbyJoinEpoch;
     private string _localSocketId = string.Empty;
     private string _lastPlayerName = string.Empty;
-    private VoiceTeamRadioChannel _lastLocalRadioChannel = VoiceTeamRadioChannel.None;
+    private volatile VoiceTeamRadioChannel _lastLocalRadioChannel = VoiceTeamRadioChannel.None;
     private int _joinInFlight;
     private int _customTx;
     private int _customRx;
@@ -192,12 +192,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private OpusEncoder _encoder = CreateEncoder();
     private Timer? _syntheticMicTimer;
     private string _lastMicDeviceName = string.Empty;
-    private float _micVolume = 1f;
+    private volatile float _micVolume = 1f;
     private float _noiseGateThreshold;
     private float _vadThreshold = 0.004f;
     private bool _autoMicGain = true;
-    private float _localLevel;
-    private bool _localSpeaking;
+    private volatile float _localLevel;
+    private volatile bool _localSpeaking;
     private bool _microphoneReady;
     private bool _speakerReady;
     private VoiceCaptureRuntimeOptions _captureOptions;
@@ -3118,6 +3118,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
 
         MaybeAdaptEncoderLocked();
+        // Snapshot the runtime options once so every per-frame read is consistent: the struct is swapped
+        // wholesale from the settings thread, so re-reading the field could mix old/new fields mid-frame.
+        var captureOptions = _captureOptions;
 
         if (!IsSyntheticSource(source))
             _micPreprocessor.ApplyHighPass(floatPcm, samples);
@@ -3140,7 +3143,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (!IsSyntheticSource(source))
             TrackCaptureHealthLocked(rawCapturePeak);
 
-        if (_captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
+        if (captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source))
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
         var transmitGain = _micPreprocessor.LimitFramePeakForEncode(floatPcm, samples);
@@ -3187,7 +3190,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _lastGateRms = decision.Rms;
         _lastGateThreshold = decision.Threshold;
 
-        if (_captureOptions.MicCalibrationDiagnostics)
+        if (captureOptions.MicCalibrationDiagnostics)
             MaybeLogMicCalibration(source, decision, false, speakingThreshold, nearClipSamples, zeroCrossings, samples, agcGain);
 
         var frameTimestamp = _sendTimestamp;
@@ -3773,10 +3776,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #pragma warning restore CS0618
         public byte PlayerId { get; private set; } = byte.MaxValue;
         public string PlayerName { get; private set; } = "Unknown";
-        private VoiceTeamRadioChannel _radioChannel = VoiceTeamRadioChannel.None;
+        private volatile VoiceTeamRadioChannel _radioChannel = VoiceTeamRadioChannel.None;
         // PlayerId the cached _radioChannel was applied for; a transient unmap+remap to the same
         // player keeps the channel, a genuine remap to another player drops it (see UpdateProfile).
-        private byte _radioChannelOwner = byte.MaxValue;
+        private volatile byte _radioChannelOwner = byte.MaxValue;
         private int _consecutiveNonRadioVoicePackets;
         private DateTime _radioChannelAppliedUtc = DateTime.MinValue;
         private const int RadioStaleClearPacketThreshold = 5;
