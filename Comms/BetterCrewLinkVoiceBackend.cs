@@ -2290,6 +2290,24 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
+    // Recover a peer whose signal handling threw (e.g. setRemoteDescription/createAnswer failed, so no answer
+    // was sent and the channel can never open). Mirrors OnPeerConnectionDied's recovery half; per-peer backoff
+    // (TryBeginRecovery) bounds it, and a non-peer socket is a no-op.
+    private void MarkPeerForImmediateRecovery(string socketId)
+    {
+        if (_disposed || !TryBeginRecovery(socketId)) return;
+        VoiceDiagnostics.Log("bcl.peer.recovery", $"socket={socketId} reason=signal-failure initiator={ShouldInitiateOffer(socketId)}");
+        if (ShouldInitiateOffer(socketId))
+        {
+            RecreatePeerConnection(socketId);
+            _ = StartOfferAsync(socketId);
+        }
+        else
+        {
+            RequestOfferFromPeer(socketId);
+        }
+    }
+
     // Answerer-side recovery: ask the elected initiator to send a fresh offer (handled in HandleSignalAsync).
     private void RequestOfferFromPeer(string socketId)
     {
@@ -2454,6 +2472,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         catch (Exception ex)
         {
             VoiceDiagnostics.Log("bcl.signal.error", $"fromSocket={fromSocketId} error=\"{DiagnosticSafe(ex.Message)}\"");
+            // A failed offer/answer leaves the peer wedged with no answer sent; recover now (backoff-bounded)
+            // instead of waiting out the ~12s connection watchdog.
+            _mainThreadActions.Enqueue(() => MarkPeerForImmediateRecovery(fromSocketId));
         }
     }
 
