@@ -217,7 +217,10 @@ internal static class VoiceProximityCalculator
         if (VoiceRoleMuteState.IsTaskVoiceBlocked(target))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetTaskBlockReason(target), previousWallCoefficient);
 
-        if (s.TeamRadio && targetRadioActive && !targetDead)
+        // Task-phase team radio is gated by the "Usable in Tasks" sub-toggle ONLY when the meeting/lobby radio
+        // option is on; when that parent is off the sub-toggle does nothing and radio stays task-usable.
+        bool taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
+        if (s.TeamRadio && taskRadioAllowed && targetRadioActive && !targetDead)
         {
             if (CanHearTeamRadio(localPlayer, target, s, targetRadioChannel))
                 return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
@@ -568,6 +571,13 @@ internal static class VoiceProximityCalculator
         VoiceRoomSettingsSnapshot s,
         float wallCoefficient)
     {
+        // Ghosts hear each other at any distance when enabled: full volume, no falloff (walls still apply).
+        if (s.GhostsHearEachOtherUnlimited)
+        {
+            float fullPan = VoiceChatRoom.GetPan(listenerPos.x, targetPos.x);
+            return CalculateLocalDeadHearing(true, s.OnlyGhostsCanTalk, wallCoefficient, 1f, fullPan);
+        }
+
         float maxDistance = ResolveGhostHearingDistance(localLightRadius, s.MaxChatDistance);
         float dx = targetPos.x - listenerPos.x;
         float dy = targetPos.y - listenerPos.y;

@@ -37,7 +37,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     bool MuffleHypnotizedDuringHysteria,
     bool TeamRadioInMeetings,
     bool PuppeteerHearFromVictim,
-    bool ParasiteHearFromVictim)
+    bool ParasiteHearFromVictim,
+    bool TeamRadioInTasks,
+    bool GhostsHearEachOtherUnlimited,
+    bool JailPersistsAfterJailorDeath)
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
@@ -76,7 +79,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         true,
         false,
         true,
-        true);
+        true,
+        true,
+        false,
+        false);
 
     public static VoiceRoomSettingsSnapshot FromGameOptions()
     {
@@ -122,7 +128,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             role.MuffleHypnotizedDuringHysteria.Value,
             s.TeamRadioInMeetings.Value,
             role.PuppeteerHearFromVictim.Value,
-            role.ParasiteHearFromVictim.Value).Clamp();
+            role.ParasiteHearFromVictim.Value,
+            s.TeamRadioInTasks.Value,
+            s.GhostsHearEachOtherUnlimited.Value,
+            role.JailPersistsAfterJailorDeath.Value).Clamp();
     }
 
     public VoiceRoomSettingsSnapshot Clamp()

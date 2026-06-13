@@ -708,7 +708,7 @@ internal static partial class VoiceRoleMuteState
 
         if (settings.MuteJailedInMeetings &&
             state.IsJailed &&
-            IsJailorValid(state.JailorId) &&
+            (settings.JailPersistsAfterJailorDeath || IsJailorValid(state.JailorId)) &&
             (!settings.JailorCanUnmuteJailed || !JailVoiceAllowed.Contains(playerId)))
         {
             reason = VoiceProximityReason.Jailed;

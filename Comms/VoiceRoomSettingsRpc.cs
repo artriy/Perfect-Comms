@@ -83,6 +83,9 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.TeamRadioInMeetings);
         writer.Write(settings.PuppeteerHearFromVictim);
         writer.Write(settings.ParasiteHearFromVictim);
+        writer.Write(settings.TeamRadioInTasks);
+        writer.Write(settings.GhostsHearEachOtherUnlimited);
+        writer.Write(settings.JailPersistsAfterJailorDeath);
     }
 
     private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
@@ -131,6 +134,9 @@ internal static class VoiceRoomSettingsRpc
         bool teamRadioInMeetings = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
         bool puppeteerHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
         bool parasiteHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
+        bool teamRadioInTasks = reader.BytesRemaining > 0 ? reader.ReadBoolean() : true;
+        bool ghostsHearEachOtherUnlimited = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
+        bool jailPersistsAfterJailorDeath = reader.BytesRemaining > 0 ? reader.ReadBoolean() : false;
 
         return new VoiceRoomSettingsSnapshot(
             backend,
@@ -166,7 +172,10 @@ internal static class VoiceRoomSettingsRpc
             muffleHypnotizedDuringHysteria,
             teamRadioInMeetings,
             puppeteerHearFromVictim,
-            parasiteHearFromVictim).Clamp();
+            parasiteHearFromVictim,
+            teamRadioInTasks,
+            ghostsHearEachOtherUnlimited,
+            jailPersistsAfterJailorDeath).Clamp();
     }
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]

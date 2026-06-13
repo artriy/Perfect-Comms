@@ -50,7 +50,12 @@ public class VoiceChatGameOptions : AbstractOptionGroup
     {
         Visible = TeamRadioSubOptionsVisible
     };
+    public ModdedToggleOption TeamRadioInTasks     { get; } = new("Team Radio - Usable in Tasks Phase", true)
+    {
+        Visible = TeamRadioInMeetingsVisible
+    };
     public ModdedToggleOption OnlyGhostsCanTalk    { get; } = new("Only Ghosts can Talk/Hear",      false);
+    public ModdedToggleOption GhostsHearEachOtherUnlimited { get; } = new("Ghosts Hear Each Other Anywhere", false);
     public ModdedToggleOption OnlyMeetingOrLobby   { get; } = new("Meetings/Lobby Only",            false);
     public ModdedToggleOption OnlyMeetingOrLobbyAffectsGhosts { get; } = new("Ghosts Also Meeting/Lobby Only", false)
     {
@@ -59,6 +64,10 @@ public class VoiceChatGameOptions : AbstractOptionGroup
 
     private static bool TeamRadioSubOptionsVisible() =>
         OptionGroupSingleton<VoiceChatGameOptions>.Instance.TeamRadio;
+
+    private static bool TeamRadioInMeetingsVisible() =>
+        OptionGroupSingleton<VoiceChatGameOptions>.Instance.TeamRadio &&
+        OptionGroupSingleton<VoiceChatGameOptions>.Instance.TeamRadioInMeetings;
 
     private static bool MeetingLobbySubOptionsVisible() =>
         OptionGroupSingleton<VoiceChatGameOptions>.Instance.OnlyMeetingOrLobby;

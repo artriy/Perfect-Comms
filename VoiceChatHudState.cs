@@ -610,8 +610,17 @@ public static class VoiceChatHudState
     // Gating both input and active-mode prevents entering radio mid-meeting when host forbids it,
     // avoiding a silent hard-mute to non-teammates during discussion.
     private static bool TeamRadioBlockedByMeetingPolicy()
-        => !VoiceRoomSettingsState.Current.TeamRadioInMeetings
-           && VoiceSceneState.IsMeetingVoicePhase(VoiceSceneState.ResolvePhase());
+    {
+        var s = VoiceRoomSettingsState.Current;
+        var phase = VoiceSceneState.ResolvePhase();
+        // Meetings: blocked unless radio is allowed in meetings.
+        if (!s.TeamRadioInMeetings && VoiceSceneState.IsMeetingVoicePhase(phase))
+            return true;
+        // Tasks: blocked when the meeting/lobby radio option is on but its "Usable in Tasks" sub-toggle is off.
+        if (s.TeamRadioInMeetings && !s.TeamRadioInTasks && VoiceSceneState.IsTaskVoicePhase(phase))
+            return true;
+        return false;
+    }
 
     internal static bool IsInImpostorRadioMode()
         => IsInTeamRadioMode();

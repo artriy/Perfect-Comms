@@ -22,11 +22,18 @@ public class VoiceRoleIntegrationOptions : AbstractOptionGroup
     public ModdedToggleOption CrewpostorUsesImpostorVoice { get; } = new("<color=#FF0000><b>Crewpostor</b></color>: Use Impostor Voice", true);
     public ModdedToggleOption MuteGlitchHacked { get; } = new("<color=#00FF00><b>Glitch</b></color>: Mute Hacked Players", true);
     public ModdedToggleOption MuteJailedInMeetings { get; } = new("<color=#A6A6A6><b>Jailor</b></color>: Mute Jailee in Meetings", true);
+    public ModdedToggleOption JailPersistsAfterJailorDeath { get; } = new("<color=#A6A6A6><b>Jailor</b></color>: Jail Persists If Jailor Dies", false)
+    {
+        Visible = JailSubOptionVisible
+    };
     public ModdedToggleOption JailorCanUnmuteJailed { get; } = new("<color=#A6A6A6><b>Jailor</b></color>: Can Unmute Jailee", true);
     public ModdedEnumOption MediumGhostVoice { get; } = new("<color=#A680FF><b>Medium</b></color>: Ghost Voice",
         (int)MediumGhostVoiceMode.None,
         typeof(MediumGhostVoiceMode),
         ["None", "Medium -> Ghost", "Ghost -> Medium", "Both"]);
+
+    private static bool JailSubOptionVisible() =>
+        OptionGroupSingleton<VoiceRoleIntegrationOptions>.Instance.MuteJailedInMeetings;
 
     internal static VoiceRoleIntegrationOptions GetInstance() =>
         OptionGroupSingleton<VoiceRoleIntegrationOptions>.Instance;
