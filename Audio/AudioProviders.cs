@@ -528,6 +528,14 @@ internal class BufferedSampleProvider : ISampleProvider
     {
         _stableReadCycles = 0;
         RecomputeSetpointLocked();              // pull the latest clean per-peer jitter
+        // Bursty-link auto-deepen: a mid-utterance underrun ratchets the ceiling toward the hard cap on the real dropout signal, so a clumped WiFi/relay link earns depth even when its low mean jitter never clamps.
+        if (_maxAdaptivePrebufferSamples < AudioHelpers.PlaybackMaxRecoveryPrebufferSamplesHard)
+        {
+            _maxAdaptivePrebufferSamples = Math.Min(
+                _maxAdaptivePrebufferSamples + AudioHelpers.FrameSize,
+                AudioHelpers.PlaybackMaxRecoveryPrebufferSamplesHard);
+            RecomputePerPeerCutSizesLocked();
+        }
         int ceiling = ReachableCeilingLocked();
         // On starvation JUMP straight to the measured-jitter setpoint (cover real variance in one step),
         // floored at +2 frames so a not-yet-measured peer still deepens.
