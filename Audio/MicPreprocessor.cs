@@ -47,6 +47,8 @@ internal sealed class MicPreprocessor : IDisposable
     private float _agcRecentSpeechPeak;
     private float _hpfLastInput;
     private float _hpfLastOutput;
+    private bool _disposed;
+    private bool _noiseSuppressionEnabled = true;
     private RnNoiseSuppressor? _noiseSuppressor;
     private SpeexEchoCanceller? _echoCanceller;
     private bool _echoCancellationEnabled = true;
@@ -177,6 +179,7 @@ internal sealed class MicPreprocessor : IDisposable
 
     public void SetNoiseSuppressionEnabled(bool enabled)
     {
+        _noiseSuppressionEnabled = enabled;
         if (enabled)
         {
             if (_noiseSuppressionState == "disabled")
@@ -193,6 +196,8 @@ internal sealed class MicPreprocessor : IDisposable
     {
         var count = Math.Min(sampleCount, pcm.Length);
         if (count <= 0) return false;
+        // Sticky intent: never lazily resurrect the native suppressor after Dispose or an explicit disable.
+        if (_disposed || !_noiseSuppressionEnabled) return false;
 
         Measure(pcm, count, out var inputPeak, out var inputSquareSum);
         if (_noiseSuppressor == null)
@@ -271,6 +276,7 @@ internal sealed class MicPreprocessor : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
         _noiseSuppressor?.Dispose();
         _noiseSuppressor = null;
         _echoCanceller?.Dispose();
@@ -295,7 +301,7 @@ internal sealed class MicPreprocessor : IDisposable
     // stops retrying once the native library is confirmed unavailable, so a missing DLL is a silent no-op.
     public bool ApplyEchoCancellation(float[] mic, float[] reference, int sampleCount)
     {
-        if (!_echoCancellationEnabled) return false;
+        if (_disposed || !_echoCancellationEnabled) return false;
         var count = Math.Min(sampleCount, Math.Min(mic.Length, reference.Length));
         if (count <= 0) return false;
 

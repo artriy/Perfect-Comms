@@ -132,6 +132,14 @@ internal sealed unsafe class RnNoiseSuppressor : IDisposable
 
     public void Dispose()
     {
+        DisposeNative();
+        GC.SuppressFinalize(this);
+    }
+
+    ~RnNoiseSuppressor() => DisposeNative();
+
+    private void DisposeNative()
+    {
         lock (_stateLock)
         {
             if (_disposed) return;
@@ -206,11 +214,23 @@ internal sealed unsafe class RnNoiseSuppressor : IDisposable
         if (File.Exists(target) && new FileInfo(target).Length == stream.Length)
             return target;
 
-        var temp = target + ".tmp";
+        // Per-process temp name so two game instances extracting at once don't collide on one .tmp (FileShare.None).
+        var temp = $"{target}.{Environment.ProcessId}.tmp";
         using (var output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
             stream.CopyTo(output);
 
-        File.Move(temp, target, true);
+        try
+        {
+            File.Move(temp, target, true);
+        }
+        catch (IOException)
+        {
+            // Another instance already published an identical target (and may hold it open); reuse it.
+            if (!(File.Exists(target) && new FileInfo(target).Length == stream.Length))
+                throw;
+            try { File.Delete(temp); } catch { }
+        }
+
         return target;
     }
 
