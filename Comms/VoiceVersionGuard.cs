@@ -17,7 +17,7 @@ internal static class VoiceVersionGuard
     private const float AnswerInterval = 1f;
     private const float ChallengeInterval = 1f;
     private const float EnforceInterval = 0.5f;
-    private const float GraceSeconds = 2f;
+    private const float GraceSeconds = 8f;
     private const float WrongVersionGrace = 4f;
     private const int NonceLength = 16;
     private const int MacLength = 32;
