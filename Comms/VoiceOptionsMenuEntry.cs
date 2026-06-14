@@ -37,7 +37,7 @@ public static class VoiceOptionsMenuEntry
     {
         _menu = menu;
         EnsureButton();
-        if (!VoiceUiKit.AnyPanelOpen && menu != null && menu.gameObject.activeInHierarchy)
+        if (!VoiceUiKit.AnyPanelOpen && menu != null && menu.gameObject.activeInHierarchy && !_chip.Visible)
             _chip.ShowWithPop();
     }
 
@@ -46,12 +46,12 @@ public static class VoiceOptionsMenuEntry
         if (_chip.Built) return;
         try
         {
-            _chip.Build("VOICE", "PERFECT COMMS",
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f),
-                new Vector2(224f, 0f),
+            _chip.Build("PERFECT COMMS", "VOICE SETTINGS",
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f),
+                new Vector2(14f, 0f),
                 VoiceSettingsPanel.Show,
                 static () => _menu != null && _menu.gameObject != null && _menu.gameObject.activeInHierarchy,
-                static () => true);
+                static () => true, 1.0f);
         }
         catch (Exception e)
         {

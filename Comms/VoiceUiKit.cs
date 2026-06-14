@@ -448,11 +448,6 @@ internal static class VoiceUiKit
             surfaceImg.color = Color.white;
             surfaceImg.raycastTarget = false;
 
-            var topGlow = Panel("TopHighlight", RootRect, TopHighlight, false);
-            topGlow.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
-            topGlow.rectTransform.sizeDelta = new Vector2(-12f, 2f);
-            topGlow.rectTransform.anchoredPosition = new Vector2(0f, -4f);
-
             const float headerH = 76f;
             HeaderRect = Rect("Header", RootRect);
             HeaderRect.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
