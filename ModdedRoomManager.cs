@@ -20,24 +20,23 @@ public static class ModdedRoomManager
             IGameOptions settings,
             GameFilterOptions filterOpts)
         {
+            if (!ReactorHttpMatchmakingBridge.IsKnownModdedRegion())
+                return true;
+
+            MessageWriter? msg = null;
             try
             {
-                // Build the host-modded-game message ourselves.
-                // Tags.HostModdedGame == 25 (byte).
-                var msg = MessageWriter.Get(SendOption.Reliable);
-                msg.StartMessage(25); // Tags.HostModdedGame
+                msg = MessageWriter.Get(SendOption.Reliable);
+                msg.StartMessage(25);
 
-                // Standard HostGame body: serialized options + crossplay flags + filter
                 msg.WriteBytesAndSize(GameOptionsManager.Instance.gameOptionsFactory.ToBytes(settings, false));
                 msg.Write(CrossplayMode.GetCrossplayFlags());
                 filterOpts.Serialize(msg);
 
-                // Append our mod GUID so Innersloth can group us in their matchmaker
                 msg.Write(ModGuid.ToByteArray());
 
                 msg.EndMessage();
                 __instance.SendOrDisconnect(msg);
-                msg.Recycle();
 
                 VoiceDiagnostics.DebugInfo(
                     $"[VC] HostModdedGame sent with GUID {ModGuid}");
@@ -46,11 +45,13 @@ public static class ModdedRoomManager
             {
                 VoiceDiagnostics.DebugError(
                     $"[VC] HostGamePatch failed, falling back to vanilla host: {ex.Message}");
-                // Return true to let the original method run if our patch failed.
                 return true;
             }
+            finally
+            {
+                msg?.Recycle();
+            }
 
-            // Return false = skip the original HostGame implementation.
             return false;
         }
     }

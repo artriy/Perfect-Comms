@@ -64,6 +64,8 @@ public class VoiceChatRoom
     private int _lastObservedHostClientId = -1;
     private bool _hostSettingsResyncPending;
     private int _lastAppliedHostVoiceRefreshNonce;
+    private float _lastAppliedHostVoiceRefreshTime = -999f;
+    private const float HostVoiceRefreshApplyCooldownSeconds = 8f;
     private float _lastHostVoiceRefreshRequestTime = -999f;
     private float _lastLocalVoiceRefreshRequestTime = -999f;
     private static int _nextHostVoiceRefreshNonce;
@@ -478,6 +480,15 @@ public class VoiceChatRoom
             return;
         }
 
+        if (trigger == "rpc"
+            && Time.time - _lastAppliedHostVoiceRefreshTime < HostVoiceRefreshApplyCooldownSeconds)
+        {
+            VoiceDiagnostics.Log("voice.refresh.rate_limited",
+                $"{sender.ToDiagnosticFields()} reason=rate-limited nonce={nonce} trigger={trigger}");
+            return;
+        }
+
+        _lastAppliedHostVoiceRefreshTime = Time.time;
         _lastAppliedHostVoiceRefreshNonce = nonce;
         var snapshot = CurrentSnapshot;
         VoiceDiagnostics.Log("voice.refresh.applied",

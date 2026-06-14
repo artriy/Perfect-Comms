@@ -41,6 +41,8 @@ public static class HostSettingsPanel
 
     public static void Show()
     {
+        if (AmongUsClient.Instance == null || !AmongUsClient.Instance.AmHost) return;
+
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
 
