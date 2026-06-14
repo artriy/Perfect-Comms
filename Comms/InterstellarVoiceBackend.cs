@@ -329,7 +329,10 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         try
         {
             lock (_micProcessSync)
+            {
                 _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
+                _micPreprocessor.SetEchoCancellationEnabled(options.EchoCancellationEnabled);
+            }
         }
         catch (Exception ex)
         {

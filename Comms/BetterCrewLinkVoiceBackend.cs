@@ -507,7 +507,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _captureOptions = options;
         _autoMicGain = ReadAutoMicGainSetting();
         lock (_captureFrameSync)
+        {
             _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
+            _micPreprocessor.SetEchoCancellationEnabled(options.EchoCancellationEnabled);
+        }
 
 #if WINDOWS
         if (restartCapture && !Mute && _microphoneReady)

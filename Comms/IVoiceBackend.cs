@@ -73,6 +73,7 @@ internal readonly record struct VoiceCaptureRuntimeOptions(
     bool SyntheticMicToneEnabled,
     bool MicCalibrationDiagnostics,
     bool NoiseSuppressionEnabled,
+    bool EchoCancellationEnabled,
     float MicSensitivity);
 
 internal readonly record struct VoiceBackendCustomMessage(

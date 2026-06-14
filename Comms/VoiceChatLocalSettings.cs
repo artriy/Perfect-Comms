@@ -81,6 +81,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> VoiceFalloffSoftness { get; }
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
+    public ConfigEntry<bool> EchoCancellationEnabled { get; }
     public ConfigEntry<bool> AutoMicGain { get; }
     public ConfigEntry<bool> StartMuted { get; }
     public ConfigEntry<bool> StartDeafened { get; }
@@ -319,6 +320,9 @@ public class VoiceChatLocalSettings
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
             new ConfigDescription("Use RNNoise to suppress outgoing microphone background noise."));
 
+        EchoCancellationEnabled = config.Bind("Audio", "EchoCancellationEnabled", true,
+            new ConfigDescription("Cancel echo/feedback of incoming voice picked up by your microphone."));
+
         AutoMicGain = config.Bind("Audio", "AutoMicGain", true,
             new ConfigDescription("Automatically boost quiet microphones toward a consistent speech level before noise suppression and the noise gate."));
 
@@ -508,7 +512,7 @@ public class VoiceChatLocalSettings
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
-                 configEntry == NoiseSuppressionEnabled || configEntry == AutoMicGain ||
+                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled || configEntry == AutoMicGain ||
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {
