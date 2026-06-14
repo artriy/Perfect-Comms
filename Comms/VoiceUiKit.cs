@@ -99,7 +99,7 @@ internal static class VoiceUiKit
         _tickFrame = frame;
         UpdateSwallow();
 
-        try { VoiceOptionsMenuEntry.TickButton(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] TickButton threw: " + e.Message); }
+        try { VoiceOptionsMenuEntry.TickButton(); VoiceHostMenuEntry.TickHostButton(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] TickButton threw: " + e.Message); }
         try { VoiceSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceSettingsPanel.Tick threw: " + e.Message); }
         try { HostSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] HostSettingsPanel.Tick threw: " + e.Message); }
     }
@@ -361,6 +361,14 @@ internal static class VoiceUiKit
     {
         return RectTransformUtility.ScreenPointToLocalPointInRectangle(
             rt, Input.mousePosition, null, out local);
+    }
+
+    public static float AppearScale(float t)
+    {
+        const float c1 = 1.70158f;
+        const float c3 = c1 + 1f;
+        float eased = 1f + c3 * (t - 1f) * (t - 1f) * (t - 1f) + c1 * (t - 1f) * (t - 1f);
+        return Mathf.LerpUnclamped(0.6f, 1f, eased);
     }
 
     public static Color32 Lerp(Color32 a, Color32 b, float t)

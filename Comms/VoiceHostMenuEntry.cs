@@ -1,15 +1,15 @@
 using System;
 using HarmonyLib;
 using UnityEngine;
-using UnityEngine.Events;
-using static UnityEngine.UI.Button;
-using Object = UnityEngine.Object;
 
 namespace VoiceChatPlugin.VoiceChat;
 
 [HarmonyPatch]
 public static class VoiceHostMenuEntry
 {
+    private static GameSettingMenu? _hostMenu;
+    private static readonly CommsChipButton _chip = new();
+
     [HarmonyPatch(typeof(GameSettingMenu), nameof(GameSettingMenu.Start))]
     [HarmonyPostfix]
     static void PerfectComms_AddHostButton(GameSettingMenu __instance)
@@ -17,33 +17,9 @@ public static class VoiceHostMenuEntry
         try
         {
             if (__instance == null) return;
-            if (AmongUsClient.Instance == null || !AmongUsClient.Instance.AmHost) return;
-
-            var preset = __instance.GameSettingsButton;
-            var roles = __instance.RoleSettingsButton;
-            var template = roles != null ? roles : preset;
-            if (template == null) return;
-
-            var clone = Object.Instantiate(template, template.transform.parent);
-            clone.name = "PerfectCommsHostButton";
-            Vector3 step = (preset != null && roles != null)
-                ? roles.transform.localPosition - preset.transform.localPosition
-                : new Vector3(0f, -0.55f, 0f);
-            clone.transform.localPosition = template.transform.localPosition + step;
-
-            foreach (var loc in clone.GetComponentsInChildren<TextTranslatorTMP>(true))
-                if (loc != null) loc.enabled = false;
-
-            clone.OnClick = new ButtonClickedEvent();
-            clone.OnClick.AddListener((Action)(() =>
-            {
-                try { HostSettingsPanel.Show(); }
-                catch (Exception e) { VoiceDiagnostics.DebugWarning($"[PerfectComms] Host button open failed: {e.Message}"); }
-            }));
-            clone.OnMouseOver ??= new UnityEvent();
-            clone.OnMouseOut ??= new UnityEvent();
-
-            clone.ChangeButtonText("Voice Settings");
+            _hostMenu = __instance;
+            EnsureButton();
+            if (HostGate()) _chip.ShowWithPop();
         }
         catch (Exception e)
         {
@@ -55,7 +31,25 @@ public static class VoiceHostMenuEntry
     [HarmonyPostfix]
     static void PerfectComms_HideOnHostClose()
     {
+        _hostMenu = null;
+        _chip.Hide();
         try { if (HostSettingsPanel.IsOpen) HostSettingsPanel.Hide(); }
         catch { }
     }
+
+    private static bool HostGate() =>
+        AmongUsClient.Instance != null && AmongUsClient.Instance.AmHost;
+
+    private static void EnsureButton()
+    {
+        if (_chip.Built) return;
+        _chip.Build("HOST", "HOST VOICE SETTINGS",
+            new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+            new Vector2(0f, -120f),
+            HostSettingsPanel.Show,
+            static () => _hostMenu != null && _hostMenu.gameObject != null && _hostMenu.gameObject.activeInHierarchy,
+            HostGate);
+    }
+
+    public static void TickHostButton() => _chip.Tick();
 }
