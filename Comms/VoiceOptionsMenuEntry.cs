@@ -56,9 +56,9 @@ public static class VoiceOptionsMenuEntry
         try
         {
             var rt = VoiceUiKit.Rect("PerfectComms_OptionsButton", VoiceUiKit.Canvas.transform);
-            rt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            rt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
             rt.sizeDelta = new Vector2(420f, 92f);
-            rt.anchoredPosition = new Vector2(54f, 0f);
+            rt.anchoredPosition = new Vector2(224f, 0f);
             _button = rt.gameObject;
             _buttonRt = rt;
 
