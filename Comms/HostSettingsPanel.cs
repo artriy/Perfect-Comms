@@ -9,6 +9,7 @@ public static class HostSettingsPanel
 {
     private const float PanelW = 1180f;
     private const float PanelH = 720f;
+    private const float PanelScale = 1.3f;
     private const float RowH = 70f;
     private const float TopPad = 12f;
 
@@ -54,7 +55,7 @@ public static class HostSettingsPanel
         _shell.Group.alpha = 1f;
         _shell.Group.interactable = true;
         _shell.Group.blocksRaycasts = true;
-        _shell.RootRect.localScale = Vector3.one;
+        _shell.RootRect.localScale = Vector3.one * PanelScale;
         _scroll = 0f;
         _shell.PaneRoot.anchoredPosition = Vector2.zero;
         _animT = 0f;
@@ -286,7 +287,7 @@ public static class HostSettingsPanel
         const float c1 = 1.70158f;
         const float c3 = c1 + 1f;
         float eased = 1f + c3 * (t - 1f) * (t - 1f) * (t - 1f) + c1 * (t - 1f) * (t - 1f);
-        float scale = Mathf.LerpUnclamped(0.6f, 1f, eased);
+        float scale = Mathf.LerpUnclamped(0.6f, 1f, eased) * PanelScale;
         _shell.RootRect.localScale = new Vector3(scale, scale, 1f);
         _shell.Group.alpha = Mathf.Clamp01(t / 0.6f);
     }
