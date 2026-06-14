@@ -456,15 +456,10 @@ internal static class VoiceUiKit
             headerBg.color = Color.white;
             headerBg.raycastTarget = false;
 
-            var accentGlow = GlowImage("HeaderAccentGlow", HeaderRect, AccentGlow);
-            accentGlow.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f));
-            accentGlow.rectTransform.sizeDelta = new Vector2(-24f, 22f);
-            accentGlow.rectTransform.anchoredPosition = new Vector2(0f, 2f);
-
-            var accentLine = Panel("HeaderAccent", HeaderRect, Accent, false);
-            accentLine.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f));
-            accentLine.rectTransform.sizeDelta = new Vector2(-36f, 3f);
-            accentLine.rectTransform.anchoredPosition = new Vector2(0f, 0f);
+            var headerDivider = Panel("HeaderDivider", HeaderRect, Divider, false);
+            headerDivider.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f));
+            headerDivider.rectTransform.sizeDelta = new Vector2(0f, 1.5f);
+            headerDivider.rectTransform.anchoredPosition = new Vector2(0f, 0f);
 
             var titleTmp = Text("Title", HeaderRect, title, 32f, TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
             titleTmp.characterSpacing = 6f;

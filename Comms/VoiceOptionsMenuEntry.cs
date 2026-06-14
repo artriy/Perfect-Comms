@@ -68,7 +68,7 @@ public static class VoiceOptionsMenuEntry
             _glow.rectTransform.offsetMax = new Vector2(26f, 26f);
 
             var borderImg = rt.gameObject.AddComponent<Image>();
-            borderImg.sprite = VoiceUiKit.Rounded(true);
+            borderImg.sprite = VoiceUiKit.Rounded(false);
             borderImg.type = Image.Type.Sliced;
             borderImg.color = VoiceUiKit.Accent;
             borderImg.raycastTarget = false;
@@ -78,22 +78,17 @@ public static class VoiceOptionsMenuEntry
             fillRt.offsetMin = new Vector2(3f, 3f);
             fillRt.offsetMax = new Vector2(-3f, -3f);
             var fill = fillRt.gameObject.AddComponent<Image>();
-            fill.sprite = VoiceUiKit.HeaderGradient();
+            fill.sprite = VoiceUiKit.Rounded(false);
             fill.type = Image.Type.Sliced;
-            fill.color = Color.white;
+            fill.color = VoiceUiKit.PanelBottom;
             fill.raycastTarget = false;
 
             var iconRt = VoiceUiKit.Rect("Icon", rt);
             iconRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             iconRt.sizeDelta = new Vector2(52f, 52f);
             iconRt.anchoredPosition = new Vector2(46f, 0f);
-            var icon = iconRt.gameObject.AddComponent<Image>();
-            icon.sprite = VoiceUiKit.Rounded(true);
-            icon.type = Image.Type.Sliced;
-            icon.color = VoiceUiKit.Accent;
-            icon.raycastTarget = false;
             var iconGlyph = VoiceUiKit.Text("Glyph", iconRt, "●", 30f,
-                VoiceUiKit.PanelBottom, TextAlignmentOptions.Center, FontStyles.Bold);
+                VoiceUiKit.Accent, TextAlignmentOptions.Center, FontStyles.Bold);
             iconGlyph.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             iconGlyph.rectTransform.offsetMin = Vector2.zero;
             iconGlyph.rectTransform.offsetMax = Vector2.zero;
