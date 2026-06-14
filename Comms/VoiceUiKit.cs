@@ -76,11 +76,15 @@ internal static class VoiceUiKit
 
     private static bool _swallowActive;
     private static bool _swallowSawRelease;
-    public static void SwallowClick() { _swallowActive = true; _swallowSawRelease = false; }
-    public static bool BlockGameInput => AnyPanelOpen || _swallowActive;
+    private static int _swallowFrame = -1000;
+    private const int SwallowMaxFrames = 20;
+    public static void SwallowClick() { _swallowActive = true; _swallowSawRelease = false; _swallowFrame = Time.frameCount; }
+    private static bool SwallowBlocking => _swallowActive && Time.frameCount - _swallowFrame < SwallowMaxFrames;
+    public static bool BlockGameInput => AnyPanelOpen || SwallowBlocking;
     private static void UpdateSwallow()
     {
         if (!_swallowActive) return;
+        if (Time.frameCount - _swallowFrame >= SwallowMaxFrames) { _swallowActive = false; return; }
         if (Input.GetMouseButton(0)) return;
         if (_swallowSawRelease) _swallowActive = false;
         else _swallowSawRelease = true;

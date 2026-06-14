@@ -721,28 +721,6 @@ public static class PingTrackerPatch
         _barRoot.transform.position += delta;
     }
 
-    private static readonly List<Renderer> _slotBoundsScratch = new();
-
-    private static Renderer[] GetSlotBoundsRenderers(SpeakerSlot slot)
-    {
-        if (slot.BoundsRenderers != null && ReferenceEquals(slot.BoundsRenderersFor, slot.IconGO))
-            return slot.BoundsRenderers;
-
-        _slotBoundsScratch.Clear();
-        if (slot.IconGO != null)
-            foreach (var r in slot.IconGO.GetComponentsInChildren<Renderer>(true))
-                if (r != null) _slotBoundsScratch.Add(r);
-        if (slot.LabelTMP != null)
-        {
-            var lr = slot.LabelTMP.GetComponent<Renderer>();
-            if (lr != null) _slotBoundsScratch.Add(lr);
-        }
-
-        slot.BoundsRenderers = _slotBoundsScratch.ToArray();
-        slot.BoundsRenderersFor = slot.IconGO;
-        return slot.BoundsRenderers;
-    }
-
     private static bool TryComputeSlotViewportBounds(Camera cam,
         out float minX, out float maxX, out float minY, out float maxY)
     {
@@ -752,23 +730,38 @@ public static class PingTrackerPatch
 
         var depthWorld = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ManualViewportDepth));
         float depthZ = depthWorld.z;
+        float rootScale = Mathf.Abs(_barRoot.transform.lossyScale.x);
+        float coreHalf = RingScale * 0.5f * rootScale;
 
         bool any = false;
         foreach (var kv in _slots)
         {
-            var rends = GetSlotBoundsRenderers(kv.Value);
-            for (int i = 0; i < rends.Length; i++)
+            var slot = kv.Value;
+            Transform? core = slot.IconGO != null ? slot.IconGO.transform
+                : slot.RingGO != null ? slot.RingGO.transform : null;
+            if (core != null)
             {
-                var r = rends[i];
-                if (r == null || !r.enabled || !r.gameObject.activeInHierarchy) continue;
-                var b = r.bounds;
-                AccumulateViewportPoint(cam, b.min.x, b.min.y, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
-                AccumulateViewportPoint(cam, b.max.x, b.min.y, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
-                AccumulateViewportPoint(cam, b.min.x, b.max.y, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
-                AccumulateViewportPoint(cam, b.max.x, b.max.y, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+                var p = core.position;
+                AccumulateBox(cam, p.x, p.y, coreHalf, coreHalf, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+            }
+            if (slot.LabelTMP != null && slot.LabelWidth > 0.0001f && slot.LabelHeight > 0.0001f)
+            {
+                var lp = slot.LabelTMP.transform.position;
+                float lhw = slot.LabelWidth * 0.5f * rootScale;
+                float lhh = slot.LabelHeight * 0.5f * rootScale;
+                AccumulateBox(cam, lp.x, lp.y, lhw, lhh, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
             }
         }
         return any;
+    }
+
+    private static void AccumulateBox(Camera cam, float cx, float cy, float hx, float hy, float depthZ,
+        ref float minX, ref float maxX, ref float minY, ref float maxY, ref bool any)
+    {
+        AccumulateViewportPoint(cam, cx - hx, cy - hy, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+        AccumulateViewportPoint(cam, cx + hx, cy - hy, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+        AccumulateViewportPoint(cam, cx - hx, cy + hy, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+        AccumulateViewportPoint(cam, cx + hx, cy + hy, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
     }
 
     private static void AccumulateViewportPoint(Camera cam, float wx, float wy, float depthZ,
@@ -1589,7 +1582,5 @@ public static class PingTrackerPatch
         public int               VanillaStyleVersion;
         public float             AppliedGhostAlpha;
         public GameObject?       GhostAlphaIcon;
-        public Renderer[]?       BoundsRenderers;
-        public GameObject?       BoundsRenderersFor;
     }
 }
