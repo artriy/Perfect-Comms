@@ -781,7 +781,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private static string DescribeDefaultWindowsWaveInDevice()
         => "mapper";
 
-    private static int ResolveWindowsWaveOutDevice(string deviceName)
+    private static int ResolveWindowsWaveOutDevice(string? deviceName)
     {
         var requested = NormalizeAudioDeviceName(deviceName);
         if (!string.IsNullOrWhiteSpace(requested))

@@ -825,7 +825,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             actual.StartsWith(requested, StringComparison.Ordinal) ||
             requested.StartsWith(actual, StringComparison.Ordinal));
 
-    private static int ResolveWaveOutDevice(string deviceName)
+    private static int ResolveWaveOutDevice(string? deviceName)
     {
         var requested = NormalizeAudioDeviceName(deviceName);
         if (!string.IsNullOrWhiteSpace(requested))
