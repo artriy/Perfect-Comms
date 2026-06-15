@@ -23,6 +23,7 @@ internal sealed class CommsChipButton
 
     public bool Built => Root != null;
     public bool Visible => Root != null && Root.activeSelf;
+    public bool CursorOver => Root != null && Root.activeSelf && _rootRt != null && VoiceUiKit.Contains(_rootRt);
 
     public void Build(string eyebrowText, string labelText,
         Vector2 anchorMin, Vector2 anchorMax, Vector2 pivot, Vector2 pos,

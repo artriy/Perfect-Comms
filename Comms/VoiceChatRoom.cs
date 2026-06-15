@@ -481,7 +481,12 @@ public class VoiceChatRoom
             return;
         }
 
+        // Only rate-limit RPC-driven refreshes whose nonce is NOT newer than the
+        // last applied one (i.e. duplicate/stale resends). A genuinely new nonce
+        // (host re-tap, host migration) is always honored even inside the window.
+        var nonceIsNewer = nonce != 0 && nonce != _lastAppliedHostVoiceRefreshNonce;
         if (trigger == "rpc"
+            && !nonceIsNewer
             && Time.time - _lastAppliedHostVoiceRefreshTime < HostVoiceRefreshApplyCooldownSeconds)
         {
             VoiceDiagnostics.Log("voice.refresh.rate_limited",

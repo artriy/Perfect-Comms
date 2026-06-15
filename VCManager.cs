@@ -47,7 +47,7 @@ internal class VCManager : MonoBehaviour
         {
             case "MainMenu":
             case "MatchMaking":
-                VoiceVersionGuard.Reset();
+                VoiceJoinGuard.Reset();
                 VoiceLobbyRegistryPublisher.ClearLocalListing();
                 VoiceChatRoom.CloseCurrentRoom();
                 VoiceLobbyBrowserUi.Clear();
@@ -73,7 +73,7 @@ internal class VCManager : MonoBehaviour
         {
             case "OnlineGame":
             case "EndGame":
-                VoiceVersionGuard.Tick();
+                VoiceJoinGuard.Tick();
                 VoiceFrameProfiler.Tick();
                 long vcTicks = VoiceFrameProfiler.Begin();
                 long hudTicks = VoiceFrameProfiler.Begin();

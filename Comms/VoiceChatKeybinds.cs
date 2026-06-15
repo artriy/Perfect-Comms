@@ -15,6 +15,8 @@ public static class VoiceChatKeybinds
     public static VoiceKeybind VolumeMenu { get; private set; } = null!;
     public static VoiceKeybind LocalVoiceRefresh { get; private set; } = null!;
     public static VoiceKeybind HostVoiceRefresh { get; private set; } = null!;
+    public static VoiceKeybind OpenVoiceMenu { get; private set; } = null!;
+    public static VoiceKeybind OpenHostVoiceSettings { get; private set; } = null!;
 
     public static void Initialize(ConfigFile config)
     {
@@ -28,5 +30,7 @@ public static class VoiceChatKeybinds
         VolumeMenu = new VoiceKeybind(config, s, "Player Volumes", KeyCode.B);
         LocalVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connection", KeyCode.F7);
         HostVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connections (Host)", KeyCode.F8);
+        OpenVoiceMenu = new VoiceKeybind(config, s, "Open Voice Menu", KeyCode.F10);
+        OpenHostVoiceSettings = new VoiceKeybind(config, s, "Open Host Voice Settings", KeyCode.F11);
     }
 }

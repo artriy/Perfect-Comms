@@ -72,7 +72,7 @@ internal static class VoiceUiKit
     public static readonly Color32 Backdrop = new(0, 0, 0, 150);
 
     public static bool AnyPanelOpen =>
-        VoiceSettingsPanel.IsOpen || HostSettingsPanel.IsOpen;
+        VoiceSettingsPanel.IsOpen || HostSettingsPanel.IsOpen || VoiceVolumeMenu.IsOpen;
 
     private static bool _swallowActive;
     private static bool _swallowSawRelease;
@@ -102,6 +102,7 @@ internal static class VoiceUiKit
         try { VoiceOptionsMenuEntry.TickButton(); VoiceHostMenuEntry.TickHostButton(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] TickButton threw: " + e.Message); }
         try { VoiceSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceSettingsPanel.Tick threw: " + e.Message); }
         try { HostSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] HostSettingsPanel.Tick threw: " + e.Message); }
+        try { VoiceVolumeMenu.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceVolumeMenu.Tick threw: " + e.Message); }
     }
 
     public static void RaiseAbove(Transform panel, Transform? extra = null)
@@ -405,7 +406,7 @@ internal static class VoiceUiKit
         private bool _dragging;
         private Vector2 _dragOffset;
 
-        public PanelShell(string objName, string title, float w, float h, Action onClose)
+        public PanelShell(string objName, string title, float w, float h, Action onClose, bool rail = true, bool backdrop = true)
         {
             Width = w; Height = h;
             _onClose = onClose;
@@ -418,15 +419,18 @@ internal static class VoiceUiKit
 
             Group = Root.AddComponent<CanvasGroup>();
 
-            var backdrop = Rect("Backdrop", RootRect);
-            backdrop.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
-            backdrop.sizeDelta = new Vector2(8000f, 8000f);
-            backdrop.anchoredPosition = Vector2.zero;
-            backdrop.SetAsFirstSibling();
-            var backdropImg = backdrop.gameObject.AddComponent<Image>();
-            backdropImg.sprite = Solid(Color.white);
-            backdropImg.color = Backdrop;
-            backdropImg.raycastTarget = true;
+            if (backdrop)
+            {
+                var backdropRt = Rect("Backdrop", RootRect);
+                backdropRt.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+                backdropRt.sizeDelta = new Vector2(8000f, 8000f);
+                backdropRt.anchoredPosition = Vector2.zero;
+                backdropRt.SetAsFirstSibling();
+                var backdropImg = backdropRt.gameObject.AddComponent<Image>();
+                backdropImg.sprite = Solid(Color.white);
+                backdropImg.color = Backdrop;
+                backdropImg.raycastTarget = true;
+            }
 
             var shadow = GlowImage("DropShadow", RootRect, PanelShadow);
             shadow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
@@ -484,26 +488,29 @@ internal static class VoiceUiKit
 
             const float pad = 20f;
             const float clipPad = 8f;
-            RailWidth = Mathf.Round(w * 0.25f);
+            RailWidth = rail ? Mathf.Round(w * 0.25f) : 0f;
 
             RailRoot = Rect("Rail", RootRect);
             RailRoot.Anchor(new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f));
             RailRoot.offsetMin = new Vector2(0f, 0f);
             RailRoot.offsetMax = new Vector2(RailWidth, -headerH);
-            var railBg = RailRoot.gameObject.AddComponent<Image>();
-            railBg.sprite = Rounded(true);
-            railBg.type = Image.Type.Sliced;
-            railBg.color = RailSurface;
-            railBg.raycastTarget = false;
+            if (rail)
+            {
+                var railBg = RailRoot.gameObject.AddComponent<Image>();
+                railBg.sprite = Rounded(true);
+                railBg.type = Image.Type.Sliced;
+                railBg.color = RailSurface;
+                railBg.raycastTarget = false;
 
-            var railDiv = Rect("RailDivider", RootRect);
-            railDiv.Anchor(new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f));
-            railDiv.offsetMin = new Vector2(RailWidth, 0f);
-            railDiv.offsetMax = new Vector2(RailWidth + 1.5f, -headerH);
-            var railDivImg = railDiv.gameObject.AddComponent<Image>();
-            railDivImg.sprite = Solid(Color.white);
-            railDivImg.color = Divider;
-            railDivImg.raycastTarget = false;
+                var railDiv = Rect("RailDivider", RootRect);
+                railDiv.Anchor(new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f));
+                railDiv.offsetMin = new Vector2(RailWidth, 0f);
+                railDiv.offsetMax = new Vector2(RailWidth + 1.5f, -headerH);
+                var railDivImg = railDiv.gameObject.AddComponent<Image>();
+                railDivImg.sprite = Solid(Color.white);
+                railDivImg.color = Divider;
+                railDivImg.raycastTarget = false;
+            }
 
             PaneWidth = w - RailWidth - pad * 2f;
             PaneHeight = h - headerH - pad * 2f;
@@ -722,6 +729,7 @@ internal static class VoiceUiKit
     {
         public RectTransform Root = null!;
         public Image? Hover;
+        public TextMeshProUGUI Title = null!;
         public float Height = 72f;
         protected float PaneW;
         public virtual void Tick(float dt) { }
@@ -734,7 +742,7 @@ internal static class VoiceUiKit
         public const float ColGap = 24f;
         public const float ValueColW = 110f;
 
-        protected float LabelColW => Mathf.Round(PaneW * 0.42f);
+        protected virtual float LabelColW => Mathf.Round(PaneW * 0.42f);
         protected float ControlLeft => EdgePad + LabelColW + ColGap;
         protected float ControlRight => PaneW - EdgePad - ValueColW - ColGap;
         protected float ControlColW => Mathf.Max(120f, ControlRight - ControlLeft);
@@ -755,9 +763,13 @@ internal static class VoiceUiKit
 
             var title = Text("RowLabel", Root, label, 20f, TextPrimary, TextAlignmentOptions.Left);
             title.overflowMode = TextOverflowModes.Ellipsis;
+            title.enableAutoSizing = true;
+            title.fontSizeMax = 20f;
+            title.fontSizeMin = 15f;
             title.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             title.rectTransform.sizeDelta = new Vector2(LabelColW, height);
             title.rectTransform.anchoredPosition = new Vector2(EdgePad, 0f);
+            Title = title;
         }
 
         protected void TickHover()
@@ -780,6 +792,8 @@ internal static class VoiceUiKit
         private float _knobT;
 
         public ToggleRow(Func<bool> get, Action<bool> set) { _get = get; _set = set; }
+
+        protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - 66f);
 
         public ToggleRow Build(RectTransform pane, string label, float width, float y, float height)
         {
@@ -1077,15 +1091,20 @@ internal static class VoiceUiKit
         private RectTransform _capRow = null!;
         private Image _clearBtn = null!;
         private Image _cancelBtn = null!;
-        private float _fullBtnW;
+        private float _normalLeft;
+        private float _capLeft;
         private bool _capturing;
         private bool _armed;
         private static RebindRow? _active;
 
         private const float CapW = 170f;
+        private const float NormalBtnW = 185f;
+        private const float CapBtnW = 150f;
 
         public RebindRow(Func<KeyCode> get, Action<KeyCode> set, Action clear)
         { _get = get; _set = set; _clear = clear; }
+
+        protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - NormalBtnW);
 
         public static bool IsCapturing => _active != null;
         public static void CancelCapture()
@@ -1097,11 +1116,12 @@ internal static class VoiceUiKit
         {
             BuildBase(pane, label, width, y, height);
 
-            _fullBtnW = (PaneW - EdgePad) - ControlLeft;
+            _normalLeft = (PaneW - EdgePad) - NormalBtnW;
+            _capLeft = (PaneW - EdgePad) - (CapBtnW + ColGap + CapW);
             _btnRt = Rect("Bind", Root);
             _btnRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            _btnRt.sizeDelta = new Vector2(_fullBtnW, 40f);
-            _btnRt.anchoredPosition = new Vector2(ControlLeft, 0f);
+            _btnRt.sizeDelta = new Vector2(NormalBtnW, 40f);
+            _btnRt.anchoredPosition = new Vector2(_normalLeft, 0f);
             _btn = _btnRt.gameObject.AddComponent<Image>();
             _btn.sprite = Rounded();
             _btn.type = Image.Type.Sliced;
@@ -1117,7 +1137,7 @@ internal static class VoiceUiKit
             _capRow = Rect("CapControls", Root);
             _capRow.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             _capRow.sizeDelta = new Vector2(CapW, 36f);
-            _capRow.anchoredPosition = new Vector2(ControlLeft + _fullBtnW - CapW * 0.5f, 0f);
+            _capRow.anchoredPosition = new Vector2((PaneW - EdgePad) - CapW * 0.5f, 0f);
             _capRow.pivot = new Vector2(0.5f, 0.5f);
 
             _clearBtn = CapButton(_capRow, "Clear", new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0f), DangerDim);
@@ -1132,13 +1152,17 @@ internal static class VoiceUiKit
         {
             if (cap)
             {
-                _btnRt.sizeDelta = new Vector2(Mathf.Max(120f, _fullBtnW - CapW - ColGap), 40f);
+                _btnRt.anchoredPosition = new Vector2(_capLeft, 0f);
+                _btnRt.sizeDelta = new Vector2(CapBtnW, 40f);
                 _capRow.gameObject.SetActive(true);
+                if (Title != null) Title.gameObject.SetActive(false);
             }
             else
             {
-                _btnRt.sizeDelta = new Vector2(_fullBtnW, 40f);
+                _btnRt.anchoredPosition = new Vector2(_normalLeft, 0f);
+                _btnRt.sizeDelta = new Vector2(NormalBtnW, 40f);
                 _capRow.gameObject.SetActive(false);
+                if (Title != null) Title.gameObject.SetActive(true);
             }
         }
 
@@ -1270,6 +1294,282 @@ internal static class VoiceUiKit
                 list.Add(kc);
             }
             return list.ToArray();
+        }
+    }
+
+    public sealed class PlayerVolumeRow : Row
+    {
+        private readonly Func<float> _get;
+        private readonly Action<float> _onChange;
+        private readonly Action _onCommit;
+        private readonly PlayerControl? _pc;
+        private readonly float _min, _max;
+
+        public byte PlayerId;
+
+        private RectTransform _track = null!;
+        private RectTransform _fill = null!;
+        private Image _fillImg = null!;
+        private RectTransform _knob = null!;
+        private RectTransform _meterFill = null!;
+        private Image _meterFillImg = null!;
+        private Image _avatarGlow = null!;
+        private RectTransform _resetRt = null!;
+        private Image _resetImg = null!;
+        private TextMeshProUGUI _value = null!;
+        private Color _glowColor;
+        private float _trackW;
+        private float _meterW;
+        private float _meterDisplay;
+        private float _meterTarget;
+        private bool _meterSpeaking;
+        private bool _dragging;
+        private bool _changed;
+        public override bool IsDragging => _dragging;
+
+        private static readonly Color32 MeterGreen  = new(77, 217, 107, 240);
+        private static readonly Color32 MeterYellow = new(242, 214, 64, 240);
+        private static readonly Color32 MeterRed    = new(245, 64, 56, 240);
+        private static readonly Color32 FillLow     = new(46, 82, 140, 235);
+        private static readonly Color32 FillBoost   = new(235, 171, 61, 235);
+        private const float MeterRelease = 1.6f;
+
+        private static Sprite? _resetIcon;
+        private static Sprite ResetIcon =>
+            _resetIcon ??= VoiceChatHudState.LoadSprite("VoiceChatPlugin.Resources.VolumeResetIcon.png", highQuality: true);
+
+        public PlayerVolumeRow(Func<float> get, Action<float> onChange, Action onCommit,
+            PlayerControl? pc, float min, float max)
+        { _get = get; _onChange = onChange; _onCommit = onCommit; _pc = pc; _min = min; _max = max; }
+
+        public PlayerVolumeRow Build(RectTransform pane, string name, float width, float y, float height)
+        {
+            BuildBase(pane, "", width, y, height);
+
+            const float avatarD = 50f;
+            float avatarCx = EdgePad + avatarD * 0.5f;
+            float textLeft = EdgePad + avatarD + 14f;
+            const float textColW = 156f;
+
+            _avatarGlow = GlowImage("AvatarGlow", Root, Clear);
+            _avatarGlow.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
+            _avatarGlow.rectTransform.sizeDelta = new Vector2(avatarD + 22f, avatarD + 22f);
+            _avatarGlow.rectTransform.anchoredPosition = new Vector2(avatarCx, 0f);
+
+            _glowColor = CrewmateAvatarRenderer.GetPaletteColor(_pc);
+
+            var avatarRt = Rect("Avatar", Root);
+            avatarRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
+            avatarRt.sizeDelta = new Vector2(avatarD, avatarD);
+            avatarRt.anchoredPosition = new Vector2(avatarCx, 0f);
+            var avatarImg = avatarRt.gameObject.AddComponent<Image>();
+            var body = CrewmateAvatarRenderer.GetBodySpriteFor(_pc);
+            if (body != null)
+            {
+                avatarImg.sprite = body;
+                avatarImg.preserveAspect = true;
+                avatarImg.color = Color.white;
+            }
+            else
+            {
+                avatarImg.sprite = Rounded(true);
+                avatarImg.type = Image.Type.Sliced;
+                avatarImg.color = _glowColor;
+            }
+            avatarImg.raycastTarget = false;
+
+            var nameTmp = Text("Name", Root, name, 19f, TextPrimary, TextAlignmentOptions.Left, FontStyles.Bold);
+            nameTmp.overflowMode = TextOverflowModes.Ellipsis;
+            nameTmp.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            nameTmp.rectTransform.sizeDelta = new Vector2(textColW, 30f);
+            nameTmp.rectTransform.anchoredPosition = new Vector2(textLeft, 13f);
+
+            _meterW = textColW;
+            var meterTrack = Rect("MeterTrack", Root);
+            meterTrack.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            meterTrack.sizeDelta = new Vector2(_meterW, 6f);
+            meterTrack.anchoredPosition = new Vector2(textLeft, -15f);
+            var meterTrackImg = meterTrack.gameObject.AddComponent<Image>();
+            meterTrackImg.sprite = Rounded(true);
+            meterTrackImg.type = Image.Type.Sliced;
+            meterTrackImg.color = TrackBg;
+            meterTrackImg.raycastTarget = false;
+
+            _meterFill = Rect("MeterFill", meterTrack);
+            _meterFill.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            _meterFill.sizeDelta = new Vector2(0f, 6f);
+            _meterFill.anchoredPosition = Vector2.zero;
+            _meterFillImg = _meterFill.gameObject.AddComponent<Image>();
+            _meterFillImg.sprite = Rounded(true);
+            _meterFillImg.type = Image.Type.Sliced;
+            _meterFillImg.color = MeterGreen;
+            _meterFillImg.raycastTarget = false;
+
+            const float resetD = 36f;
+            const float pillW = 60f;
+            const float gap = 14f;
+            float sliderLeft = textLeft + textColW + ColGap;
+            float resetLeft = PaneW - EdgePad - resetD;
+            float pillLeft = resetLeft - gap - pillW;
+            float sliderRight = pillLeft - gap;
+            _trackW = Mathf.Max(120f, sliderRight - sliderLeft);
+
+            _track = Rect("Track", Root);
+            _track.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            _track.sizeDelta = new Vector2(_trackW, 9f);
+            _track.anchoredPosition = new Vector2(sliderLeft, 0f);
+            var trackImg = _track.gameObject.AddComponent<Image>();
+            trackImg.sprite = Rounded(true);
+            trackImg.type = Image.Type.Sliced;
+            trackImg.color = TrackBg;
+            trackImg.raycastTarget = false;
+
+            float midT = Mathf.Approximately(_max, _min) ? 0.5f : (1f - _min) / (_max - _min);
+            var mid = Rect("Mid", _track);
+            mid.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
+            mid.sizeDelta = new Vector2(2f, 18f);
+            mid.anchoredPosition = new Vector2(_trackW * midT, 0f);
+            var midImg = mid.gameObject.AddComponent<Image>();
+            midImg.sprite = Solid(Color.white);
+            midImg.color = AccentSoft;
+            midImg.raycastTarget = false;
+
+            _fill = Rect("Fill", _track);
+            _fill.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            _fill.sizeDelta = new Vector2(0f, 9f);
+            _fillImg = _fill.gameObject.AddComponent<Image>();
+            _fillImg.sprite = Rounded(true);
+            _fillImg.type = Image.Type.Sliced;
+            _fillImg.color = Accent;
+            _fillImg.raycastTarget = false;
+
+            _knob = Rect("Knob", _track);
+            _knob.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
+            _knob.sizeDelta = new Vector2(22f, 22f);
+            var knobShadow = GlowImage("KnobShadow", _knob, new Color32(0, 0, 0, 140));
+            knobShadow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            knobShadow.rectTransform.offsetMin = new Vector2(-5f, -7f);
+            knobShadow.rectTransform.offsetMax = new Vector2(5f, 3f);
+            var knobImg = Rect("KnobFill", _knob).gameObject.AddComponent<Image>();
+            knobImg.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            knobImg.rectTransform.offsetMin = Vector2.zero;
+            knobImg.rectTransform.offsetMax = Vector2.zero;
+            knobImg.sprite = Rounded(true);
+            knobImg.type = Image.Type.Sliced;
+            knobImg.color = TextBright;
+            knobImg.raycastTarget = false;
+
+            var pill = Rect("Pill", Root);
+            pill.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            pill.sizeDelta = new Vector2(pillW, 34f);
+            pill.anchoredPosition = new Vector2(pillLeft, 0f);
+            var pillImg = pill.gameObject.AddComponent<Image>();
+            pillImg.sprite = Rounded(true);
+            pillImg.type = Image.Type.Sliced;
+            pillImg.color = AccentFaint;
+            pillImg.raycastTarget = false;
+            _value = Text("Value", pill, "", 18f, Accent, TextAlignmentOptions.Center, FontStyles.Bold);
+            _value.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            _value.rectTransform.offsetMin = new Vector2(4f, 0f);
+            _value.rectTransform.offsetMax = new Vector2(-4f, 0f);
+
+            _resetRt = Rect("Reset", Root);
+            _resetRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            _resetRt.sizeDelta = new Vector2(resetD, resetD);
+            _resetRt.anchoredPosition = new Vector2(resetLeft, 0f);
+            _resetImg = _resetRt.gameObject.AddComponent<Image>();
+            _resetImg.sprite = Rounded();
+            _resetImg.type = Image.Type.Sliced;
+            _resetImg.color = ControlBg;
+            _resetImg.raycastTarget = false;
+            var icon = ResetIcon;
+            if (icon != null)
+            {
+                var iconRt = Rect("ResetIcon", _resetRt);
+                iconRt.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+                iconRt.sizeDelta = new Vector2(22f, 22f);
+                var iconImg = iconRt.gameObject.AddComponent<Image>();
+                iconImg.sprite = icon;
+                iconImg.preserveAspect = true;
+                iconImg.color = TextPrimary;
+                iconImg.raycastTarget = false;
+            }
+
+            ApplyVisual();
+            return this;
+        }
+
+        private static Color FillColor(float v)
+        {
+            if (v <= 1f) return Color.Lerp(FillLow, Accent, Mathf.Clamp01(v));
+            return Color.Lerp(Accent, FillBoost, Mathf.Clamp01(v - 1f));
+        }
+
+        private static Color MeterColor(float t) => t < 0.55f
+            ? Color.Lerp(MeterGreen, MeterYellow, t / 0.55f)
+            : Color.Lerp(MeterYellow, MeterRed, (t - 0.55f) / 0.45f);
+
+        private static string ValueColor(float v)
+            => v < 0.005f ? "#8C9CB2" : v > 1.005f ? "#F2AB3D" : "#22D3EE";
+
+        private void ApplyVisual()
+        {
+            float v = Mathf.Clamp(_get(), _min, _max);
+            float t = Mathf.Approximately(_max, _min) ? 0f : (v - _min) / (_max - _min);
+            _fill.sizeDelta = new Vector2(_trackW * t, 9f);
+            _fillImg.color = FillColor(v);
+            _knob.anchoredPosition = new Vector2(_trackW * t, 0f);
+            _value.text = $"<color={ValueColor(v)}>{Mathf.RoundToInt(v * 100f)}%</color>";
+        }
+
+        public void SetLevel(float level, bool speaking)
+        {
+            _meterTarget = Mathf.Sqrt(Mathf.Clamp01(level));
+            _meterSpeaking = speaking;
+        }
+
+        public override void OnMouseDown()
+        {
+            if (Contains(_resetRt)) { _onChange(1f); _onCommit(); ApplyVisual(); return; }
+            if (Contains(_track) || Contains(_knob)) { _dragging = true; ApplyFromMouse(); }
+        }
+
+        public override void OnMouseDrag()
+        {
+            if (_dragging) ApplyFromMouse();
+        }
+
+        public override void OnMouseUp()
+        {
+            if (_dragging && _changed) { _onCommit(); _changed = false; }
+            _dragging = false;
+        }
+
+        private void ApplyFromMouse()
+        {
+            if (!LocalPoint(_track, out var lp)) return;
+            float t = Mathf.Clamp01(lp.x / _trackW);
+            float v = (float)Math.Round(_min + t * (_max - _min), 2);
+            if (Mathf.Abs(v - _get()) < 0.0001f) return;
+            _onChange(v);
+            _changed = true;
+            ApplyVisual();
+        }
+
+        public override void Tick(float dt)
+        {
+            TickHover();
+            if (!_dragging) ApplyVisual();
+            _resetImg.color = Lerp(_resetImg.color, Contains(_resetRt) ? ControlHover : ControlBg, 0.25f);
+
+            float shown = _meterTarget >= _meterDisplay
+                ? _meterTarget
+                : Mathf.Max(_meterTarget, _meterDisplay - MeterRelease * dt);
+            _meterDisplay = shown;
+            _meterFill.sizeDelta = new Vector2(_meterW * shown, 6f);
+            _meterFillImg.color = MeterColor(shown);
+            var g = _glowColor; g.a = _meterSpeaking ? 0.30f + 0.45f * shown : 0f;
+            _avatarGlow.color = g;
         }
     }
 }

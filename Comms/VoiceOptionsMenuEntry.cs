@@ -59,5 +59,7 @@ public static class VoiceOptionsMenuEntry
         }
     }
 
+    public static bool CursorOverChip => _chip.CursorOver;
+
     public static void TickButton() => _chip.Tick();
 }

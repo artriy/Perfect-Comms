@@ -98,7 +98,7 @@ internal sealed class VoiceOverlayState
         return new VoiceOverlayState(local, _remoteBuffer);
     }
 
-    private static bool IsLiveRemoteSpeaker(byte playerId, VoiceGameStateSnapshot? snapshot)
+    internal static bool IsLiveRemoteSpeaker(byte playerId, VoiceGameStateSnapshot? snapshot)
     {
         if (playerId == byte.MaxValue)
             return false;

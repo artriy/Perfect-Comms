@@ -51,5 +51,7 @@ public static class VoiceHostMenuEntry
             HostGate);
     }
 
+    public static bool CursorOverChip => _chip.CursorOver;
+
     public static void TickHostButton() => _chip.Tick();
 }

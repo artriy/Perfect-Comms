@@ -362,6 +362,8 @@ public static class VoiceSettingsPanel
 
     private static void BuildKeybinds(List<Entry> defs, VoiceChatLocalSettings s)
     {
+        Rebind(defs, VoiceChatKeybinds.OpenVoiceMenu);
+        Rebind(defs, VoiceChatKeybinds.OpenHostVoiceSettings);
         Rebind(defs, VoiceChatKeybinds.ToggleMute);
         Rebind(defs, VoiceChatKeybinds.PushToTalk);
         Rebind(defs, VoiceChatKeybinds.TeamRadio);

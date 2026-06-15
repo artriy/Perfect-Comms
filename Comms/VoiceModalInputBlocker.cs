@@ -5,7 +5,10 @@ namespace VoiceChatPlugin.VoiceChat;
 [HarmonyPatch]
 public static class VoiceModalInputBlocker
 {
-    private static bool Blocked => VoiceUiKit.BlockGameInput;
+    private static bool Blocked =>
+        VoiceUiKit.BlockGameInput
+        || VoiceOptionsMenuEntry.CursorOverChip
+        || VoiceHostMenuEntry.CursorOverChip;
 
     [HarmonyPatch(typeof(PassiveButton), nameof(PassiveButton.ReceiveClickDown))]
     [HarmonyPrefix]
@@ -46,4 +49,8 @@ public static class VoiceModalInputBlocker
     [HarmonyPatch(typeof(ControllerManager), nameof(ControllerManager.Update))]
     [HarmonyPrefix]
     static bool PerfectComms_BlockControllerUpdate() => !Blocked;
+
+    [HarmonyPatch(typeof(UnityEngine.EventSystems.EventSystem), "Update")]
+    [HarmonyPrefix]
+    static bool PerfectComms_BlockEventSystem() => !Blocked;
 }

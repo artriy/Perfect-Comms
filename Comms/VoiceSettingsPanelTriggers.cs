@@ -20,13 +20,13 @@ public static class VoiceSettingsPanelTriggers
         var chat = HudManager.Instance.Chat;
         if (chat != null && chat.IsOpenOrOpening) return;
 
-        if (Input.GetKeyDown(KeyCode.F10) && _lastClientFrame != Time.frameCount)
+        if (VoiceChatKeybinds.OpenVoiceMenu.WasPressedThisFrame() && _lastClientFrame != Time.frameCount)
         {
             _lastClientFrame = Time.frameCount;
             VoiceSettingsPanel.Toggle();
         }
 
-        if (Input.GetKeyDown(KeyCode.F11) && _lastHostFrame != Time.frameCount)
+        if (VoiceChatKeybinds.OpenHostVoiceSettings.WasPressedThisFrame() && _lastHostFrame != Time.frameCount)
         {
             _lastHostFrame = Time.frameCount;
             HostSettingsPanel.Toggle();

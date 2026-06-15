@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Perfect Comms v3.0.0
 
 Perfect Comms is now fully standalone: it no longer depends on Reactor or MiraAPI.
 

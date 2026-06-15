@@ -38,7 +38,7 @@ public sealed class VoiceKeybind
         foreach (var cb in _callbacks)
         {
             try { cb(); }
-            catch { }
+            catch (Exception ex) { VoiceDiagnostics.Log("keybind.error", $"bind={DisplayName} error=\"{ex.Message}\""); }
         }
     }
 }
