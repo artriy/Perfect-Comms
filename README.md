@@ -12,7 +12,8 @@
 <p align="center">
   <a href="#controls">Controls</a> &nbsp;·&nbsp;
   <a href="#install">Install</a> &nbsp;·&nbsp;
-  <a href="#supported-mods">Supported Mods</a>
+  <a href="#supported-mods">Supported Mods</a> &nbsp;·&nbsp;
+  <a href="#for-mod-developers">For Mod Developers</a>
 </p>
 
 <p align="center">
@@ -49,6 +50,23 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 | Mod | Voice behavior |
 | :--- | :--- |
 | **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing for Eclipsal, Grenadier, and Hypnotist effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
+
+<br>
+
+## For Mod Developers
+
+Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**. Reference `PerfectComms.dll` as a soft dependency and register your rules in `Load()`: mutes, private radio channels, relocated hearing, your own host-settings tab, and more.
+
+```csharp
+[BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]
+// in Load():
+PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
+    ctx.Phase == VoicePhaseKind.Meeting && MyRoles.IsGagged(ctx.Player)
+        ? VoiceRuleResult.Mute("Gagged")
+        : VoiceRuleResult.Pass);
+```
+
+Full guide, every primitive, and copy-paste examples are in the **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
 
 <br>
 
