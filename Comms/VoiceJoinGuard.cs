@@ -1,274 +1,94 @@
 using System;
-using System.Collections.Generic;
+using System.Reflection;
+using BepInEx.Unity.IL2CPP.Utils;
 using HarmonyLib;
 using Hazel;
 using InnerNet;
-using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-// Reactor-style version gate. The host rejects any client that does not announce
-// the SAME Perfect Comms version. A client with no mod never sends a handshake,
-// so it is treated as a mismatch and removed before it can play.
+// Reactor-faithful version gate, standalone (Reactor-absent) path.
 //
-// ponytail: version is a plaintext string, no HMAC. A client-only mod cannot keep
-// a real secret (the key ships in the binary), so the old HMAC was enforcement
-// theater. This gates honest version mismatches, which is all it can ever do.
+// This mirrors Reactor's HAAS flow EXACTLY: the joining client injects its Perfect
+// Comms version onto the SceneChange message it sends while loading in
+// (CoSendSceneChange). The host reads that injected version inside HandleGameDataInner
+// BEFORE the player is spawned into the lobby; on mismatch/absence it kicks and
+// SWALLOWS the scene-change (returns false) so the player never finishes joining.
+//
+// Why this shape: the old approach kicked from OnPlayerJoined AFTER the player had
+// already spawned in the lobby, and KickPlayer-on-a-spawned-client desynced modded
+// servers and dropped the HOST a few seconds later. Rejecting at scene-change is what
+// Reactor does and it never disconnects the host.
+//
+// Reactor coexistence: when Reactor is loaded it registers Perfect Comms into its own
+// handshake (we ship RequireOnAllClients via AssemblyMetadata, see AssemblyInfo.cs)
+// and does this gating natively, so ALL patches here stand down (ReactorHandlesIt).
+//
+// ponytail: plaintext version, no HMAC (a client-only mod can't keep a secret). The
+// only fragile piece is the IL2CPP coroutine patch via Il2CppStateMachineWrapper; it
+// is try/catch-guarded at every site, so a future game change disables the guard
+// rather than crashing.
 internal static class VoiceJoinGuard
 {
-    private const uint Magic = 0x50435631;
-    private const byte MagicB0 = 0x31;
-    private const byte MagicB1 = 0x56;
-    private const byte MagicB2 = 0x43;
-    private const byte MagicB3 = 0x50;
+    // Our marker on the injected payload: 4 magic bytes then the version string.
+    // Distinct from Reactor's "reactor" magic so the two never cross-read.
+    private const byte M0 = 0x50; // P
+    private const byte M1 = 0x43; // C
+    private const byte M2 = 0x56; // V
+    private const byte M3 = 0x31; // 1
+
+    // GameDataTypes.SceneChangeFlag, stable in the Among Us protocol.
+    private const byte SceneChangeFlag = 6;
+
+    // Reactor-style kick-reason packet: a tag-255 GameData submessage flagged
+    // SetKickReason. Read in HandleGameDataInner (works before the client has fully
+    // spawned, unlike a PlayerControl RPC), so the kicked client gets the reason in
+    // time to show it on the disconnect screen.
     private const byte SubmessageTag = byte.MaxValue;
-    private const byte FlagHandshake = 1;
-    private const byte FlagKickReason = 2;
+    private const byte FlagSetKickReason = 240; // our flag, distinct from Reactor's enum
 
-    // No-handshake = no mod. Keep this just long enough for one round-trip so a
-    // legit client's early handshake lands first; a modless client is gone fast.
-    private const float GraceSeconds = 3f;
-    private const float SendInterval = 0.5f;
-    private const int MaxSends = 8;
-    private const int MaxKicks = 3;
-    private const float RekickInterval = 3f;
-
-    private static readonly Dictionary<int, float> Pending = new();
-    private static readonly Dictionary<int, string> PendingKick = new();
-    private static readonly HashSet<int> Cleared = new();
-    private static readonly Dictionary<int, float> KickTime = new();
-    private static readonly Dictionary<int, int> KickCount = new();
-    private static readonly List<int> Scratch = new();
-
-    private static int _sentCount;
-    private static float _lastSend = -999f;
     private static string? _pendingKickReason;
+
     private static bool _loggedActive;
-    private static float _lastHeartbeat = -999f;
+
+    private static bool _reactorProbed;
+    private static bool _reactorPresent;
 
     private static void Dbg(string msg) => VoiceChatPluginMain.Logger.LogMessage("[JoinGuard] " + msg);
 
+    internal static bool ReactorHandlesItPublic => ReactorHandlesIt();
+
+    private static bool ReactorHandlesIt()
+    {
+        if (_reactorProbed) return _reactorPresent;
+        _reactorProbed = true;
+        try
+        {
+            _reactorPresent = BepInEx.Unity.IL2CPP.IL2CPPChainloader.Instance.Plugins.ContainsKey("gg.reactor.api");
+        }
+        catch (Exception ex)
+        {
+            _reactorPresent = false;
+            Dbg("reactor probe failed: " + ex.Message);
+        }
+        if (_reactorPresent) Dbg("Reactor present -> standalone guard standing down (Reactor gates version natively)");
+        return _reactorPresent;
+    }
+
+    // Kept for VCManager's existing call sites; nothing to reset in the new model.
     public static void Reset()
     {
-        Pending.Clear();
-        PendingKick.Clear();
-        Cleared.Clear();
-        KickTime.Clear();
-        KickCount.Clear();
-        _sentCount = 0;
-        _lastSend = -999f;
+        _loggedActive = false;
         _pendingKickReason = null;
-        Dbg("reset");
     }
 
+    // Kept for VCManager's per-frame call; the new model is event-driven via patches.
     public static void Tick()
     {
-        var client = AmongUsClient.Instance;
-        if (client == null) return;
-
-        if (!_loggedActive)
-        {
-            _loggedActive = true;
-            Dbg($"active ver={VoiceChatPluginMain.Version}");
-        }
-
-        if (!client.AmHost) { ClientTick(client); return; }
-        HostTick(client);
-    }
-
-    private static void ClientTick(InnerNetClient client)
-    {
-        if (Time.time - _lastHeartbeat > 3f)
-        {
-            _lastHeartbeat = Time.time;
-            Dbg($"client heartbeat sent={_sentCount} clientId={client.ClientId} hostId={client.HostId}");
-        }
-
-        if (_sentCount >= MaxSends) return;
-        if (Time.time - _lastSend < SendInterval) return;
-        if (SendHandshake(client)) { _lastSend = Time.time; _sentCount++; }
-    }
-
-    private static void HostTick(InnerNetClient client)
-    {
-        try
-        {
-            foreach (var c in client.allClients)
-            {
-                if (c == null) continue;
-                int id = c.Id;
-                if (id == client.ClientId || Cleared.Contains(id) || PendingKick.ContainsKey(id)) continue;
-                if (KickCount.TryGetValue(id, out var kc) && kc >= MaxKicks) continue;
-                if (!Pending.ContainsKey(id)) { Pending[id] = Time.time; Dbg($"track id={id}"); }
-            }
-        }
-        catch (Exception e) { Dbg("allClients scan error: " + e.Message); }
-
-        if (Time.time - _lastHeartbeat > 3f)
-        {
-            _lastHeartbeat = Time.time;
-            Dbg($"host heartbeat pending={Pending.Count} kick={PendingKick.Count} cleared={Cleared.Count}");
-        }
-
-        Scratch.Clear();
-        Scratch.AddRange(Pending.Keys);
-        foreach (var id in Scratch)
-        {
-            if (Cleared.Contains(id)) { Pending.Remove(id); continue; }
-            if (client.FindClientById(id) == null) { Forget(id); continue; }
-            if (Time.time - Pending[id] >= GraceSeconds)
-            {
-                Pending.Remove(id);
-                if (!PendingKick.ContainsKey(id)) { PendingKick[id] = MissingMessage(); Dbg($"queue-kick id={id} (no handshake)"); }
-            }
-        }
-
-        Scratch.Clear();
-        Scratch.AddRange(PendingKick.Keys);
-        foreach (var id in Scratch)
-        {
-            var cd = client.FindClientById(id);
-            if (cd == null) { Forget(id); continue; }
-            TryKick(client, id, PendingKick[id]);
-            if (KickCount.TryGetValue(id, out var kc) && kc >= MaxKicks) PendingKick.Remove(id);
-        }
-    }
-
-    private static bool SendHandshake(InnerNetClient client)
-    {
-        if (client.ClientId < 0 || client.HostId < 0) return false;
-        try
-        {
-            string version = VoiceChatPluginMain.Version;
-
-            var writer = MessageWriter.Get(SendOption.Reliable);
-            writer.StartMessage((byte) Tags.GameDataTo);
-            writer.Write(client.GameId);
-            writer.WritePacked(client.HostId);
-            writer.StartMessage(SubmessageTag);
-            writer.Write(Magic);
-            writer.Write(FlagHandshake);
-            writer.Write(version);
-            writer.WritePacked(client.ClientId);
-            writer.EndMessage();
-            writer.EndMessage();
-            client.SendOrDisconnect(writer);
-            writer.Recycle();
-
-            Dbg($"sent handshake ver={version} clientId={client.ClientId} hostId={client.HostId}");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Dbg("send error: " + ex.Message);
-            return false;
-        }
-    }
-
-    private static void TryKick(InnerNetClient client, int targetId, string reason)
-    {
-        if (KickCount.TryGetValue(targetId, out var count) && count >= MaxKicks) { Pending.Remove(targetId); return; }
-        if (KickTime.TryGetValue(targetId, out var last) && Time.time - last < RekickInterval) return;
-
-        KickTime[targetId] = Time.time;
-        KickCount[targetId] = (KickCount.TryGetValue(targetId, out var c) ? c : 0) + 1;
-        Pending.Remove(targetId);
-
-        try
-        {
-            var writer = MessageWriter.Get(SendOption.Reliable);
-            writer.StartMessage((byte) Tags.GameDataTo);
-            writer.Write(client.GameId);
-            writer.WritePacked(targetId);
-            writer.StartMessage(SubmessageTag);
-            writer.Write(Magic);
-            writer.Write(FlagKickReason);
-            writer.WritePacked(targetId);
-            writer.Write(reason);
-            writer.EndMessage();
-            writer.EndMessage();
-            client.SendOrDisconnect(writer);
-            writer.Recycle();
-
-            Dbg($"KICK id={targetId} attempt={KickCount[targetId]}");
-            client.KickPlayer(targetId, false);
-        }
-        catch (Exception ex)
-        {
-            Dbg("kick error: " + ex.Message);
-        }
-    }
-
-    private static void Forget(int id)
-    {
-        Pending.Remove(id);
-        PendingKick.Remove(id);
-        Cleared.Remove(id);
-        KickTime.Remove(id);
-        KickCount.Remove(id);
-    }
-
-    private static void Scan(InnerNetClient inc, MessageReader reader, string src)
-    {
-        var buf = reader.Buffer;
-        if (buf == null) return;
-        int start = reader.Offset;
-        int end = reader.Offset + reader.Length;
-        if (end > buf.Length) end = buf.Length;
-
-        for (int i = start; i + 5 <= end; i++)
-        {
-            if (buf[i] != SubmessageTag) continue;
-            if (buf[i + 1] != MagicB0 || buf[i + 2] != MagicB1 || buf[i + 3] != MagicB2 || buf[i + 4] != MagicB3) continue;
-
-            var r = MessageReader.Get(buf);
-            try
-            {
-                r.Offset = 0;
-                r.Length = buf.Length;
-                r.Position = i + 5;
-                byte flag = r.ReadByte();
-                if (flag == FlagHandshake) OnHandshake(inc, r);
-                else if (flag == FlagKickReason) OnKickReason(inc, r);
-            }
-            catch (Exception e) { Dbg($"{src} parse error: " + e.Message); }
-            finally { r.Recycle(); }
-            return;
-        }
-    }
-
-    private static void OnHandshake(InnerNetClient client, MessageReader r)
-    {
-        if (!client.AmHost) return;
-
-        string version = r.ReadString();
-        int clientId = r.ReadPackedInt32();
-        if (clientId == client.ClientId) return;
-
-        if (string.Equals(version, VoiceChatPluginMain.Version, StringComparison.Ordinal))
-        {
-            Cleared.Add(clientId);
-            Pending.Remove(clientId);
-            Dbg($"cleared id={clientId} ver={version}");
-        }
-        else
-        {
-            // Reactor-style: a wrong version is rejected immediately, no grace.
-            Dbg($"mismatch id={clientId} theirs={version} ours={VoiceChatPluginMain.Version}");
-            Pending.Remove(clientId);
-            if (!PendingKick.ContainsKey(clientId)) PendingKick[clientId] = MismatchMessage(version);
-        }
-    }
-
-    private static void OnKickReason(InnerNetClient client, MessageReader r)
-    {
-        if (client.AmHost) return;
-
-        int targetId = r.ReadPackedInt32();
-        string reason = r.ReadString();
-        if (targetId != client.ClientId) return;
-        _pendingKickReason = reason;
-        Dbg("kickreason stored");
+        if (_loggedActive || ReactorHandlesIt()) return;
+        if (AmongUsClient.Instance == null) return;
+        _loggedActive = true;
+        Dbg($"active ver={VoiceChatPluginMain.Version} (scene-change gate)");
     }
 
     private static string MismatchMessage(string clientVersion) =>
@@ -281,61 +101,184 @@ internal static class VoiceJoinGuard
         $"This lobby requires Perfect Comms {VoiceChatPluginMain.Version}.\n\n" +
         "Install or enable Perfect Comms to join this lobby.";
 
-    [HarmonyPatch(typeof(LobbyBehaviour), nameof(LobbyBehaviour.Start))]
-    private static class LobbyStartPatch
+    // Host -> target client: tag-255 GameDataTo carrying the kick reason. Same shape
+    // Reactor uses in KickWithReason; the host emitting this does not disconnect it.
+    private static void SendKickReason(InnerNetClient inc, int targetClientId, string reason)
     {
-        public static void Postfix() => Reset();
+        try
+        {
+            var writer = MessageWriter.Get(SendOption.Reliable);
+            writer.StartMessage((byte) Tags.GameDataTo);
+            writer.Write(inc.GameId);
+            writer.WritePacked(targetClientId);
+            writer.StartMessage(SubmessageTag);
+            writer.Write(FlagSetKickReason);
+            writer.Write(reason);
+            writer.EndMessage();
+            writer.EndMessage();
+            inc.SendOrDisconnect(writer);
+            writer.Recycle();
+        }
+        catch (Exception ex) { Dbg("send-reason error: " + ex.Message); }
     }
 
-    [HarmonyPatch(typeof(AmongUsClient), nameof(AmongUsClient.OnGameJoined))]
-    private static class GameJoinedPatch
+    // ---- Client side: inject our version onto the SceneChange we send while joining ----
+    [HarmonyPatch]
+    private static class CoSendSceneChangePatch
     {
-        public static void Postfix(AmongUsClient __instance)
+        public static MethodBase? TargetMethod()
+            => Il2CppStateMachineWrapper<InnerNetClient>.GetStateMachineMoveNext(nameof(InnerNetClient.CoSendSceneChange));
+
+        public static bool Prepare() => Il2CppStateMachineWrapper<InnerNetClient>.GetStateMachineMoveNext(nameof(InnerNetClient.CoSendSceneChange)) != null;
+
+        public static bool Prefix(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase __instance, ref bool __result)
         {
-            if (__instance == null || __instance.AmHost) return;
-            _sentCount = 0;
-            _lastSend = -999f;
-            Dbg("OnGameJoined -> early handshake");
-            if (SendHandshake(__instance)) { _lastSend = Time.time; _sentCount = 1; }
+            if (ReactorHandlesIt()) return true;
+            try
+            {
+                var wrapper = new Il2CppStateMachineWrapper<InnerNetClient>(__instance);
+                var inc = wrapper.Instance;
+                var sceneName = wrapper.GetParameter<string>("sceneName");
+
+                if (inc.AmHost || inc.connection?.State != ConnectionState.Connected || inc.ClientId < 0)
+                    return true;
+
+                var clientData = inc.FindClientById(inc.ClientId);
+                if (clientData == null) return true;
+
+                var writer = MessageWriter.Get(SendOption.Reliable);
+                writer.StartMessage((byte) Tags.GameData);
+                writer.Write(inc.GameId);
+                writer.StartMessage(SceneChangeFlag);
+                writer.WritePacked(inc.ClientId);
+                writer.Write(sceneName);
+                // PATCH: inject Perfect Comms version after the scene name.
+                writer.Write(M0); writer.Write(M1); writer.Write(M2); writer.Write(M3);
+                writer.Write(VoiceChatPluginMain.Version);
+                writer.EndMessage();
+                writer.EndMessage();
+                inc.SendOrDisconnect(writer);
+                writer.Recycle();
+
+                inc.StartCoroutine(inc.CoOnPlayerChangedScene(clientData, sceneName));
+                wrapper.State = -1;
+                __result = false;
+                Dbg($"injected version onto scene-change ver={VoiceChatPluginMain.Version}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Dbg("CoSendSceneChange inject failed (guard disabled this join): " + ex.Message);
+                return true;
+            }
         }
     }
 
-    [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.OnPlayerJoined))]
-    private static class PlayerJoinedPatch
+    // ---- Host side: validate the injected version at scene-change, before spawn ----
+    [HarmonyPatch]
+    private static class HandleGameDataInnerPatch
     {
-        public static void Postfix(InnerNetClient __instance, ClientData client)
+        public static MethodBase? TargetMethod()
+            => Il2CppStateMachineWrapper<InnerNetClient>.GetStateMachineMoveNext(nameof(InnerNetClient.HandleGameDataInner));
+
+        public static bool Prepare() => Il2CppStateMachineWrapper<InnerNetClient>.GetStateMachineMoveNext(nameof(InnerNetClient.HandleGameDataInner)) != null;
+
+        public static bool Prefix(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase __instance, ref bool __result)
         {
-            if (__instance == null || client == null || !__instance.AmHost) return;
-            int id = client.Id;
-            if (id == __instance.ClientId || Cleared.Contains(id)) return;
-            if (KickCount.TryGetValue(id, out var kc) && kc >= MaxKicks) return;
-            if (!Pending.ContainsKey(id)) Pending[id] = Time.time;
-            Dbg($"OnPlayerJoined id={id}");
+            if (ReactorHandlesIt()) return true;
+            MessageReader? reader = null;
+            try
+            {
+                var wrapper = new Il2CppStateMachineWrapper<InnerNetClient>(__instance);
+                if (wrapper.State != 0) return true;
+
+                var inc = wrapper.Instance;
+                reader = wrapper.GetParameter<MessageReader>("reader");
+                if (reader == null) return true;
+
+                // Client side: our kick-reason packet. Stash it for the disconnect screen.
+                if (reader.Tag == SubmessageTag && !inc.AmHost)
+                {
+                    byte flag = reader.ReadByte();
+                    if (flag == FlagSetKickReason)
+                    {
+                        _pendingKickReason = reader.ReadString();
+                        Dbg("received kick reason");
+                        reader.Recycle();
+                        __result = false;
+                        return false;
+                    }
+                    return true;
+                }
+
+                if (reader.Tag != SceneChangeFlag || !inc.AmHost) return true;
+
+                int clientId = reader.ReadPackedInt32();
+                var clientData = inc.FindClientById(clientId);
+                string sceneName = reader.ReadString();
+                if (clientData == null || string.IsNullOrWhiteSpace(sceneName))
+                {
+                    // Match vanilla's own not-found path: recycle and swallow.
+                    reader.Recycle();
+                    __result = false;
+                    return false;
+                }
+
+                // Read our injected version (4 magic bytes + string), if present.
+                string? clientVersion = null;
+                if (reader.BytesRemaining >= 5
+                    && reader.ReadByte() == M0 && reader.ReadByte() == M1
+                    && reader.ReadByte() == M2 && reader.ReadByte() == M3)
+                {
+                    clientVersion = reader.ReadString();
+                }
+
+                bool ok = clientVersion != null
+                    && string.Equals(clientVersion, VoiceChatPluginMain.Version, StringComparison.Ordinal);
+
+                if (!ok)
+                {
+                    string reason = clientVersion == null ? MissingMessage() : MismatchMessage(clientVersion);
+                    Dbg($"reject id={clientId} theirs={clientVersion ?? "(none)"} ours={VoiceChatPluginMain.Version} -> kick at scene-change");
+                    // Reactor-exact: send a tag-255 SetKickReason GameDataTo, THEN kick.
+                    SendKickReason(inc, clientId, reason);
+                    inc.KickPlayer(clientId, false);
+                    reader.Recycle();
+                    __result = false;
+                    return false; // swallow: player never finishes joining
+                }
+
+                // Valid: run the normal scene change ourselves and swallow the original.
+                // Do NOT recycle here — like Reactor, the reader is owned by the caller in
+                // this path; recycling would double-free.
+                Dbg($"cleared id={clientId} ver={clientVersion}");
+                inc.StartCoroutine(inc.CoOnPlayerChangedScene(clientData, sceneName));
+                __result = false;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Dbg("HandleGameDataInner validate failed (passing through): " + ex.Message);
+                return true; // let vanilla handle it; never break the host
+            }
         }
     }
 
-    [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.HandleMessage))]
-    private static class HandleMessagePatch
-    {
-        public static void Prefix(InnerNetClient __instance, [HarmonyArgument(0)] MessageReader reader)
-        {
-            if (__instance == null || reader == null) return;
-            try { Scan(__instance, reader, "hmsg"); } catch (Exception e) { Dbg("hmsg error: " + e.Message); }
-        }
-    }
-
+    // ---- Client side: show the stored reason on the disconnect screen ----
     [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.DisconnectInternal))]
     private static class DisconnectInternalPatch
     {
         public static void Prefix(InnerNetClient __instance, ref DisconnectReasons reason)
         {
-            if (reason == DisconnectReasons.Kicked && _pendingKickReason != null)
-            {
-                Dbg("disconnect swap -> custom");
-                reason = DisconnectReasons.Custom;
-                __instance.LastCustomDisconnect = _pendingKickReason;
-                _pendingKickReason = null;
-            }
+            // Reactor also swaps this screen; when it's present we never set our reason
+            // (all our patches stand down), but bail explicitly so we can never clobber
+            // Reactor's own kick-reason screen.
+            if (ReactorHandlesIt()) return;
+            if (reason != DisconnectReasons.Kicked || _pendingKickReason == null) return;
+            reason = DisconnectReasons.Custom;
+            __instance.LastCustomDisconnect = _pendingKickReason;
+            _pendingKickReason = null;
+            Dbg("disconnect swap -> perfect comms reason");
         }
     }
 }
