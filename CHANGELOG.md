@@ -2,18 +2,30 @@
 
 ## Perfect Comms v3.0.0
 
-Perfect Comms is now fully standalone: it no longer depends on Reactor or MiraAPI.
+Perfect Comms is now fully standalone: no Reactor or MiraAPI required. This release also brings a rebuilt in-game settings menu, fully rebindable keyboard and mouse controls, hardware echo cancellation, a reworked speaking bar, and another round of audio-reliability fixes.
 
 ### What's Changed
 
 - **No more Reactor or MiraAPI dependency.**
-  > <sub>Perfect Comms runs on vanilla Among Us plus BepInEx alone. It still shares a `BepInEx/plugins` folder with mods that use Reactor or MiraAPI (such as TOU-Mira) without conflict, and TOU-Mira voice integrations still activate automatically when those mods are present.</sub>
+  > <sub>Perfect Comms now runs on vanilla Among Us plus BepInEx alone. It still shares a `BepInEx/plugins` folder with mods that use Reactor or MiraAPI (such as TOU-Mira) without conflict, and TOU-Mira voice integrations still activate automatically when those mods are present.</sub>
 
-- **Rebuilt in-game settings UI.**
-  > <sub>Client settings open from the Among Us Options menu (or press F10). Host voice settings open from the lobby game-settings console (or press F11). This replaces the previous MiraAPI settings tab.</sub>
+- **Rebuilt in-game settings menu.**
+  > <sub>Client settings open from the Among Us Options menu (or press F10); host voice settings open from the lobby game-settings console (or press F11). Settings are grouped into clear sections with the more advanced options tucked away. This replaces the previous MiraAPI settings tab, all the same voice and role rules are now here.</sub>
 
-- **Full keyboard and mouse keybinds.**
+- **Fully rebindable keyboard and mouse controls.**
   > <sub>Every voice keybind can be rebound to any keyboard key or mouse button, including MB4 and MB5. Existing keybinds reset to their defaults once because of the new binding system.</sub>
+
+- **Hardware-grade echo cancellation.**
+  > <sub>A new native acoustic echo canceller in the mic pipeline, with an Echo Cancellation toggle under Noise Suppression, stops the game and other players echoing back through your mic.</sub>
+
+- **New host options.**
+  > <sub>Added mid-game Team Radio, unlimited ghost hearing range, and a "jail persists if the Jailor dies" rule.</sub>
+
+- **Reworked speaking bar.**
+  > <sub>New always-on all-players mode, adjustable scale and position, and an optional backdrop for readability. Names always match your in-game nameplates, stay clamped on-screen, and the bar no longer bobs or flashes the wrong font.</sub>
+
+- **More audio reliability fixes.**
+  > <sub>Fixed left/right stereo drifting apart, smoother voice on bursty connections, faster recovery for stuck players, and a push-to-talk indicator that always releases when you stop talking.</sub>
 
 ## Perfect Comms v2.1.7
 
