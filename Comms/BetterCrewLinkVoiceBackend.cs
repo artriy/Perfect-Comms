@@ -268,6 +268,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         ConnectSocket();
         WarmOpusCodec();
         VoiceDiagnostics.Log("bcl.created", $"room={RoomCode} region={Region} endpoint={ServerUrl}");
+        if (WineEnvironment.IsWine)
+        {
+            ReadIceSettings(out _, out _, out _, out _, out var forceRelay);
+            VoiceDiagnostics.Log("env.wine", $"detected=true forceRelay={forceRelay} localIp={WineEnvironment.GetLocalIPv4()?.ToString() ?? "none"}");
+        }
     }
 
     // Prime the Concentus Opus codec off the main thread at startup. The first OpusDecoder construction JITs
@@ -1992,12 +1997,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     // Read the Nat Fix / TURN settings once into locals so the resolved config and its signature are always
     // derived from the SAME snapshot — there is no torn read between "what we built" and "what we stamped".
-    private static void ReadIceSettings(out bool natFix, out string turnUrl, out string turnUser, out string turnCred)
+    private static void ReadIceSettings(out bool natFix, out string turnUrl, out string turnUser, out string turnCred, out bool forceRelay)
     {
         natFix = true;
         turnUrl = "turn:turn.bettercrewl.ink:3478";
         turnUser = "";
         turnCred = "";
+        // Default forceRelay on under Wine (its host/srflx gathering is broken), overridable via setting.
+        forceRelay = WineEnvironment.IsWine;
         try
         {
             var settings = VoiceSettings.Instance;
@@ -2007,19 +2014,20 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 turnUrl = settings.TurnServerUrl.Value;
                 turnUser = settings.TurnUsername.Value;
                 turnCred = settings.TurnCredential.Value;
+                forceRelay = settings.WineForceRelay.Value && WineEnvironment.IsWine;
             }
         }
-        catch { /* settings not ready; fall back to defaults (Nat Fix on) */ }
+        catch { /* settings not ready; fall back to defaults (Nat Fix on, relay forced under Wine) */ }
     }
 
     // Resolve the ICE configuration AND its signature from one settings snapshot + one read of the (volatile)
     // _iceServers, so a pooled connection's recorded signature always matches the config it was built with.
     private (RTCConfiguration Config, string Signature) ResolveIce()
     {
-        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred);
+        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred, out var forceRelay);
         var servers = _iceServers;
-        var cfg = BuildIceConfiguration(servers, natFix, turnUrl, turnUser, turnCred);
-        var sig = ComputeIceSignature(servers, natFix, turnUrl, turnUser, turnCred);
+        var cfg = BuildIceConfiguration(servers, natFix, turnUrl, turnUser, turnCred, forceRelay);
+        var sig = ComputeIceSignature(servers, natFix, turnUrl, turnUser, turnCred, forceRelay);
         return (cfg, sig);
     }
 
@@ -2027,18 +2035,26 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // recorded signature at rent time to discard stale entries.
     private string CurrentIceSignature()
     {
-        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred);
-        return ComputeIceSignature(_iceServers, natFix, turnUrl, turnUser, turnCred);
+        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred, out var forceRelay);
+        return ComputeIceSignature(_iceServers, natFix, turnUrl, turnUser, turnCred, forceRelay);
     }
 
     // Pure ICE-config builder (unit-testable). With Nat Fix on, guarantees a STUN entry AND the configured TURN
     // relay are present so a NAT-blocked peer can fall back to relay; iceTransportPolicy stays 'all', so ICE
     // uses a direct path when it can and relays ONLY the peers that need it. With Nat Fix off, the base servers
     // are used unchanged (legacy STUN-only behaviour, no relay).
-    internal static RTCConfiguration BuildIceConfiguration(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUsername, string turnCredential)
+    //
+    // forceRelay (Wine): under Wine, SIPSorcery's host/srflx candidate gathering is unreliable and often
+    // yields zero candidates, so direct/STUN never connect. We add a TURN-over-TCP variant (Wine's UDP path
+    // may be the broken part, but an outbound TCP connect works) and set iceTransportPolicy = relay so ICE
+    // skips the broken local-candidate gathering and goes straight to the TURN allocation. Relay needs only a
+    // single working outbound socket to the TURN server, which Wine can do. If TURN can't authenticate, we
+    // canNOT force relay (relay-only with no TURN = guaranteed failure), so we fall back to 'all'.
+    internal static RTCConfiguration BuildIceConfiguration(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUsername, string turnCredential, bool forceRelay = false)
     {
         var servers = new List<RTCIceServer>();
         if (baseServers != null) servers.AddRange(baseServers);
+        bool turnUsable = false;
 
         if (natFix && !string.IsNullOrWhiteSpace(turnUrl))
         {
@@ -2047,27 +2063,65 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // Only add the TURN relay if it can actually authenticate. A long-term-credential TURN allocation
             // with a blank username/credential is unusable and would just add a dead ICE server, so skip it
             // (the peer falls back to STUN-only for this connection) when either credential is missing.
-            if (!string.IsNullOrWhiteSpace(turnUsername) && !string.IsNullOrWhiteSpace(turnCredential)
-                && !servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
-                servers.Add(new RTCIceServer { urls = turnUrl, username = turnUsername, credential = turnCredential });
+            if (!string.IsNullOrWhiteSpace(turnUsername) && !string.IsNullOrWhiteSpace(turnCredential))
+            {
+                turnUsable = true;
+                if (!servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
+                    servers.Add(new RTCIceServer { urls = turnUrl, username = turnUsername, credential = turnCredential });
+                // On Wine, also offer TURN over TCP — survives when Wine's UDP path is the broken part.
+                if (forceRelay)
+                {
+                    var tcpUrl = AppendTransportTcp(turnUrl);
+                    if (tcpUrl != null && !servers.Any(s => string.Equals(s.urls, tcpUrl, StringComparison.OrdinalIgnoreCase)))
+                        servers.Add(new RTCIceServer { urls = tcpUrl, username = turnUsername, credential = turnCredential });
+                }
+            }
         }
 
-        return new RTCConfiguration { iceServers = servers, iceTransportPolicy = RTCIceTransportPolicy.all };
+        // Relay-only is only safe when there is a usable TURN relay to route through; otherwise fall back to
+        // 'all' so we don't strand the client with no reachable candidates at all.
+        var policy = (forceRelay && turnUsable) ? RTCIceTransportPolicy.relay : RTCIceTransportPolicy.all;
+        var cfg = new RTCConfiguration { iceServers = servers, iceTransportPolicy = policy };
+
+        // Wine: hand SIPSorcery an explicit bind address resolved WITHOUT the (Wine-unreliable) interface
+        // enumeration, so ICE has a valid local endpoint to gather host/relay candidates from. Harmless on
+        // native Windows but only applied under Wine. Wrapped so an SDK shape change can't break the build path.
+        if (forceRelay)
+        {
+            try
+            {
+                var local = WineEnvironment.GetLocalIPv4();
+                if (local != null) cfg.X_BindAddress = local;
+            }
+            catch { /* leave default binding */ }
+        }
+
+        return cfg;
+    }
+
+    // Add ?transport=tcp to a turn: URL if it doesn't already specify a transport.
+    private static string? AppendTransportTcp(string turnUrl)
+    {
+        if (string.IsNullOrWhiteSpace(turnUrl)) return null;
+        if (turnUrl.IndexOf("transport=", StringComparison.OrdinalIgnoreCase) >= 0) return null;
+        return turnUrl + (turnUrl.Contains('?') ? "&" : "?") + "transport=tcp";
     }
 
     // Cheap signature of everything that affects the resolved ICE config: Nat Fix, the TURN server URL AND its
     // credentials, and the signaling-provided base ICE servers. The TURN credentials are included so that a
     // credential-only change still invalidates the pool.
-    private static string ComputeIceSignature(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUser, string turnCred)
+    private static string ComputeIceSignature(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUser, string turnCred, bool forceRelay = false)
     {
         var baseUrls = baseServers == null ? "" : string.Join(",", baseServers.Select(s => s.urls));
         // The signature must mirror exactly the inputs BuildIceConfiguration actually consumes. With Nat Fix
         // OFF the TURN fields are ignored by the builder, so leaving them out keeps an edit to an unused TURN
         // setting from needlessly invalidating the warm pool. The "1|" / "0|" prefixes keep the two forms
-        // distinct so a Nat-Fix-on config can never collide with a Nat-Fix-off one.
-        return natFix
+        // distinct so a Nat-Fix-on config can never collide with a Nat-Fix-off one. The R|/D| prefix keeps
+        // relay-forced (Wine) configs distinct from direct ones so the warm pool invalidates when it flips.
+        var core = natFix
             ? "1|" + turnUrl + "|" + turnUser + "|" + turnCred + "|" + baseUrls
             : "0|" + baseUrls;
+        return (forceRelay ? "R|" : "D|") + core;
     }
 
     // Rent a pre-built connection (instant) or, on a pool miss, build inline (the old behaviour — now rare:

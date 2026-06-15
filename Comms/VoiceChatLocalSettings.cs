@@ -110,6 +110,11 @@ public class VoiceChatLocalSettings
     // audio. Only the peers that actually need it relay; everyone else stays direct. BCL backend only.
     public ConfigEntry<bool> NatFix { get; }
 
+    // Wine/Proton (Linux) only. When on, the BCL backend forces TURN-relay-only ICE and adds a TURN-over-TCP
+    // candidate, because Wine's local ICE candidate gathering is unreliable and direct/STUN never connect.
+    // Ignored on native Windows. Default on.
+    public ConfigEntry<bool> WineForceRelay { get; }
+
     public ConfigEntry<bool> DebugVoiceStats { get; }
     public ConfigEntry<bool> MicCalibrationDiagnostics { get; }
 
@@ -371,6 +376,8 @@ public class VoiceChatLocalSettings
         TurnCredential = config.Bind("Voice Server", "TurnCredential",
             "TpHR9HQNZ8taxjb3",
             new ConfigDescription("Credential (password) for the Nat Fix TURN relay."));
+        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", true,
+            new ConfigDescription("Wine/Proton (Linux) only: force TURN-relay-only voice (and add TURN-over-TCP) because Wine's local network/ICE gathering is unreliable, which otherwise leaves you unable to connect to anyone. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
 
         InterstellarServerUrl = config.Bind("Voice Server", "InterstellarServerUrl",
             VoiceEndpointSettings.DefaultInterstellarServerUrl,
