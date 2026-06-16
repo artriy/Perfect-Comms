@@ -1,10 +1,12 @@
-name: Update downloads badge
+name: Update badges
 
 on:
   schedule:
     - cron: "0 */6 * * *"   # every 6h
   release:
     types: [published, edited, deleted]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -27,12 +29,22 @@ jobs:
             > .github/badges/downloads.json
           echo "total=$total" >> "$GITHUB_OUTPUT"
 
+      - name: Compute latest release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name // empty')
+          [ -n "$tag" ] || tag="none"
+          mkdir -p .github/badges
+          printf '{"schemaVersion":1,"label":"Latest","message":"%s","color":"C51111"}\n' "$tag" \
+            > .github/badges/latest.json
+
       - name: Commit if changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet .github/badges/downloads.json; then
-            git add .github/badges/downloads.json
-            git commit -m "chore: update downloads badge"
+          git add .github/badges/downloads.json .github/badges/latest.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update badges"
             git push
           fi
