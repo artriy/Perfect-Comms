@@ -2,7 +2,7 @@
 
 ## Perfect Comms v3.0.0
 
-Perfect Comms is now fully standalone: no Reactor or MiraAPI required. This release also brings a rebuilt in-game settings menu, fully rebindable keyboard and mouse controls, hardware echo cancellation, a reworked speaking bar, and another round of audio-reliability fixes.
+Perfect Comms is now fully standalone: no Reactor or MiraAPI required. This release also brings a rebuilt in-game settings menu, fully rebindable keyboard and mouse controls, hardware echo cancellation, a reworked speaking bar, another round of audio-reliability fixes, and a public mod-integration API so other mods can register custom voice behaviours without forking Perfect Comms.
 
 ### What's Changed
 
@@ -26,6 +26,9 @@ Perfect Comms is now fully standalone: no Reactor or MiraAPI required. This rele
 
 - **More audio reliability fixes.**
   > <sub>Fixed left/right stereo drifting apart, smoother voice on bursty connections, faster recovery for stuck players, and a push-to-talk indicator that always releases when you stop talking.</sub>
+
+- **Public mod-integration API (`PerfectComms.Api`).**
+  > <sub>Other mods can now register custom voice behaviours as a soft dependency — no forking required. The API exposes five primitives: **Gate** (mute or muffle a player or the whole lobby for any phase), **Channel** (put players into a shared private or team audio channel with custom shape and volume), **Listener Origin** (relocate where the local player hears from), **Host Options** (declare synced toggles and enums that appear in the host settings panel), and **Mod Tab** (add your own section under MOD BEHAVIOUR in the host panel). All callbacks are fail-closed and isolated; a throwing or missing mod has no effect on voice. Full guide and API reference on the [wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration).</sub>
 
 ## Perfect Comms v2.1.7
 
