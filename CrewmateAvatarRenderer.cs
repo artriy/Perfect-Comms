@@ -244,9 +244,8 @@ internal static class CrewmateAvatarRenderer
         try
         {
             // Showing real identity (meeting / fixed roster) but the player is disguised: the live cosmetics layer
-            // still wears the morph's hat/skin/visor, so don't bake them. Real body colour + no cosmetics beats a
-            // morphed disguise leaking through.
-            if (ShowRealIdentity && IsDisguised(pc)) return;
+            // wears the morph, so rebuild the real hat/skin/visor from the outfit cached while they were undisguised.
+            if (ShowRealIdentity && IsDisguised(pc)) { AddCachedRealCosmetics(root, pc.PlayerId, capture); return; }
             var c = pc.cosmetics;
             if (c == null) return;
             var outfit = GetDisplayOutfit(pc);
@@ -306,6 +305,23 @@ internal static class CrewmateAvatarRenderer
         }
     }
 
+    // Adds the player's real hat/skin/visor from the outfit cached while they were undisguised. Used when a
+    // disguised player must be shown as themselves (meeting / fixed roster) but the live body wears the morph.
+    // Falls back to no cosmetics (real-colour body only) if we never captured them undisguised this game.
+    private static void AddCachedRealCosmetics(Transform root, byte playerId, List<CachedCosmeticLayer>? capture)
+    {
+        if (!OutfitCache.TryGetValue(playerId, out var outfit) || outfit.Concealed) return;
+        foreach (var layer in outfit.Layers)
+        {
+            if (layer.Sprite == null) continue;
+            var sr = AddSprite(root, layer.Name, layer.Sprite, layer.LocalPos, Quaternion.identity, CosmeticScale, layer.Color, layer.Order);
+            sr.flipX = false;
+            sr.flipY = layer.FlipY;
+            if (layer.Material != null) sr.sharedMaterial = layer.Material;
+            capture?.Add(layer);
+        }
+    }
+
     // Rebuilds the cosmetic layers in place on an existing icon (no body destroy/recreate). Concealed -> none.
     internal static void TryRefreshOutfitCosmetics(GameObject? iconRoot, PlayerControl? pc, byte playerId)
     {
@@ -325,6 +341,8 @@ internal static class CrewmateAvatarRenderer
     // most once per speaker per outfit change -- never per frame.
     private static void CacheOutfit(byte playerId, PlayerControl pc, List<CachedCosmeticLayer> layers)
     {
+        // Never overwrite the cache with a disguise; keep the last real outfit so a meeting/roster can rebuild it.
+        if (IsDisguised(pc)) return;
         bool concealed = IsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
         OutfitCache[playerId] = new CachedOutfit(
