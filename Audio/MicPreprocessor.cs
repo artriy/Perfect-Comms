@@ -27,7 +27,7 @@ internal readonly record struct NoiseSuppressionDiagnostics(
 
 internal sealed class MicPreprocessor : IDisposable
 {
-    private const int HangoverFrames = 8;
+    private const int HangoverFrames = 30;
     private const float MinimumTransmitGate = 0.0005f;
     private const float AgcTargetPeak = 0.30f;
     private const float AgcMaxGain = 16f;
