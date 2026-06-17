@@ -19,6 +19,7 @@ internal enum BclVoicePlayoutKind
     Audio,
     Plc,
     Fec,
+    Dred,
 }
 
 internal readonly struct BclVoicePacket
@@ -132,18 +133,21 @@ internal readonly struct BclVoicePacket
 
 internal readonly struct BclVoicePlayoutFrame
 {
-    public BclVoicePlayoutFrame(BclVoicePlayoutKind kind, BclVoicePacket? packet, ushort sequence, ushort duration)
+    public BclVoicePlayoutFrame(BclVoicePlayoutKind kind, BclVoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
     {
         Kind = kind;
         Packet = packet;
         Sequence = sequence;
         Duration = duration;
+        DredOffset = dredOffset;
     }
 
     public BclVoicePlayoutKind Kind { get; }
     public BclVoicePacket? Packet { get; }
     public ushort Sequence { get; }
     public ushort Duration { get; }
+    // For Dred frames: how many samples back from the recovering packet (Packet) this lost frame sits.
+    public int DredOffset { get; }
 }
 
 internal readonly struct BclVoiceJitterWindowStats
@@ -473,7 +477,11 @@ internal sealed class BclVoiceJitterBuffer
             else
             {
                 _plcFrames++;
-                frames.Add(new BclVoicePlayoutFrame(BclVoicePlayoutKind.Plc, null, _expectedSequence, next.Duration));
+                // DRED: reconstruct this lost frame from the recovering packet's Deep REDundancy. The decoder
+                // falls back to neural PLC if `next` carries no DRED, so this is always at least as good as PLC.
+                // Offset = frames back from `next` to this lost frame, in samples.
+                int dredOffsetSamples = Distance(_expectedSequence, nextSequence.Value) * next.Duration;
+                frames.Add(new BclVoicePlayoutFrame(BclVoicePlayoutKind.Dred, next, _expectedSequence, next.Duration, dredOffsetSamples));
             }
             _expectedSequence++;
         }

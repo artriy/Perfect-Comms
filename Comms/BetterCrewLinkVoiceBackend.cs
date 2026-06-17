@@ -3982,16 +3982,17 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 foreach (var frame in frames)
                 {
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
+                    var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    // FEC-reconstructed frame: decode at standard size; frame.Duration here is the
-                    // successor's, not the lost frame's.
-                    var frameSize = decodeFec
+                    // FEC/DRED reconstruct one lost frame at the standard size; a real Audio frame uses its own
+                    // duration. For FEC/DRED, frame.Packet is the successor/recovering packet, not the lost one.
+                    var frameSize = (decodeFec || isDred)
                         ? AudioHelpers.FrameSize
                         : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // A single bad frame must NOT abandon the rest of the drained batch (up to
                     // MaxDrainFramesPerPacket frames). DecodeAndAddSamples conceals the failed slot with
                     // silence, so surface the first error for telemetry and keep draining the successors.
-                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded))
+                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded, isDred ? frame.DredOffset : -1))
                         decodedFrames += decoded > 0 ? 1 : 0;
                     else if (string.IsNullOrEmpty(error))
                         error = frameError;
@@ -4018,14 +4019,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                         continue;
                     }
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
+                    var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    // FEC-reconstructed frame: decode at standard size; frame.Duration here is the
-                    // successor's, not the lost frame's.
-                    var frameSize = decodeFec
+                    // FEC/DRED reconstruct one lost frame at the standard size; a real Audio frame uses its own
+                    // duration. For FEC/DRED, frame.Packet is the successor/recovering packet, not the lost one.
+                    var frameSize = (decodeFec || isDred)
                         ? AudioHelpers.FrameSize
                         : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // Conceal a failed slot and keep draining instead of abandoning the rest of the tail batch.
-                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded))
+                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded, isDred ? frame.DredOffset : -1))
                         decodedFrames += decoded > 0 ? 1 : 0;
                     else if (string.IsNullOrEmpty(error))
                         error = frameError;
@@ -4169,7 +4171,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _decodeSuppressed = false;
         }
 
-        private bool DecodeAndAddSamples(byte[] data, bool isLegacy, bool decodeFec, int frameSize, out string? error, out int decodedFrames)
+        private bool DecodeAndAddSamples(byte[] data, bool isLegacy, bool decodeFec, int frameSize, out string? error, out int decodedFrames, int dredOffsetSamples = -1)
         {
             error = null;
             decodedFrames = 0;
@@ -4178,7 +4180,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (TryHandleSuppressedDecode(frameSize))
                 return false;
 
-            if (IsOpusDtxSilencePacket(data))
+            if (dredOffsetSamples < 0 && IsOpusDtxSilencePacket(data))
             {
                 RouteSilence(frameSize);
                 NoteDecodeSuccess();
@@ -4187,7 +4189,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             // PLC (empty payload) and FEC require frame_size to equal the EXACT missing duration; a real
             // packet is decoded at full capacity so its true (possibly larger) frame size always fits.
-            var conceal = data.Length == 0 || decodeFec;
+            var conceal = data.Length == 0 || decodeFec || dredOffsetSamples >= 0;
 
             // P2.1: pre-guard the per-packet Concentus decode THROW. On an incompatible/foreign stream sharing the
             // room, Concentus throws+catches per packet on the receive thread, stealing time from healthy streams.
@@ -4211,7 +4213,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             int decoded;
             try
             {
-                decoded = Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, capacity), decodeFrameSize, decodeFec);
+                decoded = dredOffsetSamples >= 0
+                    ? Decoder.DecodeDred(data, dredOffsetSamples, pcm.AsSpan(0, capacity), frameSize)
+                    : Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, capacity), decodeFrameSize, decodeFec);
             }
             catch (Exception ex)
             {

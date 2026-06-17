@@ -21,6 +21,9 @@ internal interface IVoiceDecoder : IDisposable
     // prior lost frame from this packet's in-band FEC.
     int Decode(ReadOnlySpan<byte> data, Span<short> pcm, int frameSize, bool fec);
     int Decode(byte[] packet, float[] pcm, int frameSize, bool fec);
+    // Reconstruct a lost frame from a later "recovering" packet's Deep REDundancy. dredOffsetSamples = samples
+    // back from that packet to the lost frame. Native libopus uses DRED; platforms without it conceal (PLC).
+    int DecodeDred(byte[] recoveringPacket, int dredOffsetSamples, Span<short> pcm, int frameSize);
 }
 
 // Windows uses native libopus 1.6.1 (neural deep PLC); Android uses the managed Concentus port. This is
@@ -84,6 +87,10 @@ internal sealed class ConcentusVoiceDecoder : IVoiceDecoder
 
     public int Decode(byte[] packet, float[] pcm, int frameSize, bool fec)
         => _dec.Decode(packet, pcm, frameSize, fec);
+
+    // Concentus has no DRED; conceal the lost frame with its built-in PLC.
+    public int DecodeDred(byte[] recoveringPacket, int dredOffsetSamples, Span<short> pcm, int frameSize)
+        => _dec.Decode(ReadOnlySpan<byte>.Empty, pcm, frameSize, false);
 
     public void Dispose() { }
 }
