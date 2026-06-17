@@ -34,7 +34,7 @@ Perfect Comms v3.0.1 is a deep audio-quality release. The entire voice engine ha
   > <sub>The speaking bar is now centered on screen and automatically wraps the talking players into multiple rows when there are too many to fit one line, so names always stay on-screen and readable instead of running off the edge.</sub>
 
 - **Speaking bar shows the correct identity.**
-  > <sub>During meetings the bar now shows each player's real appearance instead of a Glitch/Morphling's disguise, while comms sabotage still greys everyone out (including when a meeting is called while comms is down). Also fixed players occasionally rendering as a grey blank in the bar.</sub>
+  > <sub>During meetings the bar no longer briefly flashes a Glitch/Morphling's disguise for the first couple of frames before settling on their real appearance, while comms sabotage still greys everyone out (including when a meeting is called while comms is down). Also fixed players occasionally rendering as a grey blank in the bar.</sub>
 
 - **Under the hood.**
   > <sub>Hardened the native-library loaders (hash-validated extraction, proper cleanup), removed unused audio components, and documented all bundled third-party library licenses.</sub>
