@@ -25,6 +25,8 @@ internal sealed class BassStereoOutput : IDisposable
     public bool Start(int device)
     {
         Stop();
+        Bass.Configure(Configuration.UpdatePeriod, 10);
+        Bass.Configure(Configuration.PlaybackBufferLength, 100);
         if (!Bass.Init(device, AudioHelpers.ClockRate, DeviceInitFlags.Default) && Bass.LastError != Errors.Already)
             return false;
         Bass.CurrentDevice = device;
