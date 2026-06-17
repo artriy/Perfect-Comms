@@ -41,6 +41,7 @@ internal sealed class BclVoiceMixer
         public bool Primed;
         public bool EverPrimed;
         public int FadeRemaining;
+        public long LastFeedRead;
         public DateTime PrimeDeadline;
         public VoiceAudioFilterMode Mode;
         public float Bz1;
@@ -68,6 +69,8 @@ internal sealed class BclVoiceMixer
     private long _diagUnprimes;
     private long _diagSilentSamples;
     private int _diagMaxRingDepth;
+    private long _readCounter;
+    private int _diagMaxFeedGapReads;
 
     public void AddSamples(int group, float[] mono, int count, bool silent)
     {
@@ -83,6 +86,12 @@ internal sealed class BclVoiceMixer
             }
             if (!p.Primed && !p.EverPrimed && p.PrimeDeadline == DateTime.MinValue)
                 p.PrimeDeadline = DateTime.UtcNow.AddMilliseconds(MaxWaitMs);
+            if (p.LastFeedRead != 0)
+            {
+                var gap = (int)(_readCounter - p.LastFeedRead);
+                if (gap > _diagMaxFeedGapReads) _diagMaxFeedGapReads = gap;
+            }
+            p.LastFeedRead = _readCounter;
             var len = p.Ring.Length;
             for (var i = 0; i < count; i++)
             {
@@ -138,7 +147,7 @@ internal sealed class BclVoiceMixer
         lock (_sync)
         {
             var chunkMin = _diagChunkMin == int.MaxValue ? 0 : _diagChunkMin;
-            var s = $"primeSamples={PrimeSamples} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} silentSamples={_diagSilentSamples}";
+            var s = $"primeSamples={PrimeSamples} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} maxFeedGapReads={_diagMaxFeedGapReads} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} silentSamples={_diagSilentSamples}";
             _diagReadCalls = 0;
             _diagChunkMin = int.MaxValue;
             _diagChunkMax = 0;
@@ -148,6 +157,7 @@ internal sealed class BclVoiceMixer
             _diagUnprimes = 0;
             _diagSilentSamples = 0;
             _diagMaxRingDepth = 0;
+            _diagMaxFeedGapReads = 0;
             return s;
         }
     }
@@ -168,6 +178,7 @@ internal sealed class BclVoiceMixer
         lock (_sync)
         {
             _diagReadCalls++;
+            _readCounter++;
             if (frames < _diagChunkMin) _diagChunkMin = frames;
             if (frames > _diagChunkMax) _diagChunkMax = frames;
             foreach (var p in _peers.Values)
