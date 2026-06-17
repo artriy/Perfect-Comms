@@ -3547,7 +3547,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             voiceSignal: true,
             vbr: true,
             constrainedVbr: BclOpusUseConstrainedVbr,
-            dtx: true, // shrinks any quiet frames that pass the ShouldTransmit gate
+            dtx: false,
             fec: BclOpusUseInbandFec,
             packetLossPercent: BclOpusPacketLossPercent);
 
