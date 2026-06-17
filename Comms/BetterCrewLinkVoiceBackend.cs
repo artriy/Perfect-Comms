@@ -1239,9 +1239,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
-#if WINDOWS
-            result = result with { OcclusionFactor = result.WallCoefficient };
-#endif
             peer.Apply(result); // proximity volumes only — volatile route writes, no _sync, no decode
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
             // Deliberately NOT calling peer.TryFlushBufferedVoice here. Doing so held the per-peer _sync lock
@@ -3857,7 +3854,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         public void MuteAll()
         {
 #if WINDOWS
-            _mixer?.SetPeer(PlaybackGroupId, 0f, _appliedPan, 1f);
+            _mixer?.SetPeer(PlaybackGroupId, 0f, _appliedPan, VoiceAudioFilterMode.None);
 #endif
         }
 
@@ -3881,7 +3878,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             var routeVolume = Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f);
 #if WINDOWS
-            _mixer?.SetPeer(PlaybackGroupId, routeVolume, result.Pan, result.OcclusionFactor);
+            _mixer?.SetPeer(PlaybackGroupId, routeVolume, result.Pan, result.FilterMode);
 #endif
 #if ANDROID
             _androidMixer?.SetPeer(PlaybackGroupId, routeVolume, result.Pan);
