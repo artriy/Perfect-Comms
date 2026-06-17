@@ -6,9 +6,14 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class BclVoiceMixer
 {
-    private const int PrimeSamples = AudioHelpers.FrameSize * 8;
+    private const int MinCushionSamples = AudioHelpers.FrameSize * 5;
+    private const int MaxCushionSamples = AudioHelpers.FrameSize * 15;
+    private const int CushionMarginSamples = AudioHelpers.FrameSize * 2;
+    private const int PauseThresholdSamples = AudioHelpers.FrameSize * 20;
+    private const float CushionGapMultiplier = 1.5f;
+    private const float CushionGapDecay = 0.997f;
     private const int FadeSamples = AudioHelpers.ClockRate / 100;
-    private const int MaxWaitMs = 250;
+    private const int MaxWaitMs = 400;
     private const float GainGlideK = 0.002f;
     private const float RadioDrive = 2.0f;
     private const float RadioLevel = 0.75f;
@@ -40,7 +45,9 @@ internal sealed class BclVoiceMixer
         public float CurRight;
         public bool Primed;
         public int FadeRemaining;
-        public long LastFeedRead;
+        public long LastFeedConsumed;
+        public float GapEstimate;
+        public int TargetCushion = MinCushionSamples;
         public DateTime PrimeDeadline;
         public VoiceAudioFilterMode Mode;
         public float Bz1;
@@ -68,8 +75,9 @@ internal sealed class BclVoiceMixer
     private long _diagUnprimes;
     private long _diagSilentSamples;
     private int _diagMaxRingDepth;
-    private long _readCounter;
-    private int _diagMaxFeedGapReads;
+    private long _samplesConsumed;
+    private int _diagMaxFeedGapSamples;
+    private int _diagMaxTargetCushion;
 
     public void AddSamples(int group, float[] mono, int count, bool silent)
     {
@@ -85,12 +93,17 @@ internal sealed class BclVoiceMixer
             }
             if (!p.Primed && p.PrimeDeadline == DateTime.MinValue)
                 p.PrimeDeadline = DateTime.UtcNow.AddMilliseconds(MaxWaitMs);
-            if (p.LastFeedRead != 0)
+            if (p.LastFeedConsumed != 0)
             {
-                var gap = (int)(_readCounter - p.LastFeedRead);
-                if (gap > _diagMaxFeedGapReads) _diagMaxFeedGapReads = gap;
+                var gap = (int)(_samplesConsumed - p.LastFeedConsumed);
+                if (gap > _diagMaxFeedGapSamples) _diagMaxFeedGapSamples = gap;
+                p.GapEstimate *= CushionGapDecay;
+                if (gap < PauseThresholdSamples && gap > p.GapEstimate)
+                    p.GapEstimate = gap;
+                p.TargetCushion = Math.Clamp((int)(p.GapEstimate * CushionGapMultiplier) + CushionMarginSamples, MinCushionSamples, MaxCushionSamples);
+                if (p.TargetCushion > _diagMaxTargetCushion) _diagMaxTargetCushion = p.TargetCushion;
             }
-            p.LastFeedRead = _readCounter;
+            p.LastFeedConsumed = _samplesConsumed;
             var len = p.Ring.Length;
             for (var i = 0; i < count; i++)
             {
@@ -103,7 +116,7 @@ internal sealed class BclVoiceMixer
                 p.Write = (p.Write + 1) % len;
                 p.Count++;
             }
-            if (!p.Primed && p.Count >= PrimeSamples)
+            if (!p.Primed && p.Count >= p.TargetCushion)
                 PrimeLocked(p);
         }
     }
@@ -146,7 +159,7 @@ internal sealed class BclVoiceMixer
         lock (_sync)
         {
             var chunkMin = _diagChunkMin == int.MaxValue ? 0 : _diagChunkMin;
-            var s = $"primeSamples={PrimeSamples} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} maxFeedGapReads={_diagMaxFeedGapReads} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} silentSamples={_diagSilentSamples}";
+            var s = $"minCushion={MinCushionSamples} maxTargetCushion={_diagMaxTargetCushion} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} maxFeedGapMs={_diagMaxFeedGapSamples * 1000 / AudioHelpers.ClockRate} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} silentSamples={_diagSilentSamples}";
             _diagReadCalls = 0;
             _diagChunkMin = int.MaxValue;
             _diagChunkMax = 0;
@@ -156,7 +169,8 @@ internal sealed class BclVoiceMixer
             _diagUnprimes = 0;
             _diagSilentSamples = 0;
             _diagMaxRingDepth = 0;
-            _diagMaxFeedGapReads = 0;
+            _diagMaxFeedGapSamples = 0;
+            _diagMaxTargetCushion = 0;
             return s;
         }
     }
@@ -177,7 +191,7 @@ internal sealed class BclVoiceMixer
         lock (_sync)
         {
             _diagReadCalls++;
-            _readCounter++;
+            _samplesConsumed += frames;
             if (frames < _diagChunkMin) _diagChunkMin = frames;
             if (frames > _diagChunkMax) _diagChunkMax = frames;
             foreach (var p in _peers.Values)
