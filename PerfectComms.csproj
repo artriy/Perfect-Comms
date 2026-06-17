@@ -46,7 +46,7 @@
 		<PackageReference Include="BepInEx.AutoPlugin" Version="1.1.0" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
 		<PackageReference Include="Concentus" Version="2.2.2" />
-		<PackageReference Include="SIPSorcery" Version="10.0.9" />
+		<PackageReference Include="SIPSorcery" Version="10.0.10" />
 		<PackageReference Include="SocketIOClient" Version="3.1.2" />
 		<PackageReference Include="ManagedBass" Version="4.0.2" />
 	</ItemGroup>
@@ -106,10 +106,10 @@
 		<EmbeddedResource Include="Libs\Interstellar.Messages.dll">
 			<LogicalName>Lib.Interstellar.Messages.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcery\10.0.9\lib\net6.0\SIPSorcery.dll">
+		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcery\10.0.10\lib\net6.0\SIPSorcery.dll">
 			<LogicalName>Lib.SIPSorcery.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcerymedia.abstractions\10.0.9\lib\netstandard2.0\SIPSorceryMedia.Abstractions.dll">
+		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcerymedia.abstractions\10.0.10\lib\netstandard2.0\SIPSorceryMedia.Abstractions.dll">
 			<LogicalName>Lib.SIPSorceryMedia.Abstractions.dll</LogicalName>
 		</EmbeddedResource>
 		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcery.websocketsharp\0.0.1\lib\netstandard2.0\websocket-sharp.dll">
