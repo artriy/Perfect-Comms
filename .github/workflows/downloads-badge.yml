@@ -5,46 +5,43 @@ on:
     - cron: "0 */6 * * *"   # every 6h
   release:
     types: [published, edited, deleted]
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Compute total downloads
+      - name: Compute values
+        id: vals
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           total=$(gh api --paginate repos/${{ github.repository }}/releases \
             --jq '[.[].assets[].download_count] | add // 0')
-          mkdir -p .github/badges
-          printf '{"schemaVersion":1,"label":"Downloads","message":"%s","color":"24C8DB"}\n' "$total" \
-            > .github/badges/downloads.json
-          echo "total=$total" >> "$GITHUB_OUTPUT"
-
-      - name: Compute latest release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
           tag=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name // empty')
           [ -n "$tag" ] || tag="none"
-          mkdir -p .github/badges
-          printf '{"schemaVersion":1,"label":"Latest","message":"%s","color":"C51111"}\n' "$tag" \
-            > .github/badges/latest.json
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
 
-      - name: Commit if changed
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/badges/downloads.json .github/badges/latest.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update badges"
-            git push
-          fi
+      - name: Downloads badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: b09ac2c39551270e9961b92e622b0893
+          filename: downloads.json
+          label: Downloads
+          message: ${{ steps.vals.outputs.total }}
+          color: 24C8DB
+
+      - name: Latest badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: b09ac2c39551270e9961b92e622b0893
+          filename: latest.json
+          label: Latest
+          message: ${{ steps.vals.outputs.tag }}
+          color: C51111
