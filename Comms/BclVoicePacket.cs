@@ -577,7 +577,8 @@ internal sealed class BclSendPacer : IDisposable
             if (_disposed || _queue.Count == 0)
             {
                 _lastTicks = now;
-                _creditSamples = 0;
+                // Keep one frame of credit "ready" so a steady sender's next frame goes out at once (no per-frame delay); bursts still pace.
+                _creditSamples = AudioHelpers.FrameSize;
                 return false;
             }
             _creditSamples += (now - _lastTicks) * TicksToSeconds * AudioHelpers.ClockRate;
