@@ -242,10 +242,12 @@ internal static class VoiceModRegistry
     private static VoiceChannelResult? Eval(List<Func<VoiceRuleContext, VoiceChannelResult?>> list,
         string modId, PlayerControl player, VoicePhaseKind phase, bool isLocal, bool isDead)
     {
+        if (list.Count == 0) return null;
+        var ctx = MakeContext(modId, player, phase, isLocal, isDead);
         for (int i = 0; i < list.Count; i++)
         {
             VoiceChannelResult? r;
-            try { r = list[i](MakeContext(modId, player, phase, isLocal, isDead)); }
+            try { r = list[i](ctx); }
             catch { r = null; }
             if (r != null) return r;
         }

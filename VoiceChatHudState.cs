@@ -141,11 +141,20 @@ public static class VoiceChatHudState
         }
         PositionButtons();
     }
+    // Camera.main is a FindGameObjectWithTag scan in IL2CPP; cache it and refetch only when null/destroyed (Unity != null detects destroyed).
+    private static Camera? _cachedMainCamera;
+    private static Camera? MainCamera()
+    {
+        if (_cachedMainCamera != null) return _cachedMainCamera;
+        _cachedMainCamera = Camera.main;
+        return _cachedMainCamera;
+    }
+
     private static void PositionButtons()
     {
         if (_micButtonObj == null || _spkButtonObj == null) return;
 
-        var cam = Camera.main;
+        var cam = MainCamera();
         if (cam == null) return;
         var worldPt = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, ButtonViewportDepth));
 
@@ -735,7 +744,7 @@ public static class VoiceChatHudState
     private static void PositionToast()
     {
         if (_toastObj == null) return;
-        var cam = Camera.main;
+        var cam = MainCamera();
         if (cam == null) return;
         var world = cam.ViewportToWorldPoint(new Vector3(0.5f, ToastViewportY, ButtonViewportDepth));
         _toastObj.transform.position = new Vector3(world.x, world.y, world.z - 1f);
@@ -853,7 +862,7 @@ public static class VoiceChatHudState
     private static void PositionNear(GameObject tooltip, GameObject btn)
     {
         var p = btn.transform.position;
-        var cam = Camera.main;
+        var cam = MainCamera();
         if (cam == null)
         {
             tooltip.transform.position = new Vector3(p.x + TooltipHalfWidth, p.y + TooltipHalfHeight, p.z - 1f);

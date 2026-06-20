@@ -133,6 +133,7 @@ public static class MeetingSpeakingIndicatorPatch
         if (_speakingLevels.Count == 0 && !AnyCardStillVisible())
         {
             DisableAll();
+            PrewarmCardGlows(meetingHud, GlowPrewarmPerFrame);
             if (logNow)
                 LogHud("hud.meeting.update", $"idle calls={Take(ref _updateCalls)} {DescribeHudRoot(meetingHud)} {DescribeOverlay(overlay)}");
             return;
@@ -543,6 +544,24 @@ public static class MeetingSpeakingIndicatorPatch
 
     private static string DescribeColor(Color color)
         => $"({color.r:0.00},{color.g:0.00},{color.b:0.00},{color.a:0.00})";
+
+    private const int GlowPrewarmPerFrame = 2;
+
+    // Build card glows during idle meeting frames so the first-speaker frame doesn't pay the one-shot lazy build of all of them.
+    private static void PrewarmCardGlows(MeetingHud meetingHud, int budget)
+    {
+        if (meetingHud.playerStates == null) return;
+        foreach (var state in meetingHud.playerStates)
+        {
+            if (budget <= 0) return;
+            if (state == null) continue;
+            byte pid = state.TargetPlayerId;
+            if (pid == byte.MaxValue) continue;
+            if (_cardGlows.TryGetValue(pid, out var existing) && existing != null) continue;
+            CreateCardGlow(meetingHud, state, pid);
+            budget--;
+        }
+    }
 
     private static SpriteRenderer? CreateCardGlow(MeetingHud meetingHud, PlayerVoteArea state, byte playerId)
     {

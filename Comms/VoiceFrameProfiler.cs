@@ -36,11 +36,14 @@ internal static class VoiceFrameProfiler
     // full breakdown (and its logging cost) from firing on a large fraction of normal frames.
     private const double GcFrameElevatedMs = 20.0;
     private const double WindowSeconds = 5.0;
+    // A frame gap longer than this means the profiler went dormant; re-baseline so its stale GC/heap deltas aren't billed to one resumed frame.
+    private const double DormantGapSeconds = 2.0;
 
     private static bool Enabled => VoiceDiagnostics.IsEnabled;
 
     // ---- current-frame accumulation (main thread only) ----
     private static int _frame = -1;
+    private static float _lastSampleTime = float.NaN;
     private static double _frameDeltaMs;
     private static long _heapAtStart;
     private static int _gc0AtStart, _gc1AtStart, _gc2AtStart;
@@ -94,6 +97,7 @@ internal static class VoiceFrameProfiler
         if (!float.IsNaN(_windowStart) && _windowFrametimes.Count > 0)
             FlushWindow(SafeTime(), SafeHeap()); // emit the partial window (FlushFrame only flushes a full one)
         _frame = -1;
+        _lastSampleTime = float.NaN;
         _seg.Clear();
         _windowStart = float.NaN; // force a fresh window when profiling resumes
     }
@@ -101,14 +105,21 @@ internal static class VoiceFrameProfiler
     private static void EnsureFrame()
     {
         int f = SafeFrameCount();
+        float t = SafeTime();
+        bool resumedAfterGap = !float.IsNaN(_lastSampleTime) && t - _lastSampleTime > DormantGapSeconds;
+        _lastSampleTime = t;
         if (f == _frame) return;
-        if (_frame >= 0) FlushFrame();   // the frame that just ended
+        if (_frame >= 0)
+        {
+            if (resumedAfterGap) _seg.Clear();   // discard the frame stranded across a dormant gap; its GC/heap deltas are poisoned
+            else FlushFrame();                    // the frame that just ended
+        }
         _frame = f;
         _seg.Clear();
         _frameDeltaMs = SafeUnscaledDeltaMs();
         _heapAtStart = SafeHeap();
         _gc0AtStart = SafeGc(0); _gc1AtStart = SafeGc(1); _gc2AtStart = SafeGc(2);
-        if (float.IsNaN(_windowStart)) StartWindow();
+        if (float.IsNaN(_windowStart) || resumedAfterGap) StartWindow();
     }
 
     private static void FlushFrame()

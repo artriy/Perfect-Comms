@@ -140,6 +140,8 @@ public class VoiceChatRoom
     private DateTime _transitionTraceUntilUtc = DateTime.MinValue;
     private float _transitionTraceStateTimer;
     private int _tracePerfEventsRemaining;
+    private string? _lastLoggedLocalState;
+    private string? _lastLoggedOptions;
     private DateTime _lastDebugStateLogUtc = DateTime.MinValue;
     private readonly ConcurrentQueue<VoiceBackendCustomMessage> _pendingBackendCustomMessages = new();
     private readonly Dictionary<string, DateTime> _lastHostSettingsResponseBySender = new();
@@ -648,10 +650,7 @@ public class VoiceChatRoom
         var endpointLabel = endpoint.IsInterstellar ? VoiceEndpointSettings.BuildInterstellarRoomUrl(endpoint.ServerUrl) : endpoint.ServerUrl;
         VoiceDiagnostics.Log("transport.switch", $"backend={endpoint.Backend} room={roomCode} region={region} endpoint={endpointLabel}");
         ClearVoiceUiForLifecycleReset("transport switch");
-        _voiceBackend?.Dispose();
-        _voiceBackend = null;
-        _interstellarVoice = null;
-        _betterCrewLinkVoice = null;
+        DisposeVoiceBackend();
         if (IsLocalHost())
             VoiceRoomSettingsState.ClearRemote();
         _lastSentHostSettings = null;
@@ -1147,6 +1146,16 @@ public class VoiceChatRoom
         _pendingBackendCustomMessages.Enqueue(message.CopyPayload());
     }
 
+    private void DisposeVoiceBackend()
+    {
+        if (_voiceBackend != null)
+            _voiceBackend.CustomMessageReceived -= HandleBackendCustomMessage;
+        _voiceBackend?.Dispose();
+        _voiceBackend = null;
+        _interstellarVoice = null;
+        _betterCrewLinkVoice = null;
+    }
+
     private void DrainBackendCustomMessages()
     {
         while (_pendingBackendCustomMessages.TryDequeue(out var message))
@@ -1220,10 +1229,7 @@ public class VoiceChatRoom
     private void Rejoin(string reason)
     {
         ClearVoiceUiForLifecycleReset(reason);
-        _voiceBackend?.Dispose();
-        _voiceBackend = null;
-        _interstellarVoice = null;
-        _betterCrewLinkVoice = null;
+        DisposeVoiceBackend();
         CurrentSnapshot = null;
         _snapshotRefreshTimer = 0f;
         _missingPeerRecoveryReadyTime = -999f;
@@ -1266,10 +1272,7 @@ public class VoiceChatRoom
     public void Close()
     {
         ClearVoiceUiForLifecycleReset("room close");
-        _voiceBackend?.Dispose();
-        _voiceBackend = null;
-        _interstellarVoice = null;
-        _betterCrewLinkVoice = null;
+        DisposeVoiceBackend();
         _lastCompatibilityRefreshTime = -999f;
         CurrentSnapshot = null;
         _snapshotRefreshTimer = 0f;
@@ -1363,6 +1366,8 @@ public class VoiceChatRoom
         _tracePerfEventsRemaining = 0;
         _haveTracePhase = false;
         _lastTracePhase = VoiceGamePhase.Unknown;
+        _lastLoggedLocalState = null;
+        _lastLoggedOptions = null;
     }
 
     private void TrackTransitionPhase(VoiceGameStateSnapshot? snapshot)
@@ -1521,14 +1526,24 @@ public class VoiceChatRoom
 
         snapshot.TryGetLocalPlayer(out var local);
         bool localFound = snapshot.LocalPlayerId != byte.MaxValue;
-        VoiceDiagnostics.Log("state.local",
+        var localState =
             $"phase={snapshot.Phase} map={snapshot.MapId} localClient={snapshot.LocalClientId} localPlayer={snapshot.LocalPlayerId} " +
             $"localFound={localFound} local={DescribePlayer(localFound ? local : null)} " +
             $"localPos={FormatVector(snapshot.LocalPosition)} localLight={snapshot.LocalLightRadius:0.000} meeting={snapshot.MeetingActive} comms={snapshot.CommsSabotageActive} " +
             $"cameras={snapshot.CameraCount} cameraActive={snapshot.CameraViewActive} cameraIndex={snapshot.ActiveCameraIndex} cameraPos={FormatVector(snapshot.ActiveCameraPosition)} closedDoors={snapshot.ClosedDoorCount} virtualMics={_virtualMics.Count} virtualSpeakers={_virtualSpeakers.Count} " +
-            $"micMuted={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} radioHeld={VoiceChatHudState.IsTeamRadio} radioChannel={VoiceChatHudState.ActiveTeamRadioChannel()}");
+            $"micMuted={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} radioHeld={VoiceChatHudState.IsTeamRadio} radioChannel={VoiceChatHudState.ActiveTeamRadioChannel()}";
+        if (localState != _lastLoggedLocalState)
+        {
+            _lastLoggedLocalState = localState;
+            VoiceDiagnostics.Log("state.local", localState);
+        }
 
-        VoiceDiagnostics.Log("state.options", DescribeGameOptions());
+        var options = DescribeGameOptions();
+        if (options != _lastLoggedOptions)
+        {
+            _lastLoggedOptions = options;
+            VoiceDiagnostics.Log("state.options", options);
+        }
     }
 
     private static string DescribeGameOptions()

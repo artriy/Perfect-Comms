@@ -529,3 +529,72 @@ internal sealed class BclVoiceJitterBuffer
     private static int Distance(ushort from, ushort to)
         => unchecked((ushort)(to - from));
 }
+
+internal sealed class BclSendPacer : IDisposable
+{
+    private const int MaxQueuedFrames = 15; // 300 ms egress buffer at 20 ms/frame
+    private static readonly double TicksToSeconds = 1.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    private readonly Action<byte[]> _sendFrame;
+    private readonly object _lock = new();
+    private readonly Queue<byte[]> _queue = new();
+    private readonly System.Threading.Timer _timer;
+    private long _lastTicks;
+    private double _creditSamples;
+    private bool _disposed;
+
+    public BclSendPacer(Action<byte[]> sendFrame)
+    {
+        _sendFrame = sendFrame;
+        _lastTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        _timer = new System.Threading.Timer(_ => Pump(), null, 10, 10);
+    }
+
+    public void Enqueue(byte[] framed)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            while (_queue.Count >= MaxQueuedFrames) _queue.Dequeue();
+            _queue.Enqueue(framed);
+        }
+    }
+
+    private void Pump()
+    {
+        while (TryDequeueDue(out var framed))
+        {
+            try { _sendFrame(framed); } catch { }
+        }
+    }
+
+    private bool TryDequeueDue(out byte[] framed)
+    {
+        framed = Array.Empty<byte>();
+        lock (_lock)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_disposed || _queue.Count == 0)
+            {
+                _lastTicks = now;
+                _creditSamples = 0;
+                return false;
+            }
+            _creditSamples += (now - _lastTicks) * TicksToSeconds * AudioHelpers.ClockRate;
+            _lastTicks = now;
+            // Cap catch-up so a stalled timer wakes up and drains the backlog smoothly, not as one clump.
+            double cap = AudioHelpers.FrameSize * 2;
+            if (_creditSamples > cap) _creditSamples = cap;
+            if (_creditSamples < AudioHelpers.FrameSize) return false;
+            _creditSamples -= AudioHelpers.FrameSize;
+            framed = _queue.Dequeue();
+            return true;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_lock) { _disposed = true; _queue.Clear(); }
+        _timer.Dispose();
+    }
+}

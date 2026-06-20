@@ -6,3 +6,9 @@ obj/
 .idea/
 .DS_Store
 Libs/*.bak.*
+PerfectComms.Tests/
+scripts/
+cloudflare/
+TouMira/
+artifacts/
+PerfectComms.sln

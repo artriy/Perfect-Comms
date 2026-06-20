@@ -147,6 +147,21 @@ public class VoiceChatLocalSettings
     private bool _savedEchoCancellation = true;
     private bool _savedAutoMicGain = true;
     private bool _applyingUnityToggle;
+    private bool _applyingDiagnosticsToggle;
+
+    // Writes both diagnostics entries under one suppression flag so the pair triggers a single APM rebuild, not two.
+    public void ApplyDiagnosticsToggle(bool enabled)
+    {
+        _applyingDiagnosticsToggle = true;
+        try
+        {
+            DebugVoiceStats.Value = enabled;
+            MicCalibrationDiagnostics.Value = enabled;
+        }
+        finally { _applyingDiagnosticsToggle = false; }
+        VoiceDiagnostics.SetEnabled(enabled);
+        VoiceChatRoom.Current?.RefreshLocalAudioSettings();
+    }
 
     public string MicrophoneDevice
     {
@@ -523,6 +538,7 @@ public class VoiceChatLocalSettings
         }
         else if (configEntry == DebugVoiceStats)
         {
+            if (_applyingDiagnosticsToggle) return;
             VoiceDiagnostics.SetEnabled(DebugVoiceStats.Value);
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
@@ -531,7 +547,7 @@ public class VoiceChatLocalSettings
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {
-            if (_applyingUnityToggle) return;
+            if (_applyingUnityToggle || _applyingDiagnosticsToggle) return;
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == UnityAudio)

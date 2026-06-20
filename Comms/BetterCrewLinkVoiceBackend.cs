@@ -23,9 +23,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly int BclOpusPacketLossPercent = 15; // non-zero PLP so Opus embeds FEC redundancy in the wire frame
     private const int BclPlaybackLatencyMs = 60;
     private const int BclJitterTargetDelayFrames = 2;
-    private const int BclJitterMaxBufferedFrames = 16;
+    private const int BclJitterMaxBufferedFrames = 25;
     private const int BclJitterMinTargetFrames = 1;
-    private const int BclJitterMaxTargetFrames = 3;
+    private const int BclJitterMaxTargetFrames = 15;
     private const int CodecAdaptIntervalFrames = 100;
     private const int PlpDeadbandPercent = 3;
     private const float RemoteSpeakingThreshold = 0.004f;
@@ -80,6 +80,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // to drain the pool and force an inline (main-thread) build. The background refiller tops it up after
     // every rent and on every ICE-config change.
     private const int PcPoolTarget = 4;
+    private const int MaxPendingSignalsPerSocket = 32;
+    private static readonly TimeSpan PendingSignalSocketMaxAge = TimeSpan.FromSeconds(30);
+    private readonly Dictionary<string, DateTime> _pendingSignalFirstSeenUtc = new();
     private int _pcPoolRefilling;
     private static readonly TimeSpan JoinRetryInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfferRetryInterval = TimeSpan.FromSeconds(3);
@@ -256,6 +259,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         Region = region;
         ServerUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
 
+        _sendPacer = new BclSendPacer(SendFramedToChannels);
         ConnectSocket();
         WarmOpusCodec();
         VoiceDiagnostics.Log("bcl.created", $"room={RoomCode} region={Region} endpoint={ServerUrl}");
@@ -1423,6 +1427,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     public void Dispose()
     {
         _disposed = true;
+        _sendPacer.Dispose();
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
         try { _bassOut?.Dispose(); } catch { }
@@ -1727,9 +1732,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 {
                     pending = new Queue<string>();
                     _pendingSignalsBySocket[fromSocketId] = pending;
+                    _pendingSignalFirstSeenUtc[fromSocketId] = DateTime.UtcNow;
                 }
 
                 pending.Enqueue(dataJson ?? string.Empty);
+                while (pending.Count > MaxPendingSignalsPerSocket) pending.Dequeue();
                 pendingCount = pending.Count;
             }
 
@@ -1769,6 +1776,30 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         if (dropped > 0)
             VoiceDiagnostics.Log("bcl.signal.dropped", $"fromSocket={socketId} count={dropped} reason={reason}");
+    }
+
+    private void EvictStalePendingSignals()
+    {
+        var now = DateTime.UtcNow;
+        List<string>? orphans = null;
+        List<string>? aged = null;
+        lock (_peerSync)
+        {
+            if (_pendingSignalFirstSeenUtc.Count == 0) return;
+            foreach (var kv in _pendingSignalFirstSeenUtc)
+            {
+                if (!_pendingSignalsBySocket.ContainsKey(kv.Key))
+                    (orphans ??= new()).Add(kv.Key);
+                else if (now - kv.Value > PendingSignalSocketMaxAge && !_socketToClient.ContainsKey(kv.Key))
+                    (aged ??= new()).Add(kv.Key);
+            }
+            if (orphans != null)
+                foreach (var socket in orphans) _pendingSignalFirstSeenUtc.Remove(socket);
+            if (aged != null)
+                foreach (var socket in aged) _pendingSignalFirstSeenUtc.Remove(socket);
+        }
+        if (aged != null)
+            foreach (var socket in aged) DropPendingSignals(socket, "unmapped-timeout");
     }
 
     private string? GetLocalClientReason(string socketId, BclClient client)
@@ -1876,6 +1907,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         var now = DateTime.UtcNow;
         if (now - _lastOfferRetryUtc < OfferRetryInterval) return;
+        EvictStalePendingSignals();
         var peers = SnapshotPeers();
         // The answerer's dc.onopen reset never fires under SIPSorcery (no inbound channel-open callback), so
         // its RecoveryAttempts/NextRetryUtc would otherwise stay stale after a channel actually opens. Observe
@@ -3190,10 +3222,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // Reused encode scratch; all writes occur under _captureFrameSync and never escape.
     private readonly short[] _encodePcm = new short[AudioHelpers.FrameSize];
     private readonly byte[] _encodeScratch = new byte[1024];
-    // Reused open-channel list for the send loop. Only used inside ProcessMicrophoneFrameLocked, which
-    // always runs under _captureFrameSync, so it is effectively single-threaded; holds channel references
-    // (not audio data), so no aliasing concern. Replaces the per-frame SnapshotOpenChannels LINQ array.
+    // Reused open-channel list for the send loop. Only used inside SendFramedToChannels, which runs on the
+    // single send-pacer timer thread, so it is effectively single-threaded; holds channel references (not
+    // audio data), so no aliasing concern. Replaces the per-frame SnapshotOpenChannels LINQ array.
     private readonly List<RTCDataChannel> _openChannelScratch = new();
+    // Paces encoded frames out at a steady ~20 ms cadence (up to 300 ms buffered) so a local stall can't clump our send.
+    private readonly BclSendPacer _sendPacer;
 
     // Reused mono-downmix buffer for mic capture conversion. Only touched on the single NAudio capture
     // thread (OnMicrophoneData), and its contents are copied into the reused _captureFrameBuffer by
@@ -3400,6 +3434,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         // because channel.send queues it for asynchronous SCTP transmission (reusing it would corrupt
         // in-flight data).
         var framed = BclVoicePacket.Wrap(packet, encoded, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, BclVoicePacket.QuantizeLevel(transmitPeak));
+        _sendPacer.Enqueue(framed);
+    }
+
+    private void SendFramedToChannels(byte[] framed)
+    {
         var sent = false;
         SnapshotOpenChannelsInto(_openChannelScratch);
         foreach (var channel in _openChannelScratch)

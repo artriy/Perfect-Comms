@@ -412,7 +412,7 @@ public static class VoiceSettingsPanel
         Toggle(defs, "Nat Fix", s.NatFix);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,
-            v => { s.DebugVoiceStats.Value = v; s.MicCalibrationDiagnostics.Value = v; });
+            v => s.ApplyDiagnosticsToggle(v));
     }
 
     private static Vector2 GetRange(BepInEx.Configuration.ConfigEntryBase entry)

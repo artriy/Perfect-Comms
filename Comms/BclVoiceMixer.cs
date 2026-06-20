@@ -10,6 +10,7 @@ internal sealed class BclVoiceMixer
     private const int MaxCushionSamples = AudioHelpers.FrameSize * 15;
     private const int CushionMarginSamples = AudioHelpers.FrameSize * 2;
     private const int PauseThresholdSamples = AudioHelpers.FrameSize * 20;
+    private const int DrainHoldSamples = AudioHelpers.FrameSize * 10;
     private const float CushionGapMultiplier = 1.5f;
     private const float CushionGapDecay = 0.997f;
     private const int FadeSamples = AudioHelpers.ClockRate / 100;
@@ -241,10 +242,12 @@ internal sealed class BclVoiceMixer
                     bus[f * 2] += s * p.CurLeft;
                     bus[f * 2 + 1] += s * p.CurRight;
                 }
-                if (p.Count == 0)
+                if (p.Count == 0
+                    && !(p.LastFeedConsumed != 0 && _samplesConsumed - p.LastFeedConsumed < DrainHoldSamples))
                 {
                     p.Primed = false;
                     p.PrimeDeadline = DateTime.MinValue;
+                    p.LastFeedConsumed = 0;
                     _diagUnprimes++;
                 }
             }
