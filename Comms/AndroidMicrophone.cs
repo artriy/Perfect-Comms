@@ -43,6 +43,7 @@ internal sealed class AndroidMicrophone : IDisposable
 
     public bool ReuseBuffer { get; set; }
     private float[] _pollBuf = Array.Empty<float>();
+    private Il2CppStructArray<float>? _il2cppPollBuf;
 
     public void SetVolume(float v) => _volume = Math.Clamp(v, 0f, 4f);
 
@@ -74,6 +75,7 @@ internal sealed class AndroidMicrophone : IDisposable
         if (!string.IsNullOrEmpty(_device))
             Microphone.End(_device);
         _clip = null;
+        _il2cppPollBuf = null;
     }
 
     /// <summary>
@@ -102,6 +104,14 @@ internal sealed class AndroidMicrophone : IDisposable
 
         if (newSamples <= 0) return;
 
+        // Cap main-thread work: drop oldest backlog so a slow frame can't compound into a death spiral.
+        const int MaxSamplesPerTick = SampleRate / 5;
+        if (newSamples > MaxSamplesPerTick)
+        {
+            _lastPos = (_lastPos + (newSamples - MaxSamplesPerTick)) % _clip.samples;
+            newSamples = MaxSamplesPerTick;
+        }
+
         int start = _lastPos % _clip.samples;
         int firstRead = Math.Min(newSamples, _clip.samples - start);
         ReadAndPublish(start, firstRead);
@@ -117,7 +127,12 @@ internal sealed class AndroidMicrophone : IDisposable
     {
         if (_clip == null || count <= 0) return;
 
-        var samples = new Il2CppStructArray<float>(count);
+        // Reuse the IL2CPP buffer across frames to keep GC pressure off the render
+        // thread; reallocate only when the per-Tick sample count changes (steady state
+        // is a stable per-frame delta, so most frames hit the reuse path).
+        if (_il2cppPollBuf == null || _il2cppPollBuf.Length != count)
+            _il2cppPollBuf = new Il2CppStructArray<float>(count);
+        var samples = _il2cppPollBuf;
         _clip.GetData(samples, start);
 
         float[] buf;
@@ -131,7 +146,9 @@ internal sealed class AndroidMicrophone : IDisposable
             buf = new float[count];
         }
 
-        for (int i = 0; i < count; i++) buf[i] = samples[i] * _volume;
+        samples.CopyTo(buf, 0);
+        if (_volume != 1f)
+            for (int i = 0; i < count; i++) buf[i] *= _volume;
 
         DataAvailable?.Invoke(buf, count);
     }

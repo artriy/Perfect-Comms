@@ -155,6 +155,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // stale device's frame can never push samples into state the next device is about to reuse.
     private int _captureEpoch;
 
+#if ANDROID || WINDOWS
+    private readonly object _unityEncodeSync = new();
+    private readonly Queue<(float[] buffer, int samples, int epoch)> _unityEncodeQueue = new();
+    private Thread? _unityEncodeWorker;
+    private bool _unityEncodeStop;
+    private const int UnityEncodeQueueMaxFrames = 16;
+#endif
+
     private SocketIOClient.SocketIO? _socket;
 #if WINDOWS
     private BassRecorder? _bassRecorder;
@@ -867,6 +875,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
 
         _microphoneReady = false;
+        StopUnityEncodeWorker();
         lock (_captureFrameSync)
         {
             _captureEpoch++;
@@ -894,19 +903,69 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         Interlocked.Add(ref _micSamples, samples);
 
         var epoch = Volatile.Read(ref _captureEpoch);
-        lock (_captureFrameSync)
+        var copy = new float[samples];
+        Array.Copy(buffer, 0, copy, 0, samples);
+        lock (_unityEncodeSync)
         {
-            if (epoch != _captureEpoch) return;
-            try
+            if (_disposed) return;
+            while (_unityEncodeQueue.Count >= UnityEncodeQueueMaxFrames)
+                _unityEncodeQueue.Dequeue();
+            _unityEncodeQueue.Enqueue((copy, samples, epoch));
+            if (_unityEncodeWorker == null)
             {
-                ProcessMicrophoneCaptureSamples(buffer, samples);
+                _unityEncodeStop = false;
+                _unityEncodeWorker = new Thread(UnityEncodeWorkerLoop) { IsBackground = true, Name = "PerfectComms.UnityEncode" };
+                _unityEncodeWorker.Start();
             }
-            catch (Exception ex)
+            Monitor.Pulse(_unityEncodeSync);
+        }
+    }
+
+    private void UnityEncodeWorkerLoop()
+    {
+        while (true)
+        {
+            float[] buffer;
+            int samples;
+            int epoch;
+            lock (_unityEncodeSync)
             {
-                Interlocked.Increment(ref _micEncodeFailures);
-                VoiceDiagnostics.Log("bcl.mic.capture_error", $"source=android error=\"{ex.Message}\"");
+                while (_unityEncodeQueue.Count == 0 && !_unityEncodeStop && !_disposed)
+                    Monitor.Wait(_unityEncodeSync);
+                if (_unityEncodeStop || _disposed)
+                    return;
+                (buffer, samples, epoch) = _unityEncodeQueue.Dequeue();
+            }
+
+            if (epoch != Volatile.Read(ref _captureEpoch)) continue;
+            lock (_captureFrameSync)
+            {
+                if (epoch != _captureEpoch) continue;
+                try
+                {
+                    ProcessMicrophoneCaptureSamples(buffer, samples);
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref _micEncodeFailures);
+                    VoiceDiagnostics.Log("bcl.mic.capture_error", $"source=android error=\"{ex.Message}\"");
+                }
             }
         }
+    }
+
+    private void StopUnityEncodeWorker()
+    {
+        Thread? worker;
+        lock (_unityEncodeSync)
+        {
+            worker = _unityEncodeWorker;
+            _unityEncodeWorker = null;
+            _unityEncodeStop = true;
+            _unityEncodeQueue.Clear();
+            Monitor.PulseAll(_unityEncodeSync);
+        }
+        try { worker?.Join(500); } catch { }
     }
 #endif
 
