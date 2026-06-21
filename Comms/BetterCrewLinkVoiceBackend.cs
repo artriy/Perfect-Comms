@@ -4013,8 +4013,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
 
         private static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(1);
-        private DateTime _lastKeepaliveSentUtc = DateTime.MinValue;
-        private int _consecutiveKeepaliveSendFailures;
+        private long _lastKeepaliveSentTicks;
+        private volatile int _consecutiveKeepaliveSendFailures;
         public int ConsecutiveKeepaliveSendFailures => _consecutiveKeepaliveSendFailures;
         private long _lastInboundTicks;
         public long LastInboundTicks => Interlocked.Read(ref _lastInboundTicks);
@@ -4029,15 +4029,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             Interlocked.Exchange(ref _lastInboundTicks, 0);
             HasOpenedAtLeastOnce = false;
             _consecutiveKeepaliveSendFailures = 0;
-            _lastKeepaliveSentUtc = DateTime.MinValue;
+            Interlocked.Exchange(ref _lastKeepaliveSentTicks, 0);
             SilentSinceLoggedUtc = DateTime.MinValue;
         }
 
         // Unconditional liveness probe: never gated by silence suppression, so a silent-but-healthy link still proves itself.
         public void MaybeSendKeepalive(DateTime nowUtc)
         {
-            if (nowUtc - _lastKeepaliveSentUtc < KeepaliveInterval) return;
-            _lastKeepaliveSentUtc = nowUtc;
+            if (nowUtc.Ticks - Interlocked.Read(ref _lastKeepaliveSentTicks) < KeepaliveInterval.Ticks) return;
+            Interlocked.Exchange(ref _lastKeepaliveSentTicks, nowUtc.Ticks);
             var channel = DataChannel;
             if (channel?.readyState != RTCDataChannelState.open) return;
             try

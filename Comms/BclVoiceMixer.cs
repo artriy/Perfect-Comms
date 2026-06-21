@@ -46,7 +46,7 @@ internal sealed class BclVoiceMixer
         public float CurRight;
         public bool Primed;
         public int FadeRemaining;
-        public long LastFeedConsumed;
+        public long LastFeedConsumed = -1;
         public float GapEstimate;
         public int TargetCushion = MinCushionSamples;
         public DateTime PrimeDeadline;
@@ -94,7 +94,7 @@ internal sealed class BclVoiceMixer
             }
             if (!p.Primed && p.PrimeDeadline == DateTime.MinValue)
                 p.PrimeDeadline = DateTime.UtcNow.AddMilliseconds(MaxWaitMs);
-            if (p.LastFeedConsumed != 0)
+            if (p.LastFeedConsumed >= 0)
             {
                 var gap = (int)(_samplesConsumed - p.LastFeedConsumed);
                 if (gap > _diagMaxFeedGapSamples) _diagMaxFeedGapSamples = gap;
@@ -243,11 +243,11 @@ internal sealed class BclVoiceMixer
                     bus[f * 2 + 1] += s * p.CurRight;
                 }
                 if (p.Count == 0
-                    && !(p.LastFeedConsumed != 0 && _samplesConsumed - p.LastFeedConsumed < DrainHoldSamples))
+                    && !(p.LastFeedConsumed >= 0 && _samplesConsumed - p.LastFeedConsumed < DrainHoldSamples))
                 {
                     p.Primed = false;
                     p.PrimeDeadline = DateTime.MinValue;
-                    p.LastFeedConsumed = 0;
+                    p.LastFeedConsumed = -1;
                     _diagUnprimes++;
                 }
             }

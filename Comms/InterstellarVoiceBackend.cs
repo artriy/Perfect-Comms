@@ -405,7 +405,12 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
                 var manualMicrophone = new ManualMicrophone();
                 _androidMicrophone = new AndroidMicrophone();
                 _androidMicrophone.ReuseBuffer = true;
-                _androidMicrophone.DataAvailable += (buffer, _) => manualMicrophone.PushAudioData(buffer);
+                _androidMicrophone.DataAvailable += (buffer, len) =>
+                {
+                    var f = new float[len];
+                    Array.Copy(buffer, f, len);
+                    manualMicrophone.PushAudioData(f);
+                };
                 _androidMicrophone.Start(_lastMicDeviceName);
                 _room.Microphone = manualMicrophone;
 #else
