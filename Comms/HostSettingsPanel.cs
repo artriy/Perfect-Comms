@@ -14,7 +14,7 @@ public static class HostSettingsPanel
     private const float TopPad = 12f;
 
     private static readonly string[] BuiltInCategories =
-        { "PROXIMITY", "LOBBY", "VENTS & GHOSTS", "TEAM RADIO", "TOU MIRA" };
+        { "PROXIMITY", "LOBBY", "MEETING & VOICE", "TEAM RADIO", "TOU MIRA" };
 
     private static readonly (int index, string title)[] RailSections =
         { (4, "MOD BEHAVIOUR") };
@@ -237,6 +237,7 @@ public static class HostSettingsPanel
             },
             2 => new List<OptionHolder>
             {
+                g.GracePeriodEnabled, g.GracePeriodSeconds,
                 g.HearInVent, g.VentPrivateChat, g.ImpostorHearGhosts, g.CommsSabDisables,
                 g.OnlyGhostsCanTalk, g.GhostsHearEachOtherUnlimited, g.OnlyMeetingOrLobby,
                 g.OnlyMeetingOrLobbyAffectsGhosts
@@ -248,7 +249,6 @@ public static class HostSettingsPanel
             },
             4 => new List<OptionHolder>
             {
-                g.GracePeriodEnabled, g.GracePeriodSeconds,
                 r.MuteBlackmailedInMeetings, r.MuteBlackmailedNextRound, r.MuteParasiteControlled,
                 r.ParasiteHearFromVictim, r.MutePuppeteerControlled, r.PuppeteerHearFromVictim,
                 r.MuteSwooperWhileSwooped, r.MuffleBlindedOrFlashedHearing, r.MuffleHypnotizedDuringHysteria,

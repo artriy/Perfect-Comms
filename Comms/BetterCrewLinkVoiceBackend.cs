@@ -40,6 +40,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly byte[] DataControlPrefix = [(byte)'P', (byte)'C', (byte)'B', (byte)'C'];
     private static readonly byte[] LossReportMagic = [(byte)'P', (byte)'C', (byte)'L', (byte)'R'];
     private static readonly byte[] RadioStateMagic = [(byte)'P', (byte)'C', (byte)'R', (byte)'D'];
+    private static readonly byte[] KeepaliveMagic = [(byte)'P', (byte)'C', (byte)'K', (byte)'A'];
+    private static readonly byte[] KeepaliveBytes = BuildKeepaliveMessage();
     private static readonly RTCIceServer[] DefaultIceServers = [new() { urls = "stun:stun.l.google.com:19302" }];
 
     private readonly MicPreprocessor _micPreprocessor = new();
@@ -96,6 +98,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly TimeSpan PeerEscalationDeferralWindow = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PeerEscalationDeferralEpisodeMax = TimeSpan.FromSeconds(15);
     private const int PeerRecoveryInFlightMaxAttempts = 2;
+    // Inter-frame gap above this = main-thread stall (GC/scene load); skip liveness + rebase so resume can't mass-trip.
+    private static readonly TimeSpan ResumeFrameThreshold = TimeSpan.FromSeconds(2);
+    // Conservative because the audio channel is unreliable (ordered=false, maxRetransmits=0): bursty loss must not trip silence.
+    private static readonly TimeSpan PeerSilenceTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SilenceLogInterval = TimeSpan.FromSeconds(10);
     // Receive-side watchdog: how long a peer's data channel may stay non-open while its connection is alive
     // (it contributes to openChannels < peers) before we proactively re-request/re-offer for THAT peer
     // regardless of role. Targets the one-directional "hears nobody / hears most" signature directly and
@@ -127,6 +134,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int _micEncodedFrames;
     private int _micNoOpenChannelDrops;
     private ushort _sendSequence;
+    private long _lastUpdateTicks;
     private uint _sendTimestamp;
     private int _nextProvisionalPeerGroupId = -1000;
     private readonly object _micStatsLock = new();
@@ -1379,6 +1387,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         SnapshotPeersInto(_updatePeerScratch);
         _routeClientScratch.Clear();
         var lossReportNowUtc = DateTime.UtcNow;
+        var frameGapTicks = _lastUpdateTicks == 0 ? 0 : lossReportNowUtc.Ticks - _lastUpdateTicks;
+        _lastUpdateTicks = lossReportNowUtc.Ticks;
+        var resumeFrame = IsResumeFrame(frameGapTicks, ResumeFrameThreshold.Ticks);
         foreach (var peer in _updatePeerScratch)
         {
             if (peer.ClientId >= 0)
@@ -1421,6 +1432,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // so all Opus decode now happens on the receive/timer threads only. Worst case: ~40 ms extra tail
             // latency on the final frames of a talkspurt, which is imperceptible.
             peer.MaybeSendLossReport(lossReportNowUtc);
+            peer.MaybeSendKeepalive(lossReportNowUtc);
+            if (resumeFrame)
+                peer.RebaseInbound(lossReportNowUtc.Ticks);
+            else
+                NotePeerLivenessForDiagnostics(peer, lossReportNowUtc);
             peer.SampleDiagnostics();
         }
         VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
@@ -1963,6 +1979,25 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     internal static bool IsOpusDtxSilencePacket(byte[] data)
         => data != null && data.Length == 1 && (data[0] & 0x3) <= 1 && ((data[0] >> 3) & 0x1F) >= 12;
 
+    private void NotePeerLivenessForDiagnostics(PeerConnection peer, DateTime nowUtc)
+    {
+        if (peer.DataChannel?.readyState != RTCDataChannelState.open || !peer.HasOpenedAtLeastOnce) return;
+        if (IsPeerLive(true, true, peer.LastInboundTicks, nowUtc.Ticks, PeerSilenceTimeout.Ticks))
+        {
+            peer.SilentSinceLoggedUtc = DateTime.MinValue;
+            return;
+        }
+        if (!VoiceDiagnostics.IsEnabled) return;
+        if (peer.SilentSinceLoggedUtc != DateTime.MinValue && nowUtc - peer.SilentSinceLoggedUtc < SilenceLogInterval) return;
+        peer.SilentSinceLoggedUtc = nowUtc;
+        var connState = peer.Connection?.connectionState.ToString() ?? "none";
+        var corroborated = (peer.Connection != null && IsDeadConnectionState(peer.Connection.connectionState))
+                           || peer.ConsecutiveKeepaliveSendFailures > 0;
+        var silentMs = (nowUtc.Ticks - peer.LastInboundTicks) / TimeSpan.TicksPerMillisecond;
+        VoiceDiagnostics.Log("bcl.peer.silent",
+            $"client={peer.ClientId} silentMs={silentMs} conn={connState} sendFail={peer.ConsecutiveKeepaliveSendFailures} corroborated={corroborated}");
+    }
+
     private void RetryClosedDataChannels()
     {
         var now = DateTime.UtcNow;
@@ -1979,6 +2014,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             if (peer.DataChannel?.readyState == RTCDataChannelState.open)
             {
+                peer.HasOpenedAtLeastOnce = true;
                 if (peer.RecoveryAttempts != 0 || peer.NextRetryUtc != DateTime.MinValue)
                 {
                     peer.RecoveryAttempts = 0;
@@ -2505,6 +2541,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             try { peer.DataChannel?.close(); } catch { }
             try { peer.Connection?.close(); } catch { }
             peer.DataChannel = null;
+            peer.ResetLiveness();
             peer.OfferStartedUtc = DateTime.MinValue;
             peer.LastConnectionRebuildUtc = DateTime.UtcNow;
             WireNewPeerConnection(peer, socketId, pc);
@@ -2679,6 +2716,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     try { channel.close(); } catch { }
                     return;
                 }
+                peer.ResetLiveness();
                 peer.DataChannel = channel;
                 peer.OfferStartedUtc = DateTime.UtcNow;
             }
@@ -2943,12 +2981,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private void OnDataChannelMessage(PeerConnection peer, byte[] data)
     {
         if (data.Length > MaxIncomingDatagramBytes) return;
+        peer.StampInbound(DateTime.UtcNow.Ticks);
         if (HasDataControlPrefix(data))
         {
             var payload = new byte[data.Length - DataControlPrefixLength];
             Array.Copy(data, DataControlPrefixLength, payload, 0, payload.Length);
             if (TryHandleRadioState(payload, peer.PlayerId)) return;
             if (TryHandleLossReport(payload, peer)) return;
+            if (TryParseKeepalivePayload(payload)) return;
             Interlocked.Increment(ref _customRx);
             // Side-channel is untrusted for authority (self-asserted id); also avoids a torn
             // read of peer.ClientId/PlayerId on this background thread vs the mapping thread.
@@ -3036,6 +3076,31 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         lossPermille = permille;
         return true;
     }
+
+    internal static byte[] BuildKeepaliveMessage()
+        => new byte[]
+        {
+            DataControlPrefix[0], DataControlPrefix[1], DataControlPrefix[2], DataControlPrefix[3],
+            KeepaliveMagic[0], KeepaliveMagic[1], KeepaliveMagic[2], KeepaliveMagic[3],
+            1,
+        };
+
+    internal static bool TryParseKeepalivePayload(byte[] payload)
+        => payload.Length == 5
+           && payload[0] == KeepaliveMagic[0]
+           && payload[1] == KeepaliveMagic[1]
+           && payload[2] == KeepaliveMagic[2]
+           && payload[3] == KeepaliveMagic[3]
+           && payload[4] == 1;
+
+    internal static bool IsPeerLive(bool channelOpen, bool hasOpenedAtLeastOnce, long lastInboundTicks, long nowTicks, long timeoutTicks)
+        => channelOpen
+           && hasOpenedAtLeastOnce
+           && lastInboundTicks != 0
+           && nowTicks - lastInboundTicks < timeoutTicks;
+
+    internal static bool IsResumeFrame(long frameGapTicks, long resumeThresholdTicks)
+        => frameGapTicks > resumeThresholdTicks;
 
 #if WINDOWS
     // NAudio raises this when capture stops. e.Exception == null is OUR own StopRecording (mute, device
@@ -3944,6 +4009,45 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
             catch
             {
+            }
+        }
+
+        private static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(1);
+        private DateTime _lastKeepaliveSentUtc = DateTime.MinValue;
+        private int _consecutiveKeepaliveSendFailures;
+        public int ConsecutiveKeepaliveSendFailures => _consecutiveKeepaliveSendFailures;
+        private long _lastInboundTicks;
+        public long LastInboundTicks => Interlocked.Read(ref _lastInboundTicks);
+        public void StampInbound(long nowTicks) => Interlocked.Exchange(ref _lastInboundTicks, nowTicks);
+        public void RebaseInbound(long nowTicks) => Interlocked.Exchange(ref _lastInboundTicks, nowTicks);
+        public bool HasOpenedAtLeastOnce { get; set; }
+        public DateTime SilentSinceLoggedUtc { get; set; } = DateTime.MinValue;
+
+        // Channel swap (RecreatePeerConnection) reuses this object; liveness must track the NEW channel, not the dead one.
+        public void ResetLiveness()
+        {
+            Interlocked.Exchange(ref _lastInboundTicks, 0);
+            HasOpenedAtLeastOnce = false;
+            _consecutiveKeepaliveSendFailures = 0;
+            _lastKeepaliveSentUtc = DateTime.MinValue;
+            SilentSinceLoggedUtc = DateTime.MinValue;
+        }
+
+        // Unconditional liveness probe: never gated by silence suppression, so a silent-but-healthy link still proves itself.
+        public void MaybeSendKeepalive(DateTime nowUtc)
+        {
+            if (nowUtc - _lastKeepaliveSentUtc < KeepaliveInterval) return;
+            _lastKeepaliveSentUtc = nowUtc;
+            var channel = DataChannel;
+            if (channel?.readyState != RTCDataChannelState.open) return;
+            try
+            {
+                channel.send(KeepaliveBytes);
+                _consecutiveKeepaliveSendFailures = 0;
+            }
+            catch
+            {
+                if (_consecutiveKeepaliveSendFailures < int.MaxValue) _consecutiveKeepaliveSendFailures++;
             }
         }
 
