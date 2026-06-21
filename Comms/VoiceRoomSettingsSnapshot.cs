@@ -39,7 +39,9 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     bool ParasiteHearFromVictim,
     bool TeamRadioInTasks,
     bool GhostsHearEachOtherUnlimited,
-    bool JailPersistsAfterJailorDeath)
+    bool JailPersistsAfterJailorDeath,
+    bool GracePeriodEnabled,
+    float GracePeriodSeconds)
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
@@ -81,7 +83,9 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         true,
         true,
         false,
-        false);
+        false,
+        false,
+        5f);
 
     public static VoiceRoomSettingsSnapshot FromGameOptions()
     {
@@ -130,7 +134,9 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             role.ParasiteHearFromVictim.Value,
             s.TeamRadioInTasks.Value,
             s.GhostsHearEachOtherUnlimited.Value,
-            role.JailPersistsAfterJailorDeath.Value).Clamp();
+            role.JailPersistsAfterJailorDeath.Value,
+            s.GracePeriodEnabled.Value,
+            s.GracePeriodSeconds.Value).Clamp();
     }
 
     public VoiceRoomSettingsSnapshot Clamp()
@@ -143,6 +149,7 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             FalloffMode = Enum.IsDefined(typeof(VoiceFalloffMode), FalloffMode) ? FalloffMode : (int)VoiceFalloffMode.Smooth,
             OcclusionMode = Enum.IsDefined(typeof(VoiceOcclusionMode), OcclusionMode) ? OcclusionMode : (int)VoiceOcclusionMode.VisionOnly,
             MediumGhostVoice = Enum.IsDefined(typeof(MediumGhostVoiceMode), MediumGhostVoice) ? MediumGhostVoice : (int)MediumGhostVoiceMode.None,
+            GracePeriodSeconds = Math.Clamp(GracePeriodSeconds, 0f, 15f),
         };
     }
 

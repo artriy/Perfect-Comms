@@ -19,6 +19,7 @@ internal enum VoiceProximityReason
     Swooped,
     GlitchHacked,
     RoleMuted,
+    GracePeriod,
     ModChannel,
     MeetingLiving,
     TeamRadio,

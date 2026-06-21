@@ -31,6 +31,8 @@ public class VoiceChatGameOptions
     public ToggleHolder GhostsHearEachOtherUnlimited { get; }
     public ToggleHolder OnlyMeetingOrLobby { get; }
     public ToggleHolder OnlyMeetingOrLobbyAffectsGhosts { get; }
+    public ToggleHolder GracePeriodEnabled { get; }
+    public NumberHolder GracePeriodSeconds { get; }
 
     private VoiceChatGameOptions(ConfigFile cfg)
     {
@@ -83,6 +85,11 @@ public class VoiceChatGameOptions
         {
             Visible = MeetingLobbySubOptionsVisible
         };
+        GracePeriodEnabled = new ToggleHolder(cfg, Section, "GracePeriodEnabled", "Meeting Floor Grace Period", false);
+        GracePeriodSeconds = new NumberHolder(cfg, Section, "GracePeriodSeconds", "Grace Period Seconds", 5f, 0f, 15f, 1f, "0")
+        {
+            Visible = GracePeriodSubOptionVisible
+        };
     }
 
     private static VoiceChatGameOptions? _instance;
@@ -95,4 +102,6 @@ public class VoiceChatGameOptions
         Instance.TeamRadio.Value && Instance.TeamRadioInMeetings.Value;
 
     private static bool MeetingLobbySubOptionsVisible() => Instance.OnlyMeetingOrLobby.Value;
+
+    private static bool GracePeriodSubOptionVisible() => Instance.GracePeriodEnabled.Value;
 }

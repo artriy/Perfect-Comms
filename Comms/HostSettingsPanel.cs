@@ -248,6 +248,7 @@ public static class HostSettingsPanel
             },
             4 => new List<OptionHolder>
             {
+                g.GracePeriodEnabled, g.GracePeriodSeconds,
                 r.MuteBlackmailedInMeetings, r.MuteBlackmailedNextRound, r.MuteParasiteControlled,
                 r.ParasiteHearFromVictim, r.MutePuppeteerControlled, r.PuppeteerHearFromVictim,
                 r.MuteSwooperWhileSwooped, r.MuffleBlindedOrFlashedHearing, r.MuffleHypnotizedDuringHysteria,

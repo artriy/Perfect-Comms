@@ -64,6 +64,15 @@ internal static class VoiceHudWarnings
         var room = VoiceChatRoom.Current;
         if (room == null) return "";
 
+        if (VoiceRoleMuteState.IsGracePeriodActive)
+        {
+            int secs = VoiceRoleMuteState.GracePeriodSecondsRemaining;
+            var local = PlayerControl.LocalPlayer;
+            if (local != null && VoiceRoleMuteState.GracePeriodCallerId == local.PlayerId)
+                return $"you have the floor ({secs}s)";
+            return $"caller has the floor ({secs}s)";
+        }
+
         if (!room.UsingMicrophone && !room.Mute)
             return "mic unavailable";
 

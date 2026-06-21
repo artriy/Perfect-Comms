@@ -86,6 +86,8 @@ internal static class VoiceRoomSettingsRpc
         writer.Write(settings.TeamRadioInTasks);
         writer.Write(settings.GhostsHearEachOtherUnlimited);
         writer.Write(settings.JailPersistsAfterJailorDeath);
+        writer.Write(settings.GracePeriodEnabled);
+        writer.Write(settings.GracePeriodSeconds);
         WriteModOptions(writer);
     }
 
@@ -171,6 +173,8 @@ internal static class VoiceRoomSettingsRpc
         bool teamRadioInTasks = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.TeamRadioInTasks;
         bool ghostsHearEachOtherUnlimited = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.GhostsHearEachOtherUnlimited;
         bool jailPersistsAfterJailorDeath = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.JailPersistsAfterJailorDeath;
+        bool gracePeriodEnabled = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.GracePeriodEnabled;
+        float gracePeriodSeconds = reader.BytesRemaining >= 4 ? reader.ReadSingle() : defaults.GracePeriodSeconds;
 
         clamped = new VoiceRoomSettingsSnapshot(
             backend,
@@ -209,7 +213,9 @@ internal static class VoiceRoomSettingsRpc
             parasiteHearFromVictim,
             teamRadioInTasks,
             ghostsHearEachOtherUnlimited,
-            jailPersistsAfterJailorDeath).Clamp();
+            jailPersistsAfterJailorDeath,
+            gracePeriodEnabled,
+            gracePeriodSeconds).Clamp();
         ReadModOptions(reader);
         return clamped;
     }

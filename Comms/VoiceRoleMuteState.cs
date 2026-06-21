@@ -28,6 +28,8 @@ internal static partial class VoiceRoleMuteState
     private static float _nextJailVoiceHeartbeatTime;
 
     private static readonly HashSet<byte> JailVoiceAllowed = new();
+    private static byte _gracePeriodCallerId = byte.MaxValue;
+    private static float _gracePeriodDeadline;
     private static readonly HashSet<byte> MeetingBlackmailedPlayers = new();
     private static readonly HashSet<byte> PostMeetingBlackmailedPlayers = new();
     private static readonly Dictionary<byte, CachedRoleState> RoleStateCache = new();
@@ -108,6 +110,7 @@ internal static partial class VoiceRoleMuteState
         {
             _wasInMeeting = false;
             JailVoiceAllowed.Clear();
+            ClearGracePeriod();
             PostMeetingBlackmailedPlayers.Clear();
 
             if (settings.MuteBlackmailedInMeetings && settings.MuteBlackmailedNextRound)
@@ -712,6 +715,36 @@ internal static partial class VoiceRoleMuteState
     internal static bool IsJailVoiceAllowed(byte playerId)
         => JailVoiceAllowed.Contains(playerId);
 
+    internal static void OnMeetingStarted(byte callerId)
+    {
+        var settings = VoiceRoomSettingsState.Current;
+        if (!settings.GracePeriodEnabled || settings.GracePeriodSeconds <= 0f)
+        {
+            ClearGracePeriod();
+            return;
+        }
+
+        _gracePeriodCallerId = callerId;
+        _gracePeriodDeadline = Time.time + settings.GracePeriodSeconds;
+        VoiceChatHudState.ApplyMicState();
+    }
+
+    private static void ClearGracePeriod()
+    {
+        _gracePeriodCallerId = byte.MaxValue;
+        _gracePeriodDeadline = 0f;
+    }
+
+    internal static bool IsGracePeriodActive
+        => _gracePeriodCallerId != byte.MaxValue
+           && MeetingHud.Instance != null
+           && Time.time < _gracePeriodDeadline;
+
+    internal static byte GracePeriodCallerId => _gracePeriodCallerId;
+
+    internal static int GracePeriodSecondsRemaining
+        => IsGracePeriodActive ? Mathf.Max(1, Mathf.CeilToInt(_gracePeriodDeadline - Time.time)) : 0;
+
     private static bool IsMeetingVoiceBlocked(
         byte playerId,
         CachedRoleState state,
@@ -719,6 +752,12 @@ internal static partial class VoiceRoleMuteState
         out VoiceProximityReason reason)
     {
         reason = VoiceProximityReason.MeetingLiving;
+
+        if (settings.GracePeriodEnabled && IsGracePeriodActive && playerId != _gracePeriodCallerId)
+        {
+            reason = VoiceProximityReason.GracePeriod;
+            return true;
+        }
 
         if (settings.MuteSwooperWhileSwooped && state.IsSwooped)
         {
@@ -790,6 +829,7 @@ internal static partial class VoiceRoleMuteState
             VoiceProximityReason.PuppeteerControlled => "Puppeteer Controlled",
             VoiceProximityReason.Swooped => "Swooped",
             VoiceProximityReason.GlitchHacked => "Glitch Hacked",
+            VoiceProximityReason.GracePeriod => "Caller Has Floor",
             VoiceProximityReason.RoleMuted => "Role Muted",
             _ => "Role Muted",
         };

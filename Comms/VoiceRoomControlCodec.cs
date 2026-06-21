@@ -202,7 +202,9 @@ public static class VoiceRoomControlCodec
             hasParasiteHearFromVictim && buffer[tailOffset + 20] != 0,
             !hasV13Settings || buffer[tailOffset + 21] != 0,
             hasV13Settings && buffer[tailOffset + 22] != 0,
-            hasV13Settings && buffer[tailOffset + 23] != 0).Clamp();
+            hasV13Settings && buffer[tailOffset + 23] != 0,
+            false,
+            5f).Clamp();
         return true;
     }
 
