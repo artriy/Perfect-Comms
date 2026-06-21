@@ -512,6 +512,10 @@ public static class VoiceChatHudState
             {
                 if (sr != null) { sr.sprite = Sprites.MicOn; sr.color = new Color(1f, 0.55f, 0.1f); }
             }
+            else if (IsPushToTalkMode())
+            {
+                if (sr != null) { sr.sprite = _pushToTalkHeld ? Sprites.MicOn : Sprites.MicOff; sr.color = _pushToTalkHeld ? Color.white : new Color(0.13f, 0.83f, 0.93f); }
+            }
             else
             {
                 if (sr != null) { sr.sprite = Sprites.MicOn; sr.color = Color.white; }
