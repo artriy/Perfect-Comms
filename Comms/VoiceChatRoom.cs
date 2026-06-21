@@ -1282,6 +1282,7 @@ public class VoiceChatRoom
         ResetTransitionTraceState();
         VoiceDiagnostics.Log("room.close", "state cleared");
         VoiceClientRegistry.Reset();
+        VoiceRoleMuteState.Reset();
     }
 
     private void TryUpdateLocalProfile()  => UpdateLocalProfile(false);

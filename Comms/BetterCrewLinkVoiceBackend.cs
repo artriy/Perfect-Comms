@@ -306,7 +306,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     internal int PublicLobbyJoinEpoch => Volatile.Read(ref _publicLobbyJoinEpoch);
     public bool UsingMicrophone => _microphoneReady;
     public bool UsingSpeaker => _speakerReady;
-    public bool Mute { get; private set; }
+    private volatile bool _mute;
+    public bool Mute => _mute;
     public float LocalLevel => _localLevel;
     public bool LocalSpeaking => _localSpeaking;
     public int PeerCount
@@ -465,8 +466,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     public void SetMute(bool mute)
     {
-        if (Mute == mute) return;
-        Mute = mute;
+        if (_mute == mute) return;
+        _mute = mute;
         if (mute)
         {
             // Clear latched local-speaking state. A push-to-talk release mutes mid-utterance but keeps the
@@ -4200,11 +4201,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
                     var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    // FEC/DRED reconstruct one lost frame at the standard size; a real Audio frame uses its own
-                    // duration. For FEC/DRED, frame.Packet is the successor/recovering packet, not the lost one.
-                    var frameSize = (decodeFec || isDred)
-                        ? AudioHelpers.FrameSize
-                        : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
+                    // FEC/DRED must decode at the missing frame's duration (carried on frame.Duration), not a fixed size (PL1).
+                    var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // A single bad frame must NOT abandon the rest of the drained batch (up to
                     // MaxDrainFramesPerPacket frames). DecodeAndAddSamples conceals the failed slot with
                     // silence, so surface the first error for telemetry and keep draining the successors.
@@ -4238,11 +4236,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
                     var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
                     var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
-                    // FEC/DRED reconstruct one lost frame at the standard size; a real Audio frame uses its own
-                    // duration. For FEC/DRED, frame.Packet is the successor/recovering packet, not the lost one.
-                    var frameSize = (decodeFec || isDred)
-                        ? AudioHelpers.FrameSize
-                        : NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
+                    // FEC/DRED must decode at the missing frame's duration (carried on frame.Duration), not a fixed size (PL1).
+                    var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // Conceal a failed slot and keep draining instead of abandoning the rest of the tail batch.
                     if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded, isDred ? frame.DredOffset : -1))
                         decodedFrames += decoded > 0 ? 1 : 0;

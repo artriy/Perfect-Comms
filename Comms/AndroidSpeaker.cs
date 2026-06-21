@@ -113,6 +113,7 @@ internal sealed class AndroidSpeaker : IDisposable
         _source.Stop();
         // Nebula: if (audioSource) GameObject.Destroy(audioSource)
         if (_source != null) UnityEngine.Object.Destroy(_source);
+        if (_clip != null) UnityEngine.Object.Destroy(_clip); // clip holds a this-capturing PCMReaderCallback (ML2)
         VoiceDiagnostics.DebugInfo("[VC] Android speaker disposed.");
     }
 }
@@ -179,6 +180,7 @@ internal sealed class AndroidSampleProviderSpeaker : IDisposable
     {
         _source.Stop();
         if (_source != null) UnityEngine.Object.Destroy(_source);
+        if (_clip != null) UnityEngine.Object.Destroy(_clip); // clip holds a this-capturing PCMReaderCallback (ML1)
         VoiceDiagnostics.DebugInfo("[VC] Android BCL speaker disposed.");
     }
 }

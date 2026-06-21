@@ -326,15 +326,13 @@ internal sealed class BclVoiceJitterBuffer
         // instead of synthesizing a multi-second PLC concealment catch-up one frame at a time.
         if (Distance(_expectedSequence, packet.Sequence) > _maxBufferedFrames)
         {
-            int snapSkipped = Distance(_expectedSequence, packet.Sequence) - _packets.Count;
-            if (snapSkipped > 0)
-                System.Threading.Interlocked.Add(ref _cumulativeLostFrames,
-                    Math.Min(snapSkipped, SnapLossReportCapFrames));
+            // Stream discontinuity (channel rebuild), not wire loss: don't feed _cumulativeLostFrames / loss report (PL5).
             _packets.Clear();
             _expectedSequence = packet.Sequence;
             _consecutiveConcealed = 0; // real-frame resume after a discontinuity snap (Fix 2b-2)
             _windowDisturbed = true;
             _cleanWindowStreak = 0;
+            _haveArrival = false; // re-establish the inter-arrival jitter baseline after the snap (HP6)
         }
 
         if (_packets.ContainsKey(packet.Sequence))
@@ -560,12 +558,20 @@ internal sealed class BclSendPacer : IDisposable
         }
     }
 
+    private int _pumping;
+
     private void Pump()
     {
-        while (TryDequeueDue(out var framed))
+        // Periodic timer callbacks are not serialized; a Pump overrunning 10 ms would race the shared send scratch (CC1).
+        if (System.Threading.Interlocked.Exchange(ref _pumping, 1) == 1) return;
+        try
         {
-            try { _sendFrame(framed); } catch { }
+            while (TryDequeueDue(out var framed))
+            {
+                try { _sendFrame(framed); } catch { }
+            }
         }
+        finally { System.Threading.Volatile.Write(ref _pumping, 0); }
     }
 
     private bool TryDequeueDue(out byte[] framed)

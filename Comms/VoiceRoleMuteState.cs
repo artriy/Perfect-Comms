@@ -30,6 +30,8 @@ internal static partial class VoiceRoleMuteState
     private static readonly HashSet<byte> JailVoiceAllowed = new();
     private static byte _gracePeriodCallerId = byte.MaxValue;
     private static float _gracePeriodDeadline;
+    private static float _gracePeriodSeconds;
+    private static bool _gracePeriodArmed;
     private static readonly HashSet<byte> MeetingBlackmailedPlayers = new();
     private static readonly HashSet<byte> PostMeetingBlackmailedPlayers = new();
     private static readonly Dictionary<byte, CachedRoleState> RoleStateCache = new();
@@ -93,6 +95,11 @@ internal static partial class VoiceRoleMuteState
         if (inMeetingVoicePhase)
         {
             _wasInMeeting = true;
+            if (_gracePeriodCallerId != byte.MaxValue && !_gracePeriodArmed && MeetingHud.Instance != null)
+            {
+                _gracePeriodDeadline = Time.time + _gracePeriodSeconds;
+                _gracePeriodArmed = true;
+            }
             if (settings.MuteBlackmailedInMeetings)
                 TrackMeetingBlackmailedPlayers();
             else
@@ -715,6 +722,17 @@ internal static partial class VoiceRoleMuteState
     internal static bool IsJailVoiceAllowed(byte playerId)
         => JailVoiceAllowed.Contains(playerId);
 
+    // Lifecycle reset: clear all per-session role-mute statics so they cannot leak into the next game (LB3).
+    internal static void Reset()
+    {
+        JailVoiceAllowed.Clear();
+        MeetingBlackmailedPlayers.Clear();
+        PostMeetingBlackmailedPlayers.Clear();
+        ClearGracePeriod();
+        _wasInMeeting = false;
+        InvalidateRoleStateCache();
+    }
+
     internal static void OnMeetingStarted(byte callerId)
     {
         var settings = VoiceRoomSettingsState.Current;
@@ -724,8 +742,11 @@ internal static partial class VoiceRoleMuteState
             return;
         }
 
+        // Arm the deadline only once MeetingHud is live (in Update), not during the pre-meeting cutscene (LB1).
         _gracePeriodCallerId = callerId;
-        _gracePeriodDeadline = Time.time + settings.GracePeriodSeconds;
+        _gracePeriodSeconds = settings.GracePeriodSeconds;
+        _gracePeriodDeadline = 0f;
+        _gracePeriodArmed = false;
         VoiceChatHudState.ApplyMicState();
     }
 
@@ -733,10 +754,14 @@ internal static partial class VoiceRoleMuteState
     {
         _gracePeriodCallerId = byte.MaxValue;
         _gracePeriodDeadline = 0f;
+        _gracePeriodSeconds = 0f;
+        _gracePeriodArmed = false;
     }
 
     internal static bool IsGracePeriodActive
         => _gracePeriodCallerId != byte.MaxValue
+           && _gracePeriodArmed
+           && VoiceRoomSettingsState.Current.GracePeriodEnabled
            && MeetingHud.Instance != null
            && Time.time < _gracePeriodDeadline;
 
