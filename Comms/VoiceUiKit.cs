@@ -1091,6 +1091,8 @@ internal static class VoiceUiKit
         private readonly Func<KeyCode> _get;
         private readonly Action<KeyCode> _set;
         private readonly Action _clear;
+        private readonly Func<KeyCode>? _getMod;
+        private readonly Action<KeyCode>? _setMod;
         private Image _btn = null!;
         private RectTransform _btnRt = null!;
         private TextMeshProUGUI _label = null!;
@@ -1107,8 +1109,8 @@ internal static class VoiceUiKit
         private const float NormalBtnW = 185f;
         private const float CapBtnW = 150f;
 
-        public RebindRow(Func<KeyCode> get, Action<KeyCode> set, Action clear)
-        { _get = get; _set = set; _clear = clear; }
+        public RebindRow(Func<KeyCode> get, Action<KeyCode> set, Action clear, Func<KeyCode>? getMod = null, Action<KeyCode>? setMod = null)
+        { _get = get; _set = set; _clear = clear; _getMod = getMod; _setMod = setMod; }
 
         protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - NormalBtnW);
 
@@ -1199,7 +1201,8 @@ internal static class VoiceUiKit
                     : "<color=#8C9CB2>Release to bind...</color>";
                 return;
             }
-            _label.text = KeyName(_get());
+            var mod = _getMod?.Invoke() ?? KeyCode.None;
+            _label.text = mod == KeyCode.None ? KeyName(_get()) : ModName(mod) + "+" + KeyName(_get());
         }
 
         private void EndCapture()
@@ -1251,15 +1254,37 @@ internal static class VoiceUiKit
                 if (!Input.GetMouseButtonDown(m)) continue;
                 if (Contains(_clearBtn.GetComponent<RectTransform>())) { _clear(); EndCapture(); return; }
                 if (Contains(_cancelBtn.GetComponent<RectTransform>())) { EndCapture(); return; }
-                _set(MouseToKey(m)); EndCapture(); return;
+                _setMod?.Invoke(HeldModifier()); _set(MouseToKey(m)); EndCapture(); return;
             }
 
             foreach (var kc in _keyCandidates)
             {
                 if (kc == KeyCode.Escape || kc == KeyCode.Delete || kc == KeyCode.Backspace) continue;
-                if (Input.GetKeyDown(kc)) { _set(kc); EndCapture(); return; }
+                if (IsModifierKey(kc)) continue;
+                if (Input.GetKeyDown(kc)) { _setMod?.Invoke(HeldModifier()); _set(kc); EndCapture(); return; }
             }
         }
+
+        private static bool IsModifierKey(KeyCode k) =>
+            k == KeyCode.LeftShift || k == KeyCode.RightShift
+            || k == KeyCode.LeftControl || k == KeyCode.RightControl
+            || k == KeyCode.LeftAlt || k == KeyCode.RightAlt;
+
+        private static KeyCode HeldModifier()
+        {
+            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return KeyCode.LeftShift;
+            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) return KeyCode.LeftControl;
+            if (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) return KeyCode.LeftAlt;
+            return KeyCode.None;
+        }
+
+        private static string ModName(KeyCode k) => k switch
+        {
+            KeyCode.LeftShift or KeyCode.RightShift => "Shift",
+            KeyCode.LeftControl or KeyCode.RightControl => "Ctrl",
+            KeyCode.LeftAlt or KeyCode.RightAlt => "Alt",
+            _ => k.ToString()
+        };
 
         private static KeyCode MouseToKey(int m) => m switch
         {

@@ -356,7 +356,7 @@ public static class VoiceSettingsPanel
             Key = bind.DisplayName,
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.RebindRow(
-                () => bind.CurrentKey, k => bind.Set(k), () => bind.Clear())
+                () => bind.CurrentKey, k => bind.Set(k), () => bind.Clear(), () => bind.Modifier, m => bind.SetModifier(m))
                 .Build(pane, bind.DisplayName, paneW, y, RowH)
         });
     }

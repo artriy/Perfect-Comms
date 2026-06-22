@@ -819,7 +819,7 @@ public static class VoiceChatHudState
             : IsInTeamRadioMode() ? $"Team Radio: {VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel())} (held)"
             : pushToTalkMode ? "Push To Talk"
             : "Active";
-        string muteKey  = VoiceChatKeybinds.ToggleMute.CurrentKey.ToString();
+        string muteKey  = VoiceChatKeybinds.ToggleMute.Label;
         string radioKey = VoiceChatKeybinds.TeamRadio.CurrentKey.ToString();
         string cycleKey = VoiceChatKeybinds.CycleTeamRadioChannel.CurrentKey.ToString();
         string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
@@ -844,7 +844,7 @@ public static class VoiceChatHudState
 
         string status = _speakerMuted ? "Muted" : "Active";
         var tab = VoiceSettings.Instance;
-        string hotkey = VoiceChatKeybinds.ToggleSpeaker.CurrentKey.ToString();
+        string hotkey = VoiceChatKeybinds.ToggleSpeaker.Label;
 
         _spkTooltipTmp.text =
             "<b>Speaker</b>\n" +

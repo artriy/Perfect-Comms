@@ -19,6 +19,9 @@ Perfect Comms v3.2.3 fixes a crash where players on CrossOver or Wine could take
 - **Push-to-talk has its own mic color.**
   > <sub>In push-to-talk mode the mic button now shows cyan when it's armed and white while you're actually transmitting, so you can tell at a glance whether you're being heard. Mute still overrides with its usual color.</sub>
 
+- **Mute and deafen now use Shift by default, and you can bind key combos.**
+  > <sub>The default keys for muting your mic and toggling your speaker are now Shift+M and Shift+N (they were M and N), so you're less likely to hit them by accident. If you were still on the old defaults you'll be moved over once; custom keybinds are left alone. You can now also rebind any voice key to a combo, like Shift, Ctrl, or Alt plus a key, or back to a single key, in the voice settings.</sub>
+
 ## Perfect Comms v3.2.2
 
 Perfect Comms v3.2.2 makes voice smoother and more responsive on shaky connections, fixes the framerate drop in the new Unity Audio mode, and adds a meeting grace period that gives the caller the floor.

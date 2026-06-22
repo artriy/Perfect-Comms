@@ -32,5 +32,16 @@ public static class VoiceChatKeybinds
         HostVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connections (Host)", KeyCode.F8);
         OpenVoiceMenu = new VoiceKeybind(config, s, "Open Voice Menu", KeyCode.F10);
         OpenHostVoiceSettings = new VoiceKeybind(config, s, "Open Host Voice Settings", KeyCode.F11);
+
+        var shiftDefaultsMigrated = config.Bind(s, "ShiftDefaultsMigrated", false,
+            new ConfigDescription("Internal one-time flag: added Shift to the default Mute (M) and Toggle Speaker (N) keys. Do not edit."));
+        if (!shiftDefaultsMigrated.Value)
+        {
+            if (ToggleMute.Value == KeyCode.M && ToggleMute.Modifier == KeyCode.None)
+                ToggleMute.SetModifier(KeyCode.LeftShift);
+            if (ToggleSpeaker.Value == KeyCode.N && ToggleSpeaker.Modifier == KeyCode.None)
+                ToggleSpeaker.SetModifier(KeyCode.LeftShift);
+            shiftDefaultsMigrated.Value = true;
+        }
     }
 }
