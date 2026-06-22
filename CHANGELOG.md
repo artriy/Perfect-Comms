@@ -169,9 +169,6 @@ This Perfect Comms release is a big audio-quality pass: smoother voice with no c
 
 - **More self-healing playback.**
   > <sub>A stalled or erroring output device restarts itself instead of staying silent until you switch devices.</sub>
-
-See `docs/release-notes-v2.1.7.md` for the full release notes.
-
 ## Perfect Comms v2.1.6
 
 This Perfect Comms release reworks the per-player volume menu into a live mixer, adds an optional backdrop and steadier animation to the speaking bar, lets you switch between Open Mic and Push-to-Talk with a hotkey, fixes the volume menu hiding in the dark, and routes role-based spectators as voice ghosts.
@@ -184,9 +181,6 @@ This Perfect Comms release reworks the per-player volume menu into a live mixer,
 - **Switch Open Mic ↔ Push-to-Talk on the fly.** A new keybind flips your microphone between Open Mic and Push-to-Talk and shows a quick confirmation. It's unbound by default — assign a key to it in the keybind settings to use it.
 - **Spectators are handled as ghosts for voice.** Players the game marks dead through a role (e.g. Town of Us Spectator) are now routed like ghosts, so they hear and are heard the same as other dead players.
 - **No more stray hover highlight on the voice buttons.** The mic/speaker buttons (cloned from the in-game map button) no longer show a leftover hover sprite.
-
-See `docs/release-notes-v2.1.6.md` for the full release notes.
-
 ## Perfect Comms v2.1.5
 
 This Perfect Comms release fixes the speaking bar showing the wrong player and voice being heard across the whole map, clears an end-game crash that could disconnect you, tones down the end-game group call so it isn't ear-splitting, and trims a few more audio drop-outs.
@@ -198,9 +192,6 @@ This Perfect Comms release fixes the speaking bar showing the wrong player and v
 - **Fixed a crash/kick around the end-game screen.** Dropping to the end-game results and rejoining the lobby could spam errors and get you disconnected. The voice HUD now steps aside cleanly during that transition, so the freeze-and-kick is gone.
 - **The end-game group call is no longer ear-splitting.** On the results screen everyone was played back at full blast; levels are now dialed to a comfortable volume while staying clearly audible.
 - **Fewer audio drop-outs and a little less stutter.** Tiny/odd audio frames are now handled cleanly instead of being dropped, and the playback buffer carries a touch more cushion so brief network hiccups don't turn into gaps.
-
-See `docs/release-notes-v2.1.5.md` for the full release notes.
-
 ## Perfect Comms v2.1.4
 
 This Perfect Comms release gives the voice settings menu a cleaner, easier-to-read makeover, keeps voice and avatars from dropping out on the end-game screen, and rounds out another batch of fixes for one-way and patchy voice.
@@ -214,9 +205,6 @@ This Perfect Comms release gives the voice settings menu a cleaner, easier-to-re
 - **Fixed some players' audio going flat (pure mono, non-directional).** In some cases a player's voice lost its proximity and direction and came through evenly no matter where they were on the map. Their audio now plays back with the correct distance and direction again.
 - **More "I can hear you but you can't hear me" fixes.** Several cases where a voice link got stuck on one side — so one player could be heard but couldn't hear back, or a connected player made no sound at all — now sort themselves out automatically instead of needing a rejoin.
 - **Voice is a touch smoother still.** Continued behind-the-scenes tuning keeps speech steady through uneven connections, with a little less stutter.
-
-See `docs/release-notes-v2.1.4.md` for the full release notes.
-
 ## Perfect Comms v2.1.3
 
 This Perfect Comms release targets choppy / robotic voice (the kind where a player's speech breaks up or cuts in and out, especially at random and in fuller lobbies) and makes voice connections noticeably more reliable.
@@ -228,9 +216,6 @@ This Perfect Comms release targets choppy / robotic voice (the kind where a play
 - **Players not hearing each other right after joining a fresh lobby is fixed.** When two players joined a brand-new lobby together, their voice link could get stuck so neither could hear the other until someone left and rejoined. The connection now repairs itself automatically.
 - **Steadier voice connections.** Fixed a recovery loop that could repeatedly reset all of your voice connections when one player couldn't be reached, and tightened per-peer reconnection so a stuck connection re-establishes on its own. This reduces cases where you suddenly stop hearing someone mid-game while still being heard.
 - **Smoother framerate in big lobbies.** Voice-related per-frame work that grew with the player count was trimmed, reducing hitches at 12+ players.
-
-See `docs/release-notes-v2.1.3.md` for the full release notes.
-
 ## Perfect Comms v2.1.2
 
 This Perfect Comms release is a big stutter-and-lag-spike fix — if voice was making your game hitch, freeze, or drop, it should feel much smoother now.
@@ -240,9 +225,6 @@ This Perfect Comms release is a big stutter-and-lag-spike fix — if voice was m
 - **Much smoother voice** — the stutters and lag spikes around joining, talking, and hearing players should be greatly reduced.
 - **Nat Fix (on by default)** — helps players behind strict NATs or firewalls connect when they couldn't before.
 - **Steadier connections** that recover more gracefully instead of constantly dropping and retrying.
-
-See `docs/release-notes-v2.1.2.md` for the full release notes.
-
 ## Perfect Comms v2.1.1
 
 This Perfect Comms release fixes an echo / doubled-voice bug that built up during a match whenever players' connections dropped and reconnected.
@@ -251,9 +233,6 @@ This Perfect Comms release fixes an echo / doubled-voice bug that built up durin
 
 - Fixed an "echoey" / doubled-voice bug: when a player's connection dropped and reconnected, their old voice channel was left running instead of being cleaned up, so the same player could be heard more than once and unused "zombie" channels piled up over the match. Each player now keeps exactly one live voice channel, and the stale one is torn down on reconnect.
 - Reduced the matching slow build-up of wasted voice processing those leftover channels caused, so longer games stay lighter on CPU and audio.
-
-See `docs/release-notes-v2.1.1.md` for the full release notes.
-
 ## Perfect Comms v2.1.0
 
 This Perfect Comms release adds new ways to arrange the speaking bar, gives the Parasite and Puppeteer their own special hearing, and polishes the speaking-bar player icons.
@@ -268,9 +247,6 @@ This Perfect Comms release adds new ways to arrange the speaking bar, gives the 
 - Further tightened disguise and camouflage hiding, so even more concealed players and faded ghosts can't be identified from the speaking bar.
 - Rainbow-colored players now get a matching rainbow glow on their meeting highlight.
 - Refined the speaking ring's look and stopped names from clipping the ring above them in vertical layouts.
-
-See `docs/release-notes-v2.1.0.md` for the full release notes.
-
 ## Perfect Comms v2.0.9
 
 This Perfect Comms release lets you customize the speaking bar, cleans up the in-game UI and player icons, and makes voice more reliable and secure.
@@ -288,9 +264,6 @@ This Perfect Comms release lets you customize the speaking bar, cleans up the in
 - Strengthened security so hackers can't tamper with host settings or pretend to be someone else.
 - Improved audio so it sounds smoother, with fewer crackles and dropouts when a connection hiccups.
 - Fixed voice in more situations like joining a lobby, exile, meetings, security cameras, and when players disconnect, so the right people can always hear each other.
-
-See `docs/release-notes-v2.0.9.md` for the full release notes.
-
 ## Perfect Comms v2.0.8
 
 This Perfect Comms release improves camera hearing, room-policy mutes, and boosted voice playback.
@@ -302,9 +275,6 @@ This Perfect Comms release improves camera hearing, room-policy mutes, and boost
 - Blocked disconnected, dummy, and invisible players from being routed through voice.
 - Fixed speaker mute so volume refreshes and backend reconnects do not restore playback while deafened.
 - Let player volume reach 200% while keeping boosted playback limited to avoid fuzzy output.
-
-See `docs/release-notes-v2.0.8.md` for the full release notes.
-
 ## Perfect Comms v2.0.7
 
 This Perfect Comms release fixes transitional voice routing around exile and other non-gameplay phases.
@@ -315,9 +285,6 @@ This Perfect Comms release fixes transitional voice routing around exile and oth
 - Preserved meeting mutes during Exile, so blackmailed and jailed players stay muted through the exile sequence.
 - Kept task-only role mutes out of lobby-like phases such as Intro, EndGame, Menu, and Unknown.
 - Shared the same phase policy across BetterCrewLink and Interstellar so both backends route transitions consistently.
-
-See `docs/release-notes-v2.0.7.md` for the full release notes.
-
 ## Perfect Comms v2.0.6
 
 This Perfect Comms release expands role-aware voice behavior and adds team radio channels.
@@ -338,9 +305,6 @@ This Perfect Comms release expands role-aware voice behavior and adds team radio
   - **Team Radio - Lovers**
   - Players with more than one radio can cycle between channels with a keybind.
 - Improved Role Voice Rules labels with role-first wording, role-matched colors thanks to @idkimneil in [#6](https://github.com/artriy/Perfect-Comms/pull/6), and cleaner ordering.
-
-See `docs/release-notes-v2.0.6.md` for the full release notes.
-
 ## Perfect Comms v2.0.5
 
 This Perfect Comms release adds role-based voice controls and improves voice button placement.
@@ -351,9 +315,6 @@ This Perfect Comms release adds role-based voice controls and improves voice but
 - Added *Mute Blackmailed Next Round* so blackmail can optionally continue after the meeting.
 - Added options to mute parasite-controlled and puppeteer-controlled players.
 - Improved voice button placement so mic, speaker, and jail controls stay visible and easier to position near the screen edge.
-
-See `docs/release-notes-v2.0.5.md` for the full release notes.
-
 ## Perfect Comms v2.0.4
 
 This Perfect Comms release focuses on BetterCrewLink audio stability and chat input safety.
@@ -363,9 +324,6 @@ This Perfect Comms release focuses on BetterCrewLink audio stability and chat in
 - Fixed intermittent fuzzy/static audio in BetterCrewLink lobbies when multiple voices overlap.
 - Fixed hot BetterCrewLink mic frames after RNNoise so clipped capture peaks are limited before Opus encoding.
 - Fixed chat input handling so Perfect Comms no longer intercepts textbox typing, preventing crashes while typing in chat.
-
-See `docs/release-notes-v2.0.4.md` for the full release notes.
-
 ## Perfect Comms v2.0.3
 
 This Perfect Comms release focuses on voice stability, speaking ring accuracy, noise suppression, and cleaner in-game controls.
@@ -384,9 +342,6 @@ This Perfect Comms release focuses on voice stability, speaking ring accuracy, n
 - Improved the player volume menu and slider behavior.
 - Deafened players now stop transmitting voice too.
 - Removed `.DS_Store`.
-
-See `docs/release-notes-v2.0.3.md` for the full release notes.
-
 ## Perfect Comms v2.0.2
 
 ### What's Changed
@@ -397,9 +352,6 @@ See `docs/release-notes-v2.0.3.md` for the full release notes.
 - Fixed impostor radio chat handling so it only applies when the local player can actually use the radio, including blackmailer and jailor voice-block rules.
 - Changed Push To Talk mode so the mute toggle no longer creates a redundant manual mute state; released PTT remains muted and holding PTT still transmits.
 - Fixed the `VC: mic unavailable` warning appearing during normal Push To Talk idle mute.
-
-See `docs/release-notes-v2.0.2.md` for the full release notes.
-
 ## Perfect Comms v2.0.1
 
 ### What's Changed
@@ -407,9 +359,6 @@ See `docs/release-notes-v2.0.2.md` for the full release notes.
 - Changed the assets to a cleaner version by @AtonyGit in #1.
 - Fixed the Voice Lobbies close X so it sits in a clearer top-right position and is easier to see.
 - Fixed bottom-positioned speaking indicators so player names no longer clip off the bottom of the screen while staying close to the edge.
-
-See `docs/release-notes-v2.0.1.md` for the full release notes.
-
 ## Perfect Comms v2.0.0
 
 This is the backend rewrite release. Perfect Comms no longer depends on Among Us RPCs for voice audio transport. Voice now runs through selectable voice backends, with BetterCrewLink live voice as the default path and Interstellar available as an alternate backend.
@@ -423,9 +372,6 @@ This is the backend rewrite release. Perfect Comms no longer depends on Among Us
 - Directional and proximity audio are more reliable.
 - Host settings now sync across the lobby automatically.
 - Debug logs are quiet by default unless you turn them on.
-
-See `docs/release-notes-v2.0.0.md` for the full technical changelog.
-
 ## Perfect Comms v1.0.2
 
 ### Changed
