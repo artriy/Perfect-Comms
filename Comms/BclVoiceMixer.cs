@@ -79,6 +79,7 @@ internal sealed class BclVoiceMixer
     private long _samplesConsumed;
     private int _diagMaxFeedGapSamples;
     private int _diagMaxTargetCushion;
+    private long _diagDeepens;
 
     public void AddSamples(int group, float[] mono, int count, bool silent)
     {
@@ -163,7 +164,7 @@ internal sealed class BclVoiceMixer
         lock (_sync)
         {
             var chunkMin = _diagChunkMin == int.MaxValue ? 0 : _diagChunkMin;
-            var s = $"minCushion={MinCushionSamples} maxTargetCushion={_diagMaxTargetCushion} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} maxFeedGapMs={_diagMaxFeedGapSamples * 1000 / AudioHelpers.ClockRate} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} silentSamples={_diagSilentSamples}";
+            var s = $"minCushion={MinCushionSamples} maxTargetCushion={_diagMaxTargetCushion} reads={_diagReadCalls} chunk={chunkMin}-{_diagChunkMax} maxRingDepth={_diagMaxRingDepth} maxFeedGapMs={_diagMaxFeedGapSamples * 1000 / AudioHelpers.ClockRate} underrunReads={_diagUnderrunReads} fadeOuts={_diagFadeOuts} primes={_diagPrimes} unprimes={_diagUnprimes} deepens={_diagDeepens} silentSamples={_diagSilentSamples}";
             _diagReadCalls = 0;
             _diagChunkMin = int.MaxValue;
             _diagChunkMax = 0;
@@ -175,6 +176,7 @@ internal sealed class BclVoiceMixer
             _diagMaxRingDepth = 0;
             _diagMaxFeedGapSamples = 0;
             _diagMaxTargetCushion = 0;
+            _diagDeepens = 0;
             return s;
         }
     }
@@ -242,12 +244,15 @@ internal sealed class BclVoiceMixer
                     bus[f * 2] += s * p.CurLeft;
                     bus[f * 2 + 1] += s * p.CurRight;
                 }
+                // Gappy sender: re-prime to the grown cushion (bypassing drain-hold) so its bursts stop underrunning every listener.
+                var gappyReprime = p.TargetCushion > MinCushionSamples + CushionMarginSamples;
                 if (p.Count == 0
-                    && !(p.LastFeedConsumed >= 0 && _samplesConsumed - p.LastFeedConsumed < DrainHoldSamples))
+                    && (gappyReprime || !(p.LastFeedConsumed >= 0 && _samplesConsumed - p.LastFeedConsumed < DrainHoldSamples)))
                 {
                     p.Primed = false;
                     p.PrimeDeadline = DateTime.MinValue;
                     p.LastFeedConsumed = -1;
+                    if (gappyReprime) _diagDeepens++;
                     _diagUnprimes++;
                 }
             }
