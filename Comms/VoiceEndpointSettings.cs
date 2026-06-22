@@ -13,6 +13,9 @@ public static class VoiceEndpointSettings
     public const string DefaultBetterCrewLinkServerUrl = "https://bettercrewl.ink";
     public const string DefaultInterstellarServerUrl = "ws://interstellar.amongusclub.cn:19836";
 
+    // Interstellar temporarily disabled: connecting its websocket before host-sync freezes Wine/CrossOver clients and drops the whole lobby. Force BetterCrewLink for everyone until the connect is made non-blocking; flip to true to re-enable.
+    internal const bool InterstellarEnabled = false;
+
     public static VoiceEndpoint Resolve(string? interstellarServerUrl)
         => new(VoiceTransportBackend.Interstellar, NormalizeInterstellarServerUrl(interstellarServerUrl));
 

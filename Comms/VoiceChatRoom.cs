@@ -24,6 +24,7 @@ public class VoiceChatRoom
     private const float BootstrapRefreshInterval = 0.50f;
     private const float MissingPeerRecoveryGraceSeconds = 8f;
     private const float InterstellarSwitchPeerRecoveryGraceSeconds = 2f;
+    private const float HostSyncWaitTimeoutSeconds = 10f;
     private const float MissingPeerRecoveryIntervalSeconds = 5f;
     private const float PeerEscalationDeferralRecheckSeconds = 3f;
     private const int PeerEscalationDeferralMaxConsecutive = 4;
@@ -65,6 +66,7 @@ public class VoiceChatRoom
     private DateTime _lastHostSettingsRequestUtc = DateTime.MinValue;
     private int _lastObservedHostClientId = -1;
     private bool _hostSettingsResyncPending;
+    private float _hostSyncWaitStartTime = -1f;
     private int _lastAppliedHostVoiceRefreshNonce;
     private float _lastAppliedHostVoiceRefreshTime = -999f;
     private const float HostVoiceRefreshApplyCooldownSeconds = 8f;
@@ -558,15 +560,39 @@ public class VoiceChatRoom
     {
         TrackHostSettingsAuthority(snapshot);
         var settings = VoiceSettings.Instance;
+
+        if (_voiceBackend == null && ShouldWaitForHostSync())
+        {
+            RequestHostSettingsSnapshotIfNeeded();
+            return;
+        }
+
         var roomSettings = VoiceRoomSettingsState.Current;
         var endpoint = VoiceEndpointSettings.ResolveHostSelected(
             roomSettings,
             settings?.BetterCrewLinkServerUrl.Value,
             settings?.InterstellarServerUrl.Value);
+        if (!VoiceEndpointSettings.InterstellarEnabled && endpoint.IsInterstellar)
+            endpoint = VoiceEndpointSettings.Resolve(VoiceTransportBackend.BetterCrewLink, settings?.BetterCrewLinkServerUrl.Value, null);
 
         EnsureVoiceBackend(snapshot, settings, endpoint);
         SendHostSettingsSnapshot(force: false);
         RequestHostSettingsSnapshotIfNeeded();
+    }
+
+    // Defer the first backend build until the host settings snapshot arrives: a fresh joiner's local default backend may be Interstellar, whose websocket connect freezes Wine clients and desyncs the lobby. Timeout fallback keeps no-PerfectComms-host lobbies working.
+    private bool ShouldWaitForHostSync()
+    {
+        if (IsLocalHost() || VoiceRoomSettingsState.RemoteSnapshot.HasValue)
+        {
+            _hostSyncWaitStartTime = -1f;
+            return false;
+        }
+
+        if (_hostSyncWaitStartTime < 0f)
+            _hostSyncWaitStartTime = Time.time;
+
+        return Time.time - _hostSyncWaitStartTime < HostSyncWaitTimeoutSeconds;
     }
 
     private void TrackHostSettingsAuthority(VoiceGameStateSnapshot? snapshot)
@@ -1043,7 +1069,7 @@ public class VoiceChatRoom
 
     private void RequestHostSettingsSnapshot(bool force, string reason)
     {
-        if (IsLocalHost() || _voiceBackend == null) return;
+        if (IsLocalHost()) return;
         if (!force && VoiceRoomSettingsState.RemoteSnapshot.HasValue) return;
 
         var now = DateTime.UtcNow;
@@ -1259,6 +1285,7 @@ public class VoiceChatRoom
         _lastObservedHostClientId = -1;
         _hostSettingsResyncPending = false;
         _lastHostSettingsResponseBySender.Clear();
+        _hostSyncWaitStartTime = -1f;
         ResetRadioStateSync();
     }
 
