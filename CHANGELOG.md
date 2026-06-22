@@ -1,5 +1,24 @@
 # Changelog
 
+## Perfect Comms v3.2.3
+
+Perfect Comms v3.2.3 fixes a crash where players on CrossOver or Wine could take the whole lobby down when they joined, stops hitchy or weak-machine players from sounding choppy to everyone, and gives push-to-talk its own mic color.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v3.2.3/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### What's Changed
+
+- **CrossOver / Wine players no longer crash the lobby on join.**
+  > <sub>Players running Among Us through CrossOver or Wine/Proton could freeze on their voice connection the moment they joined and take everyone else down with them. Voice now waits to sync the host's settings before it connects, instead of jumping onto a local default that could hang. As part of this fix the Interstellar voice backend is temporarily disabled, so everyone uses BetterCrewLink for now.</sub>
+
+- **Choppy, cutting voice from stuttering players is smoothed out.**
+  > <sub>When a player's machine hitches (a weak PC, or running under CrossOver/Wine), their voice arrived in bursts and sounded choppy or cut out for everyone listening. The receive buffer now deepens automatically just for that player while they're stuttering, so they come through clean again. It costs nothing for players on steady connections, and the extra buffering drains back on its own as soon as they recover.</sub>
+
+- **Push-to-talk has its own mic color.**
+  > <sub>In push-to-talk mode the mic button now shows cyan when it's armed and white while you're actually transmitting, so you can tell at a glance whether you're being heard. Mute still overrides with its usual color.</sub>
+
 ## Perfect Comms v3.2.2
 
 Perfect Comms v3.2.2 makes voice smoother and more responsive on shaky connections, fixes the framerate drop in the new Unity Audio mode, and adds a meeting grace period that gives the caller the floor.
