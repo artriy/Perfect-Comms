@@ -1,5 +1,9 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -34,4 +38,45 @@ internal static class SidecarLauncher
 
     public static string BuildArguments(string handshakePath)
         => $"--handshake \"{handshakePath}\"";
+
+    public static bool TryReadHandshake(string handshakePath, out int port, out int pid)
+    {
+        port = 0;
+        pid = 0;
+        try
+        {
+            if (!File.Exists(handshakePath))
+                return false;
+            var text = File.ReadAllText(handshakePath);
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("port", out var p) || !root.TryGetProperty("pid", out var i))
+                return false;
+            port = p.GetInt32();
+            pid = i.GetInt32();
+            return port > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool PollHandshake(string handshakePath, int timeoutMs, Func<bool> childAlive, out int port, out int pid)
+    {
+        port = 0;
+        pid = 0;
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (!childAlive())
+                return false;
+            if (TryReadHandshake(handshakePath, out port, out pid))
+                return true;
+            Thread.Sleep(25);
+        }
+        return false;
+    }
 }
