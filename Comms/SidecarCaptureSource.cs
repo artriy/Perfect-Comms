@@ -108,18 +108,20 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             return false;
         }
 
+        var reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarCaptureReader" };
+        var heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarCaptureHeartbeat" };
         lock (_gate)
         {
             _client = client;
             _stream = stream;
+            _reader = reader;
+            _heartbeat = heartbeat;
         }
         _running = true;
         SetHealth(CaptureHealth.Healthy);
-        _reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarCaptureReader" };
-        _reader.Start(stream);
+        reader.Start(stream);
         Volatile.Write(ref _lastPongTick, Environment.TickCount64);
-        _heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarCaptureHeartbeat" };
-        _heartbeat.Start(stream);
+        heartbeat.Start(stream);
         return true;
     }
 
@@ -165,15 +167,53 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     {
         _running = false;
         TcpClient? client;
+        NetworkStream? stream;
+        Thread? reader;
+        Thread? heartbeat;
         lock (_gate)
         {
             client = _client;
+            stream = _stream;
+            reader = _reader;
+            heartbeat = _heartbeat;
             _client = null;
             _stream = null;
+            _reader = null;
+            _heartbeat = null;
+        }
+        if (stream != null)
+        {
+            try
+            {
+                var stop = SidecarProtocol.StopFrame();
+                stream.Write(stop, 0, stop.Length);
+                stream.Flush();
+            }
+            catch { }
         }
         try { client?.Close(); } catch { }
         KillLaunch();
+        JoinWorker(reader);
+        JoinWorker(heartbeat);
         SetHealth(CaptureHealth.Dead);
+    }
+
+    private static void JoinWorker(Thread? thread)
+    {
+        if (thread == null || thread == Thread.CurrentThread) return;
+        try { thread.Join(2000); } catch { }
+    }
+
+    internal bool AnyWorkerAlive()
+    {
+        Thread? reader;
+        Thread? heartbeat;
+        lock (_gate)
+        {
+            reader = _reader;
+            heartbeat = _heartbeat;
+        }
+        return (reader != null && reader.IsAlive) || (heartbeat != null && heartbeat.IsAlive);
     }
 
     private void KillLaunch()
