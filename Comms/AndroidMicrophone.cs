@@ -37,6 +37,12 @@ internal sealed class AndroidMicrophone : IDisposable
     private int        _lastPos;
     private bool       _recording;
     private float      _volume = 1f;
+    private long       _lastProgressMs;
+    private long       _lastRestartMs;
+    private int        _restartCount;
+    private const int  StallTimeoutMs      = 1500;
+    private const int  RestartCooldownMs   = 2000;
+    private const int  MaxRestartsPerStart = 8;
 
     // Fires on main thread (via Tick) with (float[] buf, int length)
     public event Action<float[], int>? DataAvailable;
@@ -64,6 +70,8 @@ internal sealed class AndroidMicrophone : IDisposable
         _clip      = Microphone.Start(_device, true, ClipSeconds, SampleRate);
         _lastPos   = 0;
         _recording = true;
+        _lastProgressMs = Environment.TickCount64;
+        _restartCount   = 0;
 
         VoiceDiagnostics.DebugInfo(
             $"[VC] Android mic started: '{(string.IsNullOrEmpty(_device) ? "default" : _device)}'");
@@ -96,13 +104,15 @@ internal sealed class AndroidMicrophone : IDisposable
         if (!_recording || _clip == null) return;
 
         int pos = Microphone.GetPosition(_device);
-        if (pos < 0) return;
+        if (pos < 0) { MaybeRecoverFromStall(); return; }
 
         int newSamples = pos >= _lastPos
             ? pos - _lastPos
             : (_clip.samples - _lastPos) + pos;
 
-        if (newSamples <= 0) return;
+        if (newSamples <= 0) { MaybeRecoverFromStall(); return; }
+
+        _lastProgressMs = Environment.TickCount64;
 
         // Cap main-thread work: drop oldest backlog so a slow frame can't compound into a death spiral.
         const int MaxSamplesPerTick = SampleRate / 5;
@@ -121,6 +131,54 @@ internal sealed class AndroidMicrophone : IDisposable
             ReadAndPublish(0, remaining);
 
         _lastPos = pos;
+    }
+
+    private enum StallDecision { None, Restart, GiveUpLogOnce }
+
+    private static StallDecision DecideStallAction(long now, long lastProgressMs, long lastRestartMs, int restartCount)
+    {
+        if (now - lastProgressMs < StallTimeoutMs) return StallDecision.None;
+        if (now - lastRestartMs  < RestartCooldownMs) return StallDecision.None;
+        if (restartCount >= MaxRestartsPerStart)
+            return restartCount == MaxRestartsPerStart ? StallDecision.GiveUpLogOnce : StallDecision.None;
+        return StallDecision.Restart;
+    }
+
+    private void MaybeRecoverFromStall()
+    {
+        if (!_recording || _clip == null) return;
+        long now = Environment.TickCount64;
+        switch (DecideStallAction(now, _lastProgressMs, _lastRestartMs, _restartCount))
+        {
+            case StallDecision.GiveUpLogOnce:
+                _restartCount++;
+                VoiceDiagnostics.Log("bcl.unity.mic.restart",
+                    $"giveUp device=\"{(string.IsNullOrEmpty(_device) ? "default" : _device)}\" attempts={MaxRestartsPerStart} stallMs={now - _lastProgressMs}");
+                return;
+            case StallDecision.Restart:
+                _restartCount++;
+                _lastRestartMs = now;
+                VoiceDiagnostics.Log("bcl.unity.mic.restart",
+                    $"reacquire device=\"{(string.IsNullOrEmpty(_device) ? "default" : _device)}\" attempt={_restartCount} stallMs={now - _lastProgressMs} lastPos={_lastPos}");
+                RestartCapture();
+                return;
+            default:
+                return;
+        }
+    }
+
+    private void RestartCapture()
+    {
+        try { if (!string.IsNullOrEmpty(_device)) Microphone.End(_device); } catch { }
+        string dev = _device;
+        if (string.IsNullOrEmpty(dev) || !DeviceExists(dev))
+            dev = Microphone.devices.Length > 0 ? Microphone.devices[0] : "";
+        _device = dev;
+        try { _clip = Microphone.Start(_device, true, ClipSeconds, SampleRate); } catch { _clip = null; }
+        _lastPos = 0;
+        _il2cppPollBuf = null;
+        _lastProgressMs = Environment.TickCount64;
+        _recording = _clip != null;
     }
 
     private void ReadAndPublish(int start, int count)
