@@ -141,23 +141,26 @@ fn spawn_real_producer(
     device_id: Option<String>,
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
-    err_sink: Arc<Mutex<TcpStream>>,
+    conn: Arc<Mutex<TcpStream>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(e) = spawn_cpal_capture(device_id, ring, stop) {
             eprintln!("capture error: {e}");
-            if let Ok(mut s) = err_sink.lock() {
-                let _ = s.write_all(&encode_control(&error_json("mic-denied", &e)));
-                let _ = s.flush();
-            }
+            let _ = write_frame(&conn, &encode_control(&error_json("mic-denied", &e)));
         }
     })
+}
+
+fn write_frame(conn: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> std::io::Result<()> {
+    let mut s = conn.lock().unwrap();
+    s.write_all(bytes)?;
+    s.flush()
 }
 
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
     stream.set_nodelay(true).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = stream.try_clone()?;
+    let conn = Arc::new(Mutex::new(stream.try_clone()?));
 
     let first = match read_frame_checked(&mut reader) {
         Ok(Frame::Control(s)) => s,
@@ -172,19 +175,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     }
 
     let devices = if cfg.synthetic { synthetic_devices() } else { enumerate_devices() };
-    writer.write_all(&encode_control(&ready_json(&devices)))?;
-    writer.flush()?;
+    write_frame(&conn, &encode_control(&ready_json(&devices)))?;
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
     let selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let producer_stop = Arc::new(AtomicBool::new(false));
     let producer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-    let err_sink = Arc::new(Mutex::new(stream.try_clone()?));
 
     let writer_ring = ring.clone();
     let writer_stop = stop.clone();
-    let mut wsock = stream.try_clone()?;
+    let writer_conn = conn.clone();
     let writer_handle = std::thread::spawn(move || {
         let mut since_level = 0u32;
         while !writer_stop.load(Ordering::Relaxed) {
@@ -192,15 +193,14 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             match frame {
                 Some(f) => {
                     let pk = peak(&f.samples);
-                    if wsock.write_all(&encode_audio(&f)).is_err() {
+                    if write_frame(&writer_conn, &encode_audio(&f)).is_err() {
                         break;
                     }
                     since_level += 1;
                     if since_level >= 50 {
                         since_level = 0;
-                        let _ = wsock.write_all(&encode_control(&level_json(pk)));
+                        let _ = write_frame(&writer_conn, &encode_control(&level_json(pk)));
                     }
-                    let _ = wsock.flush();
                 }
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
@@ -220,8 +220,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             InboundOp::SelectDevice { id } => {
                 *selected.lock().unwrap() = Some(id);
                 let devs = if cfg.synthetic { synthetic_devices() } else { enumerate_devices() };
-                let _ = writer.write_all(&encode_control(&devices_json(&devs)));
-                let _ = writer.flush();
+                let _ = write_frame(&conn, &encode_control(&devices_json(&devs)));
             }
             InboundOp::Start => {
                 producer_stop.store(false, Ordering::Relaxed);
@@ -235,7 +234,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             dev,
                             ring.clone(),
                             producer_stop.clone(),
-                            err_sink.clone(),
+                            conn.clone(),
                         ));
                     }
                 }
@@ -247,8 +246,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 }
             }
             InboundOp::Ping => {
-                let _ = writer.write_all(&encode_control(&pong_json(now_ns())));
-                let _ = writer.flush();
+                let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
             }
             InboundOp::Hello { .. } => {}
         }
