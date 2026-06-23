@@ -1,4 +1,8 @@
-use crate::proto::{AudioFrame, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::proto::{AudioFrame, AudioRing, DeviceInfo, FRAME_SAMPLES, SAMPLE_RATE};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const TONE_HZ: f32 = 440.0;
 
@@ -90,6 +94,123 @@ impl FrameAccumulator {
     }
 }
 
+pub fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+pub fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
+}
+
+pub struct ToneSource {
+    phase: f32,
+}
+
+impl ToneSource {
+    pub fn new() -> ToneSource {
+        ToneSource { phase: 0.0 }
+    }
+
+    pub fn fill_frame(&mut self) -> AudioFrame {
+        let step = std::f32::consts::TAU * TONE_HZ / SAMPLE_RATE as f32;
+        let mut samples = Vec::with_capacity(FRAME_SAMPLES);
+        for _ in 0..FRAME_SAMPLES {
+            samples.push(0.5 * self.phase.sin());
+            self.phase += step;
+            if self.phase >= std::f32::consts::TAU {
+                self.phase -= std::f32::consts::TAU;
+            }
+        }
+        AudioFrame { capture_ts_ns: now_ns(), samples }
+    }
+}
+
+pub fn enumerate_devices() -> Vec<DeviceInfo> {
+    let host = cpal::default_host();
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let mut out = Vec::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            let name = match d.name() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let is_default = Some(&name) == default_name.as_ref();
+            out.push(DeviceInfo { id: name.clone(), name, default: is_default });
+        }
+    }
+    out.sort_by(|a, b| b.default.cmp(&a.default));
+    out
+}
+
+fn pick_device(device_id: &Option<String>) -> Result<cpal::Device, String> {
+    let host = cpal::default_host();
+    if let Some(id) = device_id {
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().ok().as_deref() == Some(id.as_str()) {
+                    return Ok(d);
+                }
+            }
+        }
+    }
+    host.default_input_device().ok_or_else(|| "no input device".to_string())
+}
+
+pub fn spawn_cpal_capture(
+    device_id: Option<String>,
+    ring: Arc<Mutex<AudioRing>>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let device = pick_device(&device_id)?;
+    let config = device
+        .default_input_config()
+        .map_err(|e| format!("default input config: {e}"))?;
+    let in_rate = config.sample_rate().0;
+    let channels = config.channels() as usize;
+    let resampler = Arc::new(Mutex::new(Resampler::new(in_rate)));
+    let accumulator = Arc::new(Mutex::new(FrameAccumulator::new()));
+    let err_fn = |e| eprintln!("cpal stream error: {e}");
+
+    let cb_ring = ring.clone();
+    let cb_rs = resampler.clone();
+    let cb_acc = accumulator.clone();
+    let push = move |data: &[f32]| {
+        let mono = downmix_to_mono(data, channels);
+        let resampled = cb_rs.lock().unwrap().process(&mono);
+        let mut clock = now_ns;
+        let frames = cb_acc.lock().unwrap().push_and_drain(&resampled, &mut clock);
+        if frames.is_empty() {
+            return;
+        }
+        let mut ring = cb_ring.lock().unwrap();
+        for f in frames {
+            ring.push(f);
+        }
+    };
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _| push(data),
+            err_fn,
+            None,
+        ),
+        fmt => return Err(format!("unsupported sample format: {fmt:?}")),
+    }
+    .map_err(|e| format!("build input stream: {e}"))?;
+
+    stream.play().map_err(|e| format!("stream play: {e}"))?;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(stream);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +275,38 @@ mod tests {
         let frames = acc.push_and_drain(&vec![0.0f32; FRAME_SAMPLES - 110], &mut clock);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].samples.len(), FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn tone_frame_is_full_and_audible() {
+        let mut src = ToneSource::new();
+        let f = src.fill_frame();
+        assert_eq!(f.samples.len(), FRAME_SAMPLES);
+        let p = peak(&f.samples);
+        assert!(p > 0.1, "tone too quiet: {p}");
+        assert!(p <= 1.0, "tone clips: {p}");
+    }
+
+    #[test]
+    fn tone_is_continuous_across_frames() {
+        let mut src = ToneSource::new();
+        let f1 = src.fill_frame();
+        let f2 = src.fill_frame();
+        assert_ne!(f1.samples, f2.samples);
+        assert!(peak(&f2.samples) > 0.1);
+    }
+
+    #[test]
+    fn peak_reports_max_abs() {
+        assert_eq!(peak(&[0.0, -0.7, 0.3]), 0.7);
+        assert_eq!(peak(&[]), 0.0);
+    }
+
+    #[test]
+    fn now_ns_is_nonzero_and_nondecreasing() {
+        let a = now_ns();
+        let b = now_ns();
+        assert!(a > 0);
+        assert!(b >= a);
     }
 }
