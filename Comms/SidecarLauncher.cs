@@ -141,4 +141,95 @@ internal static class SidecarLauncher
         }
         return false;
     }
+
+    public static string NewHandshakePath()
+        => Path.Combine(Path.GetTempPath(), "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+
+    public static SidecarLaunchResult Launch(string helperPath, string token, int handshakeTimeoutMs, bool wine, Func<string, string> resolveWineHostPath)
+    {
+        var result = new SidecarLaunchResult { HandshakePath = NewHandshakePath() };
+        var args = BuildArguments(result.HandshakePath);
+        Process? process = null;
+        try
+        {
+            ProcessStartInfo psi;
+            if (wine)
+            {
+                var hostPath = resolveWineHostPath(helperPath);
+                psi = new ProcessStartInfo("start.exe", $"/unix \"{hostPath}\" {args}");
+            }
+            else
+            {
+                psi = new ProcessStartInfo(helperPath, args);
+            }
+            psi.UseShellExecute = false;
+            psi.RedirectStandardInput = true;
+            psi.RedirectStandardOutput = false;
+            psi.RedirectStandardError = false;
+            psi.CreateNoWindow = true;
+
+            process = Process.Start(psi);
+            if (process == null)
+            {
+                result.FailureReason = "Process.Start returned null";
+                return result;
+            }
+            result.Process = process;
+
+            try
+            {
+                process.StandardInput.WriteLine(token);
+                process.StandardInput.Flush();
+                process.StandardInput.Close();
+            }
+            catch (Exception ex)
+            {
+                result.FailureReason = "token write failed: " + ex.Message;
+                KillQuietly(process);
+                return result;
+            }
+
+            if (!PollHandshake(result.HandshakePath, handshakeTimeoutMs, () => !ProcessExited(process), out var port, out var pid))
+            {
+                result.FailureReason = ProcessExited(process)
+                    ? "helper exited before handshake (host-exec blocked or crash)"
+                    : "handshake timeout";
+                KillQuietly(process);
+                return result;
+            }
+
+            result.Port = port;
+            result.Pid = pid;
+            result.Success = true;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.FailureReason = "launch failed: " + ex.Message;
+            if (process != null)
+                KillQuietly(process);
+            return result;
+        }
+    }
+
+    private static bool ProcessExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch { return true; }
+    }
+
+    private static void KillQuietly(Process process)
+    {
+        try { if (!process.HasExited) process.Kill(); } catch { }
+    }
+}
+
+internal sealed class SidecarLaunchResult
+{
+    public bool Success;
+    public int Port;
+    public int Pid;
+    public Process? Process;
+    public string HandshakePath = "";
+    public string FailureReason = "";
 }
