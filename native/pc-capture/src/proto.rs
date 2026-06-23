@@ -139,6 +139,101 @@ impl AudioRing {
     }
 }
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op")]
+pub enum InboundOp {
+    #[serde(rename = "hello")]
+    Hello { proto: u32, token: String },
+    #[serde(rename = "select-device")]
+    SelectDevice { id: String },
+    #[serde(rename = "start")]
+    Start,
+    #[serde(rename = "stop")]
+    Stop,
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub default: bool,
+}
+
+#[derive(Serialize)]
+struct FormatBlock {
+    rate: u32,
+    channels: u16,
+    sample: &'static str,
+}
+
+#[derive(Serialize)]
+struct ReadyMsg<'a> {
+    op: &'static str,
+    proto: u32,
+    format: FormatBlock,
+    devices: &'a [DeviceInfo],
+}
+
+#[derive(Serialize)]
+struct DevicesMsg<'a> {
+    op: &'static str,
+    devices: &'a [DeviceInfo],
+}
+
+#[derive(Serialize)]
+struct LevelMsg {
+    op: &'static str,
+    peak: f32,
+}
+
+#[derive(Serialize)]
+struct ErrorMsg<'a> {
+    op: &'static str,
+    code: &'a str,
+    msg: &'a str,
+}
+
+#[derive(Serialize)]
+struct PongMsg {
+    op: &'static str,
+    #[serde(rename = "capTs")]
+    cap_ts: u64,
+}
+
+pub fn ready_json(devices: &[DeviceInfo]) -> String {
+    serde_json::to_string(&ReadyMsg {
+        op: "ready",
+        proto: PROTO_VERSION,
+        format: FormatBlock { rate: SAMPLE_RATE, channels: CHANNELS, sample: "f32" },
+        devices,
+    })
+    .expect("ready serialize")
+}
+
+pub fn devices_json(devices: &[DeviceInfo]) -> String {
+    serde_json::to_string(&DevicesMsg { op: "devices", devices }).expect("devices serialize")
+}
+
+pub fn level_json(peak: f32) -> String {
+    serde_json::to_string(&LevelMsg { op: "level", peak }).expect("level serialize")
+}
+
+pub fn error_json(code: &str, msg: &str) -> String {
+    serde_json::to_string(&ErrorMsg { op: "error", code, msg }).expect("error serialize")
+}
+
+pub fn pong_json(cap_ts: u64) -> String {
+    serde_json::to_string(&PongMsg { op: "pong", cap_ts }).expect("pong serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +346,74 @@ mod tests {
     #[test]
     fn ring_capacity_constant_is_tiny() {
         assert_eq!(RING_CAPACITY, 8);
+    }
+
+    #[test]
+    fn parse_hello() {
+        let op = parse_inbound(r#"{"op":"hello","proto":1,"token":"secret"}"#).unwrap();
+        match op {
+            InboundOp::Hello { proto, token } => {
+                assert_eq!(proto, 1);
+                assert_eq!(token, "secret");
+            }
+            other => panic!("expected hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_select_device_with_hyphenated_op() {
+        let op = parse_inbound(r#"{"op":"select-device","id":"dev-7"}"#).unwrap();
+        match op {
+            InboundOp::SelectDevice { id } => assert_eq!(id, "dev-7"),
+            other => panic!("expected select-device, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_start_stop_ping() {
+        assert!(matches!(parse_inbound(r#"{"op":"start"}"#).unwrap(), InboundOp::Start));
+        assert!(matches!(parse_inbound(r#"{"op":"stop"}"#).unwrap(), InboundOp::Stop));
+        assert!(matches!(parse_inbound(r#"{"op":"ping"}"#).unwrap(), InboundOp::Ping));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_op() {
+        assert!(parse_inbound(r#"{"op":"frobnicate"}"#).is_err());
+    }
+
+    #[test]
+    fn ready_json_has_exact_format_block() {
+        let devs = vec![DeviceInfo { id: "a".into(), name: "Mic A".into(), default: true }];
+        let s = ready_json(&devs);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["op"], "ready");
+        assert_eq!(v["proto"], 1);
+        assert_eq!(v["format"]["rate"], 48_000);
+        assert_eq!(v["format"]["channels"], 1);
+        assert_eq!(v["format"]["sample"], "f32");
+        assert_eq!(v["devices"][0]["id"], "a");
+        assert_eq!(v["devices"][0]["name"], "Mic A");
+        assert_eq!(v["devices"][0]["default"], true);
+    }
+
+    #[test]
+    fn devices_level_error_pong_json_shapes() {
+        let devs = vec![DeviceInfo { id: "x".into(), name: "X".into(), default: false }];
+        let dv: serde_json::Value = serde_json::from_str(&devices_json(&devs)).unwrap();
+        assert_eq!(dv["op"], "devices");
+        assert_eq!(dv["devices"][0]["id"], "x");
+
+        let lv: serde_json::Value = serde_json::from_str(&level_json(0.5)).unwrap();
+        assert_eq!(lv["op"], "level");
+        assert!((lv["peak"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+
+        let ev: serde_json::Value = serde_json::from_str(&error_json("mic-denied", "no mic")).unwrap();
+        assert_eq!(ev["op"], "error");
+        assert_eq!(ev["code"], "mic-denied");
+        assert_eq!(ev["msg"], "no mic");
+
+        let pv: serde_json::Value = serde_json::from_str(&pong_json(123456789)).unwrap();
+        assert_eq!(pv["op"], "pong");
+        assert_eq!(pv["capTs"], 123456789u64);
     }
 }
