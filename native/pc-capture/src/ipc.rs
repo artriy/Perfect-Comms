@@ -270,8 +270,8 @@ pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
 
     let reject_listener = listener.try_clone()?;
     let _reject = std::thread::spawn(move || {
-        while let Ok((extra, _)) = reject_listener.accept() {
-            drop(extra);
+        while let Ok((mut extra, _)) = reject_listener.accept() {
+            let _ = reject_extra_client(&mut extra);
         }
     });
 
@@ -544,10 +544,18 @@ mod tests {
 
         let second = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         let mut r2 = BufReader::new(second);
+        match read_frame(&mut r2).unwrap() {
+            Frame::Control(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                assert_eq!(v["op"], "error");
+                assert_eq!(v["code"], "busy");
+            }
+            other => panic!("expected busy error, got {other:?}"),
+        }
         let mut probe = [0u8; 1];
         use std::io::Read;
         let n = r2.read(&mut probe).unwrap_or(0);
-        assert_eq!(n, 0, "second connection should be rejected (immediate EOF)");
+        assert_eq!(n, 0, "second connection should close after busy error (EOF)");
 
         drop(r1);
         drop(first);
