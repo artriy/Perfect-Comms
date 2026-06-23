@@ -7,6 +7,7 @@ pub const FRAME_BYTES: usize = 8 + FRAME_SAMPLES * 4;
 pub const TYPE_CONTROL: u8 = 0x01;
 pub const TYPE_AUDIO: u8 = 0x02;
 
+#[cfg(test)]
 use std::io::Read;
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,8 @@ pub struct AudioFrame {
 #[derive(Debug)]
 pub enum Frame {
     Control(String),
+    // Decoded inbound audio is never read by the helper (audio flows helper->mod only); kept for the wire contract and tests.
+    #[allow(dead_code)]
     Audio(AudioFrame),
 }
 
@@ -68,6 +71,7 @@ pub fn encode_audio(frame: &AudioFrame) -> Vec<u8> {
     out
 }
 
+#[cfg(test)]
 pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
     let mut header = [0u8; 5];
     r.read_exact(&mut header)?;
@@ -93,7 +97,10 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
             for chunk in body[8..].chunks_exact(4) {
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
-            Ok(Frame::Audio(AudioFrame { capture_ts_ns: ts, samples }))
+            Ok(Frame::Audio(AudioFrame {
+                capture_ts_ns: ts,
+                samples,
+            }))
         }
         other => Err(DecodeError::BadType(other)),
     }
@@ -130,6 +137,7 @@ impl AudioRing {
         self.queue.pop_front()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -212,14 +220,22 @@ pub fn ready_json(devices: &[DeviceInfo]) -> String {
     serde_json::to_string(&ReadyMsg {
         op: "ready",
         proto: PROTO_VERSION,
-        format: FormatBlock { rate: SAMPLE_RATE, channels: CHANNELS, sample: "f32" },
+        format: FormatBlock {
+            rate: SAMPLE_RATE,
+            channels: CHANNELS,
+            sample: "f32",
+        },
         devices,
     })
     .expect("ready serialize")
 }
 
 pub fn devices_json(devices: &[DeviceInfo]) -> String {
-    serde_json::to_string(&DevicesMsg { op: "devices", devices }).expect("devices serialize")
+    serde_json::to_string(&DevicesMsg {
+        op: "devices",
+        devices,
+    })
+    .expect("devices serialize")
 }
 
 pub fn level_json(peak: f32) -> String {
@@ -227,7 +243,12 @@ pub fn level_json(peak: f32) -> String {
 }
 
 pub fn error_json(code: &str, msg: &str) -> String {
-    serde_json::to_string(&ErrorMsg { op: "error", code, msg }).expect("error serialize")
+    serde_json::to_string(&ErrorMsg {
+        op: "error",
+        code,
+        msg,
+    })
+    .expect("error serialize")
 }
 
 pub fn pong_json(cap_ts: u64) -> String {
@@ -268,7 +289,10 @@ mod tests {
         let mut samples = vec![0.0f32; FRAME_SAMPLES];
         samples[0] = 1.0;
         samples[FRAME_SAMPLES - 1] = -0.5;
-        let frame = AudioFrame { capture_ts_ns: 0x0102_0304_0506_0708, samples };
+        let frame = AudioFrame {
+            capture_ts_ns: 0x0102_0304_0506_0708,
+            samples,
+        };
         let bytes = encode_audio(&frame);
         assert_eq!(bytes[0], TYPE_AUDIO);
         let len = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
@@ -310,7 +334,10 @@ mod tests {
     }
 
     fn frame_with(ts: u64) -> AudioFrame {
-        AudioFrame { capture_ts_ns: ts, samples: vec![0.0; FRAME_SAMPLES] }
+        AudioFrame {
+            capture_ts_ns: ts,
+            samples: vec![0.0; FRAME_SAMPLES],
+        }
     }
 
     #[test]
@@ -371,9 +398,18 @@ mod tests {
 
     #[test]
     fn parse_start_stop_ping() {
-        assert!(matches!(parse_inbound(r#"{"op":"start"}"#).unwrap(), InboundOp::Start));
-        assert!(matches!(parse_inbound(r#"{"op":"stop"}"#).unwrap(), InboundOp::Stop));
-        assert!(matches!(parse_inbound(r#"{"op":"ping"}"#).unwrap(), InboundOp::Ping));
+        assert!(matches!(
+            parse_inbound(r#"{"op":"start"}"#).unwrap(),
+            InboundOp::Start
+        ));
+        assert!(matches!(
+            parse_inbound(r#"{"op":"stop"}"#).unwrap(),
+            InboundOp::Stop
+        ));
+        assert!(matches!(
+            parse_inbound(r#"{"op":"ping"}"#).unwrap(),
+            InboundOp::Ping
+        ));
     }
 
     #[test]
@@ -383,7 +419,11 @@ mod tests {
 
     #[test]
     fn ready_json_has_exact_format_block() {
-        let devs = vec![DeviceInfo { id: "a".into(), name: "Mic A".into(), default: true }];
+        let devs = vec![DeviceInfo {
+            id: "a".into(),
+            name: "Mic A".into(),
+            default: true,
+        }];
         let s = ready_json(&devs);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
@@ -398,7 +438,11 @@ mod tests {
 
     #[test]
     fn devices_level_error_pong_json_shapes() {
-        let devs = vec![DeviceInfo { id: "x".into(), name: "X".into(), default: false }];
+        let devs = vec![DeviceInfo {
+            id: "x".into(),
+            name: "X".into(),
+            default: false,
+        }];
         let dv: serde_json::Value = serde_json::from_str(&devices_json(&devs)).unwrap();
         assert_eq!(dv["op"], "devices");
         assert_eq!(dv["devices"][0]["id"], "x");
@@ -407,7 +451,8 @@ mod tests {
         assert_eq!(lv["op"], "level");
         assert!((lv["peak"].as_f64().unwrap() - 0.5).abs() < 1e-6);
 
-        let ev: serde_json::Value = serde_json::from_str(&error_json("mic-denied", "no mic")).unwrap();
+        let ev: serde_json::Value =
+            serde_json::from_str(&error_json("mic-denied", "no mic")).unwrap();
         assert_eq!(ev["op"], "error");
         assert_eq!(ev["code"], "mic-denied");
         assert_eq!(ev["msg"], "no mic");

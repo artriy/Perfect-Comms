@@ -57,9 +57,17 @@ impl Resampler {
                 break;
             }
             let frac = (idx_f - i0 as f64) as f32;
-            let s0 = if i0 < 0 { self.last } else { mono_in[i0 as usize] };
+            let s0 = if i0 < 0 {
+                self.last
+            } else {
+                mono_in[i0 as usize]
+            };
             let i1 = i0 + 1;
-            let s1 = if i1 < n as isize { mono_in[i1 as usize] } else { mono_in[n - 1] };
+            let s1 = if i1 < n as isize {
+                mono_in[i1 as usize]
+            } else {
+                mono_in[n - 1]
+            };
             out.push(s0 + (s1 - s0) * frac);
             self.pos += self.ratio;
         }
@@ -76,7 +84,9 @@ pub struct FrameAccumulator {
 
 impl FrameAccumulator {
     pub fn new() -> FrameAccumulator {
-        FrameAccumulator { buf: Vec::with_capacity(FRAME_SAMPLES * 2) }
+        FrameAccumulator {
+            buf: Vec::with_capacity(FRAME_SAMPLES * 2),
+        }
     }
 
     pub fn push_and_drain(
@@ -88,7 +98,10 @@ impl FrameAccumulator {
         let mut frames = Vec::new();
         while self.buf.len() >= FRAME_SAMPLES {
             let samples: Vec<f32> = self.buf.drain(0..FRAME_SAMPLES).collect();
-            frames.push(AudioFrame { capture_ts_ns: ts_provider(), samples });
+            frames.push(AudioFrame {
+                capture_ts_ns: ts_provider(),
+                samples,
+            });
         }
         frames
     }
@@ -124,7 +137,10 @@ impl ToneSource {
                 self.phase -= std::f32::consts::TAU;
             }
         }
-        AudioFrame { capture_ts_ns: now_ns(), samples }
+        AudioFrame {
+            capture_ts_ns: now_ns(),
+            samples,
+        }
     }
 }
 
@@ -139,10 +155,14 @@ pub fn enumerate_devices() -> Vec<DeviceInfo> {
                 Err(_) => continue,
             };
             let is_default = Some(&name) == default_name.as_ref();
-            out.push(DeviceInfo { id: name.clone(), name, default: is_default });
+            out.push(DeviceInfo {
+                id: name.clone(),
+                name,
+                default: is_default,
+            });
         }
     }
-    out.sort_by(|a, b| b.default.cmp(&a.default));
+    out.sort_by_key(|d| std::cmp::Reverse(d.default));
     out
 }
 
@@ -157,7 +177,8 @@ fn pick_device(device_id: &Option<String>) -> Result<cpal::Device, String> {
             }
         }
     }
-    host.default_input_device().ok_or_else(|| "no input device".to_string())
+    host.default_input_device()
+        .ok_or_else(|| "no input device".to_string())
 }
 
 pub fn spawn_cpal_capture(
@@ -182,7 +203,10 @@ pub fn spawn_cpal_capture(
         let mono = downmix_to_mono(data, channels);
         let resampled = cb_rs.lock().unwrap().process(&mono);
         let mut clock = now_ns;
-        let frames = cb_acc.lock().unwrap().push_and_drain(&resampled, &mut clock);
+        let frames = cb_acc
+            .lock()
+            .unwrap()
+            .push_and_drain(&resampled, &mut clock);
         if frames.is_empty() {
             return;
         }

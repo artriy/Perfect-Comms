@@ -30,7 +30,10 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     if handshake_path.is_none() {
         return Err("--handshake <path> is required".to_string());
     }
-    Ok(Args { handshake_path, synthetic })
+    Ok(Args {
+        handshake_path,
+        synthetic,
+    })
 }
 
 fn main() {
@@ -84,7 +87,10 @@ mod tests {
             "--synthetic-tone".to_string(),
         ];
         let args = parse_args(&argv).unwrap();
-        assert_eq!(args.handshake_path.unwrap().to_string_lossy(), "/tmp/hs.json");
+        assert_eq!(
+            args.handshake_path.unwrap().to_string_lossy(),
+            "/tmp/hs.json"
+        );
         assert!(args.synthetic);
     }
 

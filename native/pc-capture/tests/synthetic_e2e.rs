@@ -1,7 +1,7 @@
 use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TYPE_CONTROL: u8 = 0x01;
 const TYPE_AUDIO: u8 = 0x02;
@@ -61,7 +61,10 @@ fn synthetic_helper_streams_audio_end_to_end() {
     let hs = std::env::temp_dir().join(format!(
         "pc-e2e-hs-{}-{}.json",
         std::process::id(),
-        Instant::now().elapsed().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     ));
     let _ = std::fs::remove_file(&hs);
 

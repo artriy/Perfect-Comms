@@ -87,7 +87,10 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
             for chunk in body[8..].chunks_exact(4) {
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
-            Ok(Frame::Audio(AudioFrame { capture_ts_ns: ts, samples }))
+            Ok(Frame::Audio(AudioFrame {
+                capture_ts_ns: ts,
+                samples,
+            }))
         }
         other => Err(proto::DecodeError::BadType(other)),
     }
@@ -174,7 +177,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         return Ok(());
     }
 
-    let devices = if cfg.synthetic { synthetic_devices() } else { enumerate_devices() };
+    let devices = if cfg.synthetic {
+        synthetic_devices()
+    } else {
+        enumerate_devices()
+    };
     write_frame(&conn, &encode_control(&ready_json(&devices)))?;
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
@@ -188,8 +195,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_conn = conn.clone();
     let writer_handle = std::thread::spawn(move || {
         let mut since_level = 0u32;
+        let mut last_dropped = 0u64;
         while !writer_stop.load(Ordering::Relaxed) {
-            let frame: Option<AudioFrame> = writer_ring.lock().unwrap().pop();
+            let (frame, dropped) = {
+                let mut ring = writer_ring.lock().unwrap();
+                (ring.pop(), ring.dropped())
+            };
             match frame {
                 Some(f) => {
                     let pk = peak(&f.samples);
@@ -200,6 +211,10 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     if since_level >= 50 {
                         since_level = 0;
                         let _ = write_frame(&writer_conn, &encode_control(&level_json(pk)));
+                        if dropped != last_dropped {
+                            eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
+                            last_dropped = dropped;
+                        }
                     }
                 }
                 None => std::thread::sleep(Duration::from_millis(5)),
@@ -207,11 +222,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
-    loop {
-        let frame = match read_frame_checked(&mut reader) {
-            Ok(Frame::Control(s)) => s,
-            _ => break,
-        };
+    while let Ok(Frame::Control(frame)) = read_frame_checked(&mut reader) {
         let op = match parse_inbound(&frame) {
             Ok(op) => op,
             Err(_) => continue,
@@ -219,7 +230,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         match op {
             InboundOp::SelectDevice { id } => {
                 *selected.lock().unwrap() = Some(id);
-                let devs = if cfg.synthetic { synthetic_devices() } else { enumerate_devices() };
+                let devs = if cfg.synthetic {
+                    synthetic_devices()
+                } else {
+                    enumerate_devices()
+                };
                 let _ = write_frame(&conn, &encode_control(&devices_json(&devs)));
             }
             InboundOp::Start => {
@@ -227,7 +242,10 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 let mut guard = producer.lock().unwrap();
                 if guard.is_none() {
                     if cfg.synthetic {
-                        *guard = Some(spawn_synthetic_producer(ring.clone(), producer_stop.clone()));
+                        *guard = Some(spawn_synthetic_producer(
+                            ring.clone(),
+                            producer_stop.clone(),
+                        ));
                     } else {
                         let dev = selected.lock().unwrap().clone();
                         *guard = Some(spawn_real_producer(
@@ -350,7 +368,7 @@ mod tests {
 
     #[test]
     fn max_frame_len_covers_largest_legit_frame() {
-        assert!(MAX_FRAME_LEN >= proto::FRAME_BYTES);
+        const { assert!(MAX_FRAME_LEN >= proto::FRAME_BYTES) };
     }
 
     #[test]
@@ -362,19 +380,28 @@ mod tests {
     #[test]
     fn validate_hello_rejects_bad_token() {
         let op = parse_inbound(r#"{"op":"hello","proto":1,"token":"bad"}"#).unwrap();
-        assert!(matches!(validate_hello(&op, "good"), HelloResult::RejectToken));
+        assert!(matches!(
+            validate_hello(&op, "good"),
+            HelloResult::RejectToken
+        ));
     }
 
     #[test]
     fn validate_hello_rejects_proto_mismatch() {
         let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"good"}"#).unwrap();
-        assert!(matches!(validate_hello(&op, "good"), HelloResult::RejectProto));
+        assert!(matches!(
+            validate_hello(&op, "good"),
+            HelloResult::RejectProto
+        ));
     }
 
     #[test]
     fn validate_hello_rejects_non_hello() {
         let op = parse_inbound(r#"{"op":"start"}"#).unwrap();
-        assert!(matches!(validate_hello(&op, "good"), HelloResult::RejectToken));
+        assert!(matches!(
+            validate_hello(&op, "good"),
+            HelloResult::RejectToken
+        ));
     }
 
     #[test]
@@ -395,7 +422,9 @@ mod tests {
         client.set_nodelay(true).ok();
 
         client
-            .write_all(&encode_control(r#"{"op":"hello","proto":1,"token":"tok123"}"#))
+            .write_all(&encode_control(
+                r#"{"op":"hello","proto":1,"token":"tok123"}"#,
+            ))
             .unwrap();
 
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -410,11 +439,17 @@ mod tests {
         }
 
         client
-            .write_all(&encode_control(r#"{"op":"select-device","id":"synthetic-tone"}"#))
+            .write_all(&encode_control(
+                r#"{"op":"select-device","id":"synthetic-tone"}"#,
+            ))
             .unwrap();
         let mut got_devices = false;
-        client.write_all(&encode_control(r#"{"op":"ping"}"#)).unwrap();
-        client.write_all(&encode_control(r#"{"op":"start"}"#)).unwrap();
+        client
+            .write_all(&encode_control(r#"{"op":"ping"}"#))
+            .unwrap();
+        client
+            .write_all(&encode_control(r#"{"op":"start"}"#))
+            .unwrap();
 
         let mut got_pong = false;
         let mut got_audio = false;
@@ -444,7 +479,9 @@ mod tests {
         assert!(got_pong, "never got pong");
         assert!(got_audio, "never got audio");
 
-        client.write_all(&encode_control(r#"{"op":"stop"}"#)).unwrap();
+        client
+            .write_all(&encode_control(r#"{"op":"stop"}"#))
+            .unwrap();
         drop(reader);
         drop(client);
         server.join().unwrap();
@@ -465,7 +502,9 @@ mod tests {
         });
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
-            .write_all(&encode_control(r#"{"op":"hello","proto":1,"token":"wrong"}"#))
+            .write_all(&encode_control(
+                r#"{"op":"hello","proto":1,"token":"wrong"}"#,
+            ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
         let mut buf = [0u8; 1];
@@ -497,14 +536,16 @@ mod tests {
         let mut buf = [0u8; 1];
         use std::io::Read;
         let n = reader.read(&mut buf).unwrap_or(0);
-        assert_eq!(n, 0, "server must close on oversized declared len, never send ready");
+        assert_eq!(
+            n, 0,
+            "server must close on oversized declared len, never send ready"
+        );
         server.join().unwrap();
     }
 
     #[test]
     fn serve_writes_handshake_and_rejects_second_connection() {
-        let hs = std::env::temp_dir()
-            .join(format!("pc-serve-hs-{}.json", std::process::id()));
+        let hs = std::env::temp_dir().join(format!("pc-serve-hs-{}.json", std::process::id()));
         let hs_for_thread = hs.clone();
         let cfg = ServerConfig {
             handshake_path: hs.clone(),
@@ -531,7 +572,9 @@ mod tests {
 
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
-            .write_all(&encode_control(r#"{"op":"hello","proto":1,"token":"servetok"}"#))
+            .write_all(&encode_control(
+                r#"{"op":"hello","proto":1,"token":"servetok"}"#,
+            ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());
         match read_frame(&mut r1).unwrap() {
@@ -555,7 +598,10 @@ mod tests {
         let mut probe = [0u8; 1];
         use std::io::Read;
         let n = r2.read(&mut probe).unwrap_or(0);
-        assert_eq!(n, 0, "second connection should close after busy error (EOF)");
+        assert_eq!(
+            n, 0,
+            "second connection should close after busy error (EOF)"
+        );
 
         drop(r1);
         drop(first);
