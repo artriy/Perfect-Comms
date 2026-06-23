@@ -261,6 +261,27 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     Ok(())
 }
 
+pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
+    let listener = bind_loopback()?;
+    let port = listener.local_addr()?.port();
+    write_handshake_file(&cfg.handshake_path, port, std::process::id())?;
+
+    let first = accept_single(&listener)?;
+
+    let reject_listener = listener.try_clone()?;
+    let _reject = std::thread::spawn(move || {
+        while let Ok((extra, _)) = reject_listener.accept() {
+            drop(extra);
+        }
+    });
+
+    let result = run_session(first, &cfg);
+
+    drop(listener);
+    let _ = std::fs::remove_file(&cfg.handshake_path);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +499,59 @@ mod tests {
         let n = reader.read(&mut buf).unwrap_or(0);
         assert_eq!(n, 0, "server must close on oversized declared len, never send ready");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn serve_writes_handshake_and_rejects_second_connection() {
+        let hs = std::env::temp_dir()
+            .join(format!("pc-serve-hs-{}.json", std::process::id()));
+        let hs_for_thread = hs.clone();
+        let cfg = ServerConfig {
+            handshake_path: hs.clone(),
+            token: "servetok".to_string(),
+            synthetic: true,
+        };
+        let server = std::thread::spawn(move || {
+            serve(cfg).ok();
+        });
+
+        let mut port = 0u16;
+        for _ in 0..200 {
+            if let Ok(body) = std::fs::read_to_string(&hs_for_thread) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    port = v["port"].as_u64().unwrap_or(0) as u16;
+                    if port != 0 {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_ne!(port, 0, "handshake file never produced a port");
+
+        let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        first
+            .write_all(&encode_control(r#"{"op":"hello","proto":1,"token":"servetok"}"#))
+            .unwrap();
+        let mut r1 = BufReader::new(first.try_clone().unwrap());
+        match read_frame(&mut r1).unwrap() {
+            Frame::Control(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                assert_eq!(v["op"], "ready");
+            }
+            other => panic!("expected ready, got {other:?}"),
+        }
+
+        let second = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r2 = BufReader::new(second);
+        let mut probe = [0u8; 1];
+        use std::io::Read;
+        let n = r2.read(&mut probe).unwrap_or(0);
+        assert_eq!(n, 0, "second connection should be rejected (immediate EOF)");
+
+        drop(r1);
+        drop(first);
+        server.join().unwrap();
+        std::fs::remove_file(&hs).ok();
     }
 }
