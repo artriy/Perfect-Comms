@@ -22,7 +22,15 @@ internal static class SidecarLauncher
         => triple.Contains("windows") ? "pc-capture.exe" : "pc-capture";
 
     public static string ResourceName(string triple)
-        => $"VoiceChatPlugin.native.{triple}.{HelperFileName(triple)}";
+        => triple switch
+        {
+            "x86_64-pc-windows-msvc" => "Lib.pc-capture.pc-capture-win-x64.exe",
+            "i686-pc-windows-msvc" => "Lib.pc-capture.pc-capture-win-x86.exe",
+            "x86_64-unknown-linux-gnu" => "Lib.pc-capture.pc-capture-linux-x64",
+            "x86_64-apple-darwin" => "Lib.pc-capture.pc-capture-mac.zip",
+            "aarch64-apple-darwin" => "Lib.pc-capture.pc-capture-mac.zip",
+            _ => throw new PlatformNotSupportedException($"No pc-capture helper for target {triple}"),
+        };
 
     public static string BuildArguments(string handshakePath)
         => $"--handshake \"{handshakePath}\"";
