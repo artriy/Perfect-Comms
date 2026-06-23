@@ -15,10 +15,14 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     private TcpClient? _client;
     private NetworkStream? _stream;
     private SidecarLaunchResult? _launchResult;
-    private volatile int _health = (int)CaptureHealth.Dead;
+    private int _health = (int)CaptureHealth.Dead;
     private volatile bool _running;
     private readonly float[] _frameScratch = new float[SidecarProtocol.AudioSamples];
     private Thread? _reader;
+    internal int PingIntervalMs = 1000;
+    internal int MissedPongLimit = 3;
+    private long _lastPongTick;
+    private Thread? _heartbeat;
 
     public event Action<float[], int>? OnFrame;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
@@ -113,6 +117,9 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         SetHealth(CaptureHealth.Healthy);
         _reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarCaptureReader" };
         _reader.Start(stream);
+        Volatile.Write(ref _lastPongTick, Environment.TickCount64);
+        _heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarCaptureHeartbeat" };
+        _heartbeat.Start(stream);
         return true;
     }
 
@@ -227,6 +234,41 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             SidecarProtocol.TryReadError(json, out var code, out var msg);
             VoiceDiagnostics.Log("sidecar", $"helper error {code}: {msg}");
             SetHealth(CaptureHealth.Dead);
+        }
+        else if (op == "pong")
+        {
+            Volatile.Write(ref _lastPongTick, Environment.TickCount64);
+        }
+    }
+
+    private void HeartbeatLoop(object? state)
+    {
+        var ping = SidecarProtocol.PingFrame();
+        while (_running)
+        {
+            Thread.Sleep(PingIntervalMs);
+            if (!_running) break;
+            try
+            {
+                lock (_gate)
+                {
+                    if (_stream == null) break;
+                    _stream.Write(ping, 0, ping.Length);
+                    _stream.Flush();
+                }
+            }
+            catch
+            {
+                SetHealth(CaptureHealth.Dead);
+                break;
+            }
+            var sincePong = Environment.TickCount64 - Volatile.Read(ref _lastPongTick);
+            if (sincePong > (long)PingIntervalMs * MissedPongLimit)
+            {
+                VoiceDiagnostics.Log("sidecar", $"heartbeat: {sincePong}ms since last pong -> Dead");
+                SetHealth(CaptureHealth.Dead);
+                break;
+            }
         }
     }
 
