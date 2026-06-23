@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
@@ -35,6 +37,66 @@ internal static class SidecarLauncher
             "aarch64-apple-darwin" => "Lib.pc-capture.pc-capture-mac.zip",
             _ => throw new PlatformNotSupportedException($"No pc-capture helper for target {triple}"),
         };
+
+    public static string EnsureHelperExtracted(Assembly assembly, string baseDirectory, bool force)
+    {
+        var triple = TargetTriple();
+        var resourceName = ResourceName(triple);
+        var isMac = resourceName.EndsWith(".zip", StringComparison.Ordinal);
+        var cacheFileName = isMac ? "pc-capture.zip" : HelperFileName(triple);
+
+        if (force)
+        {
+            try
+            {
+                var cacheDir = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple);
+                if (Directory.Exists(cacheDir))
+                    Directory.Delete(cacheDir, true);
+            }
+            catch { }
+        }
+
+        var extracted = VoiceChatPlugin.NativeLibraryCache.Extract(assembly, resourceName, cacheFileName, triple, baseDirectory);
+
+        if (isMac)
+        {
+            var inner = ExtractMacApp(extracted, triple, baseDirectory);
+            MakeExecutable(inner);
+            return inner;
+        }
+
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            MakeExecutable(extracted);
+        return extracted;
+    }
+
+    public static string ExtractMacApp(string zipPath, string triple, string baseDirectory)
+    {
+        var appDir = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple, "pc-capture.app");
+        var inner = Path.Combine(appDir, "Contents", "MacOS", "pc-capture");
+        if (File.Exists(inner))
+            return inner;
+        if (Directory.Exists(appDir))
+            Directory.Delete(appDir, true);
+        ZipFile.ExtractToDirectory(zipPath, Path.GetDirectoryName(appDir)!, true);
+        return inner;
+    }
+
+    public static void MakeExecutable(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("chmod", $"+x \"{path}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            p?.WaitForExit(2000);
+        }
+        catch { }
+    }
 
     public static string BuildArguments(string handshakePath)
         => $"--handshake \"{handshakePath}\"";
