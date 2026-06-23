@@ -17,6 +17,8 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     private SidecarLaunchResult? _launchResult;
     private volatile int _health = (int)CaptureHealth.Dead;
     private volatile bool _running;
+    private readonly float[] _frameScratch = new float[SidecarProtocol.AudioSamples];
+    private Thread? _reader;
 
     public event Action<float[], int>? OnFrame;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
@@ -109,6 +111,8 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         }
         _running = true;
         SetHealth(CaptureHealth.Healthy);
+        _reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarCaptureReader" };
+        _reader.Start(stream);
         return true;
     }
 
@@ -172,6 +176,58 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         if (launch == null) return;
         try { if (launch.Process != null && !launch.Process.HasExited) launch.Process.Kill(); } catch { }
         try { if (!string.IsNullOrEmpty(launch.HandshakePath) && System.IO.File.Exists(launch.HandshakePath)) System.IO.File.Delete(launch.HandshakePath); } catch { }
+    }
+
+    private void ReadLoop(object? state)
+    {
+        var stream = (NetworkStream)state!;
+        try { stream.ReadTimeout = Timeout.Infinite; } catch { }
+        var buffer = new byte[1 << 16];
+        var have = 0;
+        while (_running)
+        {
+            int read;
+            try { read = stream.Read(buffer, have, buffer.Length - have); }
+            catch { break; }
+            if (read <= 0) break;
+            have += read;
+
+            while (SidecarProtocol.TryParseFrame(buffer, have, out var type, out var off, out var len, out var flen))
+            {
+                if (type == SidecarProtocol.TypeAudio)
+                {
+                    if (SidecarProtocol.TryDecodeAudio(buffer, off, len, _frameScratch, out _, out var count))
+                    {
+                        try { OnFrame?.Invoke(_frameScratch, count); } catch { }
+                    }
+                }
+                else if (type == SidecarProtocol.TypeControl)
+                {
+                    var json = Encoding.UTF8.GetString(buffer, off, len);
+                    HandleStreamingControl(json);
+                }
+                var remaining = have - flen;
+                if (remaining > 0)
+                    Buffer.BlockCopy(buffer, flen, buffer, 0, remaining);
+                have = remaining;
+            }
+
+            if (have == buffer.Length)
+                break;
+        }
+        if (_running)
+            SetHealth(CaptureHealth.Dead);
+    }
+
+    private void HandleStreamingControl(string json)
+    {
+        var op = SidecarProtocol.ReadOp(json);
+        if (op == "error")
+        {
+            SidecarProtocol.TryReadError(json, out var code, out var msg);
+            VoiceDiagnostics.Log("sidecar", $"helper error {code}: {msg}");
+            SetHealth(CaptureHealth.Dead);
+        }
     }
 
     private void SetHealth(CaptureHealth health) => Volatile.Write(ref _health, (int)health);
