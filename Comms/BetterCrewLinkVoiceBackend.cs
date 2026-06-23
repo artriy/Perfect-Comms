@@ -206,6 +206,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private AndroidSampleProviderSpeaker? _androidSpeaker;
 #endif
     private bool _useUnityAudio;
+    private bool? _watchdogBackendOverride;
+    private bool EffectiveUseUnityAudio => _watchdogBackendOverride ?? _useUnityAudio;
+#if WINDOWS
+    private int _watchdogZeroWindows;
+    private int _watchdogSwitchesThisJoin;
+    private bool _watchdogExhaustedLogged;
+    private int _watchdogJoinEpoch;
+    private const int WatchdogZeroWindowsToSwitch = 3;
+    private const int WatchdogMaxSwitchesPerJoin = 2;
+#endif
     private IVoiceEncoder _encoder = CreateEncoder();
     private Timer? _syntheticMicTimer;
     private string _lastMicDeviceName = string.Empty;
@@ -487,6 +497,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #if WINDOWS
         _muteSinceUtc = mute ? DateTime.UtcNow : DateTime.MinValue;
         _btMuteReleaseRequested = false;
+        if (mute) _watchdogZeroWindows = 0;
         if (!mute && !_microphoneReady)
             QueueMicrophoneTransition(true, "unmuted");
 #elif ANDROID
@@ -567,6 +578,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
+    public void ClearCaptureBackendOverride()
+    {
+        _watchdogBackendOverride = null;
+#if WINDOWS
+        _watchdogZeroWindows = 0;
+        _watchdogSwitchesThisJoin = 0;
+        _watchdogExhaustedLogged = false;
+#endif
+    }
+
     public void SetMicrophone(string deviceName, float volume)
     {
         var normalizedName = deviceName ?? string.Empty;
@@ -605,7 +626,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #if WINDOWS
     private void QueueMicrophoneTransition(bool shouldRun, string reason)
     {
-        if (_useUnityAudio)
+        if (EffectiveUseUnityAudio)
         {
             StopBassCapture("switch-to-unity");
             _mainThreadActions.Enqueue(() =>
@@ -626,6 +647,72 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (!_captureWorker.IsCompleted) return;
             _captureWorker = Task.Run(ProcessMicrophoneTransitions);
         }
+    }
+
+    private enum CaptureWatchdogAction { None, ResetHealthy, Failover, ExhaustedLogOnce }
+
+    private static CaptureWatchdogAction DecideCaptureWatchdogAction(
+        int micWindowSamples, bool mute, bool micReady, bool syntheticTone, bool transitionInFlight,
+        int zeroWindows, int switchesThisJoin, bool exhaustedLogged)
+    {
+        if (mute || !micReady || syntheticTone || transitionInFlight) return CaptureWatchdogAction.None;
+        if (micWindowSamples > 0) return CaptureWatchdogAction.ResetHealthy;
+        if (zeroWindows + 1 < WatchdogZeroWindowsToSwitch) return CaptureWatchdogAction.None;
+        if (switchesThisJoin >= WatchdogMaxSwitchesPerJoin)
+            return exhaustedLogged ? CaptureWatchdogAction.None : CaptureWatchdogAction.ExhaustedLogOnce;
+        return CaptureWatchdogAction.Failover;
+    }
+
+    private void EvaluateCaptureWatchdog(int micWindowSamples)
+    {
+        var epoch = Volatile.Read(ref _publicLobbyJoinEpoch);
+        if (epoch != _watchdogJoinEpoch)
+        {
+            _watchdogJoinEpoch = epoch;
+            _watchdogSwitchesThisJoin = 0;
+            _watchdogExhaustedLogged = false;
+        }
+
+        var mute = Mute;
+        var micReady = _microphoneReady;
+        var syntheticTone = _captureOptions.SyntheticMicToneEnabled;
+        var transitionInFlight = CaptureTransitionInFlight();
+        switch (DecideCaptureWatchdogAction(micWindowSamples, mute, micReady, syntheticTone, transitionInFlight,
+            _watchdogZeroWindows, _watchdogSwitchesThisJoin, _watchdogExhaustedLogged))
+        {
+            case CaptureWatchdogAction.None:
+                _watchdogZeroWindows = !mute && micReady && !syntheticTone && !transitionInFlight && micWindowSamples == 0
+                    ? _watchdogZeroWindows + 1
+                    : 0;
+                return;
+            case CaptureWatchdogAction.ResetHealthy:
+                _watchdogZeroWindows = 0;
+                _watchdogSwitchesThisJoin = 0;
+                _watchdogExhaustedLogged = false;
+                return;
+            case CaptureWatchdogAction.ExhaustedLogOnce:
+                _watchdogZeroWindows = 0;
+                _watchdogExhaustedLogged = true;
+                VoiceDiagnostics.Log("bcl.mic.watchdog-exhausted",
+                    $"both backends produced no audio; staying on {(EffectiveUseUnityAudio ? "unity" : "bass")} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine} hint=check-os-mic-permission");
+                return;
+            case CaptureWatchdogAction.Failover:
+                _watchdogZeroWindows = 0;
+                var from = EffectiveUseUnityAudio ? "unity" : "bass";
+                _watchdogBackendOverride = !EffectiveUseUnityAudio;
+                _watchdogSwitchesThisJoin++;
+                var to = EffectiveUseUnityAudio ? "unity" : "bass";
+                VoiceDiagnostics.Log("bcl.mic.watchdog-failover",
+                    $"reason=no-frames from={from} to={to} switchesThisJoin={_watchdogSwitchesThisJoin} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine}");
+                QueueMicrophoneTransition(true, "watchdog-failover");
+                return;
+        }
+    }
+
+    private bool CaptureTransitionInFlight()
+    {
+        if (!_mainThreadActions.IsEmpty) return true;
+        lock (_captureWorkerSync) return !_captureWorker.IsCompleted;
     }
 
     private void StopBassCapture(string reason)
@@ -676,7 +763,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void StopMicrophoneWorkerForDispose()
     {
-        if (_useUnityAudio || _androidMicrophone != null)
+        if (EffectiveUseUnityAudio || _androidMicrophone != null)
         {
             StopAndroidMicrophone("dispose");
             return;
@@ -3446,7 +3533,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (!IsSyntheticSource(source))
             TrackCaptureHealthLocked(rawCapturePeak);
 
-        if (captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source) && !_useUnityAudio)
+        if (captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source) && !EffectiveUseUnityAudio)
             _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
         var transmitGain = _micPreprocessor.LimitFramePeakForEncode(floatPcm, samples);
@@ -3753,6 +3840,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _txSquareSumSinceStats = 0.0;
             _txSamplesSinceStats = 0;
         }
+#if WINDOWS
+        EvaluateCaptureWatchdog(micWindowSamples);
+#endif
         var micClipPct = micWindowSamples == 0 ? 0f : micNearClipSamples * 100f / micWindowSamples;
         var micZeroCrossRate = micWindowSamples <= 1 ? 0f : micZeroCrossings / (float)(micWindowSamples - 1);
         var micCrest = micRms <= 0.0 ? 0.0 : micPeak / micRms;
@@ -3772,7 +3862,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             $"micMutedDrops={Volatile.Read(ref _micMutedDrops)} micEncodeFailures={Volatile.Read(ref _micEncodeFailures)} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} micNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} audioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} txPeak={_lastTransmitPeak:0.000000} txPeakMax={txPeakMax:0.000000} txRms={txRms:0.000000} txSamples={txSamples} opusBytesAvg={opusAvgBytes:0.0} opusBytesMin={opusMinBytes} opusBytesMax={opusMaxBytes} " +
             $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} {rnnoiseSummary} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
-        if (_useUnityAudio)
+        if (EffectiveUseUnityAudio)
             VoiceDiagnostics.Log("bcl.unity",
                 $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} encodedTx={Volatile.Read(ref _encodedTx)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady} speakerPlaying={_androidSpeaker?.IsPlaying} speakerReads={_androidSpeaker?.ReadCallbacks ?? 0}");
         VoiceDiagnostics.Log("bcl.playout", _voiceMixer?.FormatPlayoutDiagnostics() ?? "no-mixer");
