@@ -99,6 +99,46 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
     }
 }
 
+use std::collections::VecDeque;
+
+pub const RING_CAPACITY: usize = 8;
+
+pub struct AudioRing {
+    capacity: usize,
+    queue: VecDeque<AudioFrame>,
+    dropped: u64,
+}
+
+impl AudioRing {
+    pub fn new(capacity: usize) -> AudioRing {
+        AudioRing {
+            capacity: capacity.max(1),
+            queue: VecDeque::with_capacity(capacity.max(1)),
+            dropped: 0,
+        }
+    }
+
+    pub fn push(&mut self, frame: AudioFrame) {
+        if self.queue.len() == self.capacity {
+            self.queue.pop_front();
+            self.dropped += 1;
+        }
+        self.queue.push_back(frame);
+    }
+
+    pub fn pop(&mut self) -> Option<AudioFrame> {
+        self.queue.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +212,44 @@ mod tests {
             Err(DecodeError::BadLen(7)) => {}
             other => panic!("expected BadLen(7), got {:?}", other),
         }
+    }
+
+    fn frame_with(ts: u64) -> AudioFrame {
+        AudioFrame { capture_ts_ns: ts, samples: vec![0.0; FRAME_SAMPLES] }
+    }
+
+    #[test]
+    fn ring_is_fifo_when_not_full() {
+        let mut ring = AudioRing::new(4);
+        ring.push(frame_with(1));
+        ring.push(frame_with(2));
+        ring.push(frame_with(3));
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.dropped(), 0);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 1);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 2);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 3);
+        assert!(ring.pop().is_none());
+    }
+
+    #[test]
+    fn ring_drops_oldest_and_counts_when_full() {
+        let mut ring = AudioRing::new(3);
+        ring.push(frame_with(1));
+        ring.push(frame_with(2));
+        ring.push(frame_with(3));
+        ring.push(frame_with(4));
+        ring.push(frame_with(5));
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.dropped(), 2);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 3);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 4);
+        assert_eq!(ring.pop().unwrap().capture_ts_ns, 5);
+        assert!(ring.pop().is_none());
+    }
+
+    #[test]
+    fn ring_capacity_constant_is_tiny() {
+        assert_eq!(RING_CAPACITY, 8);
     }
 }
