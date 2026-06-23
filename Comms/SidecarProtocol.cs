@@ -135,5 +135,21 @@ internal static class SidecarProtocol
         }
     }
 
+    public static bool TryDecodeAudio(byte[] buffer, int payloadOffset, int payloadLength, float[] destination, out ulong captureTsNs, out int sampleCount)
+    {
+        captureTsNs = 0;
+        sampleCount = 0;
+        if (payloadLength != AudioPayloadBytes)
+            return false;
+        if (destination.Length < AudioSamples)
+            return false;
+        captureTsNs = BinaryPrimitives.ReadUInt64LittleEndian(buffer.AsSpan(payloadOffset, 8));
+        int samplesOffset = payloadOffset + 8;
+        for (int i = 0; i < AudioSamples; i++)
+            destination[i] = BinaryPrimitives.ReadSingleLittleEndian(buffer.AsSpan(samplesOffset + i * 4, 4));
+        sampleCount = AudioSamples;
+        return true;
+    }
+
     private static string JsonString(string value) => JsonSerializer.Serialize(value);
 }
