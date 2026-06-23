@@ -1,5 +1,7 @@
 using System;
 using System.Buffers.Binary;
+using System.Text;
+using System.Text.Json;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -41,4 +43,97 @@ internal static class SidecarProtocol
         frameLength = total;
         return true;
     }
+
+    public static byte[] EncodeControl(string json)
+        => EncodeFrame(TypeControl, Encoding.UTF8.GetBytes(json));
+
+    public static byte[] HelloFrame(int proto, string token)
+        => EncodeControl($"{{\"op\":\"hello\",\"proto\":{proto},\"token\":{JsonString(token)}}}");
+
+    public static byte[] SelectDeviceFrame(string id)
+        => EncodeControl($"{{\"op\":\"select-device\",\"id\":{JsonString(id)}}}");
+
+    public static byte[] StartFrame() => EncodeControl("{\"op\":\"start\"}");
+    public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
+    public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
+
+    public static string ReadOp(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("op", out var op) ? (op.GetString() ?? "") : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    public static bool TryReadReady(string json, out int proto, out int rate, out int channels, out string sample)
+    {
+        proto = 0;
+        rate = 0;
+        channels = 0;
+        sample = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "ready")
+                return false;
+            proto = root.TryGetProperty("proto", out var p) ? p.GetInt32() : 0;
+            if (root.TryGetProperty("format", out var fmt))
+            {
+                rate = fmt.TryGetProperty("rate", out var r) ? r.GetInt32() : 0;
+                channels = fmt.TryGetProperty("channels", out var c) ? c.GetInt32() : 0;
+                sample = fmt.TryGetProperty("sample", out var s) ? (s.GetString() ?? "") : "";
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadPong(string json, out ulong capTs)
+    {
+        capTs = 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "pong")
+                return false;
+            capTs = root.TryGetProperty("capTs", out var c) ? c.GetUInt64() : 0;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadError(string json, out string code, out string msg)
+    {
+        code = "";
+        msg = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "error")
+                return false;
+            code = root.TryGetProperty("code", out var c) ? (c.GetString() ?? "") : "";
+            msg = root.TryGetProperty("msg", out var m) ? (m.GetString() ?? "") : "";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string JsonString(string value) => JsonSerializer.Serialize(value);
 }
