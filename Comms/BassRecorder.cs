@@ -6,13 +6,15 @@ using VoiceChatPlugin.Audio;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-internal sealed class BassRecorder : IDisposable
+internal sealed class BassRecorder : ICaptureSource, IDisposable
 {
     private readonly RecordProcedure _proc;
     private readonly Action<float[], int> _onFrame;
     private readonly object _gate = new();
     private float[] _buffer = Array.Empty<float>();
     private int _stream;
+
+    public event Action<float[], int>? OnFrame;
 
     public BassRecorder(Action<float[], int> onFrame)
     {
@@ -37,6 +39,16 @@ internal sealed class BassRecorder : IDisposable
         }
     }
 
+    public CaptureHealth Health => _stream != 0 ? CaptureHealth.Healthy : CaptureHealth.Dead;
+
+    public bool Start(string? deviceId)
+    {
+        var device = -1;
+        if (!string.IsNullOrEmpty(deviceId) && int.TryParse(deviceId, out var parsed))
+            device = parsed;
+        return Start(device);
+    }
+
     private bool RecordProc(int handle, IntPtr buffer, int length, IntPtr user)
     {
         var samples = length / 4;
@@ -46,6 +58,7 @@ internal sealed class BassRecorder : IDisposable
                 _buffer = new float[samples];
             Marshal.Copy(buffer, _buffer, 0, samples);
             try { _onFrame(_buffer, samples); } catch { }
+            try { OnFrame?.Invoke(_buffer, samples); } catch { }
         }
         return true;
     }
