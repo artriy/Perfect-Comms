@@ -27,7 +27,7 @@ namespace VoiceChatPlugin.VoiceChat;
 /// In VoiceChat (which uses Hazel transport instead of Interstellar) we replicate
 /// this by reading Unity Microphone each frame and directly encoding + enqueuing.
 /// </summary>
-internal sealed class AndroidMicrophone : IDisposable
+internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 {
     private const int SampleRate  = 48000;
     private const int ClipSeconds = 1;     // Nebula uses 1 s looping clip
@@ -37,6 +37,8 @@ internal sealed class AndroidMicrophone : IDisposable
     private int        _lastPos;
     private bool       _recording;
     private float      _volume = 1f;
+    private long _lastAdvanceTicks;
+    private static readonly long DeadAfterTicks = TimeSpan.FromSeconds(15).Ticks;
     private long       _lastProgressMs;
     private long       _lastRestartMs;
     private int        _restartCount;
@@ -46,6 +48,8 @@ internal sealed class AndroidMicrophone : IDisposable
 
     // Fires on main thread (via Tick) with (float[] buf, int length)
     public event Action<float[], int>? DataAvailable;
+
+    public event Action<float[], int>? OnFrame;
 
     public bool ReuseBuffer { get; set; }
     private float[] _pollBuf = Array.Empty<float>();
@@ -70,6 +74,7 @@ internal sealed class AndroidMicrophone : IDisposable
         _clip      = Microphone.Start(_device, true, ClipSeconds, SampleRate);
         _lastPos   = 0;
         _recording = true;
+        _lastAdvanceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         _lastProgressMs = Environment.TickCount64;
         _restartCount   = 0;
 
@@ -112,6 +117,7 @@ internal sealed class AndroidMicrophone : IDisposable
 
         if (newSamples <= 0) { MaybeRecoverFromStall(); return; }
 
+        _lastAdvanceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         _lastProgressMs = Environment.TickCount64;
 
         // Cap main-thread work: drop oldest backlog so a slow frame can't compound into a death spiral.
@@ -209,6 +215,24 @@ internal sealed class AndroidMicrophone : IDisposable
             for (int i = 0; i < count; i++) buf[i] *= _volume;
 
         DataAvailable?.Invoke(buf, count);
+        OnFrame?.Invoke(buf, count);
+    }
+
+    bool ICaptureSource.Start(string? deviceId)
+    {
+        Start(deviceId ?? string.Empty);
+        return _recording;
+    }
+
+    public CaptureHealth Health
+        => ClassifyPosition(_recording, System.Diagnostics.Stopwatch.GetTimestamp(), _lastAdvanceTicks, DeadAfterTicks);
+
+    public static CaptureHealth ClassifyPosition(bool recording, long now, long lastAdvanceTicks, long deadAfterTicks)
+    {
+        if (!recording) return CaptureHealth.Dead;
+        var since = now - lastAdvanceTicks;
+        if (since >= deadAfterTicks) return CaptureHealth.Dead;
+        return CaptureHealth.Healthy;
     }
 
     public void Dispose() => Stop();
