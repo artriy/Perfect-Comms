@@ -173,7 +173,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private SocketIOClient.SocketIO? _socket;
 #if WINDOWS
-    private BassRecorder? _bassRecorder;
     private readonly object _captureWorkerSync = new();
     private Task _captureWorker = Task.CompletedTask;
     private bool _captureDesiredRunning;
@@ -191,14 +190,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private DateTime _lastSpeakerRetryUtc = DateTime.MinValue;
     private DateTime _lastPlaybackStoppedRestartUtc = DateTime.MinValue;
     private DateTime _muteSinceUtc = DateTime.MinValue;
-    private bool _speakerRequested;
     private bool _btProfileConflict;
     private bool _btMuteReleaseRequested;
     private const int SpeakerRetryFailureLimit = 3;
-    private int _speakerRetryFailures;
     private string _speakerRetryExhaustedSignature = string.Empty;
-    private int _openedSpeakerDeviceNumber = int.MinValue;
-    private string _openedSpeakerProductName = string.Empty;
     private string _lastSpeakerDeviceName = string.Empty;
 #endif
 #if ANDROID || WINDOWS
@@ -231,7 +226,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private bool _speakerReady;
     private BclVoiceMixer? _voiceMixer;
 #if WINDOWS
-    private BassStereoOutput? _bassOut;
     private SidecarStereoOutput? _sidecarOut;
 #endif
     private VoiceCaptureRuntimeOptions _captureOptions;
@@ -787,24 +781,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             StopMicrophone($"restart:{reason}");
             _latchedMicChannel = 0;
             _micChannelSwitchStreak = 0;
-            var captureKind = "bass";
+            var captureKind = "none";
             var captureDevice = "default";
-            int recordDevice = -1;
-            if (!_captureOptions.SyntheticMicToneEnabled)
-            {
-                BassRuntime.EnsureConfigured();
-                recordDevice = ResolveBassRecordDevice(_lastMicDeviceName);
-                Volatile.Write(ref _lastOpenedRecordDevice, recordDevice);
-                var recorder = new BassRecorder(ProcessBassMicFrame);
-                _bassRecorder = recorder;
-                captureKind = "bass";
-                captureDevice = ManagedBass.Bass.RecordGetDeviceInfo(recordDevice, out var rdi) ? rdi.Name : "default";
-                if (!recorder.Start(recordDevice))
-                {
-                    _bassRecorder = null;
-                    throw new InvalidOperationException($"bass record start failed: {ManagedBass.Bass.LastError}");
-                }
-            }
 
             if (_captureOptions.SyntheticMicToneEnabled)
             {
@@ -820,7 +798,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _farEndReference.Enabled = !_captureOptions.SyntheticMicToneEnabled;
             _micPreprocessor.ResetEchoCancellation();
             Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
-            VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture={captureKind} device=\"{_lastMicDeviceName}\" captureDevice=\"{captureDevice}\" captureFormat=\"48000Hz/float/mono\" recordDevice={recordDevice} recordDevices=\"{DescribeBassRecordDevices()}\" syntheticTone={_captureOptions.SyntheticMicToneEnabled} volume={_micVolume:0.00}");
+            VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture={captureKind} device=\"{_lastMicDeviceName}\" captureDevice=\"{captureDevice}\" captureFormat=\"48000Hz/float/mono\" syntheticTone={_captureOptions.SyntheticMicToneEnabled} volume={_micVolume:0.00}");
         }
         catch (Exception ex)
         {
@@ -833,13 +811,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         StopSyntheticMicTone();
         _farEndReference.Enabled = false;
-        var recorder = _bassRecorder;
-        var hadMic = recorder != null || _microphoneReady;
-        _bassRecorder = null;
-        if (recorder != null)
-        {
-            try { recorder.Dispose(); } catch { }
-        }
+        var hadMic = _microphoneReady;
         _microphoneReady = false;
         if (hadMic)
             Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
@@ -1173,14 +1145,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (!string.Equals(_lastSpeakerDeviceName, deviceName ?? string.Empty, StringComparison.Ordinal))
                 _btProfileConflict = false;
             _lastSpeakerDeviceName = deviceName ?? string.Empty;
-            _speakerRequested = true;
             SetSpeakerSidecar(deviceName ?? string.Empty);
         }
         catch (Exception ex)
         {
             _speakerReady = false;
-            _openedSpeakerDeviceNumber = int.MinValue;
-            _openedSpeakerProductName = string.Empty;
             VoiceDiagnostics.Log("bcl.speaker", $"ready=false device=\"{deviceName}\" error=\"{ex.Message}\"");
         }
 #else
@@ -1246,98 +1215,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #endif
 
 #if WINDOWS
-    private const int BassDeviceNotFound = -2;
-
-    private static int ResolveBassOutputDevice(string? deviceName)
-    {
-        var requested = NormalizeAudioDeviceName(deviceName);
-        var defaultIndex = -1;
-        for (var i = 1; i < ManagedBass.Bass.DeviceCount; i++)
-        {
-            if (!ManagedBass.Bass.GetDeviceInfo(i, out var info) || !info.IsEnabled)
-                continue;
-            if (info.IsDefault)
-                defaultIndex = i;
-            if (!string.IsNullOrWhiteSpace(requested) &&
-                DeviceNamesMatch(requested, NormalizeAudioDeviceName(info.Name)))
-                return i;
-        }
-        if (!string.IsNullOrWhiteSpace(requested))
-            return BassDeviceNotFound;
-        return defaultIndex >= 0 ? defaultIndex : -1;
-    }
-
-    private static int ResolveBassRecordDevice(string? deviceName)
-    {
-        var requested = NormalizeAudioDeviceName(deviceName);
-        var defaultIndex = -1;
-        for (var i = 0; i < ManagedBass.Bass.RecordingDeviceCount; i++)
-        {
-            if (!ManagedBass.Bass.RecordGetDeviceInfo(i, out var info) || !info.IsEnabled)
-                continue;
-            if (info.IsDefault)
-                defaultIndex = i;
-            if (!string.IsNullOrWhiteSpace(requested) &&
-                DeviceNamesMatch(requested, NormalizeAudioDeviceName(info.Name)))
-                return i;
-        }
-        return defaultIndex >= 0 ? defaultIndex : 0;
-    }
-
-    private static string DescribeBassRecordDevices()
-    {
-        try
-        {
-            var names = new System.Collections.Generic.List<string>();
-            for (var i = 0; i < ManagedBass.Bass.RecordingDeviceCount; i++)
-                if (ManagedBass.Bass.RecordGetDeviceInfo(i, out var info))
-                    names.Add($"{i}:{info.Name}");
-            return names.Count == 0 ? "none" : string.Join("|", names);
-        }
-        catch (Exception ex)
-        {
-            return $"error:{ex.Message}";
-        }
-    }
-
-    private void SetSpeakerBass(string deviceName)
-    {
-        BassRuntime.EnsureConfigured();
-        try { _androidSpeaker?.Dispose(); } catch { }
-        _androidSpeaker = null;
-
-        var device = ResolveBassOutputDevice(deviceName);
-        if (device == BassDeviceNotFound)
-        {
-            _bassOut?.Dispose();
-            _bassOut = null;
-            _speakerReady = false;
-            _openedSpeakerDeviceNumber = int.MinValue;
-            _openedSpeakerProductName = string.Empty;
-            VoiceDiagnostics.Log("bcl.speaker", $"ready=false device=\"{deviceName}\" reason=device-miss backend=bass");
-            return;
-        }
-
-        _bassOut?.Dispose();
-        var mixer = _voiceMixer ?? new BclVoiceMixer();
-        _voiceMixer = mixer;
-        mixer.SetMasterVolume(_masterVolume);
-        var output = new BassStereoOutput(block =>
-        {
-            mixer.Read(block);
-            FeedFarEndReference(block);
-        });
-        _bassOut = output;
-        _farEndReference.Reset();
-        lock (_peerSync)
-            foreach (var peer in _peersBySocket.Values)
-                peer.SetMixer(mixer);
-        _speakerReady = output.Start(device) && output.IsPlaying;
-        _openedSpeakerDeviceNumber = device;
-        _openedSpeakerProductName = ManagedBass.Bass.GetDeviceInfo(device, out var di) ? di.Name : string.Empty;
-        VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} device=\"{deviceName}\" bassDevice={device} backend=bass-mixer");
-    }
-
     private float[] _farEndLeft = Array.Empty<float>();
     private float[] _farEndRight = Array.Empty<float>();
 
@@ -1353,76 +1230,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             _farEndRight[i] = interleavedStereo[2 * i + 1];
         }
         _farEndReference.WriteStereoDownmix(_farEndLeft, frames, _farEndRight, frames, frames);
-    }
-
-    private void MaybeFollowDefaultSpeaker()
-    {
-        if (_disposed || !_speakerRequested) return;
-
-        var now = DateTime.UtcNow;
-        bool fastWindow = now.Ticks < Interlocked.Read(ref _speakerTopologyFastUntilTicks);
-        var interval = fastWindow ? SpeakerTopologyFastPollInterval : SpeakerTopologyPollInterval;
-        if (now - _speakerTopologyLastPollUtc < interval) return;
-        _speakerTopologyLastPollUtc = now;
-
-        string signature;
-        try { signature = BassRuntime.DescribeOutputDevices(); }
-        catch { return; }
-
-        if (signature == _speakerTopologySignature)
-        {
-            if (_speakerReady)
-            {
-                _speakerRetryFailures = 0;
-                return;
-            }
-            if (_speakerRetryFailures >= SpeakerRetryFailureLimit && signature == _speakerRetryExhaustedSignature) return;
-            if (now - _lastSpeakerRetryUtc < SpeakerRetryInterval) return;
-            _lastSpeakerRetryUtc = now;
-            VoiceDiagnostics.Log("bcl.speaker", $"ready=false reason=retry attempt={_speakerRetryFailures + 1} devices=\"{signature}\"");
-            SetSpeaker(_lastSpeakerDeviceName);
-            if (_speakerReady)
-            {
-                _speakerRetryFailures = 0;
-            }
-            else if (++_speakerRetryFailures >= SpeakerRetryFailureLimit)
-            {
-                _speakerRetryExhaustedSignature = signature;
-                VoiceDiagnostics.Log("bcl.speaker", $"ready=false reason=retry-exhausted devices=\"{signature}\"");
-            }
-            return;
-        }
-
-        _speakerRetryFailures = 0;
-        bool pinned = !string.IsNullOrWhiteSpace(_lastSpeakerDeviceName);
-        if (pinned && _speakerReady)
-        {
-            var resolved = ResolveBassOutputDevice(_lastSpeakerDeviceName);
-            if (resolved == _openedSpeakerDeviceNumber
-                && string.Equals(BassRuntime.DescribeOutputDevice(resolved), _openedSpeakerProductName, StringComparison.Ordinal))
-            {
-                _speakerTopologySignature = signature;
-                return;
-            }
-        }
-
-        bool openedEndpointVanished = _openedSpeakerProductName.Length > 0
-            && _speakerTopologySignature.Contains(_openedSpeakerProductName, StringComparison.Ordinal)
-            && !signature.Contains(_openedSpeakerProductName, StringComparison.Ordinal);
-        if (fastWindow && openedEndpointVanished && !_btProfileConflict)
-        {
-            _btProfileConflict = true;
-            VoiceDiagnostics.Log("bcl.speaker.profile-conflict",
-                $"mic=\"{_lastMicDeviceName}\" speaker=\"{_lastSpeakerDeviceName}\" oldDevices=\"{_speakerTopologySignature}\" newDevices=\"{signature}\"");
-        }
-        else if (_btProfileConflict && !openedEndpointVanished)
-        {
-            _btProfileConflict = false;
-            VoiceDiagnostics.Log("bcl.speaker.profile-conflict", "resolved=true");
-        }
-        VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} reason={(pinned ? "pinned-follow" : "default-follow")} oldDevices=\"{_speakerTopologySignature}\" newDevices=\"{signature}\"");
-        SetSpeaker(_lastSpeakerDeviceName);
-        _speakerTopologySignature = signature;
     }
 
     private void MaybeReleaseBluetoothMutedMicrophone()
@@ -1554,7 +1361,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #elif WINDOWS
         _androidMicrophone?.Tick();
         MaybeReleaseBluetoothMutedMicrophone();
-        MaybeFollowDefaultSpeaker();
 #endif
 
         if (snapshot == null)
@@ -1701,8 +1507,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         StopMicrophoneWorkerForDispose();
         try { _sidecarOut?.Dispose(); } catch { }
         _sidecarOut = null;
-        try { _bassOut?.Dispose(); } catch { }
-        _bassOut = null;
         try { _androidSpeaker?.Dispose(); } catch { }
         _androidSpeaker = null;
         _voiceMixer = null;

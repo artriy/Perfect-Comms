@@ -68,17 +68,12 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private DateTime _lastFlagReopenUtc = DateTime.MinValue;
     private readonly Audio.MicPreprocessor _micPreprocessor = new();
     private readonly object _micProcessSync = new();
-    private int _openedSpeakerDeviceNumber = int.MinValue;
-    private string _openedSpeakerProductName = string.Empty;
     private bool _autoMicGain = true;
     private float _transmitLimiterGain = 1f;
     private int _latchedMicChannel;
     private int _micChannelSwitchStreak;
     private double[] _micChannelEnergyScratch = Array.Empty<double>();
-    private BassRecorder? _windowsMicRecorder;
     private ManualMicrophone? _windowsMicrophone;
-    private BassStereoOutput? _windowsBassOutput;
-    private ManualSpeaker? _windowsSpeaker;
     private long _windowsMicCallbacks;
     private long _windowsMicBytes;
     private long _windowsMicSamples;
@@ -469,9 +464,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
         if (now - _speakerTopologyLastPollUtc < interval) return;
         _speakerTopologyLastPollUtc = now;
 
-        string signature;
-        try { signature = BassRuntime.DescribeOutputDevices(); }
-        catch { return; }
+        string signature = string.Empty;
 
         if (signature == _speakerTopologySignature)
         {
@@ -492,32 +485,14 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
     private void StartWindowsMicrophone(string deviceName)
     {
         StopWindowsMicrophoneCapture();
-        var manualMicrophone = new ManualMicrophone();
-        _windowsMicrophone = manualMicrophone;
-        _room.Microphone = manualMicrophone;
-
-        var recordDevice = BassRuntime.ResolveRecordDevice(deviceName);
-        var recorder = new BassRecorder(OnInterstellarMicFrame);
-        _windowsMicRecorder = recorder;
-        var captureDevice = ManagedBass.Bass.RecordGetDeviceInfo(recordDevice, out var rdi) ? rdi.Name : "default";
-        if (!recorder.Start(recordDevice))
-        {
-            _windowsMicRecorder = null;
-            VoiceDiagnostics.Log("interstellar.mic", $"capture=bass-failed error=\"{ManagedBass.Bass.LastError}\"");
-            return;
-        }
-        Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
-        VoiceDiagnostics.Log("interstellar.mic", $"capture=bass captureDevice=\"{captureDevice}\" recordDevice={recordDevice}");
+        _ = deviceName;
+        _microphoneReady = false;
+        VoiceDiagnostics.Log("interstellar.mic", "capture=disabled reason=no-windows-capture-backend");
     }
 
     private void StopWindowsMicrophoneCapture()
     {
-        var recorder = _windowsMicRecorder;
-        _windowsMicRecorder = null;
         _windowsMicrophone = null;
-        if (recorder == null) return;
-        try { recorder.Dispose(); } catch { }
-        Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
     }
 
     private void OnInterstellarMicFrame(float[] floatPcm, int samples)
@@ -772,18 +747,9 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
             StopWindowsSpeaker();
             _lastSpeakerDeviceName = deviceName ?? string.Empty;
             _speakerRequested = true;
-            BassRuntime.EnsureConfigured();
-            var manualSpeaker = new ManualSpeaker(StopWindowsSpeaker);
-            _room.Speaker = manualSpeaker;
-            _windowsSpeaker = manualSpeaker;
-
-            var outputDevice = BassRuntime.ResolveOutputDevice(deviceName);
-            var output = new BassStereoOutput(manualSpeaker.Read);
-            _windowsBassOutput = output;
-            _speakerReady = output.Start(outputDevice) && output.IsPlaying;
-            _openedSpeakerDeviceNumber = outputDevice;
-            _openedSpeakerProductName = ManagedBass.Bass.GetDeviceInfo(outputDevice, out var sdi) ? sdi.Name : "default";
-            VoiceDiagnostics.Log("interstellar.speaker", $"ready={_speakerReady} device=\"{deviceName}\" bassDevice={outputDevice} backend=bass");
+            try { _room.Speaker = null; } catch { }
+            _speakerReady = false;
+            VoiceDiagnostics.Log("interstellar.speaker", $"ready=false device=\"{deviceName}\" reason=no-windows-speaker-backend");
 #else
             try { _room.Speaker = null; } catch { }
             _speakerReady = false;
@@ -1005,12 +971,7 @@ internal sealed class InterstellarVoiceBackend : IVoiceBackend
 #if WINDOWS
     private void StopWindowsSpeaker()
     {
-        var output = _windowsBassOutput;
-        _windowsBassOutput = null;
-        _windowsSpeaker = null;
         _speakerReady = false;
-        if (output == null) return;
-        try { output.Dispose(); } catch { }
     }
 
 #endif

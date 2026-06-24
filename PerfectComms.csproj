@@ -49,7 +49,6 @@
 		<PackageReference Include="Concentus" Version="2.2.2" />
 		<PackageReference Include="SIPSorcery" Version="10.0.10" />
 		<PackageReference Include="SocketIOClient" Version="3.1.2" />
-		<PackageReference Include="ManagedBass" Version="4.0.2" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -68,12 +67,6 @@
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' != 'Android'">
-		<EmbeddedResource Include="Libs\bass.x64.dll">
-			<LogicalName>Lib.bass.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\bass.x86.dll">
-			<LogicalName>Lib.bass.x86.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\opus.x64.dll">
 			<LogicalName>Lib.opus.x64.dll</LogicalName>
 		</EmbeddedResource>
@@ -110,9 +103,6 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<EmbeddedResource Include="$(NuGetPackageRoot)managedbass\4.0.2\lib\netstandard2.0\ManagedBass.dll">
-			<LogicalName>Lib.ManagedBass.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\Concentus.dll">
 			<LogicalName>Lib.Concentus.dll</LogicalName>
 		</EmbeddedResource>

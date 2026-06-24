@@ -3,16 +3,6 @@
 Perfect Comms embeds the following third-party native libraries as assembly resources and extracts them at
 runtime (Windows, x64 and x86). Their licenses are reproduced or referenced below.
 
-## BASS / BASS_FX (audio I/O) — PROPRIETARY, see license terms
-
-- Files: `Libs/bass.x64.dll`, `Libs/bass.x86.dll`
-- Upstream: un4seen Developments, https://www.un4seen.com/bass.html (managed wrapper: ManagedBass)
-- License: **proprietary**. BASS is **free only for non-commercial use**; commercial/monetized use (including
-  donation-supported distribution) requires a paid redistribution license from un4seen. Perfect Comms is a free,
-  non-monetized mod and is distributed under the un4seen free/non-commercial terms. If this changes, a
-  commercial BASS license must be obtained (or BASS replaced with a permissively-licensed audio path).
-  See https://www.un4seen.com/ for the current license text.
-
 ## libopus 1.6.1 (voice codec, with DRED + deep PLC + OSCE)
 
 - Files: `Libs/opus.x64.dll`, `Libs/opus.x86.dll`
@@ -48,7 +38,6 @@ unambiguous, otherwise see upstream.
 
 | Assembly | License |
 |----------|---------|
-| ManagedBass, ManagedBass.Fx (BASS .NET wrapper) | MPL-2.0 (wraps the proprietary BASS native, see above) |
 | Concentus (managed Opus codec, used on non-Windows builds) | see upstream (xiph/Opus-derived) |
 | SIPSorcery, SIPSorceryMedia.Abstractions | see upstream |
 | websocket-sharp | MIT |

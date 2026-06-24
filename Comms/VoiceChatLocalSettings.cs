@@ -488,18 +488,7 @@ public class VoiceChatLocalSettings
             var mics = new List<string> { "Default" };
             try
             {
-#if WINDOWS
-                BassRuntime.EnsureConfigured();
-                int count = ManagedBass.Bass.RecordingDeviceCount;
-                for (int i = 0; i < count; i++)
-                {
-                    if (!ManagedBass.Bass.RecordGetDeviceInfo(i, out var info) || !info.IsEnabled)
-                        continue;
-                    string n = info.Name?.Trim() ?? "";
-                    if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
-                        mics.Add(n);
-                }
-#elif ANDROID
+#if ANDROID
                 foreach (var dev in AndroidMicrophone.GetDeviceNames())
                 {
                     string n = dev?.Trim() ?? "";
