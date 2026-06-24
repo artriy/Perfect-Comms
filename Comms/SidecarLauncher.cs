@@ -13,6 +13,11 @@ internal static class SidecarLauncher
 {
     public static string TargetTriple()
     {
+        if (WineEnvironment.IsWine)
+        {
+            if (WineEnvironment.HostOs == WineHostOs.MacOS) return "x86_64-apple-darwin";
+            if (WineEnvironment.HostOs == WineHostOs.Linux) return "x86_64-unknown-linux-gnu";
+        }
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return RuntimeInformation.OSArchitecture == Architecture.X86
                 ? "i686-pc-windows-msvc"
@@ -82,7 +87,7 @@ internal static class SidecarLauncher
             return inner;
         }
 
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (WineEnvironment.IsWine || !RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             MakeExecutable(extracted);
         return extracted;
     }
@@ -101,6 +106,11 @@ internal static class SidecarLauncher
 
     public static void MakeExecutable(string path)
     {
+        if (WineEnvironment.IsWine)
+        {
+            WineEnvironment.HostExec("/bin/chmod", $"+x \"{WineEnvironment.ResolveHostPath(path)}\"");
+            return;
+        }
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
         try
@@ -117,10 +127,15 @@ internal static class SidecarLauncher
 
     public static void StripQuarantine(string innerPath)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
         var appDir = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(innerPath)));
         var target = appDir ?? innerPath;
+        if (WineEnvironment.IsWine)
+        {
+            WineEnvironment.HostExec("/usr/bin/xattr", $"-dr com.apple.quarantine \"{WineEnvironment.ResolveHostPath(target)}\"");
+            return;
+        }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
         try
         {
             using var p = Process.Start(new ProcessStartInfo("xattr", $"-dr com.apple.quarantine \"{target}\"")

@@ -1,10 +1,18 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace VoiceChatPlugin.VoiceChat;
+
+internal enum WineHostOs
+{
+    Unknown = 0,
+    MacOS = 1,
+    Linux = 2,
+}
 
 // Detects whether we're running under Wine/Proton (Linux) and provides a Wine-safe way to
 // learn our real local IPv4. Both matter for WebRTC: under Wine, SIPSorcery's ICE host-candidate
@@ -39,6 +47,46 @@ internal static class WineEnvironment
             }
             return _isWine;
         }
+    }
+
+    private static bool _hostOsProbed;
+    private static WineHostOs _hostOs;
+
+    public static WineHostOs HostOs
+    {
+        get
+        {
+            if (_hostOsProbed) return _hostOs;
+            _hostOsProbed = true;
+            _hostOs = DetectHostOs();
+            return _hostOs;
+        }
+    }
+
+    private static WineHostOs DetectHostOs()
+    {
+        if (!IsWine) return WineHostOs.Unknown;
+        try
+        {
+            if (Directory.Exists(@"Z:\System\Library\CoreServices")) return WineHostOs.MacOS;
+            if (Directory.Exists(@"Z:\proc")) return WineHostOs.Linux;
+        }
+        catch { }
+        return WineHostOs.Unknown;
+    }
+
+    public static void HostExec(string unixProgram, string unixArgs)
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("start.exe", $"/unix {unixProgram} {unixArgs}")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            p?.WaitForExit(2000);
+        }
+        catch { }
     }
 
     // Get our real outbound local IPv4 WITHOUT NetworkInterface.GetAllNetworkInterfaces() (which Wine
