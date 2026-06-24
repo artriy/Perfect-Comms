@@ -575,7 +575,7 @@ public class VoiceChatLocalSettings
             var room = VoiceChatRoom.Current;
             if (room != null)
             {
-                room.ClearCaptureBackendOverride();
+                room.RebuildCaptureSupervisor();
                 room.RefreshLocalAudioSettings();
                 room.SetMicrophone(MicrophoneDevice);
 #if WINDOWS

@@ -228,7 +228,7 @@ public class VoiceChatRoom
             settings?.EchoCancellationEnabled.Value ?? true,
             settings?.MicSensitivity.Value ?? 1f);
 
-    public void ClearCaptureBackendOverride() => _betterCrewLinkVoice?.ClearCaptureBackendOverride();
+    public void RebuildCaptureSupervisor() => _betterCrewLinkVoice?.RebuildCaptureSupervisor();
 
     public void SetMute(bool mute)
     {

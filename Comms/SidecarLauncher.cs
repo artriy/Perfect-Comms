@@ -27,6 +27,22 @@ internal static class SidecarLauncher
     public static string HelperFileName(string triple)
         => triple.Contains("windows") ? "pc-capture.exe" : "pc-capture";
 
+    public static bool IsHelperAvailable()
+        => IsHelperAvailable(Assembly.GetExecutingAssembly());
+
+    public static bool IsHelperAvailable(Assembly assembly)
+    {
+        try
+        {
+            using var stream = assembly.GetManifestResourceStream(ResourceName(TargetTriple()));
+            return stream != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static string ResourceName(string triple)
         => triple switch
         {
