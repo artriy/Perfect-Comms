@@ -13,9 +13,10 @@ internal sealed class CaptureSupervisor
         int sourceCount,
         Action<int, string> restartInPlace,
         Action<int, string> switchTo,
-        Action<string> onAllFailed)
+        Action<string> onAllFailed,
+        int restartBudget = 3)
     {
-        _core = new CaptureSupervisorCore(sourceCount);
+        _core = new CaptureSupervisorCore(sourceCount, restartBudget);
         _restartInPlace = restartInPlace;
         _switchTo = switchTo;
         _onAllFailed = onAllFailed;

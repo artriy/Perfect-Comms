@@ -212,7 +212,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private CaptureSlot _activeCaptureSlot = CaptureSlot.Bass;
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
-    private int _supervisorJoinEpoch;
     private SidecarCaptureSource? _sidecarCaptureSource;
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
@@ -685,12 +684,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _captureSlots = BuildCaptureSlots(SidecarLauncher.IsHelperAvailable(), _useUnityAudio);
         _supervisorActiveIndex = 0;
         _activeCaptureSlot = _captureSlots[0];
+        var restartBudget = Array.IndexOf(_captureSlots, CaptureSlot.Sidecar) >= 0 ? 2 : 0;
         _captureSupervisor = new CaptureSupervisor(
             sourceCount: _captureSlots.Length,
             restartInPlace: ApplyCaptureSwitch,
             switchTo: ApplyCaptureSwitch,
             onAllFailed: reason => VoiceDiagnostics.Log("bcl.mic.capture-all-failed",
-                $"reason={reason} slot={_activeCaptureSlot} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine} hint=check-os-mic-permission"));
+                $"reason={reason} slot={_activeCaptureSlot} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine} hint=check-os-mic-permission"),
+            restartBudget: restartBudget);
     }
 
     private void ApplyCaptureSwitch(int index, string reason)
@@ -708,13 +709,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         EnsureCaptureSupervisor();
         var supervisor = _captureSupervisor!;
-
-        var epoch = Volatile.Read(ref _publicLobbyJoinEpoch);
-        if (epoch != _supervisorJoinEpoch)
-        {
-            _supervisorJoinEpoch = epoch;
-            supervisor.OnBoundary();
-        }
 
         if (Mute || !_microphoneReady || _captureOptions.SyntheticMicToneEnabled || CaptureTransitionInFlight())
             return;
