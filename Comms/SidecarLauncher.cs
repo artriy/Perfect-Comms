@@ -99,7 +99,8 @@ internal static class SidecarLauncher
     {
         var appDir = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple, "pc-capture.app");
         var inner = Path.Combine(appDir, "Contents", "MacOS", "pc-capture");
-        if (File.Exists(inner))
+        if (File.Exists(inner) &&
+            File.GetLastWriteTimeUtc(inner) >= File.GetLastWriteTimeUtc(zipPath))
             return inner;
         if (Directory.Exists(appDir))
             Directory.Delete(appDir, true);

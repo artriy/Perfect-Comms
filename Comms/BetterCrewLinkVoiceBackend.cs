@@ -223,7 +223,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private volatile float _localLevel;
     private volatile bool _localSpeaking;
     private bool _microphoneReady;
-    private bool _speakerReady;
+    private volatile bool _speakerReady;
     private BclVoiceMixer? _voiceMixer;
 #if WINDOWS
     private volatile SidecarStereoOutput? _sidecarOut;
@@ -680,6 +680,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         QueueMicrophoneTransition(true, "capture-switch");
     }
 
+    private void OnSidecarHeartbeatLost(SidecarCaptureSource source, string reason)
+    {
+        _mainThreadActions.Enqueue(() =>
+        {
+            if (!ReferenceEquals(_sidecarCaptureSource, source))
+                return;
+            if (Mute || !_microphoneReady || _captureOptions.SyntheticMicToneEnabled || CaptureTransitionInFlight())
+                return;
+            EnsureCaptureSupervisor();
+            _captureSupervisor?.OnHeartbeatLost(reason);
+        });
+    }
+
     private void FeedCaptureSupervisor(int micWindowSamples)
     {
         EnsureCaptureSupervisor();
@@ -850,6 +863,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             var source = new SidecarCaptureSource(LaunchSidecarHelper);
             source.OnFrame += ProcessBassMicFrame;
+            source.OnDead += reason => OnSidecarHeartbeatLost(source, reason);
             _sidecarCaptureSource = source;
             var device = _lastMicDeviceName;
             lock (_captureWorkerSync)

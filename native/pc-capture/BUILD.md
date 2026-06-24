@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Capture-only helper. No Opus, no VAD, no DSP. Loopback 127.0.0.1 single client, token via stdin, protocol version 1.
+Capture and playback helper. No Opus, no VAD, no DSP. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 2.
 
 The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through the existing `NativeLibraryCache.Extract` path (the same mechanism `bass.x64.dll` uses). When no helper resource is present for the running target, the mod simply never offers the Sidecar capture slot and behaves exactly as it does today (in-proc BASS/Unity). The helper is strictly an upgrade: worst case is never below today's behavior.
 
@@ -75,4 +75,4 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 1` (`SidecarVersion.IsCompatible`, where `Protocol = 1`) and re-extracts the bundled binary (`SidecarVersion.ShouldReExtract`). A stale or mismatched side-file therefore cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 2` (the inline `Proto` check in `SidecarCaptureSource`/`SidecarStereoOutput`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.

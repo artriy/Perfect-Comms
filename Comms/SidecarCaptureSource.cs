@@ -27,6 +27,8 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     private int _startGeneration;
 
     public event Action<float[], int>? OnFrame;
+    public event Action<string>? OnDead;
+    private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
 
     public SidecarCaptureSource(Func<string, string, SidecarLaunchResult> launch)
@@ -315,20 +317,29 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             }
             catch
             {
-                SetHealth(CaptureHealth.Dead);
+                RaiseDead("heartbeat write failed");
                 break;
             }
             var sincePong = Environment.TickCount64 - Volatile.Read(ref _lastPongTick);
             if (sincePong > (long)PingIntervalMs * MissedPongLimit)
             {
                 VoiceDiagnostics.Log("sidecar", $"heartbeat: {sincePong}ms since last pong -> Dead");
-                SetHealth(CaptureHealth.Dead);
+                RaiseDead("heartbeat pong timeout");
                 break;
             }
         }
     }
 
     private void SetHealth(CaptureHealth health) => Volatile.Write(ref _health, (int)health);
+
+    private void RaiseDead(string reason)
+    {
+        SetHealth(CaptureHealth.Dead);
+        if (Interlocked.Exchange(ref _deadRaised, 1) == 0)
+        {
+            try { OnDead?.Invoke(reason); } catch { }
+        }
+    }
 
     public void Dispose() => Stop();
 }
