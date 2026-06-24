@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -57,5 +58,35 @@ internal static class WineEnvironment
             // fall through
         }
         return null;
+    }
+
+    public static ProcessStartInfo BuildWinePathStartInfo(string windowsPath)
+    {
+        var psi = new ProcessStartInfo("winepath", $"-u \"{windowsPath}\"")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = false,
+            CreateNoWindow = true,
+        };
+        return psi;
+    }
+
+    public static string ResolveHostPath(string windowsPath)
+    {
+        try
+        {
+            using var p = Process.Start(BuildWinePathStartInfo(windowsPath));
+            if (p == null)
+                return windowsPath;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(2000);
+            var host = output.Trim();
+            return string.IsNullOrEmpty(host) ? windowsPath : host;
+        }
+        catch
+        {
+            return windowsPath;
+        }
     }
 }

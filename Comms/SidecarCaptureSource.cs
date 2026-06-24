@@ -23,6 +23,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     internal int MissedPongLimit = 3;
     private long _lastPongTick;
     private Thread? _heartbeat;
+    private int _startGeneration;
 
     public event Action<float[], int>? OnFrame;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
@@ -36,6 +37,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     {
         Stop();
         _running = false;
+        var generation = Volatile.Read(ref _startGeneration);
         var token = Guid.NewGuid().ToString("N");
         SidecarLaunchResult launch;
         try
@@ -112,6 +114,13 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         var heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarCaptureHeartbeat" };
         lock (_gate)
         {
+            if (Volatile.Read(ref _startGeneration) != generation)
+            {
+                try { client.Close(); } catch { }
+                KillLaunch();
+                SetHealth(CaptureHealth.Dead);
+                return false;
+            }
             _client = client;
             _stream = stream;
             _reader = reader;
@@ -165,6 +174,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
 
     public void Stop()
     {
+        Interlocked.Increment(ref _startGeneration);
         _running = false;
         TcpClient? client;
         NetworkStream? stream;

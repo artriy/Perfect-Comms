@@ -213,6 +213,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
     private SidecarCaptureSource? _sidecarCaptureSource;
+    private Task _sidecarStartTask = Task.CompletedTask;
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
     private bool CaptureUsesUnity => _useUnityAudio;
@@ -897,25 +898,50 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             var source = new SidecarCaptureSource(LaunchSidecarHelper);
             source.OnFrame += ProcessBassMicFrame;
             _sidecarCaptureSource = source;
-            if (!source.Start(_lastMicDeviceName))
-            {
-                source.OnFrame -= ProcessBassMicFrame;
-                _sidecarCaptureSource = null;
-                throw new InvalidOperationException("sidecar capture start failed");
-            }
-
-            _microphoneReady = true;
-            _farEndReference.Reset();
-            _farEndReference.Enabled = true;
-            _micPreprocessor.ResetEchoCancellation();
-            Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
-            VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture=sidecar device=\"{_lastMicDeviceName}\" captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00}");
+            var device = _lastMicDeviceName;
+            lock (_captureWorkerSync)
+                _sidecarStartTask = Task.Run(() => RunSidecarStart(source, device, reason));
         }
         catch (Exception ex)
         {
             StopSidecarMicrophone($"failed:{reason}");
             VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{_lastMicDeviceName}\" error=\"{ex.Message}\"");
         }
+    }
+
+    private void RunSidecarStart(SidecarCaptureSource source, string device, string reason)
+    {
+        bool started;
+        try
+        {
+            started = source.Start(device);
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{device}\" error=\"{ex.Message}\"");
+            started = false;
+        }
+
+        if (!started || _disposed || !ReferenceEquals(_sidecarCaptureSource, source))
+        {
+            try { source.OnFrame -= ProcessBassMicFrame; } catch { }
+            try { source.Dispose(); } catch { }
+            if (ReferenceEquals(_sidecarCaptureSource, source))
+            {
+                _sidecarCaptureSource = null;
+                _microphoneReady = false;
+            }
+            if (!started)
+                VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{device}\" error=\"sidecar capture start failed\"");
+            return;
+        }
+
+        _microphoneReady = true;
+        _farEndReference.Reset();
+        _farEndReference.Enabled = true;
+        _micPreprocessor.ResetEchoCancellation();
+        Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
+        VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture=sidecar device=\"{device}\" captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00}");
     }
 
     private void StopSidecarMicrophone(string reason)
@@ -930,6 +956,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             try { source.OnFrame -= ProcessBassMicFrame; } catch { }
             try { source.Dispose(); } catch { }
         }
+        Task startTask;
+        lock (_captureWorkerSync) startTask = _sidecarStartTask;
+        try { startTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _microphoneReady = false;
         lock (_captureFrameSync)
         {
@@ -950,7 +979,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         var assembly = System.Reflection.Assembly.GetExecutingAssembly();
         var helperPath = SidecarLauncher.EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
-        return SidecarLauncher.Launch(helperPath, token, handshakeTimeoutMs: 4000, wine: WineEnvironment.IsWine, resolveWineHostPath: p => p);
+        return SidecarLauncher.Launch(helperPath, token, handshakeTimeoutMs: 4000, wine: WineEnvironment.IsWine, resolveWineHostPath: WineEnvironment.ResolveHostPath);
     }
 #endif
 
