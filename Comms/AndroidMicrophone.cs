@@ -1,5 +1,6 @@
 #if ANDROID || WINDOWS
 using System;
+using System.Threading;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 
@@ -74,7 +75,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
         _clip      = Microphone.Start(_device, true, ClipSeconds, SampleRate);
         _lastPos   = 0;
         _recording = true;
-        _lastAdvanceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        Volatile.Write(ref _lastAdvanceTicks, System.Diagnostics.Stopwatch.GetTimestamp());
         _lastProgressMs = Environment.TickCount64;
         _restartCount   = 0;
 
@@ -117,7 +118,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
         if (newSamples <= 0) { MaybeRecoverFromStall(); return; }
 
-        _lastAdvanceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        Volatile.Write(ref _lastAdvanceTicks, System.Diagnostics.Stopwatch.GetTimestamp());
         _lastProgressMs = Environment.TickCount64;
 
         // Cap main-thread work: drop oldest backlog so a slow frame can't compound into a death spiral.
@@ -225,7 +226,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     }
 
     public CaptureHealth Health
-        => ClassifyPosition(_recording, System.Diagnostics.Stopwatch.GetTimestamp(), _lastAdvanceTicks, DeadAfterTicks);
+        => ClassifyPosition(_recording, System.Diagnostics.Stopwatch.GetTimestamp(), Volatile.Read(ref _lastAdvanceTicks), DeadAfterTicks);
 
     public static CaptureHealth ClassifyPosition(bool recording, long now, long lastAdvanceTicks, long deadAfterTicks)
     {
