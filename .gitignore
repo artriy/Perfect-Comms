@@ -6,6 +6,7 @@ obj/
 .idea/
 .DS_Store
 Libs/*.bak.*
+Libs/pc-capture/
 PerfectComms.Tests/
 scripts/
 cloudflare/
