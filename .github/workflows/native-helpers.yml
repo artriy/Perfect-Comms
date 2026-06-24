@@ -7,10 +7,9 @@ on:
   pull_request:
     paths:
       - "native/pc-capture/**"
-      - "scripts/build-helpers.sh"
-      - "scripts/build-mac.sh"
       - ".github/workflows/native-helpers.yml"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

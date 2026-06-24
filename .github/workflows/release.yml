@@ -1,0 +1,105 @@
+name: Release
+
+# Required repository secrets for the macOS signing/notarization steps:
+#   APPLE_DEVELOPER_ID        e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_NOTARY_PROFILE      keychain profile name created via:
+#                             xcrun notarytool store-credentials --apple-id ... --team-id ... --password <app-specific>
+#   APPLE_ID                  Apple ID email (for store-credentials in CI)
+#   APPLE_TEAM_ID             10-char team id
+#   APPLE_APP_PASSWORD        app-specific password for notarization
+#   APPLE_CERT_P12_BASE64     base64 of the Developer ID Application .p12
+#   APPLE_CERT_PASSWORD       password for the .p12
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  helpers:
+    uses: ./.github/workflows/native-helpers.yml
+
+  sign-mac:
+    needs: helpers
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: helper-mac
+          path: macdl
+      - name: Import signing certificate
+        env:
+          P12: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          P12_PASS: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then echo "no signing cert secret; skipping mac signing"; exit 0; fi
+          echo "$P12" | base64 -d > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$P12_PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+      - name: Store notary credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_APP_PASSWORD" ]; then echo "no notary creds; skipping"; exit 0; fi
+          xcrun notarytool store-credentials pc-notary \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+      - name: Sign, notarize, staple
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_NOTARY_PROFILE: pc-notary
+        run: |
+          cd macdl && unzip -o pc-capture-mac.zip && cd ..
+          cp -R macdl/pc-capture.app Libs/pc-capture/pc-capture.app 2>/dev/null || (mkdir -p Libs/pc-capture && cp -R macdl/pc-capture.app Libs/pc-capture/)
+          if [ -z "${APPLE_DEVELOPER_ID}" ]; then
+            echo "no APPLE_DEVELOPER_ID; shipping unsigned mac app"
+            (cd Libs/pc-capture && ditto -c -k --keepParent pc-capture.app pc-capture-mac.zip)
+            exit 0
+          fi
+          codesign --force --options runtime --timestamp \
+            --entitlements native/pc-capture/macos/pc-capture.entitlements \
+            --sign "$APPLE_DEVELOPER_ID" Libs/pc-capture/pc-capture.app
+          codesign --verify --strict --verbose=2 Libs/pc-capture/pc-capture.app
+          (cd Libs/pc-capture && ditto -c -k --keepParent pc-capture.app pc-capture-mac.zip)
+          xcrun notarytool submit Libs/pc-capture/pc-capture-mac.zip --keychain-profile pc-notary --wait
+          xcrun stapler staple Libs/pc-capture/pc-capture.app
+          (cd Libs/pc-capture && rm -f pc-capture-mac.zip && ditto -c -k --keepParent pc-capture.app pc-capture-mac.zip)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-mac-signed
+          path: Libs/pc-capture/pc-capture-mac.zip
+          if-no-files-found: error
+
+  package:
+    needs: [helpers, sign-mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+      - name: Collect helpers
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Stage helpers into Libs
+        run: |
+          mkdir -p Libs/pc-capture
+          cp dl/helper-win-x64/pc-capture-win-x64.exe Libs/pc-capture/
+          cp dl/helper-win-x86/pc-capture-win-x86.exe Libs/pc-capture/
+          cp dl/helper-linux-x64/pc-capture-linux-x64 Libs/pc-capture/
+          if [ -d dl/helper-mac-signed ]; then cp dl/helper-mac-signed/pc-capture-mac.zip Libs/pc-capture/; else cp dl/helper-mac/pc-capture-mac.zip Libs/pc-capture/; fi
+      - name: Package
+        run: bash scripts/package-release.sh Release
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: artifacts/PerfectComms-Release.zip
