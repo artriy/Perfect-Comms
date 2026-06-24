@@ -232,6 +232,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private BclVoiceMixer? _voiceMixer;
 #if WINDOWS
     private BassStereoOutput? _bassOut;
+    private SidecarStereoOutput? _sidecarOut;
 #endif
     private VoiceCaptureRuntimeOptions _captureOptions;
     private const float DeadInputPeakThreshold = 0.00012f;
@@ -1173,7 +1174,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 _btProfileConflict = false;
             _lastSpeakerDeviceName = deviceName ?? string.Empty;
             _speakerRequested = true;
-            SetSpeakerBass(deviceName ?? string.Empty);
+            SetSpeakerSidecar(deviceName ?? string.Empty);
         }
         catch (Exception ex)
         {
@@ -1208,6 +1209,41 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #endif
 #endif
     }
+
+#if WINDOWS
+    private void SetSpeakerSidecar(string deviceName)
+    {
+        try { _androidSpeaker?.Dispose(); } catch { }
+        _androidSpeaker = null;
+        _sidecarOut?.Dispose();
+        var mixer = _voiceMixer ?? new BclVoiceMixer();
+        _voiceMixer = mixer;
+        mixer.SetMasterVolume(_masterVolume);
+        _farEndReference.Reset();
+        lock (_peerSync)
+            foreach (var peer in _peersBySocket.Values)
+                peer.SetMixer(mixer);
+        var output = new SidecarStereoOutput(LaunchSidecarHelper, block =>
+        {
+            mixer.Read(block);
+            FeedFarEndReference(block);
+        });
+        _sidecarOut = output;
+        Task.Run(() =>
+        {
+            var ok = output.Start(deviceName);
+            if (!ReferenceEquals(_sidecarOut, output))
+            {
+                output.Dispose();
+                return;
+            }
+            _speakerReady = ok;
+            if (ok && output.OutputDevices.Count > 0)
+                VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(output.OutputDevices);
+            VoiceDiagnostics.Log("bcl.speaker", $"ready={ok} device=\"{deviceName}\" backend=sidecar");
+        });
+    }
+#endif
 
 #if WINDOWS
     private const int BassDeviceNotFound = -2;
@@ -1663,6 +1699,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _sendPacer.Dispose();
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
+        try { _sidecarOut?.Dispose(); } catch { }
+        _sidecarOut = null;
         try { _bassOut?.Dispose(); } catch { }
         _bassOut = null;
         try { _androidSpeaker?.Dispose(); } catch { }

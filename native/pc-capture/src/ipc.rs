@@ -1,8 +1,12 @@
-use crate::audio::{enumerate_devices, now_ns, peak, spawn_cpal_capture, ToneSource};
+use crate::audio::{
+    enumerate_devices, enumerate_output_devices, now_ns, peak, spawn_cpal_capture,
+    spawn_cpal_playback, ToneSource,
+};
 use crate::proto;
 use crate::proto::{
     devices_json, encode_audio, encode_control, error_json, level_json, parse_inbound, pong_json,
-    ready_json, AudioFrame, AudioRing, DeviceInfo, Frame, InboundOp, PROTO_VERSION, RING_CAPACITY,
+    ready_json, AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
+    PROTO_VERSION, RING_CAPACITY,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -103,6 +107,18 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
                 samples,
             }))
         }
+        proto::TYPE_AUDIO_OUT => {
+            if len != proto::AUDIO_OUT_BYTES {
+                return Err(proto::DecodeError::BadLen(len));
+            }
+            let mut body = vec![0u8; proto::AUDIO_OUT_BYTES];
+            r.read_exact(&mut body)?;
+            let mut samples = Vec::with_capacity(proto::AUDIO_OUT_SAMPLES);
+            for chunk in body.chunks_exact(4) {
+                samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+            Ok(Frame::AudioOut(AudioOutFrame { samples }))
+        }
         other => Err(proto::DecodeError::BadType(other)),
     }
 }
@@ -193,7 +209,20 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     } else {
         enumerate_devices()
     };
-    write_frame(&conn, &encode_control(&ready_json(&devices)))?;
+    let output_devices = if cfg.synthetic {
+        synthetic_devices()
+    } else {
+        enumerate_output_devices()
+    };
+    write_frame(
+        &conn,
+        &encode_control(&ready_json(&devices, &output_devices)),
+    )?;
+
+    let playback = Arc::new(Mutex::new(PlaybackRing::new(8 * proto::AUDIO_OUT_FRAMES)));
+    let out_stop = Arc::new(AtomicBool::new(false));
+    let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
@@ -233,57 +262,98 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
-    while let Ok(Frame::Control(frame)) = read_frame_checked(&mut reader) {
-        let op = match parse_inbound(&frame) {
-            Ok(op) => op,
-            Err(_) => continue,
+    loop {
+        let frame = match read_frame_checked(&mut reader) {
+            Ok(f) => f,
+            Err(_) => break,
         };
-        match op {
-            InboundOp::SelectDevice { id } => {
-                *selected.lock().unwrap() = Some(id);
-                let devs = if cfg.synthetic {
-                    synthetic_devices()
-                } else {
-                    enumerate_devices()
-                };
-                let _ = write_frame(&conn, &encode_control(&devices_json(&devs)));
-            }
-            InboundOp::Start => {
-                producer_stop.store(false, Ordering::Relaxed);
-                let mut guard = producer.lock().unwrap();
+        match frame {
+            Frame::AudioOut(f) => {
+                playback.lock().unwrap().push(&f.samples);
+                let mut guard = out_thread.lock().unwrap();
                 if guard.is_none() {
-                    if cfg.synthetic {
-                        *guard = Some(spawn_synthetic_producer(
-                            ring.clone(),
-                            producer_stop.clone(),
-                        ));
-                    } else {
-                        let dev = selected.lock().unwrap().clone();
-                        *guard = Some(spawn_real_producer(
-                            dev,
-                            ring.clone(),
-                            producer_stop.clone(),
-                            conn.clone(),
-                        ));
+                    let dev = out_selected.lock().unwrap().clone();
+                    let pb = playback.clone();
+                    let st = out_stop.clone();
+                    st.store(false, Ordering::Relaxed);
+                    *guard = Some(std::thread::spawn(move || {
+                        if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+                            eprintln!("pc-capture: playback error: {e}");
+                        }
+                    }));
+                }
+            }
+            Frame::Control(text) => {
+                let op = match parse_inbound(&text) {
+                    Ok(op) => op,
+                    Err(_) => continue,
+                };
+                match op {
+                    InboundOp::SelectDevice { id } => {
+                        *selected.lock().unwrap() = Some(id);
+                        let devs = if cfg.synthetic {
+                            synthetic_devices()
+                        } else {
+                            enumerate_devices()
+                        };
+                        let outs = if cfg.synthetic {
+                            synthetic_devices()
+                        } else {
+                            enumerate_output_devices()
+                        };
+                        let _ = write_frame(&conn, &encode_control(&devices_json(&devs, &outs)));
                     }
+                    InboundOp::SelectOutputDevice { id } => {
+                        *out_selected.lock().unwrap() = Some(id);
+                        out_stop.store(true, Ordering::Relaxed);
+                        if let Some(h) = out_thread.lock().unwrap().take() {
+                            h.join().ok();
+                        }
+                        out_stop.store(false, Ordering::Relaxed);
+                    }
+                    InboundOp::Start => {
+                        producer_stop.store(false, Ordering::Relaxed);
+                        let mut guard = producer.lock().unwrap();
+                        if guard.is_none() {
+                            if cfg.synthetic {
+                                *guard = Some(spawn_synthetic_producer(
+                                    ring.clone(),
+                                    producer_stop.clone(),
+                                ));
+                            } else {
+                                let dev = selected.lock().unwrap().clone();
+                                *guard = Some(spawn_real_producer(
+                                    dev,
+                                    ring.clone(),
+                                    producer_stop.clone(),
+                                    conn.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    InboundOp::Stop => {
+                        producer_stop.store(true, Ordering::Relaxed);
+                        if let Some(h) = producer.lock().unwrap().take() {
+                            h.join().ok();
+                        }
+                    }
+                    InboundOp::Ping => {
+                        let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
+                    }
+                    InboundOp::Hello { .. } => {}
                 }
             }
-            InboundOp::Stop => {
-                producer_stop.store(true, Ordering::Relaxed);
-                if let Some(h) = producer.lock().unwrap().take() {
-                    h.join().ok();
-                }
-            }
-            InboundOp::Ping => {
-                let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
-            }
-            InboundOp::Hello { .. } => {}
+            Frame::Audio(_) => {}
         }
     }
 
     producer_stop.store(true, Ordering::Relaxed);
     stop.store(true, Ordering::Relaxed);
+    out_stop.store(true, Ordering::Relaxed);
     if let Some(h) = producer.lock().unwrap().take() {
+        h.join().ok();
+    }
+    if let Some(h) = out_thread.lock().unwrap().take() {
         h.join().ok();
     }
     writer_handle.join().ok();
@@ -396,13 +466,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":1,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":1,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -411,7 +481,7 @@ mod tests {
 
     #[test]
     fn validate_hello_rejects_proto_mismatch() {
-        let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":99,"token":"good"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectProto
@@ -446,7 +516,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":1,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":2,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -455,7 +525,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 1);
+                assert_eq!(v["proto"], 2);
                 assert_eq!(v["format"]["rate"], 48_000);
             }
             other => panic!("expected ready, got {other:?}"),
@@ -493,6 +563,7 @@ mod tests {
                     assert_eq!(f.samples.len(), 960);
                     got_audio = true;
                 }
+                Frame::AudioOut(_) => {}
             }
             if got_pong && got_audio && got_devices {
                 break;
@@ -526,7 +597,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":1,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":2,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -596,7 +667,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":1,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":2,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

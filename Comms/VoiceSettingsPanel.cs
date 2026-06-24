@@ -210,6 +210,7 @@ public static class VoiceSettingsPanel
         for (int i = 0; i < entries.Count; i++)
             sig = sig * 31 + entries[i].Key.GetHashCode();
         sig = sig * 31 + VoiceChatLocalSettings.MicDeviceListVersion;
+        sig = sig * 31 + VoiceChatLocalSettings.SpkDeviceListVersion;
         return sig;
     }
 

@@ -60,7 +60,8 @@ fn main() {
 
     if args.enumerate {
         let devices = audio::enumerate_devices();
-        let json = proto::devices_json(&devices);
+        let output_devices = audio::enumerate_output_devices();
+        let json = proto::devices_json(&devices, &output_devices);
         let path = args.handshake_path.as_ref().unwrap();
         if let Err(e) = ipc::write_devices_file(path, &json) {
             eprintln!("pc-capture: cannot write devices file: {e}");

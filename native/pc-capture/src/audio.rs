@@ -1,4 +1,4 @@
-use crate::proto::{AudioFrame, AudioRing, DeviceInfo, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::proto::{AudioFrame, AudioRing, DeviceInfo, PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -248,6 +248,165 @@ pub fn spawn_cpal_capture(
     .map_err(|e| format!("build input stream: {e}"))?;
 
     stream.play().map_err(|e| format!("stream play: {e}"))?;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(stream);
+    Ok(())
+}
+
+pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let mut out = Vec::new();
+    if let Ok(devices) = host.output_devices() {
+        for d in devices {
+            let name = match d.name() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let is_default = Some(&name) == default_name.as_ref();
+            out.push(DeviceInfo {
+                id: name.clone(),
+                name,
+                default: is_default,
+            });
+        }
+    }
+    out.sort_by_key(|d| std::cmp::Reverse(d.default));
+    out
+}
+
+fn pick_output_device(host: &cpal::Host, device_id: &Option<String>) -> Result<cpal::Device, String> {
+    if let Some(id) = device_id {
+        if let Ok(devices) = host.output_devices() {
+            for d in devices {
+                if d.name().ok().as_deref() == Some(id.as_str()) {
+                    return Ok(d);
+                }
+            }
+        }
+    }
+    host.default_output_device()
+        .ok_or_else(|| "no output device".to_string())
+}
+
+fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(ranges) = device.supported_output_configs() {
+        let mut best: Option<cpal::SupportedStreamConfigRange> = None;
+        for r in ranges {
+            if r.min_sample_rate().0 <= SAMPLE_RATE && r.max_sample_rate().0 >= SAMPLE_RATE {
+                let better = match &best {
+                    None => true,
+                    Some(b) => {
+                        let bf = b.sample_format() == cpal::SampleFormat::F32;
+                        let rf = r.sample_format() == cpal::SampleFormat::F32;
+                        (rf && !bf) || (rf == bf && r.channels() > b.channels())
+                    }
+                };
+                if better {
+                    best = Some(r);
+                }
+            }
+        }
+        if let Some(r) = best {
+            return Ok(r.with_sample_rate(cpal::SampleRate(SAMPLE_RATE)));
+        }
+    }
+    device
+        .default_output_config()
+        .map_err(|e| format!("default output config: {e}"))
+}
+
+fn write_out_frame(out: &mut [f32], frame: usize, channels: usize, l: f32, r: f32) {
+    let base = frame * channels;
+    if channels == 1 {
+        out[base] = (l + r) * 0.5;
+        return;
+    }
+    for c in 0..channels {
+        out[base + c] = match c {
+            0 => l,
+            1 => r,
+            _ => 0.0,
+        };
+    }
+}
+
+pub fn spawn_cpal_playback(
+    device_id: Option<String>,
+    playback: Arc<Mutex<PlaybackRing>>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let host = cpal::default_host();
+    let device = pick_output_device(&host, &device_id)?;
+    let config = pick_output_config(&device)?;
+    let out_channels = config.channels() as usize;
+    let out_rate = config.sample_rate().0;
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+    let err_fn = |e| eprintln!("cpal output stream error: {e}");
+    let ratio = SAMPLE_RATE as f64 / out_rate.max(1) as f64;
+
+    let cb_ring = playback.clone();
+    let mut s0 = (0.0f32, 0.0f32);
+    let mut s1 = (0.0f32, 0.0f32);
+    let mut pos = 1.0f64;
+    let mut fill = move |out: &mut [f32]| {
+        let frames = out.len() / out_channels.max(1);
+        let mut ring = cb_ring.lock().unwrap();
+        for f in 0..frames {
+            while pos >= 1.0 {
+                s0 = s1;
+                s1 = ring.pop_stereo().unwrap_or((0.0, 0.0));
+                pos -= 1.0;
+            }
+            let t = pos as f32;
+            let l = s0.0 + (s1.0 - s0.0) * t;
+            let r = s0.1 + (s1.1 - s0.1) * t;
+            write_out_frame(out, f, out_channels, l, r);
+            pos += ratio;
+        }
+    };
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            &stream_config,
+            move |data: &mut [f32], _| fill(data),
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            &stream_config,
+            move |data: &mut [i16], _| {
+                let mut tmp = vec![0f32; data.len()];
+                fill(&mut tmp);
+                for (d, &s) in data.iter_mut().zip(tmp.iter()) {
+                    *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_output_stream(
+            &stream_config,
+            move |data: &mut [u16], _| {
+                let mut tmp = vec![0f32; data.len()];
+                fill(&mut tmp);
+                for (d, &s) in data.iter_mut().zip(tmp.iter()) {
+                    *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
+                }
+            },
+            err_fn,
+            None,
+        ),
+        fmt => return Err(format!("unsupported output sample format: {fmt:?}")),
+    }
+    .map_err(|e| format!("build output stream: {e}"))?;
+
+    stream
+        .play()
+        .map_err(|e| format!("output stream play: {e}"))?;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

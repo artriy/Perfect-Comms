@@ -67,7 +67,9 @@ public class VoiceChatLocalSettings
     private static int _micDeviceListVersion;
 #if WINDOWS
     private static Task? _sidecarProbeTask;
-    private static string[] _spkDeviceNames = Array.Empty<string>();
+    private static volatile string[] _spkDeviceNames = Array.Empty<string>();
+    private static volatile bool _spkNamesFromSidecar;
+    private static int _spkDeviceListVersion;
 #endif
 
     public static string[] MicDeviceNames => _micDeviceNames;
@@ -83,8 +85,26 @@ public class VoiceChatLocalSettings
         _micNamesFromSidecar = true;
         Interlocked.Increment(ref _micDeviceListVersion);
     }
+
+    public static int SpkDeviceListVersion =>
+#if WINDOWS
+        Volatile.Read(ref _spkDeviceListVersion);
+#else
+        0;
+#endif
 #if WINDOWS
     public static string[] SpkDeviceNames => _spkDeviceNames;
+
+    public static void SetSpkDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    {
+        var arr = new string[names.Count + 1];
+        arr[0] = "Default";
+        for (int i = 0; i < names.Count; i++)
+            arr[i + 1] = names[i];
+        _spkDeviceNames = arr;
+        _spkNamesFromSidecar = true;
+        Interlocked.Increment(ref _spkDeviceListVersion);
+    }
 #endif
 
     // ── Settings ──────────────────────────────────────────────────────────────
@@ -184,13 +204,12 @@ public class VoiceChatLocalSettings
     }
 
 #if WINDOWS
-    public string SpeakerDevice
+    public string SpeakerDevice => _savedSpkDeviceName?.Value ?? "";
+
+    private string SpkDeviceNameAtCurrentIndex()
     {
-        get
-        {
-            int idx = (int)SpeakerDeviceIndex.Value;
-            return idx > 0 && idx < _spkDeviceNames.Length ? _spkDeviceNames[idx] : "";
-        }
+        int idx = (int)SpeakerDeviceIndex.Value;
+        return idx > 0 && idx < _spkDeviceNames.Length ? _spkDeviceNames[idx] : "";
     }
 #endif
 
@@ -494,22 +513,8 @@ public class VoiceChatLocalSettings
         }
 
 #if WINDOWS
-        var spks = new List<string> { "Default" };
-        try
-        {
-            BassRuntime.EnsureConfigured();
-            int count = ManagedBass.Bass.DeviceCount;
-            for (int i = 1; i < count; i++)
-            {
-                if (!ManagedBass.Bass.GetDeviceInfo(i, out var info) || !info.IsEnabled)
-                    continue;
-                string n = info.Name?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
-                    spks.Add(n);
-            }
-        }
-        catch { }
-        _spkDeviceNames = spks.ToArray();
+        if (!_spkNamesFromSidecar)
+            _spkDeviceNames = new[] { "Default" };
 #endif
     }
 
@@ -527,6 +532,7 @@ public class VoiceChatLocalSettings
             MaybeProbeSidecarDevices();
         }
         VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
+        VoiceSettings.Instance?.ResolveSpkIndexIfListChanged();
     }
 
     private static void MaybeProbeSidecarDevices()
@@ -538,9 +544,11 @@ public class VoiceChatLocalSettings
         {
             try
             {
-                var names = SidecarLauncher.EnumerateDevices();
-                if (names.Count > 0)
-                    SetMicDeviceNamesFromSidecar(names);
+                var (inputs, outputs) = SidecarLauncher.EnumerateDevices();
+                if (inputs.Count > 0)
+                    SetMicDeviceNamesFromSidecar(inputs);
+                if (outputs.Count > 0)
+                    SetSpkDeviceNamesFromSidecar(outputs);
             }
             catch { }
         });
@@ -560,6 +568,24 @@ public class VoiceChatLocalSettings
         if (!resolved.Equals(MicrophoneDeviceIndex.Value))
             MicrophoneDeviceIndex.Value = resolved;
     }
+
+#if WINDOWS
+    private int _lastResolvedSpkVersion = -1;
+
+    internal void ResolveSpkIndexIfListChanged()
+    {
+        int version = SpkDeviceListVersion;
+        if (version == _lastResolvedSpkVersion) return;
+        _lastResolvedSpkVersion = version;
+        var resolved = ResolveDeviceIndex<SpkDeviceEnum>(_savedSpkDeviceName.Value, _spkDeviceNames, SpeakerDeviceIndex.Value);
+        if (!string.IsNullOrEmpty(_savedSpkDeviceName.Value) && (int)(object)resolved <= 0)
+            return;
+        if (!resolved.Equals(SpeakerDeviceIndex.Value))
+            SpeakerDeviceIndex.Value = resolved;
+    }
+#else
+    internal void ResolveSpkIndexIfListChanged() { }
+#endif
 
     internal void Dispatch(ConfigEntryBase configEntry)
     {
@@ -609,8 +635,11 @@ public class VoiceChatLocalSettings
 #if WINDOWS
         else if (configEntry == SpeakerDeviceIndex)
         {
-            _savedSpkDeviceName.Value = SpeakerDevice;
-            VoiceChatRoom.Current?.SetSpeaker(SpeakerDevice);
+            var name = SpkDeviceNameAtCurrentIndex();
+            bool deviceChanged = !string.Equals(_savedSpkDeviceName.Value, name, StringComparison.Ordinal);
+            _savedSpkDeviceName.Value = name;
+            if (deviceChanged)
+                VoiceChatRoom.Current?.SetSpeaker(name);
         }
 #endif
         else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY ||

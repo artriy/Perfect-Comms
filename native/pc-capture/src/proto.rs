@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -6,6 +6,10 @@ pub const FRAME_BYTES: usize = 8 + FRAME_SAMPLES * 4;
 
 pub const TYPE_CONTROL: u8 = 0x01;
 pub const TYPE_AUDIO: u8 = 0x02;
+pub const TYPE_AUDIO_OUT: u8 = 0x03;
+pub const AUDIO_OUT_FRAMES: usize = 960;
+pub const AUDIO_OUT_SAMPLES: usize = AUDIO_OUT_FRAMES * 2;
+pub const AUDIO_OUT_BYTES: usize = AUDIO_OUT_SAMPLES * 4;
 
 #[cfg(test)]
 use std::io::Read;
@@ -16,12 +20,18 @@ pub struct AudioFrame {
     pub samples: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioOutFrame {
+    pub samples: Vec<f32>,
+}
+
 #[derive(Debug)]
 pub enum Frame {
     Control(String),
     // Decoded inbound audio is never read by the helper (audio flows helper->mod only); kept for the wire contract and tests.
     #[allow(dead_code)]
     Audio(AudioFrame),
+    AudioOut(AudioOutFrame),
 }
 
 #[derive(Debug)]
@@ -147,6 +157,47 @@ impl AudioRing {
     }
 }
 
+pub struct PlaybackRing {
+    capacity_pairs: usize,
+    queue: VecDeque<(f32, f32)>,
+    dropped: u64,
+}
+
+impl PlaybackRing {
+    pub fn new(capacity_pairs: usize) -> PlaybackRing {
+        let cap = capacity_pairs.max(2);
+        PlaybackRing {
+            capacity_pairs: cap,
+            queue: VecDeque::with_capacity(cap),
+            dropped: 0,
+        }
+    }
+
+    pub fn push(&mut self, interleaved: &[f32]) {
+        let pairs = interleaved.len() / 2;
+        for i in 0..pairs {
+            if self.queue.len() >= self.capacity_pairs {
+                self.queue.pop_front();
+                self.dropped += 1;
+            }
+            self.queue
+                .push_back((interleaved[2 * i], interleaved[2 * i + 1]));
+        }
+    }
+
+    pub fn pop_stereo(&mut self) -> Option<(f32, f32)> {
+        self.queue.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +213,8 @@ pub enum InboundOp {
     Stop,
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "select-output-device")]
+    SelectOutputDevice { id: String },
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
@@ -188,12 +241,16 @@ struct ReadyMsg<'a> {
     proto: u32,
     format: FormatBlock,
     devices: &'a [DeviceInfo],
+    #[serde(rename = "outputDevices")]
+    output_devices: &'a [DeviceInfo],
 }
 
 #[derive(Serialize)]
 struct DevicesMsg<'a> {
     op: &'static str,
     devices: &'a [DeviceInfo],
+    #[serde(rename = "outputDevices")]
+    output_devices: &'a [DeviceInfo],
 }
 
 #[derive(Serialize)]
@@ -216,7 +273,7 @@ struct PongMsg {
     cap_ts: u64,
 }
 
-pub fn ready_json(devices: &[DeviceInfo]) -> String {
+pub fn ready_json(devices: &[DeviceInfo], output_devices: &[DeviceInfo]) -> String {
     serde_json::to_string(&ReadyMsg {
         op: "ready",
         proto: PROTO_VERSION,
@@ -226,14 +283,16 @@ pub fn ready_json(devices: &[DeviceInfo]) -> String {
             sample: "f32",
         },
         devices,
+        output_devices,
     })
     .expect("ready serialize")
 }
 
-pub fn devices_json(devices: &[DeviceInfo]) -> String {
+pub fn devices_json(devices: &[DeviceInfo], output_devices: &[DeviceInfo]) -> String {
     serde_json::to_string(&DevicesMsg {
         op: "devices",
         devices,
+        output_devices,
     })
     .expect("devices serialize")
 }
@@ -261,13 +320,35 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 1);
+        assert_eq!(PROTO_VERSION, 2);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
         assert_eq!(FRAME_BYTES, 8 + 960 * 4);
         assert_eq!(TYPE_CONTROL, 0x01);
         assert_eq!(TYPE_AUDIO, 0x02);
+        assert_eq!(TYPE_AUDIO_OUT, 0x03);
+        assert_eq!(AUDIO_OUT_BYTES, 1920 * 4);
+    }
+
+    #[test]
+    fn parse_select_output_device() {
+        let op = parse_inbound(r#"{"op":"select-output-device","id":"spk-1"}"#).unwrap();
+        match op {
+            InboundOp::SelectOutputDevice { id } => assert_eq!(id, "spk-1"),
+            other => panic!("expected select-output-device, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playback_ring_drops_oldest_when_full() {
+        let mut ring = PlaybackRing::new(2);
+        ring.push(&[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.dropped(), 1);
+        assert_eq!(ring.pop_stereo(), Some((2.0, 2.0)));
+        assert_eq!(ring.pop_stereo(), Some((3.0, 3.0)));
+        assert_eq!(ring.pop_stereo(), None);
     }
 
     #[test]
@@ -424,10 +505,10 @@ mod tests {
             name: "Mic A".into(),
             default: true,
         }];
-        let s = ready_json(&devs);
+        let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 1);
+        assert_eq!(v["proto"], 2);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");
@@ -443,7 +524,7 @@ mod tests {
             name: "X".into(),
             default: false,
         }];
-        let dv: serde_json::Value = serde_json::from_str(&devices_json(&devs)).unwrap();
+        let dv: serde_json::Value = serde_json::from_str(&devices_json(&devs, &[])).unwrap();
         assert_eq!(dv["op"], "devices");
         assert_eq!(dv["devices"][0]["id"], "x");
 

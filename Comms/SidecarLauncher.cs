@@ -199,23 +199,23 @@ internal static class SidecarLauncher
         return Path.Combine(dir, "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
     }
 
-    public static List<string> EnumerateDevices()
+    public static (List<string> Input, List<string> Output) EnumerateDevices()
     {
         try
         {
             var assembly = Assembly.GetExecutingAssembly();
             if (!IsHelperAvailable(assembly))
-                return new List<string>();
+                return (new List<string>(), new List<string>());
             var helperPath = EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
             return EnumerateDevices(helperPath, WineEnvironment.IsWine, WineEnvironment.ResolveHostPath);
         }
         catch
         {
-            return new List<string>();
+            return (new List<string>(), new List<string>());
         }
     }
 
-    public static List<string> EnumerateDevices(string helperPath, bool wine, Func<string, string> resolveWineHostPath)
+    public static (List<string> Input, List<string> Output) EnumerateDevices(string helperPath, bool wine, Func<string, string> resolveWineHostPath)
     {
         var outPath = NewHandshakePath();
         Process? process = null;
@@ -239,15 +239,15 @@ internal static class SidecarLauncher
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 3000)
             {
-                if (TryReadDevicesFile(outPath, out var names))
-                    return names;
+                if (TryReadDevicesFile(outPath, out var input, out var output))
+                    return (input, output);
                 Thread.Sleep(25);
             }
-            return new List<string>();
+            return (new List<string>(), new List<string>());
         }
         catch
         {
-            return new List<string>();
+            return (new List<string>(), new List<string>());
         }
         finally
         {
@@ -257,9 +257,10 @@ internal static class SidecarLauncher
         }
     }
 
-    private static bool TryReadDevicesFile(string path, out List<string> names)
+    private static bool TryReadDevicesFile(string path, out List<string> input, out List<string> output)
     {
-        names = new List<string>();
+        input = new List<string>();
+        output = new List<string>();
         try
         {
             if (!File.Exists(path))
@@ -267,7 +268,9 @@ internal static class SidecarLauncher
             var text = File.ReadAllText(path);
             if (string.IsNullOrWhiteSpace(text))
                 return false;
-            return SidecarProtocol.TryReadDevices(text, out names);
+            var ok = SidecarProtocol.TryReadDevices(text, out input);
+            SidecarProtocol.TryReadOutputDevices(text, out output);
+            return ok;
         }
         catch
         {

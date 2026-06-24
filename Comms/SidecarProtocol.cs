@@ -10,8 +10,12 @@ internal static class SidecarProtocol
 {
     public const byte TypeControl = 0x01;
     public const byte TypeAudio = 0x02;
+    public const byte TypeAudioOut = 0x03;
     public const int AudioSamples = 960;
     public const int AudioPayloadBytes = 8 + AudioSamples * 4;
+    public const int AudioOutFrames = 960;
+    public const int AudioOutSamples = AudioOutFrames * 2;
+    public const int AudioOutPayloadBytes = AudioOutSamples * 4;
     public const int HeaderBytes = 5;
     public const int MaxPayloadBytes = 1 << 20;
 
@@ -53,6 +57,18 @@ internal static class SidecarProtocol
 
     public static byte[] SelectDeviceFrame(string id)
         => EncodeControl($"{{\"op\":\"select-device\",\"id\":{JsonString(id)}}}");
+
+    public static byte[] SelectOutputDeviceFrame(string id)
+        => EncodeControl($"{{\"op\":\"select-output-device\",\"id\":{JsonString(id)}}}");
+
+    public static byte[] EncodeAudioOut(float[] interleavedStereo, int sampleCount)
+    {
+        var payload = new byte[AudioOutPayloadBytes];
+        var n = Math.Min(sampleCount, AudioOutSamples);
+        for (int i = 0; i < n; i++)
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(i * 4, 4), interleavedStereo[i]);
+        return EncodeFrame(TypeAudioOut, payload);
+    }
 
     public static byte[] StartFrame() => EncodeControl("{\"op\":\"start\"}");
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
@@ -105,6 +121,31 @@ internal static class SidecarProtocol
         {
             using var doc = JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty("devices", out var devices) || devices.ValueKind != JsonValueKind.Array)
+                return false;
+            foreach (var device in devices.EnumerateArray())
+            {
+                if (device.TryGetProperty("name", out var n))
+                {
+                    var name = n.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                        names.Add(name!);
+                }
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadOutputDevices(string json, out List<string> names)
+    {
+        names = new List<string>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("outputDevices", out var devices) || devices.ValueKind != JsonValueKind.Array)
                 return false;
             foreach (var device in devices.EnumerateArray())
             {
