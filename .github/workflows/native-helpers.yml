@@ -75,3 +75,36 @@ jobs:
           name: helper-mac
           path: Libs/pc-capture/pc-capture-mac.zip
           if-no-files-found: error
+
+  smoke:
+    needs: [windows, linux, macos]
+    strategy:
+      matrix:
+        include:
+          - artifact: helper-win-x64
+            os: windows-latest
+            bin: pc-capture-win-x64.exe
+          - artifact: helper-linux-x64
+            os: ubuntu-latest
+            bin: pc-capture-linux-x64
+          - artifact: helper-mac
+            os: macos-latest
+            bin: pc-capture-mac.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dl
+      - name: Smoke
+        shell: bash
+        run: |
+          if [[ "${{ matrix.bin }}" == *.zip ]]; then
+            cd dl && unzip -o "${{ matrix.bin }}" && cd ..
+            chmod +x dl/pc-capture.app/Contents/MacOS/pc-capture
+            bash scripts/ci-smoke-helper.sh dl/pc-capture.app/Contents/MacOS/pc-capture
+          else
+            chmod +x "dl/${{ matrix.bin }}" || true
+            bash scripts/ci-smoke-helper.sh "dl/${{ matrix.bin }}"
+          fi
