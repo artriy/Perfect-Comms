@@ -284,7 +284,19 @@ pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
     let port = listener.local_addr()?.port();
     write_handshake_file(&cfg.handshake_path, port, std::process::id())?;
 
+    let connected = Arc::new(AtomicBool::new(false));
+    let guard_connected = connected.clone();
+    let guard_path = cfg.handshake_path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(15));
+        if !guard_connected.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&guard_path);
+            std::process::exit(0);
+        }
+    });
+
     let first = accept_single(&listener)?;
+    connected.store(true, Ordering::Relaxed);
 
     let reject_listener = listener.try_clone()?;
     let _reject = std::thread::spawn(move || {

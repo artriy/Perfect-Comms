@@ -8,11 +8,13 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct Args {
     pub handshake_path: Option<PathBuf>,
+    pub token_file: Option<PathBuf>,
     pub synthetic: bool,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut handshake_path = None;
+    let mut token_file = None;
     let mut synthetic = false;
     let mut i = 1;
     while i < argv.len() {
@@ -21,6 +23,11 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
                 i += 1;
                 let p = argv.get(i).ok_or("--handshake requires a path")?;
                 handshake_path = Some(PathBuf::from(p));
+            }
+            "--token-file" => {
+                i += 1;
+                let p = argv.get(i).ok_or("--token-file requires a path")?;
+                token_file = Some(PathBuf::from(p));
             }
             "--synthetic-tone" => synthetic = true,
             other => return Err(format!("unknown argument: {other}")),
@@ -32,6 +39,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     Ok(Args {
         handshake_path,
+        token_file,
         synthetic,
     })
 }
@@ -46,15 +54,24 @@ fn main() {
         }
     };
 
-    let stdin = std::io::stdin();
-    let mut locked = stdin.lock();
-    let token = match ipc::read_token_line(&mut locked) {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
-            eprintln!("pc-capture: missing auth token on stdin");
-            std::process::exit(2);
+    let token = match &args.token_file {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(s) => s.trim_end_matches(['\r', '\n']).to_string(),
+            Err(e) => {
+                eprintln!("pc-capture: cannot read token file: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            let stdin = std::io::stdin();
+            let mut locked = stdin.lock();
+            ipc::read_token_line(&mut locked).unwrap_or_default()
         }
     };
+    if token.is_empty() {
+        eprintln!("pc-capture: missing auth token");
+        std::process::exit(2);
+    }
 
     let cfg = ServerConfig {
         handshake_path: args.handshake_path.unwrap(),
@@ -92,6 +109,19 @@ mod tests {
             "/tmp/hs.json"
         );
         assert!(args.synthetic);
+    }
+
+    #[test]
+    fn parse_args_reads_token_file() {
+        let argv = vec![
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/hs.json".to_string(),
+            "--token-file".to_string(),
+            "/tmp/tok".to_string(),
+        ];
+        let args = parse_args(&argv).unwrap();
+        assert_eq!(args.token_file.unwrap().to_string_lossy(), "/tmp/tok");
     }
 
     #[test]

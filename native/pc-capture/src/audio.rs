@@ -216,10 +216,30 @@ pub fn spawn_cpal_capture(
         }
     };
 
-    let stream = match config.sample_format() {
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+    let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
+            &stream_config,
             move |data: &[f32], _| push(data),
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &stream_config,
+            move |data: &[i16], _| {
+                let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                push(&f);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            &stream_config,
+            move |data: &[u16], _| {
+                let f: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                push(&f);
+            },
             err_fn,
             None,
         ),

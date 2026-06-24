@@ -193,30 +193,64 @@ internal static class SidecarLauncher
     }
 
     public static string NewHandshakePath()
-        => Path.Combine(Path.GetTempPath(), "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+    {
+        var dir = WineEnvironment.IsWine ? @"Z:\tmp" : Path.GetTempPath();
+        return Path.Combine(dir, "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+    }
 
     public static SidecarLaunchResult Launch(string helperPath, string token, int handshakeTimeoutMs, bool wine, Func<string, string> resolveWineHostPath)
     {
         var result = new SidecarLaunchResult { HandshakePath = NewHandshakePath() };
-        var args = BuildArguments(result.HandshakePath);
         Process? process = null;
+        string? tokenFile = null;
         try
         {
-            ProcessStartInfo psi;
             if (wine)
             {
-                var hostPath = resolveWineHostPath(helperPath);
-                psi = new ProcessStartInfo("start.exe", $"/unix \"{hostPath}\" {args}");
+                tokenFile = result.HandshakePath + ".token";
+                File.WriteAllText(tokenFile, token);
+                var hostHelper = resolveWineHostPath(helperPath);
+                var hostHandshake = resolveWineHostPath(result.HandshakePath);
+                var hostToken = resolveWineHostPath(tokenFile);
+                var wpsi = new ProcessStartInfo("start.exe",
+                    $"/unix \"{hostHelper}\" --handshake \"{hostHandshake}\" --token-file \"{hostToken}\"")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardInput = false,
+                    RedirectStandardOutput = false,
+                    RedirectStandardError = false,
+                    CreateNoWindow = true,
+                };
+
+                process = Process.Start(wpsi);
+                if (process == null)
+                {
+                    result.FailureReason = "Process.Start returned null (start.exe missing)";
+                    return result;
+                }
+                result.Process = process;
+
+                if (!PollHandshake(result.HandshakePath, handshakeTimeoutMs, () => true, out var wport, out var wpid))
+                {
+                    result.FailureReason = "handshake timeout (wine host-exec: verify Z: maps to host root, winepath, and host mic permission)";
+                    return result;
+                }
+
+                result.Port = wport;
+                result.Pid = wpid;
+                result.Success = true;
+                return result;
             }
-            else
+
+            var args = BuildArguments(result.HandshakePath);
+            var psi = new ProcessStartInfo(helperPath, args)
             {
-                psi = new ProcessStartInfo(helperPath, args);
-            }
-            psi.UseShellExecute = false;
-            psi.RedirectStandardInput = true;
-            psi.RedirectStandardOutput = false;
-            psi.RedirectStandardError = false;
-            psi.CreateNoWindow = true;
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
+                CreateNoWindow = true,
+            };
 
             process = Process.Start(psi);
             if (process == null)
@@ -259,6 +293,13 @@ internal static class SidecarLauncher
             if (process != null)
                 KillQuietly(process);
             return result;
+        }
+        finally
+        {
+            if (tokenFile != null)
+            {
+                try { File.Delete(tokenFile); } catch { }
+            }
         }
     }
 

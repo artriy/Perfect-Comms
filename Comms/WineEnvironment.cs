@@ -125,16 +125,30 @@ internal static class WineEnvironment
         try
         {
             using var p = Process.Start(BuildWinePathStartInfo(windowsPath));
-            if (p == null)
-                return windowsPath;
-            var output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(2000);
-            var host = output.Trim();
-            return string.IsNullOrEmpty(host) ? windowsPath : host;
+            if (p != null)
+            {
+                var output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(2000);
+                var host = output.Trim();
+                if (!string.IsNullOrEmpty(host))
+                    return host;
+            }
         }
         catch
         {
-            return windowsPath;
         }
+        return ManualHostPath(windowsPath);
+    }
+
+    private static string ManualHostPath(string windowsPath)
+    {
+        if (windowsPath.Length >= 2 && (windowsPath[0] == 'Z' || windowsPath[0] == 'z') && windowsPath[1] == ':')
+        {
+            var rest = windowsPath.Substring(2).Replace('\\', '/');
+            if (!rest.StartsWith("/"))
+                rest = "/" + rest;
+            return rest;
+        }
+        return windowsPath;
     }
 }
