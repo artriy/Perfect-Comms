@@ -189,10 +189,12 @@ impl PlaybackRing {
         self.queue.pop_front()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.queue.len()
     }
 
+    #[cfg(test)]
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
