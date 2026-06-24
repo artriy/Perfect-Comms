@@ -11,7 +11,6 @@ name: Release
 #   APPLE_CERT_PASSWORD       password for the .p12
 on:
   push:
-    branches: [feat/crossplatform-capture-sidecar]
     tags: ["v*"]
   workflow_dispatch:
 
