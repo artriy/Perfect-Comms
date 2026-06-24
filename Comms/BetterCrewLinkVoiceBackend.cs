@@ -214,6 +214,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int _supervisorActiveIndex;
     private SidecarCaptureSource? _sidecarCaptureSource;
     private Task _sidecarStartTask = Task.CompletedTask;
+    private int _sidecarColdStartRetries;
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
     private bool CaptureUsesUnity => _useUnityAudio;
@@ -887,6 +888,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         try
         {
             StopSidecarMicrophone($"restart:{reason}");
+            if (reason != "sidecar-cold-retry") _sidecarColdStartRetries = 0;
             if (_captureOptions.SyntheticMicToneEnabled)
             {
                 StartSyntheticMicTone(reason);
@@ -932,10 +934,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 _microphoneReady = false;
             }
             if (!started)
+            {
                 VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{device}\" error=\"sidecar capture start failed\"");
+                if (!_disposed && _sidecarColdStartRetries++ < 2)
+                    Task.Run(async () => { try { await Task.Delay(700); if (!_disposed) QueueMicrophoneTransition(true, "sidecar-cold-retry"); } catch { } });
+            }
             return;
         }
 
+        _sidecarColdStartRetries = 0;
         _microphoneReady = true;
         _farEndReference.Reset();
         _farEndReference.Enabled = true;
