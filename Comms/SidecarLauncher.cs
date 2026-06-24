@@ -78,6 +78,7 @@ internal static class SidecarLauncher
         {
             var inner = ExtractMacApp(extracted, triple, baseDirectory);
             MakeExecutable(inner);
+            StripQuarantine(inner);
             return inner;
         }
 
@@ -105,6 +106,24 @@ internal static class SidecarLauncher
         try
         {
             using var p = Process.Start(new ProcessStartInfo("chmod", $"+x \"{path}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            p?.WaitForExit(2000);
+        }
+        catch { }
+    }
+
+    public static void StripQuarantine(string innerPath)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+        var appDir = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(innerPath)));
+        var target = appDir ?? innerPath;
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("xattr", $"-dr com.apple.quarantine \"{target}\"")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
