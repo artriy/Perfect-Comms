@@ -9,9 +9,9 @@ base="https://builds.bepinex.dev"
 rm -rf "$dest"
 mkdir -p "$dest"
 
-rel="$(curl -fsSL "$base/projects/bepinex_be" \
-	| grep -oE '/projects/bepinex_be/[0-9]+/BepInEx-Unity\.IL2CPP-win-x64-[^"]+\.zip' \
-	| head -n1)"
+page="$(curl -fsSL "$base/projects/bepinex_be")"
+rel="$(grep -oE '/projects/bepinex_be/[0-9]+/BepInEx-Unity\.IL2CPP-win-x64-[^"]+\.zip' <<<"$page" || true)"
+rel="${rel%%$'\n'*}"
 if [ -z "$rel" ]; then
 	echo "could not locate BepInEx IL2CPP win-x64 build" >&2
 	exit 1
