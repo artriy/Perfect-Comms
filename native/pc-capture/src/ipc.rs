@@ -262,6 +262,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
+    let mut last_out_spawn_ns: Option<u64> = None;
     loop {
         let frame = match read_frame_checked(&mut reader) {
             Ok(f) => f,
@@ -271,16 +272,27 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             Frame::AudioOut(f) => {
                 playback.lock().unwrap().push(&f.samples);
                 let mut guard = out_thread.lock().unwrap();
+                if guard.as_ref().map_or(false, |h| h.is_finished()) {
+                    if let Some(h) = guard.take() {
+                        h.join().ok();
+                    }
+                }
                 if guard.is_none() {
-                    let dev = out_selected.lock().unwrap().clone();
-                    let pb = playback.clone();
-                    let st = out_stop.clone();
-                    st.store(false, Ordering::Relaxed);
-                    *guard = Some(std::thread::spawn(move || {
-                        if let Err(e) = spawn_cpal_playback(dev, pb, st) {
-                            eprintln!("pc-capture: playback error: {e}");
-                        }
-                    }));
+                    let now = now_ns();
+                    let due = last_out_spawn_ns
+                        .map_or(true, |t| now.saturating_sub(t) >= 1_000_000_000);
+                    if due {
+                        last_out_spawn_ns = Some(now);
+                        let dev = out_selected.lock().unwrap().clone();
+                        let pb = playback.clone();
+                        let st = out_stop.clone();
+                        st.store(false, Ordering::Relaxed);
+                        *guard = Some(std::thread::spawn(move || {
+                            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+                                eprintln!("pc-capture: playback error: {e}");
+                            }
+                        }));
+                    }
                 }
             }
             Frame::Control(text) => {
@@ -314,6 +326,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     InboundOp::Start => {
                         producer_stop.store(false, Ordering::Relaxed);
                         let mut guard = producer.lock().unwrap();
+                        if guard.as_ref().map_or(false, |h| h.is_finished()) {
+                            if let Some(h) = guard.take() {
+                                h.join().ok();
+                            }
+                        }
                         if guard.is_none() {
                             if cfg.synthetic {
                                 *guard = Some(spawn_synthetic_producer(

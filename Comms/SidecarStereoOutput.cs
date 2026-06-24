@@ -12,6 +12,7 @@ internal sealed class SidecarStereoOutput : IDisposable
 {
     public const int Proto = 2;
     private const int HandshakeTimeoutMs = 4000;
+    private const int WriteTimeoutMs = 250;
     private const int FrameSamples = SidecarProtocol.AudioOutSamples;
     private const int FrameMs = 20;
 
@@ -64,6 +65,7 @@ internal sealed class SidecarStereoOutput : IDisposable
             client.Connect(IPAddress.Loopback, launch.Port);
             stream = client.GetStream();
             stream.ReadTimeout = HandshakeTimeoutMs;
+            stream.WriteTimeout = WriteTimeoutMs;
         }
         catch (Exception ex)
         {
@@ -124,6 +126,12 @@ internal sealed class SidecarStereoOutput : IDisposable
         var deadline = Environment.TickCount + HandshakeTimeoutMs;
         while (Environment.TickCount < deadline)
         {
+            if (have == buffer.Length)
+            {
+                if (buffer.Length >= SidecarProtocol.HeaderBytes + SidecarProtocol.MaxPayloadBytes)
+                { error = "ready frame too large"; return false; }
+                Array.Resize(ref buffer, buffer.Length * 2);
+            }
             int read;
             try { read = stream.Read(buffer, have, buffer.Length - have); }
             catch (Exception ex) { error = "read: " + ex.Message; return false; }
@@ -165,18 +173,17 @@ internal sealed class SidecarStereoOutput : IDisposable
             catch { Array.Clear(_block, 0, _block.Length); }
 
             var frame = SidecarProtocol.EncodeAudioOut(_block, FrameSamples);
+            NetworkStream? stream;
+            lock (_gate) { stream = _stream; }
+            if (stream == null) break;
             try
             {
-                lock (_gate)
-                {
-                    if (_stream == null) break;
-                    _stream.Write(frame, 0, frame.Length);
-                    _stream.Flush();
-                }
+                stream.Write(frame, 0, frame.Length);
+                stream.Flush();
             }
             catch
             {
-                Ready = false;
+                Stop();
                 break;
             }
 

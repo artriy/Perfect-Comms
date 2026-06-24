@@ -910,13 +910,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var hadMic = source != null || _microphoneReady;
         _sidecarCaptureSource = null;
         if (source != null)
-        {
             try { source.OnFrame -= ProcessBassMicFrame; } catch { }
-            try { source.Dispose(); } catch { }
-        }
         Task startTask;
         lock (_captureWorkerSync) startTask = _sidecarStartTask;
-        try { startTask.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+        Task.Run(() =>
+        {
+            try { source?.Dispose(); } catch { }
+            try { startTask?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+        });
         _microphoneReady = false;
         lock (_captureFrameSync)
         {

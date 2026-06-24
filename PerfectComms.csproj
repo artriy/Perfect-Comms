@@ -102,6 +102,11 @@
 		</EmbeddedResource>
 	</ItemGroup>
 
+	<Target Name="AssertHelperEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' != 'Android'">
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe') And !Exists('Libs\pc-capture\pc-capture-win-x86.exe') And !Exists('Libs\pc-capture\pc-capture-linux-x64') And !Exists('Libs\pc-capture\pc-capture-mac.zip')"
+			Text="No pc-capture helper found in Libs\pc-capture\. Desktop capture/playback is sidecar-only; run scripts/build-helpers.sh (or stage a prebuilt helper) before a non-Android build." />
+	</Target>
+
 	<ItemGroup>
 		<EmbeddedResource Include="Libs\Concentus.dll">
 			<LogicalName>Lib.Concentus.dll</LogicalName>

@@ -18,6 +18,8 @@ internal static class SidecarLauncher
         {
             if (WineEnvironment.HostOs == WineHostOs.MacOS) return "x86_64-apple-darwin";
             if (WineEnvironment.HostOs == WineHostOs.Linux) return "x86_64-unknown-linux-gnu";
+            throw new PlatformNotSupportedException(
+                "pc-capture: running under Wine but host OS is undetectable (Z: not mapped to host root); cannot select a native helper");
         }
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return RuntimeInformation.OSArchitecture == Architecture.X86
@@ -289,9 +291,10 @@ internal static class SidecarLauncher
             {
                 tokenFile = result.HandshakePath + ".token";
                 File.WriteAllText(tokenFile, token);
+                var hostToken = resolveWineHostPath(tokenFile);
+                WineEnvironment.HostExec("/bin/chmod", $"600 \"{hostToken}\"");
                 var hostHelper = resolveWineHostPath(helperPath);
                 var hostHandshake = resolveWineHostPath(result.HandshakePath);
-                var hostToken = resolveWineHostPath(tokenFile);
                 var wpsi = new ProcessStartInfo("start.exe",
                     $"/unix \"{hostHelper}\" --handshake \"{hostHandshake}\" --token-file \"{hostToken}\"")
                 {

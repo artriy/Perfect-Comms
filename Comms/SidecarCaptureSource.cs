@@ -9,6 +9,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
 {
     public const int Proto = 2;
     private const int HandshakeTimeoutMs = 4000;
+    private const int WriteTimeoutMs = 250;
 
     private readonly Func<string, string, SidecarLaunchResult> _launch;
     private readonly object _gate = new();
@@ -56,7 +57,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             SetHealth(CaptureHealth.Dead);
             return false;
         }
-        _launchResult = launch;
+        Volatile.Write(ref _launchResult, launch);
 
         TcpClient client;
         NetworkStream stream;
@@ -66,6 +67,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             client.Connect(System.Net.IPAddress.Loopback, launch.Port);
             stream = client.GetStream();
             stream.ReadTimeout = HandshakeTimeoutMs;
+            stream.WriteTimeout = WriteTimeoutMs;
         }
         catch (Exception ex)
         {
@@ -142,6 +144,12 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         var deadline = Environment.TickCount + HandshakeTimeoutMs;
         while (Environment.TickCount < deadline)
         {
+            if (have == buffer.Length)
+            {
+                if (buffer.Length >= SidecarProtocol.HeaderBytes + SidecarProtocol.MaxPayloadBytes)
+                { error = "ready frame too large"; return false; }
+                Array.Resize(ref buffer, buffer.Length * 2);
+            }
             int read;
             try { read = stream.Read(buffer, have, buffer.Length - have); }
             catch (Exception ex) { error = "read: " + ex.Message; return false; }
@@ -228,8 +236,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
 
     private void KillLaunch()
     {
-        var launch = _launchResult;
-        _launchResult = null;
+        var launch = Interlocked.Exchange(ref _launchResult, null);
         if (launch == null) return;
         try { if (launch.Process != null && !launch.Process.HasExited) launch.Process.Kill(); } catch { }
         try { if (!string.IsNullOrEmpty(launch.HandshakePath) && System.IO.File.Exists(launch.HandshakePath)) System.IO.File.Delete(launch.HandshakePath); } catch { }
@@ -298,14 +305,13 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         {
             Thread.Sleep(PingIntervalMs);
             if (!_running) break;
+            NetworkStream? stream;
+            lock (_gate) { stream = _stream; }
+            if (stream == null) break;
             try
             {
-                lock (_gate)
-                {
-                    if (_stream == null) break;
-                    _stream.Write(ping, 0, ping.Length);
-                    _stream.Flush();
-                }
+                stream.Write(ping, 0, ping.Length);
+                stream.Flush();
             }
             catch
             {

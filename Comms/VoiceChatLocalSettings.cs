@@ -199,8 +199,9 @@ public class VoiceChatLocalSettings
 
     private string MicDeviceNameAtCurrentIndex()
     {
+        var names = _micDeviceNames;
         int idx = (int)MicrophoneDeviceIndex.Value;
-        return idx > 0 && idx < _micDeviceNames.Length ? _micDeviceNames[idx] : "";
+        return idx > 0 && idx < names.Length ? names[idx] : "";
     }
 
 #if WINDOWS
@@ -208,8 +209,9 @@ public class VoiceChatLocalSettings
 
     private string SpkDeviceNameAtCurrentIndex()
     {
+        var names = _spkDeviceNames;
         int idx = (int)SpeakerDeviceIndex.Value;
-        return idx > 0 && idx < _spkDeviceNames.Length ? _spkDeviceNames[idx] : "";
+        return idx > 0 && idx < names.Length ? names[idx] : "";
     }
 #endif
 

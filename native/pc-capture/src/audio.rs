@@ -345,7 +345,6 @@ pub fn spawn_cpal_playback(
     let out_rate = config.sample_rate().0;
     let sample_format = config.sample_format();
     let stream_config: cpal::StreamConfig = config.into();
-    let err_fn = |e| eprintln!("cpal output stream error: {e}");
     let ratio = SAMPLE_RATE as f64 / out_rate.max(1) as f64;
 
     let cb_ring = playback.clone();
@@ -355,7 +354,15 @@ pub fn spawn_cpal_playback(
     let mut pos = 1.0f64;
     let mut fill = move |out: &mut [f32]| {
         let frames = out.len() / out_channels.max(1);
-        let mut ring = cb_ring.lock().unwrap();
+        let mut ring = match cb_ring.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                for s in out.iter_mut() {
+                    *s = 0.0;
+                }
+                return;
+            }
+        };
         let err = (ring.len() as f64 - target_pairs) / target_pairs;
         let eff_ratio = ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004));
         for f in 0..frames {
@@ -373,36 +380,56 @@ pub fn spawn_cpal_playback(
     };
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_output_stream(
-            &stream_config,
-            move |data: &mut [f32], _| fill(data),
-            err_fn,
-            None,
-        ),
-        cpal::SampleFormat::I16 => device.build_output_stream(
-            &stream_config,
-            move |data: &mut [i16], _| {
-                let mut tmp = vec![0f32; data.len()];
-                fill(&mut tmp);
-                for (d, &s) in data.iter_mut().zip(tmp.iter()) {
-                    *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                }
-            },
-            err_fn,
-            None,
-        ),
-        cpal::SampleFormat::U16 => device.build_output_stream(
-            &stream_config,
-            move |data: &mut [u16], _| {
-                let mut tmp = vec![0f32; data.len()];
-                fill(&mut tmp);
-                for (d, &s) in data.iter_mut().zip(tmp.iter()) {
-                    *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
-                }
-            },
-            err_fn,
-            None,
-        ),
+        cpal::SampleFormat::F32 => {
+            let es = stop.clone();
+            device.build_output_stream(
+                &stream_config,
+                move |data: &mut [f32], _| fill(data),
+                move |e| {
+                    eprintln!("cpal output stream error: {e}");
+                    es.store(true, Ordering::Relaxed);
+                },
+                None,
+            )
+        }
+        cpal::SampleFormat::I16 => {
+            let es = stop.clone();
+            let mut scratch: Vec<f32> = Vec::new();
+            device.build_output_stream(
+                &stream_config,
+                move |data: &mut [i16], _| {
+                    scratch.resize(data.len(), 0.0);
+                    fill(&mut scratch);
+                    for (d, &s) in data.iter_mut().zip(scratch.iter()) {
+                        *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                    }
+                },
+                move |e| {
+                    eprintln!("cpal output stream error: {e}");
+                    es.store(true, Ordering::Relaxed);
+                },
+                None,
+            )
+        }
+        cpal::SampleFormat::U16 => {
+            let es = stop.clone();
+            let mut scratch: Vec<f32> = Vec::new();
+            device.build_output_stream(
+                &stream_config,
+                move |data: &mut [u16], _| {
+                    scratch.resize(data.len(), 0.0);
+                    fill(&mut scratch);
+                    for (d, &s) in data.iter_mut().zip(scratch.iter()) {
+                        *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
+                    }
+                },
+                move |e| {
+                    eprintln!("cpal output stream error: {e}");
+                    es.store(true, Ordering::Relaxed);
+                },
+                None,
+            )
+        }
         fmt => return Err(format!("unsupported output sample format: {fmt:?}")),
     }
     .map_err(|e| format!("build output stream: {e}"))?;
