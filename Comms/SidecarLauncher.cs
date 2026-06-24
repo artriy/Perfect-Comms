@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -196,6 +197,82 @@ internal static class SidecarLauncher
     {
         var dir = WineEnvironment.IsWine ? @"Z:\tmp" : Path.GetTempPath();
         return Path.Combine(dir, "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+    }
+
+    public static List<string> EnumerateDevices()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            if (!IsHelperAvailable(assembly))
+                return new List<string>();
+            var helperPath = EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
+            return EnumerateDevices(helperPath, WineEnvironment.IsWine, WineEnvironment.ResolveHostPath);
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
+    public static List<string> EnumerateDevices(string helperPath, bool wine, Func<string, string> resolveWineHostPath)
+    {
+        var outPath = NewHandshakePath();
+        Process? process = null;
+        try
+        {
+            ProcessStartInfo psi;
+            if (wine)
+            {
+                var hostHelper = resolveWineHostPath(helperPath);
+                var hostOut = resolveWineHostPath(outPath);
+                psi = new ProcessStartInfo("start.exe", $"/unix \"{hostHelper}\" --enumerate --handshake \"{hostOut}\"");
+            }
+            else
+            {
+                psi = new ProcessStartInfo(helperPath, $"--enumerate --handshake \"{outPath}\"");
+            }
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+
+            process = Process.Start(psi);
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 3000)
+            {
+                if (TryReadDevicesFile(outPath, out var names))
+                    return names;
+                Thread.Sleep(25);
+            }
+            return new List<string>();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+        finally
+        {
+            if (process != null && !wine)
+                KillQuietly(process);
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+    }
+
+    private static bool TryReadDevicesFile(string path, out List<string> names)
+    {
+        names = new List<string>();
+        try
+        {
+            if (!File.Exists(path))
+                return false;
+            var text = File.ReadAllText(path);
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+            return SidecarProtocol.TryReadDevices(text, out names);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static SidecarLaunchResult Launch(string helperPath, string token, int handshakeTimeoutMs, bool wine, Func<string, string> resolveWineHostPath)

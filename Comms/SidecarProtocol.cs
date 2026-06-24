@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
 
@@ -88,6 +89,31 @@ internal static class SidecarProtocol
                 rate = fmt.TryGetProperty("rate", out var r) ? r.GetInt32() : 0;
                 channels = fmt.TryGetProperty("channels", out var c) ? c.GetInt32() : 0;
                 sample = fmt.TryGetProperty("sample", out var s) ? (s.GetString() ?? "") : "";
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadDevices(string json, out List<string> names)
+    {
+        names = new List<string>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("devices", out var devices) || devices.ValueKind != JsonValueKind.Array)
+                return false;
+            foreach (var device in devices.EnumerateArray())
+            {
+                if (device.TryGetProperty("name", out var n))
+                {
+                    var name = n.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                        names.Add(name!);
+                }
             }
             return true;
         }

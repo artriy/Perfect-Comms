@@ -10,12 +10,14 @@ pub struct Args {
     pub handshake_path: Option<PathBuf>,
     pub token_file: Option<PathBuf>,
     pub synthetic: bool,
+    pub enumerate: bool,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut handshake_path = None;
     let mut token_file = None;
     let mut synthetic = false;
+    let mut enumerate = false;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -30,6 +32,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
                 token_file = Some(PathBuf::from(p));
             }
             "--synthetic-tone" => synthetic = true,
+            "--enumerate" => enumerate = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -41,6 +44,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         handshake_path,
         token_file,
         synthetic,
+        enumerate,
     })
 }
 
@@ -53,6 +57,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if args.enumerate {
+        let devices = audio::enumerate_devices();
+        let json = proto::devices_json(&devices);
+        let path = args.handshake_path.as_ref().unwrap();
+        if let Err(e) = ipc::write_devices_file(path, &json) {
+            eprintln!("pc-capture: cannot write devices file: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
 
     let token = match &args.token_file {
         Some(path) => match std::fs::read_to_string(path) {
@@ -109,6 +124,19 @@ mod tests {
             "/tmp/hs.json"
         );
         assert!(args.synthetic);
+    }
+
+    #[test]
+    fn parse_args_reads_enumerate_flag() {
+        let argv = vec![
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/devs.json".to_string(),
+            "--enumerate".to_string(),
+        ];
+        let args = parse_args(&argv).unwrap();
+        assert!(args.enumerate);
+        assert!(!args.synthetic);
     }
 
     #[test]

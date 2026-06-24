@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -60,12 +62,27 @@ public enum VoiceMicMode
 
 public class VoiceChatLocalSettings
 {
-    private static string[] _micDeviceNames = Array.Empty<string>();
+    private static volatile string[] _micDeviceNames = Array.Empty<string>();
+    private static volatile bool _micNamesFromSidecar;
+    private static int _micDeviceListVersion;
 #if WINDOWS
+    private static Task? _sidecarProbeTask;
     private static string[] _spkDeviceNames = Array.Empty<string>();
 #endif
 
     public static string[] MicDeviceNames => _micDeviceNames;
+    public static int MicDeviceListVersion => Volatile.Read(ref _micDeviceListVersion);
+
+    public static void SetMicDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    {
+        var arr = new string[names.Count + 1];
+        arr[0] = "Default";
+        for (int i = 0; i < names.Count; i++)
+            arr[i + 1] = names[i];
+        _micDeviceNames = arr;
+        _micNamesFromSidecar = true;
+        Interlocked.Increment(ref _micDeviceListVersion);
+    }
 #if WINDOWS
     public static string[] SpkDeviceNames => _spkDeviceNames;
 #endif
@@ -163,13 +180,12 @@ public class VoiceChatLocalSettings
         VoiceChatRoom.Current?.RefreshLocalAudioSettings();
     }
 
-    public string MicrophoneDevice
+    public string MicrophoneDevice => _savedMicDeviceName?.Value ?? "";
+
+    private string MicDeviceNameAtCurrentIndex()
     {
-        get
-        {
-            int idx = (int)MicrophoneDeviceIndex.Value;
-            return idx > 0 && idx < _micDeviceNames.Length ? _micDeviceNames[idx] : "";
-        }
+        int idx = (int)MicrophoneDeviceIndex.Value;
+        return idx > 0 && idx < _micDeviceNames.Length ? _micDeviceNames[idx] : "";
     }
 
 #if WINDOWS
@@ -456,31 +472,34 @@ public class VoiceChatLocalSettings
 
     public static void RefreshDeviceLists()
     {
-        var mics = new List<string> { "Default" };
-        try
+        if (!_micNamesFromSidecar)
         {
+            var mics = new List<string> { "Default" };
+            try
+            {
 #if WINDOWS
-            BassRuntime.EnsureConfigured();
-            int count = ManagedBass.Bass.RecordingDeviceCount;
-            for (int i = 0; i < count; i++)
-            {
-                if (!ManagedBass.Bass.RecordGetDeviceInfo(i, out var info) || !info.IsEnabled)
-                    continue;
-                string n = info.Name?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
-                    mics.Add(n);
-            }
+                BassRuntime.EnsureConfigured();
+                int count = ManagedBass.Bass.RecordingDeviceCount;
+                for (int i = 0; i < count; i++)
+                {
+                    if (!ManagedBass.Bass.RecordGetDeviceInfo(i, out var info) || !info.IsEnabled)
+                        continue;
+                    string n = info.Name?.Trim() ?? "";
+                    if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
+                        mics.Add(n);
+                }
 #elif ANDROID
-            foreach (var dev in AndroidMicrophone.GetDeviceNames())
-            {
-                string n = dev?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n))
-                    mics.Add(n);
-            }
+                foreach (var dev in AndroidMicrophone.GetDeviceNames())
+                {
+                    string n = dev?.Trim() ?? "";
+                    if (!string.IsNullOrEmpty(n))
+                        mics.Add(n);
+                }
 #endif
+            }
+            catch { }
+            _micDeviceNames = mics.ToArray();
         }
-        catch { }
-        _micDeviceNames = mics.ToArray();
 
 #if WINDOWS
         var spks = new List<string> { "Default" };
@@ -509,9 +528,45 @@ public class VoiceChatLocalSettings
     public static void MaybeRefreshDeviceLists()
     {
         var now = DateTime.UtcNow;
-        if (now < _nextDeviceRefreshUtc) return;
-        _nextDeviceRefreshUtc = now.AddSeconds(2);
-        RefreshDeviceLists();
+        if (now >= _nextDeviceRefreshUtc)
+        {
+            _nextDeviceRefreshUtc = now.AddSeconds(2);
+            RefreshDeviceLists();
+            MaybeProbeSidecarDevices();
+        }
+        VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
+    }
+
+    private static void MaybeProbeSidecarDevices()
+    {
+#if WINDOWS
+        if (!SidecarLauncher.IsHelperAvailable()) return;
+        if (_sidecarProbeTask != null && !_sidecarProbeTask.IsCompleted) return;
+        _sidecarProbeTask = Task.Run(() =>
+        {
+            try
+            {
+                var names = SidecarLauncher.EnumerateDevices();
+                if (names.Count > 0)
+                    SetMicDeviceNamesFromSidecar(names);
+            }
+            catch { }
+        });
+#endif
+    }
+
+    private int _lastResolvedMicVersion = -1;
+
+    internal void ResolveMicIndexIfListChanged()
+    {
+        int version = MicDeviceListVersion;
+        if (version == _lastResolvedMicVersion) return;
+        _lastResolvedMicVersion = version;
+        var resolved = ResolveDeviceIndex<MicDeviceEnum>(_savedMicDeviceName.Value, _micDeviceNames, MicrophoneDeviceIndex.Value);
+        if (!string.IsNullOrEmpty(_savedMicDeviceName.Value) && (int)(object)resolved <= 0)
+            return;
+        if (!resolved.Equals(MicrophoneDeviceIndex.Value))
+            MicrophoneDeviceIndex.Value = resolved;
     }
 
     internal void Dispatch(ConfigEntryBase configEntry)
@@ -585,8 +640,11 @@ public class VoiceChatLocalSettings
         }
         else if (configEntry == MicrophoneDeviceIndex)
         {
-            _savedMicDeviceName.Value = MicrophoneDevice;
-            VoiceChatRoom.Current?.SetMicrophone(MicrophoneDevice);
+            var name = MicDeviceNameAtCurrentIndex();
+            bool deviceChanged = !string.Equals(_savedMicDeviceName.Value, name, StringComparison.Ordinal);
+            _savedMicDeviceName.Value = name;
+            if (deviceChanged)
+                VoiceChatRoom.Current?.SetMicrophone(name);
             VoiceChatRoom.Current?.SetMicVolume(MicVolume.Value);
         }
 #if WINDOWS

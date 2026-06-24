@@ -35,6 +35,17 @@ pub fn write_handshake_file(path: &Path, port: u16, pid: u32) -> std::io::Result
     Ok(())
 }
 
+pub fn write_devices_file(path: &Path, json: &str) -> std::io::Result<()> {
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&temp)?;
+        f.write_all(json.as_bytes())?;
+        f.flush()?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
 pub fn accept_single(listener: &TcpListener) -> std::io::Result<TcpStream> {
     let (stream, _addr) = listener.accept()?;
     stream.set_nodelay(true).ok();
