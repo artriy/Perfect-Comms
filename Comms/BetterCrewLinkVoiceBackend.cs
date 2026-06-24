@@ -667,10 +667,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private static CaptureSlot[] BuildCaptureSlots(bool helperAvailable, bool useUnityAudio)
     {
+        if (helperAvailable)
+            return new[] { CaptureSlot.Sidecar };
         if (useUnityAudio)
             return new[] { CaptureSlot.Unity, CaptureSlot.Bass };
-        if (helperAvailable)
-            return new[] { CaptureSlot.Sidecar, CaptureSlot.Bass, CaptureSlot.Unity };
         return new[] { CaptureSlot.Bass, CaptureSlot.Unity };
     }
 
