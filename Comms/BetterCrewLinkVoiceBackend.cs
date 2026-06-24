@@ -205,7 +205,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private AndroidMicrophone? _androidMicrophone;
     private AndroidSampleProviderSpeaker? _androidSpeaker;
 #endif
-    private bool _useUnityAudio;
 #if WINDOWS
     private enum CaptureSlot { Sidecar, Bass, Unity }
     private CaptureSlot[] _captureSlots = Array.Empty<CaptureSlot>();
@@ -217,7 +216,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private int _sidecarColdStartRetries;
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
-    private bool CaptureUsesUnity => _useUnityAudio;
+    private bool CaptureUsesUnity => true;
 #endif
     private IVoiceEncoder _encoder = CreateEncoder();
     private Timer? _syntheticMicTimer;
@@ -535,14 +534,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var restartCapture = _captureOptions.SyntheticMicToneEnabled != options.SyntheticMicToneEnabled;
         _captureOptions = options;
         _autoMicGain = ReadAutoMicGainSetting();
-        _useUnityAudio = ReadUnityAudioSetting();
         lock (_captureFrameSync)
         {
             _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
-            if (_useUnityAudio)
-                _micPreprocessor.DisableApm();
-            else
-                _micPreprocessor.ConfigureApm(options.EchoCancellationEnabled, _autoMicGain);
+            _micPreprocessor.ConfigureApm(options.EchoCancellationEnabled, _autoMicGain);
         }
 
 #if WINDOWS
@@ -569,22 +564,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
-    private static bool ReadUnityAudioSetting()
-    {
-        try
-        {
-            return VoiceSettings.Instance?.UnityAudio.Value ?? false;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public void RebuildCaptureSupervisor()
     {
 #if WINDOWS
-        _useUnityAudio = ReadUnityAudioSetting();
         BuildCaptureSupervisor();
 #endif
     }
@@ -666,7 +648,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
-    private static CaptureSlot[] BuildCaptureSlots(bool helperAvailable, bool useUnityAudio)
+    private static CaptureSlot[] BuildCaptureSlots()
     {
         return new[] { CaptureSlot.Sidecar };
     }
@@ -679,7 +661,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void BuildCaptureSupervisor()
     {
-        _captureSlots = BuildCaptureSlots(SidecarLauncher.IsHelperAvailable(), _useUnityAudio);
+        _captureSlots = BuildCaptureSlots();
         _supervisorActiveIndex = 0;
         _activeCaptureSlot = _captureSlots[0];
         var restartBudget = Array.IndexOf(_captureSlots, CaptureSlot.Sidecar) >= 0 ? 2 : 0;
@@ -1191,9 +1173,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 _btProfileConflict = false;
             _lastSpeakerDeviceName = deviceName ?? string.Empty;
             _speakerRequested = true;
-            _useUnityAudio = ReadUnityAudioSetting();
-            if (_useUnityAudio) SetSpeakerUnity();
-            else SetSpeakerBass(deviceName ?? string.Empty);
+            SetSpeakerBass(deviceName ?? string.Empty);
         }
         catch (Exception ex)
         {
@@ -1281,32 +1261,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         catch (Exception ex)
         {
             return $"error:{ex.Message}";
-        }
-    }
-
-    private void SetSpeakerUnity()
-    {
-        _bassOut?.Dispose();
-        _bassOut = null;
-        try
-        {
-            _androidSpeaker?.Dispose();
-            var mixer = _voiceMixer ?? new BclVoiceMixer();
-            _voiceMixer = mixer;
-            mixer.SetMasterVolume(_masterVolume);
-            _androidSpeaker = new AndroidSampleProviderSpeaker(mixer);
-            _speakerReady = _androidSpeaker.IsPlaying;
-            lock (_peerSync)
-                foreach (var peer in _peersBySocket.Values)
-                    peer.SetMixer(mixer);
-            VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} backend=unity-managed");
-        }
-        catch (Exception ex)
-        {
-            try { _androidSpeaker?.Dispose(); } catch { }
-            _androidSpeaker = null;
-            _speakerReady = false;
-            VoiceDiagnostics.Log("bcl.speaker", $"ready=false backend=unity error=\"{ex.Message}\"");
         }
     }
 

@@ -306,7 +306,6 @@ public static class VoiceSettingsPanel
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
         Toggle(defs, "Echo Cancellation", s.EchoCancellationEnabled);
         Toggle(defs, "Auto Mic Gain", s.AutoMicGain);
-        Toggle(defs, "Use Unity Audio (only use if you have problems)", s.UnityAudio);
         Slider(defs, "Voice Falloff Softness", s.VoiceFalloffSoftness, Pct);
         Section(defs, "STARTUP");
         Toggle(defs, "Start Muted", s.StartMuted);
