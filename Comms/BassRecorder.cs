@@ -1,18 +1,23 @@
 #if WINDOWS
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using ManagedBass;
 using VoiceChatPlugin.Audio;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-internal sealed class BassRecorder : ICaptureSource, IDisposable
+internal sealed class BassRecorder : IDisposable, ICaptureSource
 {
     private readonly RecordProcedure _proc;
     private readonly Action<float[], int> _onFrame;
     private readonly object _gate = new();
     private float[] _buffer = Array.Empty<float>();
     private int _stream;
+    private bool _started;
+    private long _lastFrameTicks;
+    private static readonly long DeadAfterTicks = TimeSpan.FromSeconds(15).Ticks;
 
     public event Action<float[], int>? OnFrame;
 
@@ -35,18 +40,35 @@ internal sealed class BassRecorder : ICaptureSource, IDisposable
                 try { Bass.RecordFree(); } catch { }
                 return false;
             }
+            _started = true;
+            Volatile.Write(ref _lastFrameTicks, Stopwatch.GetTimestamp());
             return true;
         }
     }
 
-    public CaptureHealth Health => _stream != 0 ? CaptureHealth.Healthy : CaptureHealth.Dead;
-
     public bool Start(string? deviceId)
+        => Start(ResolveDevice(deviceId));
+
+    public CaptureHealth Health
+        => ClassifyRecency(Stopwatch.GetTimestamp(), Volatile.Read(ref _lastFrameTicks), DeadAfterTicks, _started);
+
+    public static CaptureHealth ClassifyRecency(long now, long lastFrameTicks, long deadAfterTicks, bool started)
     {
-        var device = -1;
-        if (!string.IsNullOrEmpty(deviceId) && int.TryParse(deviceId, out var parsed))
-            device = parsed;
-        return Start(device);
+        if (!started) return CaptureHealth.Dead;
+        if (lastFrameTicks == 0)
+            return now >= deadAfterTicks ? CaptureHealth.Dead : CaptureHealth.Silent;
+        var since = now - lastFrameTicks;
+        if (since >= deadAfterTicks) return CaptureHealth.Dead;
+        return CaptureHealth.Healthy;
+    }
+
+    private static int ResolveDevice(string? deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return -1;
+        for (var i = 0; Bass.RecordGetDeviceInfo(i, out var info); i++)
+            if (string.Equals(info.Name, deviceId, StringComparison.Ordinal))
+                return i;
+        return -1;
     }
 
     private bool RecordProc(int handle, IntPtr buffer, int length, IntPtr user)
@@ -57,6 +79,7 @@ internal sealed class BassRecorder : ICaptureSource, IDisposable
             if (_buffer.Length < samples)
                 _buffer = new float[samples];
             Marshal.Copy(buffer, _buffer, 0, samples);
+            Volatile.Write(ref _lastFrameTicks, Stopwatch.GetTimestamp());
             try { _onFrame(_buffer, samples); } catch { }
             try { OnFrame?.Invoke(_buffer, samples); } catch { }
         }
@@ -71,6 +94,7 @@ internal sealed class BassRecorder : ICaptureSource, IDisposable
 
     private void StopLocked()
     {
+        _started = false;
         var h = _stream;
         _stream = 0;
         if (h != 0)
