@@ -94,6 +94,21 @@
 		</EmbeddedResource>
 	</ItemGroup>
 
+	<ItemGroup Condition="'$(Configuration)' != 'Android'">
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x64.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x64.exe')">
+			<LogicalName>Lib.pc-capture.pc-capture-win-x64.exe</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x86.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x86.exe')">
+			<LogicalName>Lib.pc-capture.pc-capture-win-x86.exe</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-linux-x64" Condition="Exists('Libs\pc-capture\pc-capture-linux-x64')">
+			<LogicalName>Lib.pc-capture.pc-capture-linux-x64</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-mac.zip" Condition="Exists('Libs\pc-capture\pc-capture-mac.zip')">
+			<LogicalName>Lib.pc-capture.pc-capture-mac.zip</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
 	<ItemGroup>
 		<EmbeddedResource Include="$(NuGetPackageRoot)managedbass\4.0.2\lib\netstandard2.0\ManagedBass.dll">
 			<LogicalName>Lib.ManagedBass.dll</LogicalName>
