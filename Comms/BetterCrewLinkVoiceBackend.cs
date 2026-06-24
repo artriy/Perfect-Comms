@@ -958,7 +958,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
         Task startTask;
         lock (_captureWorkerSync) startTask = _sidecarStartTask;
-        try { startTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        try { startTask.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
         _microphoneReady = false;
         lock (_captureFrameSync)
         {
