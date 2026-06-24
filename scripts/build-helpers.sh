@@ -5,7 +5,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate="$root/native/pc-capture"
 out="$root/Libs/pc-capture"
 dry=0
-[[ "${1:-}" == "--dry-run" ]] && dry=1
+only=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry=1 ;;
+    *) only="$arg" ;;
+  esac
+done
 
 declare -a targets=(
   "x86_64-pc-windows-msvc:pc-capture.exe:pc-capture-win-x64.exe"
@@ -16,6 +22,7 @@ declare -a targets=(
 mkdir -p "$out"
 for entry in "${targets[@]}"; do
   IFS=":" read -r triple binname destname <<<"$entry"
+  [[ -n "$only" && "$only" != "$triple" ]] && continue
   src="$crate/target/$triple/release/$binname"
   dest="$out/$destname"
   echo "map $triple -> $dest"

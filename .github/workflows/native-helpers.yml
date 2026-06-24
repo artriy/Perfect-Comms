@@ -1,0 +1,77 @@
+name: Native helpers
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "native/pc-capture/**"
+      - "scripts/build-helpers.sh"
+      - "scripts/build-mac.sh"
+      - ".github/workflows/native-helpers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            dest: pc-capture-win-x64.exe
+            artifact: helper-win-x64
+          - target: i686-pc-windows-msvc
+            dest: pc-capture-win-x86.exe
+            artifact: helper-win-x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build helper
+        shell: bash
+        run: bash scripts/build-helpers.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: Libs/pc-capture/${{ matrix.dest }}
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build helper
+        run: bash scripts/build-helpers.sh x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux-x64
+          path: Libs/pc-capture/pc-capture-linux-x64
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build ad-hoc universal helper
+        run: bash scripts/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-mac
+          path: Libs/pc-capture/pc-capture-mac.zip
+          if-no-files-found: error
