@@ -226,7 +226,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private bool _speakerReady;
     private BclVoiceMixer? _voiceMixer;
 #if WINDOWS
-    private SidecarStereoOutput? _sidecarOut;
+    private volatile SidecarStereoOutput? _sidecarOut;
 #endif
     private VoiceCaptureRuntimeOptions _captureOptions;
     private const float DeadInputPeakThreshold = 0.00012f;
@@ -1200,6 +1200,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _sidecarOut = output;
         Task.Run(() =>
         {
+            if (!ReferenceEquals(_sidecarOut, output))
+            {
+                output.Dispose();
+                return;
+            }
             var ok = output.Start(deviceName);
             if (!ReferenceEquals(_sidecarOut, output))
             {

@@ -349,12 +349,15 @@ pub fn spawn_cpal_playback(
     let ratio = SAMPLE_RATE as f64 / out_rate.max(1) as f64;
 
     let cb_ring = playback.clone();
+    let target_pairs = (FRAME_SAMPLES * 4) as f64;
     let mut s0 = (0.0f32, 0.0f32);
     let mut s1 = (0.0f32, 0.0f32);
     let mut pos = 1.0f64;
     let mut fill = move |out: &mut [f32]| {
         let frames = out.len() / out_channels.max(1);
         let mut ring = cb_ring.lock().unwrap();
+        let err = (ring.len() as f64 - target_pairs) / target_pairs;
+        let eff_ratio = ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004));
         for f in 0..frames {
             while pos >= 1.0 {
                 s0 = s1;
@@ -365,7 +368,7 @@ pub fn spawn_cpal_playback(
             let l = s0.0 + (s1.0 - s0.0) * t;
             let r = s0.1 + (s1.1 - s0.1) * t;
             write_out_frame(out, f, out_channels, l, r);
-            pos += ratio;
+            pos += eff_ratio;
         }
     };
 
