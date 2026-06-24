@@ -34,13 +34,9 @@ if [[ "$config" != "Android" ]]; then
 fi
 cp "$dll" "$release_dll"
 cp "$root/README.md" "$output/README.md"
-cp "$root/docs/install.md" "$output/install.md"
-cp "$root/research/voicechat_test_matrix.md" "$output/voicechat_test_matrix.md"
 cp "$root/LICENSE" "$output/LICENSE"
 cp "$root/THIRD_PARTY_NOTICES.md" "$output/THIRD_PARTY_NOTICES.md"
 cp "$root/PRIVACY.md" "$output/PRIVACY.md"
-cp "$root/TROUBLESHOOTING.md" "$output/TROUBLESHOOTING.md"
-cp "$root/RELEASE_CHECKLIST.md" "$output/RELEASE_CHECKLIST.md"
 
 version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
 protocol="$(grep -m1 'ProtocolVersion =' "$root/Comms/VoiceProtocol.cs" | sed -E 's/.*ProtocolVersion = ([0-9]+).*/\1/')"
@@ -91,7 +87,7 @@ PY
 fi
 
 if [[ "$config" != "Android" ]]; then
-	dependency_source="$root/TouMira"
+	dependency_source="${PC_DEPENDENCY_SOURCE:-$root/TouMira}"
 	dependency_output="$root/artifacts/PerfectComms+dependencies"
 	dependency_zip="$root/artifacts/PerfectComms+dependencies.zip"
 	required_dependency_files=(
@@ -123,11 +119,9 @@ if [[ "$config" != "Android" ]]; then
 	cp "$dependency_source/BepInEx/config/BepInEx.cfg" "$dependency_output/BepInEx/config/BepInEx.cfg"
 	cp "$dll" "$dependency_output/BepInEx/plugins/PerfectComms.dll"
 	cp "$root/README.md" "$dependency_output/README.md"
-	cp "$root/docs/install.md" "$dependency_output/install.md"
 	cp "$root/LICENSE" "$dependency_output/LICENSE"
 	cp "$root/THIRD_PARTY_NOTICES.md" "$dependency_output/THIRD_PARTY_NOTICES.md"
 	cp "$root/PRIVACY.md" "$dependency_output/PRIVACY.md"
-	cp "$root/TROUBLESHOOTING.md" "$dependency_output/TROUBLESHOOTING.md"
 	cat >"$dependency_output/DEPENDENCIES.txt" <<'EOF'
 Perfect Comms with dependencies
 Includes: PerfectComms.dll and BepInEx Unity IL2CPP 6.0.0-be.735.
