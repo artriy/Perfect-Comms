@@ -74,6 +74,11 @@ internal static class SidecarProtocol
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
     public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
 
+    public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
+        => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
+
+    private static string JsonBool(bool value) => value ? "true" : "false";
+
     public static string ReadOp(string json)
     {
         try
