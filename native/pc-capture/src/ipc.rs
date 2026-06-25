@@ -493,13 +493,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":3,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":2,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":3,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -543,7 +543,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":2,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":3,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -552,7 +552,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 2);
+                assert_eq!(v["proto"], 3);
                 assert_eq!(v["format"]["rate"], 48_000);
             }
             other => panic!("expected ready, got {other:?}"),
@@ -624,7 +624,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":2,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":3,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -694,7 +694,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":2,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":3,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

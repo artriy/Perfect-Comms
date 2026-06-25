@@ -10,7 +10,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class SidecarStereoOutput : IDisposable
 {
-    public const int Proto = 2;
+    public const int Proto = 3;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int FrameSamples = SidecarProtocol.AudioOutSamples;

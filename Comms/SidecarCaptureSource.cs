@@ -7,7 +7,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
 {
-    public const int Proto = 2;
+    public const int Proto = 3;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
 

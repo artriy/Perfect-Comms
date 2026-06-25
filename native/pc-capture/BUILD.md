@@ -75,4 +75,4 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 2` (the inline `Proto` check in `SidecarCaptureSource`/`SidecarStereoOutput`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 3` (the inline `Proto` check in `SidecarCaptureSource`/`SidecarStereoOutput`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
