@@ -99,8 +99,8 @@ jobs:
         run: |
           if [[ "${{ matrix.bin }}" == *.zip ]]; then
             cd dl && unzip -o "${{ matrix.bin }}" && cd ..
-            chmod +x dl/pc-capture.app/Contents/MacOS/pc-capture
-            bash scripts/ci-smoke-helper.sh dl/pc-capture.app/Contents/MacOS/pc-capture
+            chmod +x dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
+            bash scripts/ci-smoke-helper.sh dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
           else
             chmod +x "dl/${{ matrix.bin }}" || true
             bash scripts/ci-smoke-helper.sh "dl/${{ matrix.bin }}"

@@ -5,7 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate="$root/native/pc-capture"
 out="$root/Libs/pc-capture"
 work="$crate/target/mac-bundle"
-app="$work/pc-capture.app"
+app="$work/PerfectCommsAudio.app"
 dry=0
 [[ "${1:-}" == "--dry-run" ]] && dry=1
 
@@ -25,9 +25,9 @@ cargo build --release --manifest-path "$crate/Cargo.toml" --target aarch64-apple
 rm -rf "$work"
 mkdir -p "$app/Contents/MacOS"
 
-lipo -create -output "$app/Contents/MacOS/pc-capture" "$x64" "$arm64"
-chmod +x "$app/Contents/MacOS/pc-capture"
-lipo -info "$app/Contents/MacOS/pc-capture"
+lipo -create -output "$app/Contents/MacOS/PerfectCommsAudio" "$x64" "$arm64"
+chmod +x "$app/Contents/MacOS/PerfectCommsAudio"
+lipo -info "$app/Contents/MacOS/PerfectCommsAudio"
 
 cat >"$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,11 +35,15 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>pc-capture</string>
+  <string>PerfectCommsAudio</string>
   <key>CFBundleIdentifier</key>
   <string>ink.perfectcomms.pccapture</string>
   <key>CFBundleName</key>
-  <string>pc-capture</string>
+  <string>PerfectComms</string>
+  <key>CFBundleDisplayName</key>
+  <string>PerfectComms</string>
+  <key>CFBundleIconFile</key>
+  <string>PerfectCommsAudio</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>NSMicrophoneUsageDescription</key>
@@ -47,6 +51,19 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+mkdir -p "$app/Contents/Resources"
+iconsrc="$root/Resources/miclogo.png"
+iconset="$work/PerfectCommsAudio.iconset"
+if command -v iconutil >/dev/null 2>&1 && [[ -f "$iconsrc" ]]; then
+  mkdir -p "$iconset"
+  for s in 16 32 128 256 512; do
+    sips -z "$s" "$s" "$iconsrc" --out "$iconset/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+    d=$((s * 2))
+    sips -z "$d" "$d" "$iconsrc" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null 2>&1 || true
+  done
+  iconutil -c icns "$iconset" -o "$app/Contents/Resources/PerfectCommsAudio.icns" || true
+fi
 
 codesign --force --deep --sign - "$app"
 codesign --verify --verbose "$app"

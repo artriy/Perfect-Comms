@@ -33,7 +33,7 @@ internal static class SidecarLauncher
     }
 
     public static string HelperFileName(string triple)
-        => triple.Contains("windows") ? "pc-capture.exe" : "pc-capture";
+        => triple.Contains("windows") ? "PerfectCommsAudio.exe" : "PerfectCommsAudio";
 
     public static bool IsHelperAvailable()
         => IsHelperAvailable(Assembly.GetExecutingAssembly());
@@ -97,8 +97,8 @@ internal static class SidecarLauncher
 
     public static string ExtractMacApp(string zipPath, string triple, string baseDirectory)
     {
-        var appDir = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple, "pc-capture.app");
-        var inner = Path.Combine(appDir, "Contents", "MacOS", "pc-capture");
+        var appDir = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple, "PerfectCommsAudio.app");
+        var inner = Path.Combine(appDir, "Contents", "MacOS", "PerfectCommsAudio");
         if (File.Exists(inner) &&
             File.GetLastWriteTimeUtc(inner) >= File.GetLastWriteTimeUtc(zipPath))
             return inner;
