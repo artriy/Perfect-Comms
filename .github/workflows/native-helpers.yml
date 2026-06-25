@@ -2,13 +2,14 @@ name: Native helpers
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/crossplatform-capture-sidecar]
     tags: ["v*"]
   pull_request:
     paths:
       - "native/pc-capture/**"
       - "native/apm-sys/**"
       - "native/df-sys/**"
+      - "native/rtc-interop/**"
       - "native/third_party/webrtc-audio-processing/**"
       - "native/third_party/deep-filter/**"
       - "scripts/build-apm.sh"
@@ -352,3 +353,38 @@ jobs:
           name: df-mac
           path: artifacts/df/libdf.dylib
           if-no-files-found: error
+
+  rtc-interop-win:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ilammy/setup-nasm@v1
+      - name: Build rtc-interop (${{ matrix.target }}) [i686 is the ring/webrtc GATE]
+        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target ${{ matrix.target }}
+
+  rtc-interop-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build rtc-interop (x86_64-unknown-linux-gnu)
+        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target x86_64-unknown-linux-gnu
+
+  rtc-interop-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build rtc-interop (aarch64-apple-darwin)
+        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target aarch64-apple-darwin
