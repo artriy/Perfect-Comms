@@ -2,7 +2,7 @@ name: Native helpers
 
 on:
   push:
-    branches: [main, feat/dsp-in-helper]
+    branches: [main]
     tags: ["v*"]
   pull_request:
     paths:
