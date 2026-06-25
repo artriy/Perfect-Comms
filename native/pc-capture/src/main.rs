@@ -1,4 +1,6 @@
 mod audio;
+#[allow(dead_code)]
+mod codec;
 mod dsp;
 mod ipc;
 mod proto;
