@@ -87,12 +87,47 @@ internal static class SidecarLauncher
             var inner = ExtractMacApp(extracted, triple, baseDirectory);
             MakeExecutable(inner);
             StripQuarantine(inner);
+            EnsureDspLibsExtracted(assembly, baseDirectory, triple, inner);
             return inner;
         }
 
         if (WineEnvironment.IsWine || !RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             MakeExecutable(extracted);
+        EnsureDspLibsExtracted(assembly, baseDirectory, triple, extracted);
         return extracted;
+    }
+
+    public static (string Resource, string File)[] DspLibsFor(string triple)
+        => triple switch
+        {
+            "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll"), ("Lib.dsp.df.x64.dll", "df.x64.dll") },
+            "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll"), ("Lib.dsp.df.x86.dll", "df.x86.dll") },
+            "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so"), ("Lib.dsp.libdf.so", "libdf.so") },
+            "x86_64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib"), ("Lib.dsp.libdf.dylib", "libdf.dylib") },
+            "aarch64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib"), ("Lib.dsp.libdf.dylib", "libdf.dylib") },
+            _ => Array.Empty<(string, string)>(),
+        };
+
+    public static void EnsureDspLibsExtracted(Assembly assembly, string baseDirectory, string triple, string helperPath)
+    {
+        var helperDir = Path.GetDirectoryName(helperPath);
+        if (string.IsNullOrEmpty(helperDir)) return;
+        foreach (var (resource, file) in DspLibsFor(triple))
+        {
+            try
+            {
+                using (var probe = assembly.GetManifestResourceStream(resource))
+                    if (probe == null) continue;
+                var extracted = NativeLibraryCache.Extract(assembly, resource, file, triple, baseDirectory);
+                var beside = Path.Combine(helperDir, file);
+                if (!string.Equals(Path.GetFullPath(extracted), Path.GetFullPath(beside), StringComparison.OrdinalIgnoreCase))
+                    File.Copy(extracted, beside, true);
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("sidecar.dsp", $"extract failed res={resource} err=\"{ex.Message}\"");
+            }
+        }
     }
 
     public static string ExtractMacApp(string zipPath, string triple, string baseDirectory)

@@ -7,6 +7,7 @@ obj/
 .DS_Store
 Libs/*.bak.*
 Libs/pc-capture/
+Libs/dsp/
 PerfectComms.Tests/
 scripts/
 cloudflare/

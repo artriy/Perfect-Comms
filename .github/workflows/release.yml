@@ -96,6 +96,17 @@ jobs:
           cp dl/helper-win-x86/pc-capture-win-x86.exe Libs/pc-capture/
           cp dl/helper-linux-x64/pc-capture-linux-x64 Libs/pc-capture/
           if [ -d dl/helper-mac-signed ]; then cp dl/helper-mac-signed/pc-capture-mac.zip Libs/pc-capture/; else cp dl/helper-mac/pc-capture-mac.zip Libs/pc-capture/; fi
+      - name: Stage DSP libs into Libs
+        run: |
+          mkdir -p Libs/dsp
+          cp dl/apm-win-x64/webrtc-apm.x64.dll Libs/dsp/
+          cp dl/apm-win-x86/webrtc-apm.x86.dll Libs/dsp/
+          cp dl/apm-linux-x64/libwebrtc-apm.so Libs/dsp/
+          cp dl/apm-mac/libwebrtc-apm.dylib Libs/dsp/
+          cp dl/df-win-x64/df.x64.dll Libs/dsp/
+          cp dl/df-win-x86/df.x86.dll Libs/dsp/
+          cp dl/df-linux-x64/libdf.so Libs/dsp/
+          cp dl/df-mac/libdf.dylib Libs/dsp/
       - name: Assemble BepInEx dependency bundle source
         run: bash scripts/fetch-bepinex.sh "${{ runner.temp }}/bepinex-deps"
       - name: Package (Release + dependencies)

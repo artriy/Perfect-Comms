@@ -102,6 +102,33 @@
 		</EmbeddedResource>
 	</ItemGroup>
 
+	<ItemGroup Condition="'$(Configuration)' != 'Android'">
+		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x64.dll" Condition="Exists('Libs\dsp\webrtc-apm.x64.dll')">
+			<LogicalName>Lib.dsp.webrtc-apm.x64.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x86.dll" Condition="Exists('Libs\dsp\webrtc-apm.x86.dll')">
+			<LogicalName>Lib.dsp.webrtc-apm.x86.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.so" Condition="Exists('Libs\dsp\libwebrtc-apm.so')">
+			<LogicalName>Lib.dsp.libwebrtc-apm.so</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.dylib" Condition="Exists('Libs\dsp\libwebrtc-apm.dylib')">
+			<LogicalName>Lib.dsp.libwebrtc-apm.dylib</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\df.x64.dll" Condition="Exists('Libs\dsp\df.x64.dll')">
+			<LogicalName>Lib.dsp.df.x64.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\df.x86.dll" Condition="Exists('Libs\dsp\df.x86.dll')">
+			<LogicalName>Lib.dsp.df.x86.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libdf.so" Condition="Exists('Libs\dsp\libdf.so')">
+			<LogicalName>Lib.dsp.libdf.so</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libdf.dylib" Condition="Exists('Libs\dsp\libdf.dylib')">
+			<LogicalName>Lib.dsp.libdf.dylib</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
 	<Target Name="AssertHelperEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' != 'Android'">
 		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe') And !Exists('Libs\pc-capture\pc-capture-win-x86.exe') And !Exists('Libs\pc-capture\pc-capture-linux-x64') And !Exists('Libs\pc-capture\pc-capture-mac.zip')"
 			Text="No pc-capture helper found in Libs\pc-capture\. Desktop capture/playback is sidecar-only; run scripts/build-helpers.sh (or stage a prebuilt helper) before a non-Android build." />
