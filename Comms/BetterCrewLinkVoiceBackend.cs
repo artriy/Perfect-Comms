@@ -153,10 +153,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private double _txSquareSumSinceStats;
     private int _txSamplesSinceStats;
     private readonly float[] _captureFrameBuffer = new float[AudioHelpers.FrameSize];
-    private readonly float[] _referenceFrame = new float[AudioHelpers.FrameSize];
-    // Far-end reference shared with the playback provider: ~500ms ring, occupancy capped at ~200ms so the
-    // echo-canceller's reference delay can't drift unbounded relative to capture.
-    private readonly FarEndReference _farEndReference = new(AudioHelpers.ClockRate / 2, AudioHelpers.ClockRate / 5);
     private int _captureFrameSamples;
     // Bumped under _captureFrameSync on every capture stop/restart. A BassRecorder callback that was already
     // dispatched before teardown snapshots the epoch on entry and is dropped once it acquires the lock, so a
@@ -206,9 +202,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private CaptureSlot _activeCaptureSlot = CaptureSlot.Bass;
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
-    private SidecarCaptureSource? _sidecarCaptureSource;
-    private Task _sidecarStartTask = Task.CompletedTask;
-    private int _sidecarColdStartRetries;
+    private SidecarVoiceClient? _voice;
+    private Task _voiceStartTask = Task.CompletedTask;
+    private int _voiceColdStartRetries;
+    private readonly object _voiceSync = new();
+    private Thread? _voicePump;
+    private volatile bool _voicePumpRunning;
+    private readonly float[] _playbackBlock = new float[SidecarProtocol.AudioOutSamples];
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
     private bool CaptureUsesUnity => true;
@@ -225,9 +225,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private bool _microphoneReady;
     private volatile bool _speakerReady;
     private BclVoiceMixer? _voiceMixer;
-#if WINDOWS
-    private volatile SidecarStereoOutput? _sidecarOut;
-#endif
     private VoiceCaptureRuntimeOptions _captureOptions;
     private const float DeadInputPeakThreshold = 0.00012f;
     private const float LiveSignalPeakThreshold = 0.005f;
@@ -494,6 +491,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #if WINDOWS
         _muteSinceUtc = mute ? DateTime.UtcNow : DateTime.MinValue;
         _btMuteReleaseRequested = false;
+        if (mute)
+            _voice?.SetMicActive(false);
+        else if (_microphoneReady && !_captureOptions.SyntheticMicToneEnabled)
+            _voice?.SetMicActive(true);
         if (!mute && !_microphoneReady)
             QueueMicrophoneTransition(true, "unmuted");
 #elif ANDROID
@@ -529,13 +530,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var restartCapture = _captureOptions.SyntheticMicToneEnabled != options.SyntheticMicToneEnabled;
         _captureOptions = options;
         _autoMicGain = ReadAutoMicGainSetting();
-        lock (_captureFrameSync)
-        {
-            _micPreprocessor.SetNoiseSuppressionEnabled(options.NoiseSuppressionEnabled);
-            _micPreprocessor.ConfigureApm(options.EchoCancellationEnabled, _autoMicGain);
-        }
 
 #if WINDOWS
+        _voice?.SetDsp(options.EchoCancellationEnabled, _autoMicGain, options.NoiseSuppressionEnabled, true);
         EnsureCaptureSupervisor();
         if (restartCapture && !Mute && _microphoneReady)
             QueueMicrophoneTransition(true, "capture-options");
@@ -574,11 +571,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _micVolume = Mathf.Clamp(volume, 0f, 2f);
 #if WINDOWS
         if (deviceChanged)
-        {
             _btProfileConflict = false;
-            lock (_captureFrameSync)
-                _micPreprocessor.ResetAutoGain();
-        }
         if (Mute)
         {
             QueueMicrophoneTransition(false, "set-muted");
@@ -619,7 +612,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (_activeCaptureSlot == CaptureSlot.Unity)
         {
             StopBassCapture("switch-to-unity");
-            if (_sidecarCaptureSource != null)
+            if (_voice != null)
                 StopSidecarMicrophone("switch-to-unity");
             _mainThreadActions.Enqueue(() =>
             {
@@ -628,7 +621,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             });
             return;
         }
-        if (_sidecarCaptureSource != null)
+        if (_voice != null)
             StopSidecarMicrophone("switch-to-bass");
         if (_androidMicrophone != null)
             _mainThreadActions.Enqueue(() => StopAndroidMicrophone("switch-to-bass"));
@@ -680,17 +673,144 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         QueueMicrophoneTransition(true, "capture-switch");
     }
 
-    private void OnSidecarHeartbeatLost(SidecarCaptureSource source, string reason)
+    private void OnSidecarHeartbeatLost(SidecarVoiceClient voice, string reason)
     {
         _mainThreadActions.Enqueue(() =>
         {
-            if (!ReferenceEquals(_sidecarCaptureSource, source))
+            if (_disposed || !ReferenceEquals(_voice, voice))
                 return;
-            if (Mute || !_microphoneReady || _captureOptions.SyntheticMicToneEnabled || CaptureTransitionInFlight())
+            if (CaptureTransitionInFlight())
                 return;
-            EnsureCaptureSupervisor();
-            _captureSupervisor?.OnHeartbeatLost(reason);
+            VoiceDiagnostics.Log("bcl.voice", $"reason=heartbeat-lost detail={reason} restart=true");
+            StopVoiceSession("heartbeat-lost");
+            EnsureVoiceSession("heartbeat-lost");
         });
+    }
+
+    private void EnsureVoiceSession(string reason)
+    {
+        lock (_voiceSync)
+        {
+            if (_voice != null) return;
+            var voice = new SidecarVoiceClient(LaunchSidecarHelper);
+            voice.OnFrame += ProcessBassMicFrame;
+            voice.OnDead += r => OnSidecarHeartbeatLost(voice, r);
+            _voice = voice;
+            var mic = _lastMicDeviceName;
+            var spk = _lastSpeakerDeviceName;
+            _voiceStartTask = Task.Run(() => RunVoiceStart(voice, mic, spk, reason));
+        }
+    }
+
+    private void RunVoiceStart(SidecarVoiceClient voice, string mic, string spk, string reason)
+    {
+        bool started;
+        try
+        {
+            started = voice.Start(mic, spk);
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("bcl.voice", $"ready=false reason={reason} error=\"{ex.Message}\"");
+            started = false;
+        }
+
+        if (!started || _disposed || !ReferenceEquals(_voice, voice))
+        {
+            try { voice.OnFrame -= ProcessBassMicFrame; } catch { }
+            try { voice.Dispose(); } catch { }
+            lock (_voiceSync)
+                if (ReferenceEquals(_voice, voice)) _voice = null;
+            _speakerReady = false;
+            if (!started)
+            {
+                VoiceDiagnostics.Log("bcl.voice", $"ready=false reason={reason} error=\"sidecar voice start failed\"");
+                if (!_disposed && _voiceColdStartRetries++ < 2)
+                    Task.Run(async () => { try { await Task.Delay(700); if (!_disposed) EnsureVoiceSession("voice-cold-retry"); } catch { } });
+            }
+            return;
+        }
+
+        _voiceColdStartRetries = 0;
+        voice.SetDsp(_captureOptions.EchoCancellationEnabled, _autoMicGain, _captureOptions.NoiseSuppressionEnabled, true);
+        voice.SetMicActive(!Mute && _microphoneReady && !_captureOptions.SyntheticMicToneEnabled);
+        _speakerReady = true;
+        if (voice.OutputDevices.Count > 0)
+            VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(voice.OutputDevices);
+        StartVoicePump();
+        Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
+        VoiceDiagnostics.Log("bcl.voice", $"ready=true reason={reason} mic=\"{mic}\" spk=\"{spk}\" outputs={voice.OutputDevices.Count}");
+    }
+
+    private void StopVoiceSession(string reason)
+    {
+        StopVoicePump();
+        SidecarVoiceClient? voice;
+        Task startTask;
+        lock (_voiceSync)
+        {
+            voice = _voice;
+            _voice = null;
+            startTask = _voiceStartTask;
+        }
+        if (voice != null)
+            try { voice.OnFrame -= ProcessBassMicFrame; } catch { }
+        Task.Run(() =>
+        {
+            try { voice?.Dispose(); } catch { }
+            try { startTask?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+        });
+        _speakerReady = false;
+        VoiceDiagnostics.Log("bcl.voice", $"stopped reason={reason}");
+    }
+
+    private void StartVoicePump()
+    {
+        lock (_voiceSync)
+        {
+            if (_voicePumpRunning) return;
+            _voicePumpRunning = true;
+            _voicePump = new Thread(VoicePumpLoop) { IsBackground = true, Name = "SidecarVoicePump" };
+            _voicePump.Start();
+        }
+    }
+
+    private void StopVoicePump()
+    {
+        Thread? pump;
+        lock (_voiceSync)
+        {
+            _voicePumpRunning = false;
+            pump = _voicePump;
+            _voicePump = null;
+        }
+        if (pump != null && pump != Thread.CurrentThread)
+            try { pump.Join(1000); } catch { }
+    }
+
+    private void VoicePumpLoop()
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long nextMs = 0;
+        const int frameMs = 20;
+        while (_voicePumpRunning)
+        {
+            var voice = _voice;
+            if (voice == null) break;
+            try
+            {
+                var mixer = _voiceMixer;
+                if (mixer != null) mixer.Read(_playbackBlock);
+                else Array.Clear(_playbackBlock, 0, _playbackBlock.Length);
+            }
+            catch { Array.Clear(_playbackBlock, 0, _playbackBlock.Length); }
+            voice.SendPlayback(_playbackBlock);
+
+            nextMs += frameMs;
+            var sleep = nextMs - sw.ElapsedMilliseconds;
+            if (sleep > 1) Thread.Sleep((int)sleep);
+            else if (sleep < -200) nextMs = sw.ElapsedMilliseconds;
+        }
     }
 
     private void FeedCaptureSupervisor(int micWindowSamples)
@@ -758,9 +878,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void StopMicrophoneWorkerForDispose()
     {
-        if (_sidecarCaptureSource != null)
+        if (_voice != null)
         {
-            StopSidecarMicrophone("dispose");
+            StopVoiceSession("dispose");
             return;
         }
         if (_activeCaptureSlot == CaptureSlot.Unity || _androidMicrophone != null)
@@ -805,11 +925,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
 
             _microphoneReady = true;
-            // Start capturing the playback reference (and drop any stale adaptation) only for a real mic; the
-            // synthetic tone is never echo-cancelled.
-            _farEndReference.Reset();
-            _farEndReference.Enabled = !_captureOptions.SyntheticMicToneEnabled;
-            _micPreprocessor.ResetEchoCancellation();
             Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
             VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture={captureKind} device=\"{_lastMicDeviceName}\" captureDevice=\"{captureDevice}\" captureFormat=\"48000Hz/float/mono\" syntheticTone={_captureOptions.SyntheticMicToneEnabled} volume={_micVolume:0.00}");
         }
@@ -823,7 +938,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private void StopMicrophone(string reason)
     {
         StopSyntheticMicTone();
-        _farEndReference.Enabled = false;
         var hadMic = _microphoneReady;
         _microphoneReady = false;
         if (hadMic)
@@ -851,23 +965,27 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         try
         {
-            StopSidecarMicrophone($"restart:{reason}");
-            if (reason != "sidecar-cold-retry") _sidecarColdStartRetries = 0;
+            StopSyntheticMicTone();
             if (_captureOptions.SyntheticMicToneEnabled)
             {
                 StartSyntheticMicTone(reason);
                 _microphoneReady = true;
+                EnsureVoiceSession(reason);
+                _voice?.SetMicActive(false);
                 VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture=synthetic device=\"{_lastMicDeviceName}\" syntheticTone=true volume={_micVolume:0.00}");
                 return;
             }
 
-            var source = new SidecarCaptureSource(LaunchSidecarHelper);
-            source.OnFrame += ProcessBassMicFrame;
-            source.OnDead += reason => OnSidecarHeartbeatLost(source, reason);
-            _sidecarCaptureSource = source;
-            var device = _lastMicDeviceName;
-            lock (_captureWorkerSync)
-                _sidecarStartTask = Task.Run(() => RunSidecarStart(source, device, reason));
+            _microphoneReady = true;
+            EnsureVoiceSession(reason);
+            var voice = _voice;
+            if (voice != null)
+            {
+                voice.SelectMicDevice(_lastMicDeviceName);
+                voice.SetMicActive(true);
+            }
+            Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
+            VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture=sidecar device=\"{_lastMicDeviceName}\" captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00}");
         }
         catch (Exception ex)
         {
@@ -876,62 +994,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
     }
 
-    private void RunSidecarStart(SidecarCaptureSource source, string device, string reason)
-    {
-        bool started;
-        try
-        {
-            started = source.Start(device);
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{device}\" error=\"{ex.Message}\"");
-            started = false;
-        }
-
-        if (!started || _disposed || !ReferenceEquals(_sidecarCaptureSource, source))
-        {
-            try { source.OnFrame -= ProcessBassMicFrame; } catch { }
-            try { source.Dispose(); } catch { }
-            if (ReferenceEquals(_sidecarCaptureSource, source))
-            {
-                _sidecarCaptureSource = null;
-                _microphoneReady = false;
-            }
-            if (!started)
-            {
-                VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{device}\" error=\"sidecar capture start failed\"");
-                if (!_disposed && _sidecarColdStartRetries++ < 2)
-                    Task.Run(async () => { try { await Task.Delay(700); if (!_disposed) QueueMicrophoneTransition(true, "sidecar-cold-retry"); } catch { } });
-            }
-            return;
-        }
-
-        _sidecarColdStartRetries = 0;
-        _microphoneReady = true;
-        _farEndReference.Reset();
-        _farEndReference.Enabled = true;
-        _micPreprocessor.ResetEchoCancellation();
-        Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
-        VoiceDiagnostics.Log("bcl.mic", $"ready=true reason={reason} capture=sidecar device=\"{device}\" captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00}");
-    }
-
     private void StopSidecarMicrophone(string reason)
     {
         StopSyntheticMicTone();
-        _farEndReference.Enabled = false;
-        var source = _sidecarCaptureSource;
-        var hadMic = source != null || _microphoneReady;
-        _sidecarCaptureSource = null;
-        if (source != null)
-            try { source.OnFrame -= ProcessBassMicFrame; } catch { }
-        Task startTask;
-        lock (_captureWorkerSync) startTask = _sidecarStartTask;
-        Task.Run(() =>
-        {
-            try { source?.Dispose(); } catch { }
-            try { startTask?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
-        });
+        _voice?.SetMicActive(false);
+        var hadMic = _microphoneReady;
         _microphoneReady = false;
         lock (_captureFrameSync)
         {
@@ -1199,59 +1266,29 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         try { _androidSpeaker?.Dispose(); } catch { }
         _androidSpeaker = null;
-        _sidecarOut?.Dispose();
         var mixer = _voiceMixer ?? new BclVoiceMixer();
         _voiceMixer = mixer;
         mixer.SetMasterVolume(_masterVolume);
-        _farEndReference.Reset();
         lock (_peerSync)
             foreach (var peer in _peersBySocket.Values)
                 peer.SetMixer(mixer);
-        var output = new SidecarStereoOutput(LaunchSidecarHelper, block =>
+        var voice = _voice;
+        if (voice != null)
         {
-            mixer.Read(block);
-            FeedFarEndReference(block);
-        });
-        _sidecarOut = output;
-        Task.Run(() =>
+            voice.SelectOutputDevice(deviceName);
+            StartVoicePump();
+            _speakerReady = true;
+            VoiceDiagnostics.Log("bcl.speaker", $"ready=true device=\"{deviceName}\" backend=sidecar reused=true");
+        }
+        else
         {
-            if (!ReferenceEquals(_sidecarOut, output))
-            {
-                output.Dispose();
-                return;
-            }
-            var ok = output.Start(deviceName);
-            if (!ReferenceEquals(_sidecarOut, output))
-            {
-                output.Dispose();
-                return;
-            }
-            _speakerReady = ok;
-            if (ok && output.OutputDevices.Count > 0)
-                VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(output.OutputDevices);
-            VoiceDiagnostics.Log("bcl.speaker", $"ready={ok} device=\"{deviceName}\" backend=sidecar");
-        });
+            EnsureVoiceSession("speaker");
+            VoiceDiagnostics.Log("bcl.speaker", $"ready=pending device=\"{deviceName}\" backend=sidecar");
+        }
     }
 #endif
 
 #if WINDOWS
-    private float[] _farEndLeft = Array.Empty<float>();
-    private float[] _farEndRight = Array.Empty<float>();
-
-    private void FeedFarEndReference(float[] interleavedStereo)
-    {
-        if (!_captureOptions.EchoCancellationEnabled) return;
-        int frames = interleavedStereo.Length / 2;
-        if (frames <= 0) return;
-        if (_farEndLeft.Length < frames) { _farEndLeft = new float[frames]; _farEndRight = new float[frames]; }
-        for (int i = 0; i < frames; i++)
-        {
-            _farEndLeft[i] = interleavedStereo[2 * i];
-            _farEndRight[i] = interleavedStereo[2 * i + 1];
-        }
-        _farEndReference.WriteStereoDownmix(_farEndLeft, frames, _farEndRight, frames, frames);
-    }
-
     private void MaybeReleaseBluetoothMutedMicrophone()
     {
         if (!Mute || !_microphoneReady || !_btProfileConflict || _btMuteReleaseRequested) return;
@@ -1525,8 +1562,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _sendPacer.Dispose();
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
-        try { _sidecarOut?.Dispose(); } catch { }
-        _sidecarOut = null;
+        StopVoiceSession("dispose");
         try { _androidSpeaker?.Dispose(); } catch { }
         _androidSpeaker = null;
         _voiceMixer = null;
@@ -3437,23 +3473,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         var rawCapturePeak = AudioHelpers.MeasurePeak(floatPcm, samples);
 
-        bool hasReference = !IsSyntheticSource(source) && _micPreprocessor.ApmReady
-            && _farEndReference.TryReadAligned(_referenceFrame, samples);
-        bool apmRan = !IsSyntheticSource(source)
-            && _micPreprocessor.RunApmCapture(floatPcm, samples, _referenceFrame, hasReference, BclPlaybackLatencyMs);
-
         float agcGain = 1f;
-        float preSuppressionPeak;
-        if (apmRan)
-        {
-            preSuppressionPeak = AudioHelpers.MeasurePeak(floatPcm, samples);
-        }
-        else
-        {
-            if (!IsSyntheticSource(source))
-                _micPreprocessor.ApplyHighPass(floatPcm, samples);
-            agcGain = _micPreprocessor.ApplyAutoGain(floatPcm, samples, _autoMicGain && !IsSyntheticSource(source), out preSuppressionPeak);
-        }
+        float preSuppressionPeak = rawCapturePeak;
 
         var preSuppressionGuardGain = AudioHelpers.GetCaptureEncodeLimiterGain(preSuppressionPeak);
         if (preSuppressionGuardGain < 1f)
@@ -3464,9 +3485,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         if (!IsSyntheticSource(source))
             TrackCaptureHealthLocked(rawCapturePeak);
-
-        if (captureOptions.NoiseSuppressionEnabled && !IsSyntheticSource(source) && !CaptureUsesUnity)
-            _micPreprocessor.TryApplyNoiseSuppression(floatPcm, samples);
 
         var transmitGain = _micPreprocessor.LimitFramePeakForEncode(floatPcm, samples);
         var max = 0f;
@@ -3815,7 +3833,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #if ANDROID
         return "android-unity-microphone";
 #elif WINDOWS
-        if (_sidecarCaptureSource != null) return "sidecar";
+        if (_voice != null) return "sidecar";
         return _androidMicrophone != null ? "unity-microphone" : "bass";
 #else
         return "bass";

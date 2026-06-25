@@ -1,11 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
+internal sealed class SidecarVoiceClient : IDisposable
 {
     public const int Proto = 3;
     private const int HandshakeTimeoutMs = 4000;
@@ -13,12 +14,14 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
 
     private readonly Func<string, string, SidecarLaunchResult> _launch;
     private readonly object _gate = new();
+    private readonly object _writeLock = new();
     private TcpClient? _client;
     private NetworkStream? _stream;
     private SidecarLaunchResult? _launchResult;
     private int _health = (int)CaptureHealth.Dead;
     private volatile bool _running;
     private readonly float[] _frameScratch = new float[SidecarProtocol.AudioSamples];
+    private string[] _outputDevices = Array.Empty<string>();
     private Thread? _reader;
     internal int PingIntervalMs = 1000;
     internal int MissedPongLimit = 3;
@@ -30,13 +33,14 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
     public event Action<string>? OnDead;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
+    public IReadOnlyList<string> OutputDevices => _outputDevices;
 
-    public SidecarCaptureSource(Func<string, string, SidecarLaunchResult> launch)
+    public SidecarVoiceClient(Func<string, string, SidecarLaunchResult> launch)
     {
         _launch = launch;
     }
 
-    public bool Start(string? deviceId)
+    public bool Start(string? micDevice, string? spkDevice)
     {
         Stop();
         _running = false;
@@ -45,7 +49,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         SidecarLaunchResult launch;
         try
         {
-            launch = _launch(token, deviceId ?? "");
+            launch = _launch(token, micDevice ?? "");
         }
         catch (Exception ex)
         {
@@ -85,7 +89,7 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             stream.Write(hello, 0, hello.Length);
             stream.Flush();
 
-            if (!ReadReady(stream, out var error))
+            if (!ReadReady(stream, out var outputDevices, out var error))
             {
                 VoiceDiagnostics.Log("sidecar", "handshake failed: " + error);
                 try { client.Close(); } catch { }
@@ -93,11 +97,19 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
                 SetHealth(CaptureHealth.Dead);
                 return false;
             }
+            _outputDevices = outputDevices;
 
-            if (!string.IsNullOrEmpty(deviceId))
+            if (!string.IsNullOrEmpty(micDevice))
             {
-                var sel = SidecarProtocol.SelectDeviceFrame(deviceId!);
+                var sel = SidecarProtocol.SelectDeviceFrame(micDevice!);
                 stream.Write(sel, 0, sel.Length);
+                stream.Flush();
+            }
+
+            if (!string.IsNullOrEmpty(spkDevice))
+            {
+                var selOut = SidecarProtocol.SelectOutputDeviceFrame(spkDevice!);
+                stream.Write(selOut, 0, selOut.Length);
                 stream.Flush();
             }
 
@@ -114,8 +126,8 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             return false;
         }
 
-        var reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarCaptureReader" };
-        var heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarCaptureHeartbeat" };
+        var reader = new Thread(ReadLoop) { IsBackground = true, Name = "SidecarVoiceReader" };
+        var heartbeat = new Thread(HeartbeatLoop) { IsBackground = true, Name = "SidecarVoiceHeartbeat" };
         lock (_gate)
         {
             if (Volatile.Read(ref _startGeneration) != generation)
@@ -138,8 +150,62 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         return true;
     }
 
-    private bool ReadReady(NetworkStream stream, out string error)
+    private void Write(byte[] frame)
     {
+        NetworkStream? s;
+        lock (_gate) { s = _stream; }
+        if (s == null) throw new System.IO.IOException("sidecar stream closed");
+        lock (_writeLock)
+        {
+            s.Write(frame, 0, frame.Length);
+            s.Flush();
+        }
+    }
+
+    public void SendPlayback(float[] stereoBlock)
+    {
+        if (!_running) return;
+        try
+        {
+            Write(SidecarProtocol.EncodeAudioOut(stereoBlock, stereoBlock.Length));
+        }
+        catch
+        {
+            RaiseDead("playback write failed");
+        }
+    }
+
+    public void SetDsp(bool aec, bool agc, bool ns, bool hpf)
+    {
+        if (!_running) return;
+        try { Write(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-dsp write failed: " + ex.Message); }
+    }
+
+    public void SetMicActive(bool active)
+    {
+        if (!_running) return;
+        try { Write(active ? SidecarProtocol.StartFrame() : SidecarProtocol.StopFrame()); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-mic-active write failed: " + ex.Message); }
+    }
+
+    public void SelectMicDevice(string deviceId)
+    {
+        if (!_running || string.IsNullOrEmpty(deviceId)) return;
+        try { Write(SidecarProtocol.SelectDeviceFrame(deviceId)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-device write failed: " + ex.Message); }
+    }
+
+    public void SelectOutputDevice(string deviceId)
+    {
+        if (!_running || string.IsNullOrEmpty(deviceId)) return;
+        try { Write(SidecarProtocol.SelectOutputDeviceFrame(deviceId)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-output-device write failed: " + ex.Message); }
+    }
+
+    private bool ReadReady(NetworkStream stream, out string[] outputDevices, out string error)
+    {
+        outputDevices = Array.Empty<string>();
         error = "";
         var buffer = new byte[8192];
         var have = 0;
@@ -175,6 +241,8 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
                 }
                 if (proto != Proto) { error = $"proto mismatch helper={proto} mod={Proto}"; return false; }
                 if (rate != 48000 || sample != "f32") { error = $"format mismatch rate={rate} sample={sample}"; return false; }
+                if (SidecarProtocol.TryReadOutputDevices(json, out var devs))
+                    outputDevices = devs.ToArray();
                 return true;
             }
         }
@@ -206,8 +274,11 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
             try
             {
                 var stop = SidecarProtocol.StopFrame();
-                stream.Write(stop, 0, stop.Length);
-                stream.Flush();
+                lock (_writeLock)
+                {
+                    stream.Write(stop, 0, stop.Length);
+                    stream.Flush();
+                }
             }
             catch { }
         }
@@ -307,13 +378,9 @@ internal sealed class SidecarCaptureSource : ICaptureSource, IDisposable
         {
             Thread.Sleep(PingIntervalMs);
             if (!_running) break;
-            NetworkStream? stream;
-            lock (_gate) { stream = _stream; }
-            if (stream == null) break;
             try
             {
-                stream.Write(ping, 0, ping.Length);
-                stream.Flush();
+                Write(ping);
             }
             catch
             {
