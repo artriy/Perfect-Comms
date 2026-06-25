@@ -13,5 +13,6 @@ cloudflare/
 TouMira/
 artifacts/
 build-apm-*/
+build-df-*/
 PerfectComms.sln
 .superpowers/
