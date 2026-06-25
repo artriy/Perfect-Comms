@@ -73,18 +73,6 @@
 		<EmbeddedResource Include="Libs\opus.x86.dll">
 			<LogicalName>Lib.opus.x86.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\df.x64.dll">
-			<LogicalName>Lib.df.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\df.x86.dll">
-			<LogicalName>Lib.df.x86.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\webrtc-apm.x64.dll">
-			<LogicalName>Lib.webrtc-apm.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\webrtc-apm.x86.dll">
-			<LogicalName>Lib.webrtc-apm.x86.dll</LogicalName>
-		</EmbeddedResource>
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' != 'Android'">

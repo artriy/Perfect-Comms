@@ -33,7 +33,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private const float SyntheticToneAmplitude = 0.012f;
     private static readonly TimeSpan RemoteActivityHold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MicCalibrationLogInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan RnNoiseStatsLogInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan BclQuietTailFlushDelay = TimeSpan.FromMilliseconds(30);
     private static readonly TimeSpan BclQuietTailFlushTimerDelay = BclQuietTailFlushDelay + TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan SignalRejectLogInterval = TimeSpan.FromSeconds(5);
@@ -260,7 +259,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private double _syntheticTonePhase;
     private int _syntheticFrames;
     private DateTime _lastMicCalibrationLogUtc = DateTime.MinValue;
-    private DateTime _lastRnNoiseStatsLogUtc = DateTime.MinValue;
     private string _lastGateReason = "none";
     private float _lastGatePeak;
     private float _lastGateRms;
@@ -3797,11 +3795,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var micZeroCrossRate = micWindowSamples <= 1 ? 0f : micZeroCrossings / (float)(micWindowSamples - 1);
         var micCrest = micRms <= 0.0 ? 0.0 : micPeak / micRms;
         var opusAvgBytes = opusFrames == 0 ? 0.0 : opusBytes / (double)opusFrames;
-        var rnnoise = _micPreprocessor.ConsumeNoiseSuppressionDiagnostics();
-        var rnnoiseSummary =
-            $"enabled={_captureOptions.NoiseSuppressionEnabled} rnnoiseState={rnnoise.State} rnnoiseAttempts={rnnoise.Attempts} rnnoiseFrames={rnnoise.ProcessedFrames} rnnoiseUnavailable={rnnoise.UnavailableFrames} rnnoiseSamples={rnnoise.Samples} " +
-            $"rnnoiseInputPeak={rnnoise.InputPeak:0.000000} rnnoiseInputRms={rnnoise.InputRms:0.000000} rnnoiseOutputPeak={rnnoise.OutputPeak:0.000000} rnnoiseOutputRms={rnnoise.OutputRms:0.000000} rnnoiseSpeechMax={rnnoise.SpeechProbabilityMax:0.000} " +
-            $"rnnoiseFrameSize={rnnoise.FrameSize} rnnoiseNativePath=\"{DiagnosticSafe(rnnoise.NativePath)}\" rnnoiseLastError=\"{DiagnosticSafe(rnnoise.LastError)}\"";
         VoiceDiagnostics.Log("bcl.stats",
             $"reason={reason} room={RoomCode} region={Region} endpoint={ServerUrl} phase={snapshot?.Phase.ToString() ?? "none"} socketConnected={_socket?.Connected == true} socketId={_socket?.Id ?? "none"} " +
             $"peers={peers.Length} openChannels={openChannels} peerTransport={peerTransport} localSocket={GetEffectiveLocalSocketId()} joinedClient={_joinedClientId} joinInFlight={Volatile.Read(ref _joinInFlight)} joinRetryAgeMs={(DateTime.UtcNow - _lastJoinAttemptUtc).TotalMilliseconds:0} audible={peers.Count(peer => peer.CurrentRoute.Audible)} speaking={peers.Count(peer => peer.IsSpeaking)} " +
@@ -3811,21 +3804,12 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             $"micCallbacks={Volatile.Read(ref _micCallbacks)} micBytes={Volatile.Read(ref _micBytes)} micSamples={Volatile.Read(ref _micSamples)} micWindowSamples={micWindowSamples} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micCrest={micCrest:0.00} micNonZeroSamples={micNonZeroSamples} micSilentCallbacks={micSilentCallbacks} micNearClipSamples={micNearClipSamples} micClipPct={micClipPct:0.000} micZeroCrossRate={micZeroCrossRate:0.0000} " +
             $"micMutedDrops={Volatile.Read(ref _micMutedDrops)} micEncodeFailures={Volatile.Read(ref _micEncodeFailures)} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} micNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} audioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} txPeak={_lastTransmitPeak:0.000000} txPeakMax={txPeakMax:0.000000} txRms={txRms:0.000000} txSamples={txSamples} opusBytesAvg={opusAvgBytes:0.0} opusBytesMin={opusMinBytes} opusBytesMax={opusMaxBytes} " +
-            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} {rnnoiseSummary} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
+            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
         if (CaptureUsesUnity)
             VoiceDiagnostics.Log("bcl.unity",
                 $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} encodedTx={Volatile.Read(ref _encodedTx)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady} speakerPlaying={_androidSpeaker?.IsPlaying} speakerReads={_androidSpeaker?.ReadCallbacks ?? 0}");
         VoiceDiagnostics.Log("bcl.playout", _voiceMixer?.FormatPlayoutDiagnostics() ?? "no-mixer");
-        if ((_captureOptions.NoiseSuppressionEnabled || rnnoise.Attempts > 0 || rnnoise.UnavailableFrames > 0)
-            && now - _lastRnNoiseStatsLogUtc >= RnNoiseStatsLogInterval)
-        {
-            _lastRnNoiseStatsLogUtc = now;
-            LogNoiseSuppressionStats(rnnoiseSummary);
-        }
     }
-
-    private static void LogNoiseSuppressionStats(string message)
-        => VoiceDiagnostics.Log("bcl.rnnoise.stats", message);
 
     private string DescribeCaptureMode()
     {
