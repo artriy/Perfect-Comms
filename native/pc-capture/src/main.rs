@@ -1,4 +1,5 @@
 mod audio;
+mod dsp;
 mod ipc;
 mod proto;
 

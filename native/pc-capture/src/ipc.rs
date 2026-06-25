@@ -219,6 +219,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         &encode_control(&ready_json(&devices, &output_devices)),
     )?;
 
+    let dsp = Arc::new(Mutex::new(crate::dsp::Dsp::new(crate::dsp::DspConfig::default())));
+
     let playback = Arc::new(Mutex::new(PlaybackRing::new(8 * proto::AUDIO_OUT_FRAMES)));
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -233,6 +235,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_ring = ring.clone();
     let writer_stop = stop.clone();
     let writer_conn = conn.clone();
+    let writer_dsp = dsp.clone();
     let writer_handle = std::thread::spawn(move || {
         let mut since_level = 0u32;
         let mut last_dropped = 0u64;
@@ -242,7 +245,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 (ring.pop(), ring.dropped())
             };
             match frame {
-                Some(f) => {
+                Some(mut f) => {
+                    writer_dsp.lock().unwrap().capture(&mut f.samples);
                     let pk = peak(&f.samples);
                     if write_frame(&writer_conn, &encode_audio(&f)).is_err() {
                         break;
@@ -271,6 +275,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         match frame {
             Frame::AudioOut(f) => {
                 playback.lock().unwrap().push(&f.samples);
+                dsp.lock().unwrap().far_end(&f.samples);
                 let mut guard = out_thread.lock().unwrap();
                 if guard.as_ref().map_or(false, |h| h.is_finished()) {
                     if let Some(h) = guard.take() {
