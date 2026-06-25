@@ -324,9 +324,32 @@ jobs:
         run: bash scripts/build-df.sh mac
       - name: Smoke mac (df-sys load + process a frame)
         run: |
-          DF_LIB="$PWD/artifacts/df/libdf.dylib" \
-            cargo test --manifest-path native/df-sys/Cargo.toml --release \
-            -- --ignored loads_and_processes_a_frame
+          set -euo pipefail
+          export DF_LIB="$PWD/artifacts/df/libdf.dylib"
+          echo "uname: $(uname -m)"
+          sysctl -n machdep.cpu.brand_string || true
+          file "$DF_LIB"
+          lipo -info "$DF_LIB" || true
+          otool -L "$DF_LIB" || true
+          cargo test --manifest-path native/df-sys/Cargo.toml --release --no-run
+          bin="$(find native/df-sys/target/release/deps -maxdepth 1 -type f -name 'df_sys-*' ! -name '*.d' | xargs ls -t | head -1)"
+          echo "test bin: $bin"
+          set +e
+          "$bin" --ignored --nocapture loads_and_processes_a_frame
+          code=$?
+          set -e
+          echo "test exit code: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "=== lldb crash capture ==="
+            lldb -b \
+              -o run \
+              -o 'thread backtrace all' \
+              -o 'register read pc' \
+              -o 'disassemble --pc' \
+              -o 'quit' \
+              -- "$bin" --ignored --nocapture loads_and_processes_a_frame || true
+            exit "$code"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: df-mac
