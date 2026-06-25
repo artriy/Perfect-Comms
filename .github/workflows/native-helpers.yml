@@ -2,11 +2,14 @@ name: Native helpers
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/dsp-in-helper]
     tags: ["v*"]
   pull_request:
     paths:
       - "native/pc-capture/**"
+      - "native/apm-sys/**"
+      - "native/third_party/webrtc-audio-processing/**"
+      - "scripts/build-apm.sh"
       - ".github/workflows/native-helpers.yml"
   workflow_dispatch:
   workflow_call:
@@ -105,3 +108,115 @@ jobs:
             chmod +x "dl/${{ matrix.bin }}" || true
             bash scripts/ci-smoke-helper.sh "dl/${{ matrix.bin }}"
           fi
+
+  # ---- webrtc-audio-processing DSP shared library (apm-sys gate) ----
+  # Build the vendored C++ APM as a SHARED lib that exports the webrtc_apm_* C
+  # ABI, then prove apm-sys (libloading) can load it and process a frame.
+  # The two Windows DLLs are cross-built on Linux with the mingw toolchains the
+  # crossfiles reference (same approach as Libs/df-build.md), then loaded on a
+  # real Windows runner. i686 (32-bit Windows) is the go/no-go gate.
+  apm-build-linux:
+    runs-on: ubuntu-latest
+    container: rust:1-bullseye
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Toolchains (meson, ninja, mingw cross)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config ninja-build python3 python3-pip \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+          # webrtc/abseil need std::thread -> force the POSIX mingw runtime
+          update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-posix || true
+          update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-posix || true
+          update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix || true
+          update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix || true
+          pip3 install meson || pip3 install --break-system-packages meson
+      - name: Build linux-x64 (.so)
+        run: bash scripts/build-apm.sh linux-x64
+      - name: Smoke linux-x64 (apm-sys load + process a frame)
+        run: |
+          APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.so" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+      - name: Build win-x64 (.dll, x86_64-w64-mingw32)
+        run: bash scripts/build-apm.sh win-x64
+      - name: Build win-x86 (.dll, i686-w64-mingw32) [GATE]
+        run: bash scripts/build-apm.sh win-x86
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-linux-x64
+          path: artifacts/apm/libwebrtc-apm.so
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-win-x64
+          path: artifacts/apm/webrtc-apm.x64.dll
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-win-x86
+          path: artifacts/apm/webrtc-apm.x86.dll
+          if-no-files-found: error
+
+  apm-smoke-win-x64:
+    needs: apm-build-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-win-x64
+          path: dl
+      - name: Smoke win-x64 (apm-sys load + process a frame)
+        shell: bash
+        run: |
+          APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x64.dll" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+
+  apm-smoke-win-x86:
+    needs: apm-build-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-win-x86
+          path: dl
+      - name: Smoke win-x86 (32-bit process loads 32-bit DLL) [GATE]
+        shell: bash
+        run: |
+          APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x86.dll" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            --target i686-pc-windows-msvc \
+            -- --ignored loads_and_processes_a_frame
+
+  apm-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: meson + ninja
+        run: brew install meson ninja
+      - name: Build mac (.dylib)
+        run: bash scripts/build-apm.sh mac
+      - name: Smoke mac (apm-sys load + process a frame)
+        run: |
+          APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.dylib" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-mac
+          path: artifacts/apm/libwebrtc-apm.dylib
+          if-no-files-found: error

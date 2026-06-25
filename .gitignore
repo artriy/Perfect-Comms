@@ -12,5 +12,6 @@ scripts/
 cloudflare/
 TouMira/
 artifacts/
+build-apm-*/
 PerfectComms.sln
 .superpowers/
