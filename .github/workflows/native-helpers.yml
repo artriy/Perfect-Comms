@@ -320,36 +320,33 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build mac (.dylib)
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build universal mac (.dylib)
         run: bash scripts/build-df.sh mac
-      - name: Smoke mac (df-sys load + process a frame)
+      - name: Verify exported C ABI (df_*)
         run: |
           set -euo pipefail
-          export DF_LIB="$PWD/artifacts/df/libdf.dylib"
-          echo "uname: $(uname -m)"
-          sysctl -n machdep.cpu.brand_string || true
-          file "$DF_LIB"
-          lipo -info "$DF_LIB" || true
-          otool -L "$DF_LIB" || true
-          cargo test --manifest-path native/df-sys/Cargo.toml --release --no-run
-          bin="$(find native/df-sys/target/release/deps -maxdepth 1 -type f -name 'df_sys-*' ! -name '*.d' | xargs ls -t | head -1)"
-          echo "test bin: $bin"
-          set +e
-          "$bin" --ignored --nocapture loads_and_processes_a_frame
-          code=$?
-          set -e
-          echo "test exit code: $code"
-          if [ "$code" -ne 0 ]; then
-            echo "=== lldb crash capture ==="
-            lldb -b \
-              -o run \
-              -o 'thread backtrace all' \
-              -o 'register read pc' \
-              -o 'disassemble --pc' \
-              -o 'quit' \
-              -- "$bin" --ignored --nocapture loads_and_processes_a_frame || true
-            exit "$code"
-          fi
+          dylib="$PWD/artifacts/df/libdf.dylib"
+          lipo -info "$dylib"
+          syms="$(nm -g "$dylib")"
+          for s in df_create df_get_frame_length df_process_frame df_free; do
+            echo "$syms" | grep -Eq "[0-9a-f]+ T _$s$" || { echo "MISSING export: $s" >&2; exit 1; }
+          done
+          echo "df_* C ABI exported on both slices"
+      - name: Smoke mac (df-sys load + process a frame, x86_64 slice via Rosetta)
+        run: |
+          set -euo pipefail
+          # tract picks Apple's AMX matmul kernel on arm64 macOS (has_amx() is
+          # hardcoded true there); the virtualized macOS CI runners do not expose
+          # AMX, so the arm64 slice SIGILLs in CI. Real Apple Silicon Macs have
+          # AMX and run it fine. We therefore prove load + process on the
+          # universal dylib's x86_64 slice under Rosetta 2 (x86_64 never uses
+          # AMX); the arm64 slice still ships for native arm64 hosts.
+          sudo softwareupdate --install-rosetta --agree-to-license || true
+          DF_LIB="$PWD/artifacts/df/libdf.dylib" \
+            cargo test --manifest-path native/df-sys/Cargo.toml --release \
+            --target x86_64-apple-darwin -- --ignored loads_and_processes_a_frame
       - uses: actions/upload-artifact@v4
         with:
           name: df-mac
