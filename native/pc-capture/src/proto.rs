@@ -216,6 +216,13 @@ pub enum InboundOp {
     Ping,
     #[serde(rename = "select-output-device")]
     SelectOutputDevice { id: String },
+    #[serde(rename = "set-dsp")]
+    SetDsp {
+        aec: bool,
+        agc: bool,
+        ns: bool,
+        hpf: bool,
+    },
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
@@ -330,6 +337,21 @@ mod tests {
         assert_eq!(TYPE_AUDIO, 0x02);
         assert_eq!(TYPE_AUDIO_OUT, 0x03);
         assert_eq!(AUDIO_OUT_BYTES, 1920 * 4);
+    }
+
+    #[test]
+    fn parse_set_dsp() {
+        let op = parse_inbound(r#"{"op":"set-dsp","aec":true,"agc":false,"ns":true,"hpf":false}"#)
+            .unwrap();
+        match op {
+            InboundOp::SetDsp { aec, agc, ns, hpf } => {
+                assert!(aec);
+                assert!(!agc);
+                assert!(ns);
+                assert!(!hpf);
+            }
+            other => panic!("expected set-dsp, got {other:?}"),
+        }
     }
 
     #[test]

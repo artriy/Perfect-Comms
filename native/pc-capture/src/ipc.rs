@@ -359,6 +359,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             h.join().ok();
                         }
                     }
+                    InboundOp::SetDsp { aec, agc, ns, hpf } => {
+                        dsp.lock()
+                            .unwrap()
+                            .set(crate::dsp::DspConfig { aec, agc, ns, hpf });
+                    }
                     InboundOp::Ping => {
                         let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
                     }

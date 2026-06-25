@@ -94,6 +94,35 @@ impl Dsp {
         }
     }
 
+    pub fn set(&mut self, cfg: DspConfig) {
+        if cfg.aec || cfg.agc || cfg.hpf {
+            if let Some(apm) = self.apm.as_mut() {
+                if let Err(e) = apm.set_config(cfg.aec, cfg.agc, cfg.hpf) {
+                    eprintln!("pc-capture: apm reconfigure failed, reloading: {e}");
+                    self.apm = load_apm(&cfg);
+                }
+            } else {
+                self.apm = load_apm(&cfg);
+            }
+        } else {
+            self.apm = None;
+        }
+
+        if cfg.ns {
+            if self.ns.is_none() {
+                self.ns = load_ns(&cfg);
+            }
+        } else {
+            self.ns = None;
+        }
+
+        eprintln!(
+            "pc-capture: dsp set aec/agc/hpf={} ns={}",
+            self.apm.is_some(),
+            self.ns.is_some()
+        );
+    }
+
     pub fn far_end(&mut self, stereo: &[f32]) {
         let apm = match self.apm.as_mut() {
             Some(a) => a,
