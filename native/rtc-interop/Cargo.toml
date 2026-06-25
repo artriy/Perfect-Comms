@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 webrtc = "0.11"
 tokio = { version = "1", features = ["full"] }
-audiopus = "0.2"
 serde_json = "1"
 anyhow = "1"
 bytes = "1"

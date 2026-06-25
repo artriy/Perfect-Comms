@@ -31,40 +31,10 @@ fn opus_capability() -> RTCRtpCodecCapability {
     }
 }
 
-fn encode_tone_frame() -> Bytes {
-    let frame = 960usize;
-    let mut pcm = vec![0i16; frame * 2];
-    let freq = 440.0f32;
-    for i in 0..frame {
-        let s = ((i as f32) * 2.0 * std::f32::consts::PI * freq / 48000.0).sin();
-        let v = (s * 8000.0) as i16;
-        pcm[i * 2] = v;
-        pcm[i * 2 + 1] = v;
-    }
-    match audiopus::coder::Encoder::new(
-        audiopus::SampleRate::Hz48000,
-        audiopus::Channels::Stereo,
-        audiopus::Application::Audio,
-    ) {
-        Ok(enc) => {
-            let mut out = vec![0u8; 4000];
-            match enc.encode(&pcm, &mut out) {
-                Ok(n) => {
-                    out.truncate(n);
-                    eprintln!("[offer] opus tone frame encoded: {n} bytes");
-                    Bytes::from(out)
-                }
-                Err(e) => {
-                    eprintln!("[offer] opus encode failed ({e}); using silence payload");
-                    Bytes::from_static(&[0xf8, 0xff, 0xfe])
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("[offer] opus encoder init failed ({e}); using silence payload");
-            Bytes::from_static(&[0xf8, 0xff, 0xfe])
-        }
-    }
+fn opus_frame_20ms() -> Bytes {
+    let mut frame = vec![0u8; 80];
+    frame[0] = 0xfc;
+    Bytes::from(frame)
 }
 
 #[tokio::main]
@@ -106,7 +76,7 @@ async fn main() -> Result<()> {
 
     let track_writer = Arc::clone(&track);
     tokio::spawn(async move {
-        let payload = encode_tone_frame();
+        let payload = opus_frame_20ms();
         let mut ticker = tokio::time::interval(Duration::from_millis(20));
         loop {
             ticker.tick().await;
