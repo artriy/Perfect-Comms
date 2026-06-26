@@ -20,7 +20,7 @@
 		<SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
 		<GenerateAssemblyInfo>True</GenerateAssemblyInfo>
 		<Configurations>Debug;Release;Android;Windows</Configurations>
-		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;cloudflare/**;scripts/**</DefaultItemExcludes>
+		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;cloudflare/**;scripts/**;native/**</DefaultItemExcludes>
 	</PropertyGroup>
 
 	<!--
