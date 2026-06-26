@@ -6,7 +6,7 @@ using VoiceChatPlugin.Audio;
 namespace VoiceChatPlugin.VoiceChat;
 
 [Flags]
-internal enum BclVoicePacketFlags : byte
+internal enum VoicePacketFlags : byte
 {
     None = 0,
     Radio = 1 << 0,
@@ -14,7 +14,7 @@ internal enum BclVoicePacketFlags : byte
     Synthetic = 1 << 2,
 }
 
-internal enum BclVoicePlayoutKind
+internal enum VoicePlayoutKind
 {
     Audio,
     Plc,
@@ -30,7 +30,7 @@ internal readonly struct VoicePacket
     private const byte CodecOpus = 1;
     public const int HeaderBytes = 14;
 
-    public VoicePacket(ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level, byte[] payload)
+    public VoicePacket(ushort sequence, uint timestamp, ushort duration, VoicePacketFlags flags, byte level, byte[] payload)
     {
         Sequence = sequence;
         Timestamp = timestamp;
@@ -43,10 +43,10 @@ internal readonly struct VoicePacket
     public ushort Sequence { get; }
     public uint Timestamp { get; }
     public ushort Duration { get; }
-    public BclVoicePacketFlags Flags { get; }
+    public VoicePacketFlags Flags { get; }
     public byte Level { get; }
     public byte[] Payload { get; }
-    public bool HasLossResistantFec => Flags.HasFlag(BclVoicePacketFlags.LossResistant);
+    public bool HasLossResistantFec => Flags.HasFlag(VoicePacketFlags.LossResistant);
 
     public static byte QuantizeLevel(float level)
         => (byte)Math.Clamp((int)MathF.Round(Math.Clamp(level, 0f, 1f) * byte.MaxValue), 0, byte.MaxValue);
@@ -54,13 +54,13 @@ internal readonly struct VoicePacket
     public static bool HasMagic(byte[] packet)
         => packet.Length >= 2 && packet[0] == Magic0 && packet[1] == Magic1;
 
-    public static byte[] Wrap(byte[] opusPayload, ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level)
+    public static byte[] Wrap(byte[] opusPayload, ushort sequence, uint timestamp, ushort duration, VoicePacketFlags flags, byte level)
         => Wrap(opusPayload, opusPayload.Length, sequence, timestamp, duration, flags, level);
 
     // Length-aware overload: frames only the first payloadLength bytes of opusPayload. Lets the sender wrap
     // directly from its reusable encode scratch buffer (which is larger than the encoded frame) without an
     // intermediate trimmed-copy allocation per transmitted frame.
-    public static byte[] Wrap(byte[] opusPayload, int payloadLength, ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level)
+    public static byte[] Wrap(byte[] opusPayload, int payloadLength, ushort sequence, uint timestamp, ushort duration, VoicePacketFlags flags, byte level)
     {
         if (payloadLength <= 0) throw new ArgumentException("Payload must not be empty.", nameof(opusPayload));
         if (payloadLength > opusPayload.Length) throw new ArgumentOutOfRangeException(nameof(payloadLength));
@@ -90,7 +90,7 @@ internal readonly struct VoicePacket
         // Reject an over-large untrusted payload before allocating/decoding it (single enforced BCL cap).
         if (packet.Length - HeaderBytes > VoiceProtocol.MaxEncodedAudioBytes) return false;
 
-        var flags = (BclVoicePacketFlags)packet[12];
+        var flags = (VoicePacketFlags)packet[12];
         if ((flags & ~AllowedFlags) != 0) return false;
 
         var duration = ReadUInt16(packet, 10);
@@ -102,10 +102,10 @@ internal readonly struct VoicePacket
         return true;
     }
 
-    private static BclVoicePacketFlags AllowedFlags =>
-        BclVoicePacketFlags.Radio |
-        BclVoicePacketFlags.LossResistant |
-        BclVoicePacketFlags.Synthetic;
+    private static VoicePacketFlags AllowedFlags =>
+        VoicePacketFlags.Radio |
+        VoicePacketFlags.LossResistant |
+        VoicePacketFlags.Synthetic;
 
     private static ushort ReadUInt16(byte[] buffer, int offset)
         => (ushort)((buffer[offset] << 8) | buffer[offset + 1]);
@@ -133,7 +133,7 @@ internal readonly struct VoicePacket
 
 internal readonly struct BclVoicePlayoutFrame
 {
-    public BclVoicePlayoutFrame(BclVoicePlayoutKind kind, VoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
+    public BclVoicePlayoutFrame(VoicePlayoutKind kind, VoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
     {
         Kind = kind;
         Packet = packet;
@@ -142,7 +142,7 @@ internal readonly struct BclVoicePlayoutFrame
         DredOffset = dredOffset;
     }
 
-    public BclVoicePlayoutKind Kind { get; }
+    public VoicePlayoutKind Kind { get; }
     public VoicePacket? Packet { get; }
     public ushort Sequence { get; }
     public ushort Duration { get; }
@@ -185,7 +185,7 @@ internal readonly struct BclVoiceJitterWindowStats
         => $"v2:{V2Packets} legacy:{LegacyPackets} late:{LateDrops} dup:{DuplicateDrops} reorder:{ReorderedPackets} lost:{LostFrames} plc:{PlcFrames} fec:{FecFrames} depth:{CurrentDepth}/{MaxDepth} target:{TargetDelayFrames} jitterMs:{JitterMs:0.0}";
 }
 
-internal sealed class BclVoiceJitterBuffer
+internal sealed class VoiceJitterBuffer
 {
     public const int DefaultTargetDelayFrames = 3;
     public const int DefaultMaxBufferedFrames = 12;
@@ -243,7 +243,7 @@ internal sealed class BclVoiceJitterBuffer
     private readonly List<BclVoicePlayoutFrame> _enqueueScratch = new(MaxDrainFramesPerPacket);
     private readonly List<BclVoicePlayoutFrame> _drainScratch = new(MaxDrainFramesPerPacket);
 
-    public BclVoiceJitterBuffer(int targetDelayFrames = DefaultTargetDelayFrames, int maxBufferedFrames = DefaultMaxBufferedFrames, int? minTargetDelayFrames = null, int? maxTargetDelayFrames = null)
+    public VoiceJitterBuffer(int targetDelayFrames = DefaultTargetDelayFrames, int maxBufferedFrames = DefaultMaxBufferedFrames, int? minTargetDelayFrames = null, int? maxTargetDelayFrames = null)
     {
         _maxBufferedFrames = Math.Max(1, maxBufferedFrames);
         _targetDelayFrames = Math.Clamp(targetDelayFrames, 0, _maxBufferedFrames);
@@ -445,7 +445,7 @@ internal sealed class BclVoiceJitterBuffer
         {
             if (_packets.Remove(_expectedSequence, out var packet))
             {
-                frames.Add(new BclVoicePlayoutFrame(BclVoicePlayoutKind.Audio, packet, packet.Sequence, packet.Duration));
+                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Audio, packet, packet.Sequence, packet.Duration));
                 _consecutiveConcealed = 0; // a real frame breaks the conceal run (Fix 2b-2)
                 _expectedSequence++;
                 continue;
@@ -472,7 +472,7 @@ internal sealed class BclVoiceJitterBuffer
             if (next.HasLossResistantFec && Distance(_expectedSequence, nextSequence.Value) == 1)
             {
                 _fecFrames++;
-                frames.Add(new BclVoicePlayoutFrame(BclVoicePlayoutKind.Fec, next, _expectedSequence, next.Duration));
+                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Fec, next, _expectedSequence, next.Duration));
             }
             else
             {
@@ -481,7 +481,7 @@ internal sealed class BclVoiceJitterBuffer
                 // falls back to neural PLC if `next` carries no DRED, so this is always at least as good as PLC.
                 // Offset = frames back from `next` to this lost frame, in samples.
                 int dredOffsetSamples = Distance(_expectedSequence, nextSequence.Value) * next.Duration;
-                frames.Add(new BclVoicePlayoutFrame(BclVoicePlayoutKind.Dred, next, _expectedSequence, next.Duration, dredOffsetSamples));
+                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Dred, next, _expectedSequence, next.Duration, dredOffsetSamples));
             }
             _expectedSequence++;
         }
@@ -528,7 +528,7 @@ internal sealed class BclVoiceJitterBuffer
         => unchecked((ushort)(to - from));
 }
 
-internal sealed class BclSendPacer : IDisposable
+internal sealed class VoiceSendPacer : IDisposable
 {
     private const int MaxQueuedFrames = 15; // 300 ms egress buffer at 20 ms/frame
     private static readonly double TicksToSeconds = 1.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -541,7 +541,7 @@ internal sealed class BclSendPacer : IDisposable
     private double _creditSamples;
     private bool _disposed;
 
-    public BclSendPacer(Action<byte[]> sendFrame)
+    public VoiceSendPacer(Action<byte[]> sendFrame)
     {
         _sendFrame = sendFrame;
         _lastTicks = System.Diagnostics.Stopwatch.GetTimestamp();

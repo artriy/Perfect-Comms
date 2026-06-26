@@ -297,9 +297,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         ServerUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
 
 #if ANDROID
-        _sendPacer = new BclSendPacer(SendOpusFrameToAudioTracks);
+        _sendPacer = new VoiceSendPacer(SendOpusFrameToAudioTracks);
 #else
-        _sendPacer = new BclSendPacer(SendFramedToChannels);
+        _sendPacer = new VoiceSendPacer(SendFramedToChannels);
 #endif
         ConnectSocket();
         StartTurnCredentialFetch();
@@ -1843,7 +1843,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             try
             {
                 var socketId = ctx.GetValue<string>(0);
-                var client = ctx.GetValue<BclClient>(1);
+                var client = ctx.GetValue<VoiceBackendClient>(1);
                 if (socketId == null || client == null) return;
 #if !ANDROID
                 _mainThreadActions.Enqueue(() => MapClient(socketId, client));
@@ -1856,7 +1856,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             try
             {
-                var clients = ctx.GetValue<Dictionary<string, BclClient>>(0);
+                var clients = ctx.GetValue<Dictionary<string, VoiceBackendClient>>(0);
                 if (clients == null) return;
 #if !ANDROID
                 _mainThreadActions.Enqueue(() =>
@@ -1884,7 +1884,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             try
             {
                 var socketId = ctx.GetValue<string>(0);
-                var client = ctx.GetValue<BclClient>(1);
+                var client = ctx.GetValue<VoiceBackendClient>(1);
                 if (socketId == null || client == null) return;
 #if !ANDROID
                 _mainThreadActions.Enqueue(() =>
@@ -2021,7 +2021,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _lastOfferRetryUtc = DateTime.MinValue;
     }
 
-    private bool MapClient(string socketId, BclClient client)
+    private bool MapClient(string socketId, VoiceBackendClient client)
     {
         if (client.clientId < 0) return false;
         var localReason = GetLocalClientReason(socketId, client);
@@ -2066,7 +2066,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return true;
     }
 
-    private void RepairPeerClientMapping(string socketId, BclClient client)
+    private void RepairPeerClientMapping(string socketId, VoiceBackendClient client)
     {
         PeerConnection? peer;
         int oldClientId;
@@ -2170,7 +2170,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             foreach (var socket in aged) DropPendingSignals(socket, "unmapped-timeout");
     }
 
-    private string? GetLocalClientReason(string socketId, BclClient client)
+    private string? GetLocalClientReason(string socketId, VoiceBackendClient client)
     {
         if (_socket != null && !string.IsNullOrEmpty(_socket.Id) && string.Equals(socketId, _socket.Id, StringComparison.Ordinal))
             return "socket";
@@ -3886,7 +3886,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly List<RTCDataChannel> _openChannelScratch = new();
 #endif
     // Paces encoded frames out at a steady ~20 ms cadence (up to 300 ms buffered) so a local stall can't clump our send.
-    private readonly BclSendPacer _sendPacer;
+    private readonly VoiceSendPacer _sendPacer;
 
     // Reused mono-downmix buffer for mic capture conversion. Only touched on the single NAudio capture
     // thread (OnMicrophoneData), and its contents are copied into the reused _captureFrameBuffer by
@@ -4066,10 +4066,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _txSquareSumSinceStats += transmitSquareSum;
             _txSamplesSinceStats += samples;
         }
-        var voiceFlags = BclVoicePacketFlags.None;
-        if (VoiceTeamRadioChannels.IsActive(_lastLocalRadioChannel)) voiceFlags |= BclVoicePacketFlags.Radio;
-        if (BclOpusUseInbandFec) voiceFlags |= BclVoicePacketFlags.LossResistant;
-        if (IsSyntheticSource(source)) voiceFlags |= BclVoicePacketFlags.Synthetic;
+        var voiceFlags = VoicePacketFlags.None;
+        if (VoiceTeamRadioChannels.IsActive(_lastLocalRadioChannel)) voiceFlags |= VoicePacketFlags.Radio;
+        if (BclOpusUseInbandFec) voiceFlags |= VoicePacketFlags.LossResistant;
+        if (IsSyntheticSource(source)) voiceFlags |= VoicePacketFlags.Synthetic;
         // Wrap directly from the reusable encode scratch (first `encoded` bytes), skipping the old
         // intermediate trimmed byte[] copy. The framed buffer itself stays a fresh per-frame allocation
         // because channel.send queues it for asynchronous SCTP transmission (reusing it would corrupt
@@ -4416,7 +4416,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         private readonly object _sync = new();
         private VoiceMixer? _mixer;
         public void SetMixer(VoiceMixer? mixer) => _mixer = mixer;
-        private readonly BclVoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: BclJitterTargetDelayFrames, maxBufferedFrames: BclJitterMaxBufferedFrames, minTargetDelayFrames: BclJitterMinTargetFrames, maxTargetDelayFrames: BclJitterMaxTargetFrames);
+        private readonly VoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: BclJitterTargetDelayFrames, maxBufferedFrames: BclJitterMaxBufferedFrames, minTargetDelayFrames: BclJitterMinTargetFrames, maxTargetDelayFrames: BclJitterMaxTargetFrames);
         private VoiceProximityResult _currentRoute = VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
         private float _levelPeakSinceStats;
         private float _packetLevelPeakSinceStats;
@@ -4811,7 +4811,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 // per-packet audio Radio flag: the true case is a no-op while the false case cleared
                 // _radioChannel, so a reordered pre-radio audio frame arriving after a PCRD would wipe
                 // the freshly validated channel and briefly drop the speaker off team radio.
-                if ((packet.Flags & BclVoicePacketFlags.Radio) != 0)
+                if ((packet.Flags & VoicePacketFlags.Radio) != 0)
                     Interlocked.Exchange(ref _consecutiveNonRadioVoicePackets, 0);
                 else if (RadioActive
                          && DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastRadioChannelAppliedTicks)) > RadioStaleClearActivationGrace
@@ -4833,8 +4833,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 {
                     var frame = frames[i];
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
-                    var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
-                    var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
+                    var isDred = frame.Kind == VoicePlayoutKind.Dred;
+                    var decodeFec = frame.Kind == VoicePlayoutKind.Fec;
                     // FEC/DRED must decode at the missing frame's duration (carried on frame.Duration), not a fixed size (PL1).
                     var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // A single bad frame must NOT abandon the rest of the drained batch (up to
@@ -4862,14 +4862,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 for (int i = 0; i < frames.Count; i++)
                 {
                     var frame = frames[i];
-                    if (frame.Kind == BclVoicePlayoutKind.Plc)
+                    if (frame.Kind == VoicePlayoutKind.Plc)
                     {
                         RouteSilence(NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration)));
                         continue;
                     }
                     var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
-                    var isDred = frame.Kind == BclVoicePlayoutKind.Dred;
-                    var decodeFec = frame.Kind == BclVoicePlayoutKind.Fec;
+                    var isDred = frame.Kind == VoicePlayoutKind.Dred;
+                    var decodeFec = frame.Kind == VoicePlayoutKind.Fec;
                     // FEC/DRED must decode at the missing frame's duration (carried on frame.Duration), not a fixed size (PL1).
                     var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
                     // Conceal a failed slot and keep draining instead of abandoning the rest of the tail batch.
@@ -5188,7 +5188,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Replace("\"", "'");
 
     private sealed class SignalPayload { public string from { get; set; } = string.Empty; public string data { get; set; } = string.Empty; }
-    private sealed class BclClient { public int clientId { get; set; } = -1; public int playerId { get; set; } = -1; public bool isHost { get; set; } }
+    private sealed class VoiceBackendClient { public int clientId { get; set; } = -1; public int playerId { get; set; } = -1; public bool isHost { get; set; } }
     private sealed class ClientPeerConfig { public IceServerDto[]? iceServers { get; set; } }
     private sealed class IceServerDto { public string urls { get; set; } = string.Empty; public string? username { get; set; } public string? credential { get; set; } }
 }
