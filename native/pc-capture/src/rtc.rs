@@ -285,3 +285,61 @@ impl RtcEngine {
         self.recv_rx.lock().unwrap().try_recv().ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    #[test]
+    fn loopback_two_engines_exchange_opus() {
+        let (a_tx, a_rx) = channel::<LocalSignal>();
+        let (b_tx, b_rx) = channel::<LocalSignal>();
+        let a = RtcEngine::new(a_tx);
+        let b = RtcEngine::new(b_tx);
+
+        a.add_peer("B".to_string());
+
+        let payload: Vec<u8> = (0..80u8).map(|i| i ^ 0x5a).collect();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut received: Option<Vec<u8>> = None;
+        let mut count = 0u32;
+
+        while Instant::now() < deadline {
+            while let Ok(sig) = a_rx.try_recv() {
+                match sig {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => b.set_remote_sdp("A", &sdp_type, &sdp),
+                    LocalSignal::Candidate { candidate, .. } => b.add_ice_candidate("A", &candidate),
+                }
+            }
+            while let Ok(sig) = b_rx.try_recv() {
+                match sig {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => a.set_remote_sdp("B", &sdp_type, &sdp),
+                    LocalSignal::Candidate { candidate, .. } => a.add_ice_candidate("B", &candidate),
+                }
+            }
+            a.send_opus(&payload);
+            while let Some((_pid, pkt)) = b.recv() {
+                count += 1;
+                if received.is_none() {
+                    received = Some(pkt);
+                }
+            }
+            if count >= 10 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            count >= 1,
+            "peer B never received any opus packets over webrtc"
+        );
+        assert_eq!(
+            received.as_deref(),
+            Some(payload.as_slice()),
+            "received opus payload mismatch"
+        );
+    }
+}

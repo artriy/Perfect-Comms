@@ -395,3 +395,32 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build rtc-interop (aarch64-apple-darwin)
         run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target aarch64-apple-darwin
+
+  # ---- helper-to-helper webrtc loopback (Phase 3 RtcEngine gate) ----
+  # Two in-process RtcEngines cross-feed offer/answer/ICE over their LocalSignal
+  # channels, then one sends an Opus packet and the other's recv() must yield it.
+  # This proves the helper's webrtc-rs peer table end to end without the mod.
+  helper-rtc-loopback-linux:
+    runs-on: ubuntu-latest
+    container: rust:1-bullseye
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA dev headers, cmake, nasm
+        run: |
+          apt-get update
+          apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+
+  helper-rtc-loopback-win:
+    runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
