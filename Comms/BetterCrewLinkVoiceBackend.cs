@@ -804,6 +804,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var now = DateTime.UtcNow;
         if (now < _rpcPollNextUtc) return;
         _rpcPollNextUtc = now + RpcPollInterval;
+        var nowMs = Environment.TickCount64;
 
         var client = AmongUsClient.Instance;
         if (client == null || snapshot == null)
@@ -837,7 +838,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (id < 0 || id == localId) continue;
             _rpcPresentScratch.Add(id);
             if (_rpcKnownClients.Add(id))
-                _peerSession.OnPlayerJoined(id);
+                _peerSession.OnPlayerJoined(id, nowMs);
         }
 
         if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
@@ -852,6 +853,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 _rpcKnownClients.Remove(id);
             }
         }
+
+        _peerSession.Tick(nowMs);
     }
 
     private void OnSidecarLevel(float peak, bool speaking)

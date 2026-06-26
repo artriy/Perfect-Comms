@@ -116,6 +116,7 @@ internal sealed class PeerSessionManager
 {
     public const int ProtocolVersion = 1;
     public const int MinCompatibleVersion = 1;
+    private const long HelloResendIntervalMs = 3000;
 
     private sealed class PeerEntry
     {
@@ -123,6 +124,7 @@ internal sealed class PeerSessionManager
         public bool HelloSent;
         public bool HelloReceived;
         public bool Added;
+        public long LastHelloSentMs;
     }
 
     private readonly int _localClientId;
@@ -151,12 +153,26 @@ internal sealed class PeerSessionManager
         return false;
     }
 
-    public void OnPlayerJoined(int clientId)
+    public void OnPlayerJoined(int clientId, long nowMs = 0)
     {
         if (clientId == _localClientId || clientId < 0) return;
         var peer = GetOrCreate(clientId);
         SendHelloIfNeeded(clientId, peer);
+        peer.LastHelloSentMs = nowMs;
         TryStartSession(clientId, peer);
+    }
+
+    public void Tick(long nowMs)
+    {
+        foreach (var pair in _peers)
+        {
+            var peer = pair.Value;
+            if (!peer.HelloSent) continue;
+            if (peer.State is not (PeerState.Idle or PeerState.Greeted)) continue;
+            if (nowMs - peer.LastHelloSentMs < HelloResendIntervalMs) continue;
+            peer.LastHelloSentMs = nowMs;
+            _sender.Send(pair.Key, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+        }
     }
 
     public void OnPlayerLeft(int clientId)
