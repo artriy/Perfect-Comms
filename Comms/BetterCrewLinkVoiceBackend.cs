@@ -2775,6 +2775,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // Captured pc lets the handler ignore events from a connection we already replaced.
             pc.onconnectionstatechange += state =>
             {
+#if ANDROID
+                if (_peerSession != null)
+                {
+                    _mainThreadActions.Enqueue(() => OnRpcPeerConnectionState(socketId, pc, state));
+                    return;
+                }
+#endif
                 if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
                     _mainThreadActions.Enqueue(() => OnPeerConnectionDied(socketId, pc, state));
             };
@@ -2946,6 +2953,21 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("bcl.peer.created", $"socket={key} client={clientId} playbackGroup={playbackGroupId} source=rpc");
             return peer;
         }
+    }
+
+    private void OnRpcPeerConnectionState(string socketId, RTCPeerConnection pc, RTCPeerConnectionState state)
+    {
+        if (_peerSession == null) return;
+        lock (_peerSync)
+        {
+            if (!_peersBySocket.TryGetValue(socketId, out var peer)) return;
+            if (!ReferenceEquals(peer.Connection, pc)) return;
+        }
+        if (!SipsorceryVoiceTransport.TryParseClientId(socketId, out var clientId)) return;
+        if (state == RTCPeerConnectionState.connected)
+            _peerSession.OnPeerConnected(clientId);
+        else if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.disconnected or RTCPeerConnectionState.closed)
+            _peerSession.OnPeerConnectionLost(clientId, Environment.TickCount64);
     }
 #endif
 
