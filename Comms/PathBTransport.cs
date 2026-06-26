@@ -33,3 +33,28 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public void AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate);
 }
 #endif
+
+#if ANDROID
+internal sealed class SipsorceryVoiceTransport : IVoiceTransport
+{
+    private readonly BetterCrewLinkVoiceBackend _backend;
+
+    public SipsorceryVoiceTransport(BetterCrewLinkVoiceBackend backend)
+    {
+        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+    }
+
+    public static string PeerId(int clientId) => clientId.ToString(CultureInfo.InvariantCulture);
+
+    public static bool TryParseClientId(string peerId, out int clientId)
+        => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
+
+    public void AddPeer(int clientId) => _backend.RpcAddPeer(PeerId(clientId));
+
+    public void RemovePeer(int clientId) => _backend.RpcClosePeer(PeerId(clientId));
+
+    public void SetRemoteSdp(int clientId, string sdpType, string sdp) => _backend.RpcApplyRemoteSdp(PeerId(clientId), sdpType, sdp);
+
+    public void AddIceCandidate(int clientId, string candidate) => _backend.RpcApplyRemoteCandidate(PeerId(clientId), candidate);
+}
+#endif

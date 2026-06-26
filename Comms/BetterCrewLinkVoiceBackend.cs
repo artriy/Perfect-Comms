@@ -216,8 +216,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private Thread? _voicePump;
     private volatile bool _voicePumpRunning;
     private readonly float[] _playbackBlock = new float[SidecarProtocol.AudioOutSamples];
+    private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
+#else
+    private bool CaptureUsesUnity => true;
+#endif
+#if WINDOWS || ANDROID
     private PeerSessionManager? _peerSession;
-    private SidecarVoiceTransport? _rpcTransport;
+    private IVoiceTransport? _rpcTransport;
     private readonly RpcSignalingSender _rpcSender = new();
     private bool _rpcOnMessageHooked;
     private DateTime _rpcPollNextUtc = DateTime.MinValue;
@@ -225,9 +230,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private readonly HashSet<int> _rpcKnownClients = new();
     private readonly HashSet<int> _rpcPresentScratch = new();
     private readonly List<int> _rpcLeftScratch = new();
-    private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
-#else
-    private bool CaptureUsesUnity => true;
 #endif
     private IVoiceEncoder _encoder = CreateEncoder();
     private Timer? _syntheticMicTimer;
@@ -506,6 +508,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     public int TryRecoverMissingClients(VoiceGameStateSnapshot snapshot)
     {
         if (_disposed || snapshot == null) return 0;
+#if ANDROID
+        if (_peerSession != null) return 0;
+#endif
         // Snapshot the unhealthy mapped peers under the lock, then act outside it (StartOfferAsync /
         // RequestOfferFromPeer / RecreatePeerConnection each take _peerSync themselves).
         var targets = new List<(string SocketId, bool Initiator, bool Stuck)>();
@@ -801,67 +806,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
             _peerSession?.OnLocalCandidate(clientId, candidate);
-    }
-
-    private void OnRpcSignal(int senderClientId, SignalMsgType type, byte[] payload)
-        => _peerSession?.OnSignal(senderClientId, type, payload);
-
-    private void PumpRpcSignaling(VoiceGameStateSnapshot? snapshot)
-    {
-        var now = DateTime.UtcNow;
-        if (now < _rpcPollNextUtc) return;
-        _rpcPollNextUtc = now + RpcPollInterval;
-        var nowMs = Environment.TickCount64;
-
-        var client = AmongUsClient.Instance;
-        if (client == null || snapshot == null)
-        {
-            if (_peerSession != null && _rpcKnownClients.Count > 0)
-            {
-                _peerSession.Reset();
-                _rpcKnownClients.Clear();
-            }
-            return;
-        }
-
-        var localId = client.ClientId;
-        if (localId < 0) return;
-
-        if (_peerSession == null)
-        {
-            _rpcTransport = new SidecarVoiceTransport(() => _voice);
-            _peerSession = new PeerSessionManager(localId, _rpcTransport, _rpcSender);
-            if (!_rpcOnMessageHooked)
-            {
-                AmongUsRpcSignaling.OnMessage += OnRpcSignal;
-                _rpcOnMessageHooked = true;
-            }
-        }
-
-        _rpcPresentScratch.Clear();
-        foreach (var remote in client.allClients)
-        {
-            var id = remote.Id;
-            if (id < 0 || id == localId) continue;
-            _rpcPresentScratch.Add(id);
-            if (_rpcKnownClients.Add(id))
-                _peerSession.OnPlayerJoined(id, nowMs);
-        }
-
-        if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
-        {
-            _rpcLeftScratch.Clear();
-            foreach (var id in _rpcKnownClients)
-                if (!_rpcPresentScratch.Contains(id))
-                    _rpcLeftScratch.Add(id);
-            foreach (var id in _rpcLeftScratch)
-            {
-                _peerSession.OnPlayerLeft(id);
-                _rpcKnownClients.Remove(id);
-            }
-        }
-
-        _peerSession.Tick(nowMs);
     }
 
     private void OnSidecarLevel(float peak, bool speaking)
@@ -1191,6 +1135,73 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var assembly = System.Reflection.Assembly.GetExecutingAssembly();
         var helperPath = SidecarLauncher.EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
         return SidecarLauncher.Launch(helperPath, token, handshakeTimeoutMs: 4000, wine: WineEnvironment.IsWine, resolveWineHostPath: WineEnvironment.ResolveHostPath);
+    }
+#endif
+
+#if WINDOWS || ANDROID
+    private void OnRpcSignal(int senderClientId, SignalMsgType type, byte[] payload)
+        => _peerSession?.OnSignal(senderClientId, type, payload);
+
+    private void PumpRpcSignaling(VoiceGameStateSnapshot? snapshot)
+    {
+        var now = DateTime.UtcNow;
+        if (now < _rpcPollNextUtc) return;
+        _rpcPollNextUtc = now + RpcPollInterval;
+        var nowMs = Environment.TickCount64;
+
+        var client = AmongUsClient.Instance;
+        if (client == null || snapshot == null)
+        {
+            if (_peerSession != null && _rpcKnownClients.Count > 0)
+            {
+                _peerSession.Reset();
+                _rpcKnownClients.Clear();
+            }
+            return;
+        }
+
+        var localId = client.ClientId;
+        if (localId < 0) return;
+
+        if (_peerSession == null)
+        {
+#if WINDOWS
+            _rpcTransport = new SidecarVoiceTransport(() => _voice);
+#elif ANDROID
+            _rpcTransport = new SipsorceryVoiceTransport(this);
+#endif
+            _peerSession = new PeerSessionManager(localId, _rpcTransport!, _rpcSender);
+            if (!_rpcOnMessageHooked)
+            {
+                AmongUsRpcSignaling.OnMessage += OnRpcSignal;
+                _rpcOnMessageHooked = true;
+            }
+        }
+
+        _rpcPresentScratch.Clear();
+        foreach (var remote in client.allClients)
+        {
+            var id = remote.Id;
+            if (id < 0 || id == localId) continue;
+            _rpcPresentScratch.Add(id);
+            if (_rpcKnownClients.Add(id))
+                _peerSession.OnPlayerJoined(id, nowMs);
+        }
+
+        if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
+        {
+            _rpcLeftScratch.Clear();
+            foreach (var id in _rpcKnownClients)
+                if (!_rpcPresentScratch.Contains(id))
+                    _rpcLeftScratch.Add(id);
+            foreach (var id in _rpcLeftScratch)
+            {
+                _peerSession.OnPlayerLeft(id);
+                _rpcKnownClients.Remove(id);
+            }
+        }
+
+        _peerSession.Tick(nowMs);
     }
 #endif
 
@@ -1591,7 +1602,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         MaybeReleaseBluetoothMutedMicrophone();
 #endif
 
-#if WINDOWS
+#if WINDOWS || ANDROID
         PumpRpcSignaling(snapshot);
 #endif
 
@@ -1755,7 +1766,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _disposed = true;
         try { _turnCts?.Cancel(); _turnCts?.Dispose(); } catch { }
         _sendPacer.Dispose();
-#if WINDOWS
+#if WINDOWS || ANDROID
         if (_rpcOnMessageHooked)
         {
             AmongUsRpcSignaling.OnMessage -= OnRpcSignal;
@@ -1764,6 +1775,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _peerSession?.Reset();
         _peerSession = null;
         _rpcKnownClients.Clear();
+#endif
+#if WINDOWS
         StopMicrophoneWorkerForDispose();
         StopVoiceSession("dispose");
         try { _androidSpeaker?.Dispose(); } catch { }
@@ -1821,7 +1834,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 var socketId = ctx.GetValue<string>(0);
                 var client = ctx.GetValue<BclClient>(1);
                 if (socketId == null || client == null) return;
+#if !ANDROID
                 _mainThreadActions.Enqueue(() => MapClient(socketId, client));
+#endif
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=setClient error=\"{ex.Message}\""); }
             await Task.CompletedTask;
@@ -1832,6 +1847,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             {
                 var clients = ctx.GetValue<Dictionary<string, BclClient>>(0);
                 if (clients == null) return;
+#if !ANDROID
                 _mainThreadActions.Enqueue(() =>
                 {
                     foreach (var sid in SnapshotMappedSocketIds())
@@ -1847,6 +1863,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                         }
                     }
                 });
+#endif
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=setClients error=\"{ex.Message}\""); }
             await Task.CompletedTask;
@@ -1858,11 +1875,13 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 var socketId = ctx.GetValue<string>(0);
                 var client = ctx.GetValue<BclClient>(1);
                 if (socketId == null || client == null) return;
+#if !ANDROID
                 _mainThreadActions.Enqueue(() =>
                 {
                     if (MapClient(socketId, client) && EnsurePeer(socketId) != null && ShouldInitiateOffer(socketId))
                         _ = StartOfferAsync(socketId);
                 });
+#endif
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=join error=\"{ex.Message}\""); }
             await Task.CompletedTask;
@@ -1873,7 +1892,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             {
                 var socketId = ctx.GetValue<string>(0);
                 if (socketId == null) return;
+#if !ANDROID
                 _mainThreadActions.Enqueue(() => RemovePeer(socketId));
+#endif
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=leave error=\"{ex.Message}\""); }
             await Task.CompletedTask;
@@ -1884,8 +1905,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             {
                 var payload = ctx.GetValue<SignalPayload>(0);
                 if (payload == null) return;
+#if !ANDROID
                 VoiceDiagnostics.Log("bcl.signal.queued", $"fromSocket={payload.from} queueDepth={_mainThreadActions.Count + 1}");
                 _mainThreadActions.Enqueue(() => HandleQueuedSignal(payload.from, payload.data));
+#endif
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=signal error=\"{ex.Message}\""); }
             await Task.CompletedTask;
@@ -2165,6 +2188,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private bool ShouldInitiateOffer(string socketId)
     {
+#if ANDROID
+        if (_peerSession != null)
+            return RpcLocalIsOfferer(socketId);
+#endif
         var localSocketId = GetEffectiveLocalSocketId();
         return !string.IsNullOrEmpty(localSocketId)
             && !string.Equals(socketId, localSocketId, StringComparison.Ordinal)
@@ -2258,6 +2285,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void RetryClosedDataChannels()
     {
+#if ANDROID
+        if (_peerSession != null) return;
+#endif
         var now = DateTime.UtcNow;
         if (now - _lastOfferRetryUtc < OfferRetryInterval) return;
         EvictStalePendingSignals();
@@ -2719,12 +2749,21 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             };
             pc.onicecandidate += candidate =>
             {
-                if (candidate == null || _socket == null) return;
+                if (candidate == null) return;
                 // Diagnostic: candidate type (host/srflx/relay) proves whether TURN relay candidates were
                 // gathered for this peer — i.e. whether Nat Fix is actually reaching the relay.
                 if (VoiceDiagnostics.IsEnabled)
                     VoiceDiagnostics.Log("bcl.ice.candidate", $"socket={socketId} type={candidate.type} protocol={candidate.protocol}");
                 var signalData = JsonSerializer.Serialize(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
+#if ANDROID
+                if (_peerSession != null)
+                {
+                    if (SipsorceryVoiceTransport.TryParseClientId(socketId, out var candClientId))
+                        _peerSession.OnLocalCandidate(candClientId, signalData);
+                    return;
+                }
+#endif
+                if (_socket == null) return;
                 _ = _socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
             };
             pc.oniceconnectionstatechange += iceState =>
@@ -2813,6 +2852,101 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (decodedFrames > 0)
             Interlocked.Add(ref _encodedRx, decodedFrames);
     }
+
+    internal void RpcAddPeer(string key)
+    {
+        var peer = EnsureRpcPeer(key);
+        if (peer == null) return;
+        _ = StartOfferAsync(key);
+    }
+
+    internal void RpcClosePeer(string key) => RemovePeer(key);
+
+    internal void RpcApplyRemoteSdp(string key, string sdpType, string sdp)
+    {
+        if (string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = RpcAnswerOfferAsync(key, sdp);
+            return;
+        }
+        RTCPeerConnection? conn;
+        lock (_peerSync)
+            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
+        if (conn == null) return;
+        try { conn.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = sdp }); }
+        catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-answer"); }
+    }
+
+    internal void RpcApplyRemoteCandidate(string key, string candidate)
+    {
+        RTCPeerConnection? conn;
+        lock (_peerSync)
+            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
+        if (conn == null) return;
+        var init = TryDecodeSignal(candidate, out var signal, out _) && signal.Kind == "candidate"
+            ? new RTCIceCandidateInit { candidate = signal.Candidate, sdpMid = signal.SdpMid, sdpMLineIndex = signal.SdpMLineIndex }
+            : new RTCIceCandidateInit { candidate = candidate, sdpMid = "0", sdpMLineIndex = 0 };
+        try { conn.addIceCandidate(init); }
+        catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-candidate"); }
+    }
+
+    private async Task RpcAnswerOfferAsync(string key, string sdp)
+    {
+        RTCPeerConnection? conn;
+        lock (_peerSync)
+            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
+        if (conn == null) return;
+        try
+        {
+            conn.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = sdp });
+            var answer = conn.createAnswer(null);
+            await conn.setLocalDescription(answer);
+            lock (_peerSync)
+            {
+                if (_disposed || !_peersBySocket.TryGetValue(key, out var p) || !ReferenceEquals(p.Connection, conn)) return;
+            }
+            if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(key, out var clientId))
+                _peerSession.OnLocalSdp(clientId, "answer", answer.sdp);
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("bcl.offer.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-answer");
+        }
+    }
+
+    private bool RpcLocalIsOfferer(string key)
+    {
+        var client = AmongUsClient.Instance;
+        return client != null
+            && SipsorceryVoiceTransport.TryParseClientId(key, out var remote)
+            && client.ClientId < remote;
+    }
+
+    private PeerConnection? EnsureRpcPeer(string key)
+    {
+        lock (_peerSync)
+            if (_peersBySocket.TryGetValue(key, out var known)) return known;
+
+        var pc = RentPeerConnection();
+        lock (_peerSync)
+        {
+            if (_peersBySocket.TryGetValue(key, out var existing)) { CloseRented(pc); return existing; }
+            var clientId = SipsorceryVoiceTransport.TryParseClientId(key, out var parsed) ? parsed : -1;
+            if (clientId >= 0)
+            {
+                _clientToSocket[clientId] = key;
+                _socketToClient[key] = clientId;
+            }
+            var playbackGroupId = clientId >= 0 ? clientId : _nextProvisionalPeerGroupId--;
+            var peer = new PeerConnection(key, clientId, playbackGroupId);
+            WireNewPeerConnection(peer, key, pc);
+            _peersBySocket[key] = peer;
+            if (_voiceMixer != null)
+                peer.SetMixer(_voiceMixer);
+            VoiceDiagnostics.Log("bcl.peer.created", $"socket={key} client={clientId} playbackGroup={playbackGroupId} source=rpc");
+            return peer;
+        }
+    }
 #endif
 
     // Includes 'disconnected' on purpose: used by the offer-gate (LocalLinkNeedsRebuild) and the
@@ -2887,6 +3021,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // an offer (offering itself would cause glare). Per-peer debounced against re-offer storms.
     private void OnPeerConnectionDied(string socketId, RTCPeerConnection pc, RTCPeerConnectionState state)
     {
+#if ANDROID
+        if (_peerSession != null) return;
+#endif
         lock (_peerSync)
         {
             if (!_peersBySocket.TryGetValue(socketId, out var peer)) return;
@@ -3036,7 +3173,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             socket = _socket;
             conn = peer.Connection; // capture once; use for the whole handshake
         }
-        if (socket == null || conn == null) return;
+        if (conn == null) return;
 #if WINDOWS
         await Task.CompletedTask;
 #else
@@ -3075,8 +3212,18 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             {
                 if (_disposed || !ReferenceEquals(peer.Connection, conn)) return; // don't emit a stale offer
             }
-            var sdpJson = JsonSerializer.Serialize(new { type = "offer", sdp = offer.sdp });
-            await socket.EmitAsync("signal", new object[] { new { to = socketId, data = sdpJson } });
+#if ANDROID
+            if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(socketId, out var offerClientId))
+            {
+                _peerSession.OnLocalSdp(offerClientId, "offer", offer.sdp);
+            }
+            else
+#endif
+            {
+                if (socket == null) return;
+                var sdpJson = JsonSerializer.Serialize(new { type = "offer", sdp = offer.sdp });
+                await socket.EmitAsync("signal", new object[] { new { to = socketId, data = sdpJson } });
+            }
         }
         catch (Exception ex)
         {
