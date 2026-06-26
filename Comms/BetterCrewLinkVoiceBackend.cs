@@ -3232,22 +3232,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 #endif
     }
 
-    private void RelayHelperLocalSdp(string peerId, string sdpType, string sdp)
-    {
-        var socket = _socket;
-        if (socket == null || string.IsNullOrEmpty(peerId)) return;
-        var data = JsonSerializer.Serialize(new { type = sdpType, sdp });
-        _ = socket.EmitAsync("signal", new object[] { new { to = peerId, data } });
-    }
-
-    private void RelayHelperLocalCandidate(string peerId, string candidate)
-    {
-        var socket = _socket;
-        if (socket == null || string.IsNullOrEmpty(peerId)) return;
-        var data = JsonSerializer.Serialize(new { candidate });
-        _ = socket.EmitAsync("signal", new object[] { new { to = peerId, data } });
-    }
-
     private async Task RunSignalHandlerAsync(string fromSocketId, string dataJson)
     {
         try
