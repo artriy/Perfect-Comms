@@ -4,7 +4,7 @@ using VoiceChatPlugin.Audio;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-internal sealed class BclVoiceMixer
+internal sealed class VoiceMixer
 {
     private const int MinCushionSamples = AudioHelpers.FrameSize * 5;
     private const int MaxCushionSamples = AudioHelpers.FrameSize * 15;

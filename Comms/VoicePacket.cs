@@ -22,7 +22,7 @@ internal enum BclVoicePlayoutKind
     Dred,
 }
 
-internal readonly struct BclVoicePacket
+internal readonly struct VoicePacket
 {
     private const byte Magic0 = (byte)'P';
     private const byte Magic1 = (byte)'V';
@@ -30,7 +30,7 @@ internal readonly struct BclVoicePacket
     private const byte CodecOpus = 1;
     public const int HeaderBytes = 14;
 
-    public BclVoicePacket(ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level, byte[] payload)
+    public VoicePacket(ushort sequence, uint timestamp, ushort duration, BclVoicePacketFlags flags, byte level, byte[] payload)
     {
         Sequence = sequence;
         Timestamp = timestamp;
@@ -81,7 +81,7 @@ internal readonly struct BclVoicePacket
         return packet;
     }
 
-    public static bool TryRead(byte[] packet, out BclVoicePacket voicePacket)
+    public static bool TryRead(byte[] packet, out VoicePacket voicePacket)
     {
         voicePacket = default;
         if (packet.Length <= HeaderBytes || !HasMagic(packet)) return false;
@@ -98,7 +98,7 @@ internal readonly struct BclVoicePacket
 
         var payload = new byte[packet.Length - HeaderBytes];
         Array.Copy(packet, HeaderBytes, payload, 0, payload.Length);
-        voicePacket = new BclVoicePacket(ReadUInt16(packet, 4), ReadUInt32(packet, 6), duration, flags, packet[13], payload);
+        voicePacket = new VoicePacket(ReadUInt16(packet, 4), ReadUInt32(packet, 6), duration, flags, packet[13], payload);
         return true;
     }
 
@@ -133,7 +133,7 @@ internal readonly struct BclVoicePacket
 
 internal readonly struct BclVoicePlayoutFrame
 {
-    public BclVoicePlayoutFrame(BclVoicePlayoutKind kind, BclVoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
+    public BclVoicePlayoutFrame(BclVoicePlayoutKind kind, VoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
     {
         Kind = kind;
         Packet = packet;
@@ -143,7 +143,7 @@ internal readonly struct BclVoicePlayoutFrame
     }
 
     public BclVoicePlayoutKind Kind { get; }
-    public BclVoicePacket? Packet { get; }
+    public VoicePacket? Packet { get; }
     public ushort Sequence { get; }
     public ushort Duration { get; }
     // For Dred frames: how many samples back from the recovering packet (Packet) this lost frame sits.
@@ -206,7 +206,7 @@ internal sealed class BclVoiceJitterBuffer
     private int _cleanWindowStreak;
     private long _cumulativeAcceptedPackets;
     private long _cumulativeLostFrames;
-    private readonly Dictionary<ushort, BclVoicePacket> _packets = new();
+    private readonly Dictionary<ushort, VoicePacket> _packets = new();
     private bool _hasExpected;
     private ushort _expectedSequence;
     private int _v2Packets;
@@ -302,7 +302,7 @@ internal sealed class BclVoiceJitterBuffer
             _targetDelayFrames--;
     }
 
-    public IReadOnlyList<BclVoicePlayoutFrame> Enqueue(BclVoicePacket packet)
+    public IReadOnlyList<BclVoicePlayoutFrame> Enqueue(VoicePacket packet)
     {
         _v2Packets++;
         var frames = _enqueueScratch;

@@ -17,7 +17,7 @@ using VoiceChatPlugin.Audio;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
+internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 {
     private const int DataControlPrefixLength = 4;
     // Hard ceiling on an untrusted inbound datagram (largest legit message is a ~4 KB voice packet).
@@ -242,7 +242,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private volatile bool _localSpeaking;
     private bool _microphoneReady;
     private volatile bool _speakerReady;
-    private BclVoiceMixer? _voiceMixer;
+    private VoiceMixer? _voiceMixer;
     private VoiceCaptureRuntimeOptions _captureOptions;
     private const float DeadInputPeakThreshold = 0.00012f;
     private const float LiveSignalPeakThreshold = 0.005f;
@@ -290,7 +290,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     public event Action<VoiceBackendCustomMessage>? CustomMessageReceived;
 
-    public BetterCrewLinkVoiceBackend(string roomCode, string region, string serverUrl)
+    public PerfectCommsVoiceBackend(string roomCode, string region, string serverUrl)
     {
         RoomCode = roomCode;
         Region = region;
@@ -1432,7 +1432,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         try
         {
             _androidSpeaker?.Dispose();
-            var mixer = _voiceMixer ?? new BclVoiceMixer();
+            var mixer = _voiceMixer ?? new VoiceMixer();
             _voiceMixer = mixer;
             _androidSpeaker = new AndroidSampleProviderSpeaker(mixer);
             _speakerReady = _androidSpeaker.IsPlaying;
@@ -1459,7 +1459,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         try { _androidSpeaker?.Dispose(); } catch { }
         _androidSpeaker = null;
-        var mixer = _voiceMixer ?? new BclVoiceMixer();
+        var mixer = _voiceMixer ?? new VoiceMixer();
         _voiceMixer = mixer;
         mixer.SetMasterVolume(_masterVolume);
         lock (_peerSync)
@@ -2819,7 +2819,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void SendOpusFrameToAudioTracks(byte[] framed)
     {
-        if (!BclVoicePacket.TryRead(framed, out var packet)) return;
+        if (!VoicePacket.TryRead(framed, out var packet)) return;
         var payload = packet.Payload;
         if (payload.Length == 0) return;
         uint duration = packet.Duration == 0 ? (uint)AudioHelpers.FrameSize : packet.Duration;
@@ -4074,7 +4074,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         // intermediate trimmed byte[] copy. The framed buffer itself stays a fresh per-frame allocation
         // because channel.send queues it for asynchronous SCTP transmission (reusing it would corrupt
         // in-flight data).
-        var framed = BclVoicePacket.Wrap(packet, encoded, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, BclVoicePacket.QuantizeLevel(transmitPeak));
+        var framed = VoicePacket.Wrap(packet, encoded, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, VoicePacket.QuantizeLevel(transmitPeak));
         _sendPacer.Enqueue(framed);
     }
 
@@ -4414,8 +4414,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private sealed class PeerConnection : IDisposable
     {
         private readonly object _sync = new();
-        private BclVoiceMixer? _mixer;
-        public void SetMixer(BclVoiceMixer? mixer) => _mixer = mixer;
+        private VoiceMixer? _mixer;
+        public void SetMixer(VoiceMixer? mixer) => _mixer = mixer;
         private readonly BclVoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: BclJitterTargetDelayFrames, maxBufferedFrames: BclJitterMaxBufferedFrames, minTargetDelayFrames: BclJitterMinTargetFrames, maxTargetDelayFrames: BclJitterMaxTargetFrames);
         private VoiceProximityResult _currentRoute = VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
         private float _levelPeakSinceStats;
@@ -4795,10 +4795,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 decodedFrames = 0;
                 if (_disposed) return false;
 
-                if (!BclVoicePacket.HasMagic(data))
+                if (!VoicePacket.HasMagic(data))
                     return DecodeLegacyPacket(data, out error, out decodedFrames);
 
-                if (!BclVoicePacket.TryRead(data, out var packet))
+                if (!VoicePacket.TryRead(data, out var packet))
                 {
                     // Magic matched but header parse failed; do NOT legacy-decode (would feed header
                     // bytes to Opus as audio). Drop as a parse error.

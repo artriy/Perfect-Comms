@@ -37,9 +37,9 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
 #if ANDROID
 internal sealed class SipsorceryVoiceTransport : IVoiceTransport
 {
-    private readonly BetterCrewLinkVoiceBackend _backend;
+    private readonly PerfectCommsVoiceBackend _backend;
 
-    public SipsorceryVoiceTransport(BetterCrewLinkVoiceBackend backend)
+    public SipsorceryVoiceTransport(PerfectCommsVoiceBackend backend)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
     }

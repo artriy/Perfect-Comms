@@ -57,7 +57,7 @@ public class VoiceChatRoom
     internal bool IsBetterCrewLinkBackendActive => _betterCrewLinkVoice != null;
     internal int BetterCrewLinkPublicLobbyJoinEpoch => _betterCrewLinkVoice?.PublicLobbyJoinEpoch ?? 0;
     private IVoiceBackend? _voiceBackend;
-    private BetterCrewLinkVoiceBackend? _betterCrewLinkVoice;
+    private PerfectCommsVoiceBackend? _betterCrewLinkVoice;
     private VoiceRoomSettingsSnapshot? _lastSentHostSettings;
     private int _lastSentModOptionRevision = -1;
     private DateTime _lastSentHostSettingsUtc = DateTime.MinValue;
@@ -683,8 +683,8 @@ public class VoiceChatRoom
         _lastSentHostSettings = null;
         _lastHostSettingsRequestUtc = DateTime.MinValue;
         ResetRadioStateSync();
-        _voiceBackend = new BetterCrewLinkVoiceBackend(roomCode, region, endpoint.ServerUrl);
-        _betterCrewLinkVoice = _voiceBackend as BetterCrewLinkVoiceBackend;
+        _voiceBackend = new PerfectCommsVoiceBackend(roomCode, region, endpoint.ServerUrl);
+        _betterCrewLinkVoice = _voiceBackend as PerfectCommsVoiceBackend;
         // P1.2: pre-warm the one-time HUD init (sprite PNG decode + button/tooltip GameObjects) here, off the
         // game-entry frame — the same room-construction lifecycle slot as the backend's WarmOpusCodec. Runs on
         // the Unity main thread (this method already touches VoiceChatHudState below) and is idempotent, so the
