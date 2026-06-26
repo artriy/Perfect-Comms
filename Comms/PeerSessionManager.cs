@@ -26,6 +26,7 @@ internal enum PeerState
     Offering,
     Answering,
     Connected,
+    Established,
 }
 
 internal static class SignalPayload
@@ -117,6 +118,8 @@ internal sealed class PeerSessionManager
     public const int ProtocolVersion = 1;
     public const int MinCompatibleVersion = 1;
     private const long HelloResendIntervalMs = 3000;
+    private const long HandshakeTimeoutMs = 12000;
+    private const long ReinitThrottleMs = 3000;
 
     private sealed class PeerEntry
     {
@@ -125,6 +128,8 @@ internal sealed class PeerSessionManager
         public bool HelloReceived;
         public bool Added;
         public long LastHelloSentMs;
+        public long LastProgressMs;
+        public long LastReinitMs;
     }
 
     private readonly int _localClientId;
@@ -159,7 +164,7 @@ internal sealed class PeerSessionManager
         var peer = GetOrCreate(clientId);
         SendHelloIfNeeded(clientId, peer);
         peer.LastHelloSentMs = nowMs;
-        TryStartSession(clientId, peer);
+        TryStartSession(clientId, peer, nowMs);
     }
 
     public void Tick(long nowMs)
@@ -167,11 +172,59 @@ internal sealed class PeerSessionManager
         foreach (var pair in _peers)
         {
             var peer = pair.Value;
-            if (!peer.HelloSent) continue;
-            if (peer.State is not (PeerState.Idle or PeerState.Greeted)) continue;
-            if (nowMs - peer.LastHelloSentMs < HelloResendIntervalMs) continue;
+            if (peer.State is PeerState.Idle or PeerState.Greeted)
+            {
+                if (!peer.HelloSent) continue;
+                if (nowMs - peer.LastHelloSentMs < HelloResendIntervalMs) continue;
+                peer.LastHelloSentMs = nowMs;
+                _sender.Send(pair.Key, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+            }
+            else if (peer.State is PeerState.Offering or PeerState.Answering)
+            {
+                if (peer.LastProgressMs == 0) continue;
+                if (nowMs - peer.LastProgressMs < HandshakeTimeoutMs) continue;
+                if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                Reinitiate(pair.Key, peer, nowMs);
+            }
+        }
+    }
+
+    public void OnPeerConnected(int clientId)
+    {
+        if (!_peers.TryGetValue(clientId, out var peer)) return;
+        peer.State = PeerState.Established;
+        peer.LastProgressMs = 0;
+        peer.LastReinitMs = 0;
+    }
+
+    public void OnPeerConnectionLost(int clientId, long nowMs = 0)
+    {
+        if (!_peers.TryGetValue(clientId, out var peer)) return;
+        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) return;
+        Reinitiate(clientId, peer, nowMs);
+    }
+
+    private void Reinitiate(int clientId, PeerEntry peer, long nowMs)
+    {
+        peer.LastReinitMs = nowMs;
+        if (peer.Added)
+        {
+            _transport.RemovePeer(clientId);
+            peer.Added = false;
+        }
+        if (LocalIsOfferer(clientId))
+        {
+            peer.Added = true;
+            peer.State = PeerState.Offering;
+            peer.LastProgressMs = nowMs;
+            _transport.AddPeer(clientId);
+        }
+        else
+        {
+            peer.State = PeerState.Greeted;
+            peer.LastProgressMs = 0;
             peer.LastHelloSentMs = nowMs;
-            _sender.Send(pair.Key, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+            _sender.Send(clientId, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
         }
     }
 
@@ -188,14 +241,14 @@ internal sealed class PeerSessionManager
             DropPeer(clientId);
     }
 
-    public void OnSignal(int senderClientId, SignalMsgType type, byte[] payload)
+    public void OnSignal(int senderClientId, SignalMsgType type, byte[] payload, long nowMs = 0)
     {
         if (senderClientId == _localClientId || senderClientId < 0) return;
 
         switch (type)
         {
-            case SignalMsgType.Hello: HandleHello(senderClientId, payload); break;
-            case SignalMsgType.Offer: HandleOffer(senderClientId, payload); break;
+            case SignalMsgType.Hello: HandleHello(senderClientId, payload, nowMs); break;
+            case SignalMsgType.Offer: HandleOffer(senderClientId, payload, nowMs); break;
             case SignalMsgType.Answer: HandleAnswer(senderClientId, payload); break;
             case SignalMsgType.Candidate: HandleCandidate(senderClientId, payload); break;
             case SignalMsgType.Bye: DropPeer(senderClientId); break;
@@ -216,7 +269,7 @@ internal sealed class PeerSessionManager
         _sender.Send(clientId, SignalMsgType.Candidate, SignalPayload.Candidate(candidate));
     }
 
-    private void HandleHello(int clientId, byte[] payload)
+    private void HandleHello(int clientId, byte[] payload, long nowMs)
     {
         if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible)) return;
         if (!IsCompatible(version, minCompatible)) return;
@@ -224,10 +277,10 @@ internal sealed class PeerSessionManager
         var peer = GetOrCreate(clientId);
         peer.HelloReceived = true;
         SendHelloIfNeeded(clientId, peer);
-        TryStartSession(clientId, peer);
+        TryStartSession(clientId, peer, nowMs);
     }
 
-    private void HandleOffer(int clientId, byte[] payload)
+    private void HandleOffer(int clientId, byte[] payload, long nowMs)
     {
         if (LocalIsOfferer(clientId)) return;
         if (!SignalPayload.TryReadSdp(payload, out var sdpType, out var sdp)) return;
@@ -239,6 +292,7 @@ internal sealed class PeerSessionManager
             _transport.AddPeer(clientId);
         }
         peer.State = PeerState.Answering;
+        peer.LastProgressMs = nowMs;
         _transport.SetRemoteSdp(clientId, sdpType, sdp);
     }
 
@@ -258,20 +312,22 @@ internal sealed class PeerSessionManager
         _transport.AddIceCandidate(clientId, candidate);
     }
 
-    private void TryStartSession(int clientId, PeerEntry peer)
+    private void TryStartSession(int clientId, PeerEntry peer, long nowMs)
     {
-        if (!peer.HelloReceived || peer.State == PeerState.Connected) return;
+        if (!peer.HelloReceived || peer.State is PeerState.Connected or PeerState.Established) return;
 
         if (LocalIsOfferer(clientId))
         {
             if (peer.Added) return;
             peer.Added = true;
             peer.State = PeerState.Offering;
+            peer.LastProgressMs = nowMs;
             _transport.AddPeer(clientId);
         }
         else if (peer.State is PeerState.Idle or PeerState.Greeted)
         {
             peer.State = PeerState.Answering;
+            peer.LastProgressMs = nowMs;
         }
     }
 
