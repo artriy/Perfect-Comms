@@ -788,6 +788,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             voice.OnDead += r => OnSidecarHeartbeatLost(voice, r);
             voice.OnLocalSdp += OnHelperLocalSdp;
             voice.OnLocalCandidate += OnHelperLocalCandidate;
+            voice.OnPeerState += OnHelperPeerState;
             voice.OnLevel += OnSidecarLevel;
             _voice = voice;
             var mic = _lastMicDeviceName;
@@ -806,6 +807,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     {
         if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
             _peerSession?.OnLocalCandidate(clientId, candidate);
+    }
+
+    private void OnHelperPeerState(string peerId, string state)
+    {
+        if (_peerSession == null) return;
+        if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId)) return;
+        if (state == "connected")
+            _peerSession.OnPeerConnected(clientId);
+        else if (state is "failed" or "disconnected" or "closed")
+            _peerSession.OnPeerConnectionLost(clientId, Environment.TickCount64);
     }
 
     private void OnSidecarLevel(float peak, bool speaking)

@@ -396,6 +396,13 @@ struct LocalCandidateMsg<'a> {
     candidate: &'a str,
 }
 
+#[derive(Serialize)]
+struct PeerStateMsg<'a> {
+    op: &'static str,
+    peer_id: &'a str,
+    state: &'a str,
+}
+
 pub fn local_sdp_json(peer_id: &str, sdp_type: &str, sdp: &str) -> String {
     serde_json::to_string(&LocalSdpMsg {
         op: "local-sdp",
@@ -413,6 +420,15 @@ pub fn local_candidate_json(peer_id: &str, candidate: &str) -> String {
         candidate,
     })
     .expect("local-candidate serialize")
+}
+
+pub fn peer_state_json(peer_id: &str, state: &str) -> String {
+    serde_json::to_string(&PeerStateMsg {
+        op: "peer-state",
+        peer_id,
+        state,
+    })
+    .expect("peer-state serialize")
 }
 
 #[cfg(test)]
@@ -570,6 +586,12 @@ mod tests {
         assert_eq!(cv["op"], "local-candidate");
         assert_eq!(cv["peer_id"], "p1");
         assert_eq!(cv["candidate"], "cand");
+
+        let pv: serde_json::Value =
+            serde_json::from_str(&peer_state_json("p1", "connected")).unwrap();
+        assert_eq!(pv["op"], "peer-state");
+        assert_eq!(pv["peer_id"], "p1");
+        assert_eq!(pv["state"], "connected");
     }
 
     #[test]

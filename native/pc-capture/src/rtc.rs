@@ -14,6 +14,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::{
@@ -32,6 +33,10 @@ pub enum LocalSignal {
     Candidate {
         peer_id: String,
         candidate: String,
+    },
+    PeerState {
+        peer_id: String,
+        state: String,
     },
 }
 
@@ -120,6 +125,19 @@ async fn create_peer(
                     }
                 }
             }
+        })
+    }));
+
+    let state_signal = out_local_signal.clone();
+    let state_peer = peer_id.clone();
+    pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+        let signal = state_signal.clone();
+        let pid = state_peer.clone();
+        Box::pin(async move {
+            let _ = signal.send(LocalSignal::PeerState {
+                peer_id: pid,
+                state: s.to_string(),
+            });
         })
     }));
 
@@ -360,18 +378,25 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut received: Option<Vec<u8>> = None;
         let mut count = 0u32;
+        let mut saw_connected = false;
 
         while Instant::now() < deadline {
             while let Ok(sig) = a_rx.try_recv() {
                 match sig {
                     LocalSignal::Sdp { sdp_type, sdp, .. } => b.set_remote_sdp("A", &sdp_type, &sdp),
                     LocalSignal::Candidate { candidate, .. } => b.add_ice_candidate("A", &candidate),
+                    LocalSignal::PeerState { state, .. } => {
+                        if state == "connected" {
+                            saw_connected = true;
+                        }
+                    }
                 }
             }
             while let Ok(sig) = b_rx.try_recv() {
                 match sig {
                     LocalSignal::Sdp { sdp_type, sdp, .. } => a.set_remote_sdp("B", &sdp_type, &sdp),
                     LocalSignal::Candidate { candidate, .. } => a.add_ice_candidate("B", &candidate),
+                    LocalSignal::PeerState { .. } => {}
                 }
             }
             a.send_opus(&payload);
@@ -395,6 +420,10 @@ mod tests {
             received.as_deref(),
             Some(payload.as_slice()),
             "received opus payload mismatch"
+        );
+        assert!(
+            saw_connected,
+            "engine A never emitted a connected peer-state"
         );
     }
 }

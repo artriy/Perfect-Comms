@@ -6,8 +6,8 @@ use crate::codec::OpusCodec;
 use crate::proto;
 use crate::proto::{
     devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
-    parse_inbound, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame,
-    InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
+    parse_inbound, peer_state_json, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
+    DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
 use crate::gamestate::{GameState, LocalState, PeerState};
 use crate::mix::{FalloffMode, Mixer};
@@ -356,6 +356,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 LocalSignal::Candidate { peer_id, candidate } => {
                     local_candidate_json(&peer_id, &candidate)
                 }
+                LocalSignal::PeerState { peer_id, state } => peer_state_json(&peer_id, &state),
             };
             if write_frame(&signal_conn, &encode_control(&json)).is_err() {
                 break;

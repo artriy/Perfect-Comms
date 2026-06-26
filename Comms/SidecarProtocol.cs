@@ -368,6 +368,26 @@ internal static class SidecarProtocol
         }
     }
 
+    public static bool TryReadPeerState(string json, out string peerId, out string state)
+    {
+        peerId = "";
+        state = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "peer-state")
+                return false;
+            peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            state = root.TryGetProperty("state", out var s) ? (s.GetString() ?? "") : "";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static bool TryDecodeAudio(byte[] buffer, int payloadOffset, int payloadLength, float[] destination, out ulong captureTsNs, out int sampleCount)
     {
         captureTsNs = 0;

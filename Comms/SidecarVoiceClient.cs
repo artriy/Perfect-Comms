@@ -34,6 +34,7 @@ internal sealed class SidecarVoiceClient : IDisposable
     public event Action<string>? OnDead;
     public event Action<string, string, string>? OnLocalSdp;
     public event Action<string, string>? OnLocalCandidate;
+    public event Action<string, string>? OnPeerState;
     public event Action<float, bool>? OnLevel;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
@@ -435,6 +436,13 @@ internal sealed class SidecarVoiceClient : IDisposable
             if (SidecarProtocol.TryReadLocalCandidate(json, out var peerId, out var candidate))
             {
                 try { OnLocalCandidate?.Invoke(peerId, candidate); } catch { }
+            }
+        }
+        else if (op == "peer-state")
+        {
+            if (SidecarProtocol.TryReadPeerState(json, out var peerId, out var state))
+            {
+                try { OnPeerState?.Invoke(peerId, state); } catch { }
             }
         }
         else if (op == "level")
