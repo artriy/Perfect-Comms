@@ -695,11 +695,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             voice.OnDead += r => OnSidecarHeartbeatLost(voice, r);
             voice.OnLocalSdp += RelayHelperLocalSdp;
             voice.OnLocalCandidate += RelayHelperLocalCandidate;
+            voice.OnLevel += OnSidecarLevel;
             _voice = voice;
             var mic = _lastMicDeviceName;
             var spk = _lastSpeakerDeviceName;
             _voiceStartTask = Task.Run(() => RunVoiceStart(voice, mic, spk, reason));
         }
+    }
+
+    private void OnSidecarLevel(float peak, bool speaking)
+    {
+        if (Mute) { _localLevel = 0f; _localSpeaking = false; return; }
+        _localLevel = peak;
+        _localSpeaking = speaking;
     }
 
     private void RunVoiceStart(SidecarVoiceClient voice, string mic, string spk, string reason)

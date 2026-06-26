@@ -280,6 +280,26 @@ internal static class SidecarProtocol
         }
     }
 
+    public static bool TryReadLevel(string json, out float peak, out bool speaking)
+    {
+        peak = 0f;
+        speaking = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "level")
+                return false;
+            peak = root.TryGetProperty("peak", out var p) ? p.GetSingle() : 0f;
+            speaking = root.TryGetProperty("speaking", out var s) && s.GetBoolean();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static bool TryReadLocalSdp(string json, out string peerId, out string sdpType, out string sdp)
     {
         peerId = "";
