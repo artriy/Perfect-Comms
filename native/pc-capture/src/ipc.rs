@@ -9,7 +9,10 @@ use crate::proto::{
     local_sdp_json, parse_inbound, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
     DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
+use crate::gamestate::{GameState, LocalState, PeerState};
+use crate::mix::{FalloffMode, Mixer};
 use crate::rtc::{LocalSignal, RtcEngine};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -272,30 +275,60 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let rtc = Arc::new(Mutex::new(RtcEngine::new(local_signal_tx)));
     let rtc_stop = Arc::new(AtomicBool::new(false));
 
+    let game_state = Arc::new(GameState::new());
+    let (dec_remove_tx, dec_remove_rx) = std::sync::mpsc::channel::<String>();
+
     let drain_rtc = rtc.clone();
     let drain_stop = rtc_stop.clone();
     let drain_playback = playback.clone();
+    let drain_gs = game_state.clone();
     let drain_handle = std::thread::spawn(move || {
-        let mut codec = OpusCodec::new().ok();
-        let mut pcm = [0f32; crate::codec::FRAME_SIZE];
+        let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
+        let mut mixer = Mixer::new();
+        let mut frames: HashMap<String, Vec<f32>> = HashMap::new();
         let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
         while !drain_stop.load(Ordering::Relaxed) {
-            let pkt = drain_rtc.lock().unwrap().recv();
-            match pkt {
-                Some((_peer, data)) => {
-                    if let Some(c) = codec.as_mut() {
-                        let n = c.decode(&data, &mut pcm);
-                        if n > 0 {
-                            for i in 0..n {
-                                stereo[2 * i] = pcm[i];
-                                stereo[2 * i + 1] = pcm[i];
-                            }
-                            drain_playback.lock().unwrap().push(&stereo[..n * 2]);
+            while let Ok(id) = dec_remove_rx.try_recv() {
+                decoders.remove(&id);
+            }
+            frames.clear();
+            let mut drained = 0;
+            loop {
+                let pkt = drain_rtc.lock().unwrap().recv();
+                let (peer, data) = match pkt {
+                    Some(p) => p,
+                    None => break,
+                };
+                if !decoders.contains_key(&peer) {
+                    match OpusCodec::new() {
+                        Ok(c) => {
+                            decoders.insert(peer.clone(), c);
                         }
+                        Err(_) => continue,
                     }
                 }
-                None => std::thread::sleep(Duration::from_millis(5)),
+                let codec = decoders.get_mut(&peer).unwrap();
+                let mut pcm = [0f32; crate::codec::FRAME_SIZE];
+                let n = codec.decode(&data, &mut pcm);
+                if n > 0 {
+                    frames.insert(peer, pcm[..n].to_vec());
+                }
+                drained += 1;
+                if drained >= 256 {
+                    break;
+                }
             }
+            if frames.is_empty() {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let snap = drain_gs.snapshot();
+            mixer.set_master(snap.master);
+            mixer.set_deafened(snap.local.deafened);
+            let per_peer: Vec<(String, &[f32])> =
+                frames.iter().map(|(k, v)| (k.clone(), v.as_slice())).collect();
+            mixer.mix(&per_peer, &drain_gs, &mut stereo);
+            drain_playback.lock().unwrap().push(&stereo);
         }
     });
 
@@ -424,6 +457,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     }
                     InboundOp::PeerRemove { peer_id } => {
                         rtc.lock().unwrap().remove_peer(&peer_id);
+                        game_state.remove_peer(&peer_id);
+                        let _ = dec_remove_tx.send(peer_id);
                     }
                     InboundOp::SetRemoteSdp {
                         peer_id,
@@ -434,6 +469,39 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     }
                     InboundOp::AddIceCandidate { peer_id, candidate } => {
                         rtc.lock().unwrap().add_ice_candidate(&peer_id, &candidate);
+                    }
+                    InboundOp::GameState {
+                        lx,
+                        ly,
+                        facing,
+                        deaf,
+                        master,
+                        maxd,
+                        falloff,
+                        peers,
+                    } => {
+                        let local = LocalState {
+                            x: lx,
+                            y: ly,
+                            facing,
+                            deafened: deaf,
+                        };
+                        let peer_states: Vec<(String, PeerState)> = peers
+                            .into_iter()
+                            .map(|p| {
+                                (
+                                    p.id,
+                                    PeerState {
+                                        x: p.x,
+                                        y: p.y,
+                                        muted: p.muted,
+                                        volume: p.vol,
+                                        role_flags: p.roles,
+                                    },
+                                )
+                            })
+                            .collect();
+                        game_state.apply(local, master, maxd, FalloffMode::from_i32(falloff), peer_states);
                     }
                     InboundOp::Hello { .. } => {}
                 }

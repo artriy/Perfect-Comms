@@ -235,6 +235,35 @@ pub enum InboundOp {
     },
     #[serde(rename = "add-ice-candidate")]
     AddIceCandidate { peer_id: String, candidate: String },
+    #[serde(rename = "game-state")]
+    GameState {
+        lx: f32,
+        ly: f32,
+        #[serde(default)]
+        facing: f32,
+        deaf: bool,
+        master: f32,
+        maxd: f32,
+        falloff: i32,
+        peers: Vec<GameStatePeer>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GameStatePeer {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default = "default_peer_volume")]
+    pub vol: f32,
+    #[serde(default)]
+    pub roles: u32,
+}
+
+fn default_peer_volume() -> f32 {
+    1.0
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
@@ -442,6 +471,53 @@ mod tests {
                 assert_eq!(candidate, "c");
             }
             other => panic!("expected add-ice-candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_game_state_op() {
+        let json = r#"{"op":"game-state","lx":1.5,"ly":-2.0,"facing":0.0,"deaf":false,"master":1.0,"maxd":6.0,"falloff":1,"peers":[{"id":"sock1","x":3.0,"y":0.0,"muted":false,"vol":1.0,"roles":0},{"id":"sock2","x":-4.0,"y":2.0,"muted":true,"vol":0.5,"roles":7}]}"#;
+        match parse_inbound(json).unwrap() {
+            InboundOp::GameState {
+                lx,
+                ly,
+                deaf,
+                master,
+                maxd,
+                falloff,
+                peers,
+                ..
+            } => {
+                assert_eq!(lx, 1.5);
+                assert_eq!(ly, -2.0);
+                assert!(!deaf);
+                assert_eq!(master, 1.0);
+                assert_eq!(maxd, 6.0);
+                assert_eq!(falloff, 1);
+                assert_eq!(peers.len(), 2);
+                assert_eq!(peers[0].id, "sock1");
+                assert_eq!(peers[0].x, 3.0);
+                assert!(!peers[0].muted);
+                assert_eq!(peers[1].id, "sock2");
+                assert!(peers[1].muted);
+                assert_eq!(peers[1].vol, 0.5);
+                assert_eq!(peers[1].roles, 7);
+            }
+            other => panic!("expected game-state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_game_state_peer_defaults() {
+        let json = r#"{"op":"game-state","lx":0.0,"ly":0.0,"deaf":true,"master":1.0,"maxd":6.0,"falloff":0,"peers":[{"id":"s","x":1.0,"y":1.0}]}"#;
+        match parse_inbound(json).unwrap() {
+            InboundOp::GameState { peers, deaf, .. } => {
+                assert!(deaf);
+                assert_eq!(peers[0].vol, 1.0);
+                assert!(!peers[0].muted);
+                assert_eq!(peers[0].roles, 0);
+            }
+            other => panic!("expected game-state, got {other:?}"),
         }
     }
 
