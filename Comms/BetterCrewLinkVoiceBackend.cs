@@ -2787,7 +2787,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (socket == null || conn == null) return;
 #if WINDOWS
         _voice?.AddPeer(socketId);
-#endif
+        await Task.CompletedTask;
+#else
         VoiceDiagnostics.Log("bcl.offer", $"reason=start socket={socketId} client={peer.ClientId} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
         try
         {
@@ -2830,6 +2831,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
             VoiceDiagnostics.Log("bcl.offer.error", $"socket={socketId} error=\"{DiagnosticSafe(ex.Message)}\"");
         }
+#endif
     }
 
     private void RelayHelperLocalSdp(string peerId, string sdpType, string sdp)
@@ -2876,6 +2878,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var peer = EnsurePeer(fromSocketId);
         if (peer?.Connection == null || _socket == null) return;
         VoiceDiagnostics.Log("bcl.signal.accepted", $"fromSocket={fromSocketId} client={peer.ClientId} type={signal.Kind}");
+#if WINDOWS
+        await Task.CompletedTask;
+#endif
         if (signal.Kind == "request-offer")
         {
             // Answerer asked us to re-offer. Only the initiator may offer; share the recovery debounce.
@@ -2884,7 +2889,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // ShouldInitiateOffer (no glare) + TryBeginRecovery (per-peer backoff) bound it to one peer, no storm.
             if (ShouldInitiateOffer(fromSocketId) && (LocalLinkNeedsRebuild(peer) || signal.RebuildRequested) && TryBeginRecovery(fromSocketId))
             {
+#if !WINDOWS
                 RecreatePeerConnection(fromSocketId);
+#endif
                 _ = StartOfferAsync(fromSocketId);
             }
             return;
@@ -2893,7 +2900,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         {
 #if WINDOWS
             _voice?.SetRemoteSdp(fromSocketId, "offer", signal.Sdp!);
-#endif
+#else
             // Rebuild so this offer lands on a CLEAN connection whenever our current one cannot carry its
             // channel. A second OFFER only arrives for a peer when the initiator RE-created its connection
             // (after a stuck/dead link) and re-offered. Applying such a re-offer to our stale connection —
@@ -2937,25 +2944,28 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
             var answerJson = JsonSerializer.Serialize(new { type = "answer", sdp = answer.sdp });
             await _socket.EmitAsync("signal", new object[] { new { to = fromSocketId, data = answerJson } });
+#endif
         }
         else if (signal.Kind == "answer")
         {
 #if WINDOWS
             _voice?.SetRemoteSdp(fromSocketId, "answer", signal.Sdp!);
-#endif
+#else
             peer.Connection.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = signal.Sdp });
+#endif
         }
         else if (signal.Kind == "candidate")
         {
 #if WINDOWS
             _voice?.AddIceCandidate(fromSocketId, signal.Candidate!);
-#endif
+#else
             peer.Connection.addIceCandidate(new RTCIceCandidateInit
             {
                 candidate = signal.Candidate,
                 sdpMid = signal.SdpMid,
                 sdpMLineIndex = signal.SdpMLineIndex,
             });
+#endif
         }
     }
 
