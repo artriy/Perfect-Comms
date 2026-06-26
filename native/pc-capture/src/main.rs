@@ -4,6 +4,8 @@ mod codec;
 mod dsp;
 mod ipc;
 mod proto;
+#[allow(dead_code)]
+mod rtc;
 
 use ipc::ServerConfig;
 use std::path::PathBuf;
