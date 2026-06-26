@@ -5,9 +5,9 @@ use crate::audio::{
 use crate::codec::OpusCodec;
 use crate::proto;
 use crate::proto::{
-    devices_json, encode_audio, encode_control, error_json, level_json, local_candidate_json,
-    local_sdp_json, parse_inbound, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
-    DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
+    devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
+    parse_inbound, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame,
+    InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
 use crate::gamestate::{GameState, LocalState, PeerState};
 use crate::mix::{FalloffMode, Mixer};
@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const MAX_FRAME_LEN: usize = proto::FRAME_BYTES * 4;
+
+const SPEAKING_PEAK: f32 = 0.02;
 
 pub struct ServerConfig {
     pub handshake_path: PathBuf,
@@ -237,11 +239,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let producer_stop = Arc::new(AtomicBool::new(false));
     let producer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
+    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
+    let rtc = Arc::new(Mutex::new(RtcEngine::new(local_signal_tx)));
+    let rtc_stop = Arc::new(AtomicBool::new(false));
+
     let writer_ring = ring.clone();
     let writer_stop = stop.clone();
     let writer_conn = conn.clone();
     let writer_dsp = dsp.clone();
+    let writer_rtc = rtc.clone();
     let writer_handle = std::thread::spawn(move || {
+        let mut encoder = OpusCodec::new().ok();
         let mut since_level = 0u32;
         let mut last_dropped = 0u64;
         while !writer_stop.load(Ordering::Relaxed) {
@@ -253,13 +261,21 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 Some(mut f) => {
                     writer_dsp.lock().unwrap().capture(&mut f.samples);
                     let pk = peak(&f.samples);
-                    if write_frame(&writer_conn, &encode_audio(&f)).is_err() {
-                        break;
+                    if let Some(enc) = encoder.as_mut() {
+                        let pkt = enc.encode(&f.samples);
+                        if !pkt.is_empty() {
+                            writer_rtc.lock().unwrap().send_opus(&pkt);
+                        }
                     }
                     since_level += 1;
                     if since_level >= 50 {
                         since_level = 0;
-                        let _ = write_frame(&writer_conn, &encode_control(&level_json(pk)));
+                        let speaking = pk >= SPEAKING_PEAK;
+                        if write_frame(&writer_conn, &encode_control(&level_json(pk, speaking)))
+                            .is_err()
+                        {
+                            break;
+                        }
                         if dropped != last_dropped {
                             eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
                             last_dropped = dropped;
@@ -270,10 +286,6 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             }
         }
     });
-
-    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
-    let rtc = Arc::new(Mutex::new(RtcEngine::new(local_signal_tx)));
-    let rtc_stop = Arc::new(AtomicBool::new(false));
 
     let game_state = Arc::new(GameState::new());
     let (dec_remove_tx, dec_remove_rx) = std::sync::mpsc::channel::<String>();
@@ -665,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_session_handshakes_pings_streams_audio_and_replies_devices() {
+    fn synthetic_session_handshakes_pings_emits_level_and_replies_devices() {
         let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
         let cfg = ServerConfig {
@@ -712,7 +724,7 @@ mod tests {
             .unwrap();
 
         let mut got_pong = false;
-        let mut got_audio = false;
+        let mut got_level = false;
         for _ in 0..400 {
             match read_frame(&mut reader).unwrap() {
                 Frame::Control(s) => {
@@ -725,20 +737,22 @@ mod tests {
                         got_pong = true;
                         assert!(v["capTs"].as_u64().unwrap() > 0);
                     }
+                    if v["op"] == "level" {
+                        got_level = true;
+                        assert!(v["peak"].is_number());
+                        assert!(v["speaking"].is_boolean());
+                    }
                 }
-                Frame::Audio(f) => {
-                    assert_eq!(f.samples.len(), 960);
-                    got_audio = true;
-                }
+                Frame::Audio(_) => {}
                 Frame::AudioOut(_) => {}
             }
-            if got_pong && got_audio && got_devices {
+            if got_pong && got_level && got_devices {
                 break;
             }
         }
         assert!(got_devices, "never got devices reply");
         assert!(got_pong, "never got pong");
-        assert!(got_audio, "never got audio");
+        assert!(got_level, "never got level");
 
         client
             .write_all(&encode_control(r#"{"op":"stop"}"#))

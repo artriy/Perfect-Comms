@@ -18,7 +18,7 @@ fn encode_control(json: &str) -> Vec<u8> {
 
 enum Frame {
     Control(String),
-    Audio(usize),
+    Audio,
 }
 
 fn read_frame<R: Read>(r: &mut R) -> std::io::Result<Frame> {
@@ -32,8 +32,7 @@ fn read_frame<R: Read>(r: &mut R) -> std::io::Result<Frame> {
         TYPE_CONTROL => Ok(Frame::Control(String::from_utf8_lossy(&body).into_owned())),
         TYPE_AUDIO => {
             assert_eq!(len, FRAME_BYTES, "audio frame wrong size");
-            let samples = (len - 8) / 4;
-            Ok(Frame::Audio(samples))
+            Ok(Frame::Audio)
         }
         other => panic!("unknown frame type {other}"),
     }
@@ -56,7 +55,7 @@ fn parse_port(body: &str) -> Option<u16> {
 }
 
 #[test]
-fn synthetic_helper_streams_audio_end_to_end() {
+fn synthetic_helper_emits_level_end_to_end() {
     let exe = env!("CARGO_BIN_EXE_pc-capture");
     let hs = std::env::temp_dir().join(format!(
         "pc-e2e-hs-{}-{}.json",
@@ -115,7 +114,7 @@ fn synthetic_helper_streams_audio_end_to_end() {
             assert!(s.contains("\"ready\""), "expected ready, got {s}");
             assert!(s.contains("48000"), "expected 48000 rate, got {s}");
         }
-        Frame::Audio(_) => panic!("expected ready before audio"),
+        Frame::Audio => panic!("expected ready before audio"),
     }
 
     client
@@ -126,27 +125,27 @@ fn synthetic_helper_streams_audio_end_to_end() {
         .unwrap();
 
     let mut got_pong = false;
-    let mut audio_frames = 0;
+    let mut level_frames = 0;
     let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline && (!got_pong || audio_frames < 3) {
+    while Instant::now() < deadline && (!got_pong || level_frames < 2) {
         match read_frame(&mut reader) {
             Ok(Frame::Control(s)) => {
                 if s.contains("\"pong\"") {
                     got_pong = true;
                 }
+                if s.contains("\"level\"") {
+                    level_frames += 1;
+                }
             }
-            Ok(Frame::Audio(samples)) => {
-                assert_eq!(samples, 960);
-                audio_frames += 1;
-            }
+            Ok(Frame::Audio) => {}
             Err(_) => break,
         }
     }
 
     assert!(got_pong, "never received pong");
     assert!(
-        audio_frames >= 3,
-        "expected >=3 audio frames, got {audio_frames}"
+        level_frames >= 2,
+        "expected >=2 level frames, got {level_frames}"
     );
 
     client

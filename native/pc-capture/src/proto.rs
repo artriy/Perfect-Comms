@@ -70,6 +70,7 @@ pub fn encode_control(json: &str) -> Vec<u8> {
     out
 }
 
+#[allow(dead_code)]
 pub fn encode_audio(frame: &AudioFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(5 + FRAME_BYTES);
     out.push(TYPE_AUDIO);
@@ -306,6 +307,7 @@ struct DevicesMsg<'a> {
 struct LevelMsg {
     op: &'static str,
     peak: f32,
+    speaking: bool,
 }
 
 #[derive(Serialize)]
@@ -346,8 +348,13 @@ pub fn devices_json(devices: &[DeviceInfo], output_devices: &[DeviceInfo]) -> St
     .expect("devices serialize")
 }
 
-pub fn level_json(peak: f32) -> String {
-    serde_json::to_string(&LevelMsg { op: "level", peak }).expect("level serialize")
+pub fn level_json(peak: f32, speaking: bool) -> String {
+    serde_json::to_string(&LevelMsg {
+        op: "level",
+        peak,
+        speaking,
+    })
+    .expect("level serialize")
 }
 
 pub fn error_json(code: &str, msg: &str) -> String {
@@ -725,9 +732,10 @@ mod tests {
         assert_eq!(dv["op"], "devices");
         assert_eq!(dv["devices"][0]["id"], "x");
 
-        let lv: serde_json::Value = serde_json::from_str(&level_json(0.5)).unwrap();
+        let lv: serde_json::Value = serde_json::from_str(&level_json(0.5, true)).unwrap();
         assert_eq!(lv["op"], "level");
         assert!((lv["peak"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(lv["speaking"], true);
 
         let ev: serde_json::Value =
             serde_json::from_str(&error_json("mic-denied", "no mic")).unwrap();
