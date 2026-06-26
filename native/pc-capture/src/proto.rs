@@ -224,20 +224,16 @@ pub enum InboundOp {
         hpf: bool,
     },
     #[serde(rename = "peer-add")]
-    #[allow(dead_code)]
     PeerAdd { peer_id: String },
     #[serde(rename = "peer-remove")]
-    #[allow(dead_code)]
     PeerRemove { peer_id: String },
     #[serde(rename = "set-remote-sdp")]
-    #[allow(dead_code)]
     SetRemoteSdp {
         peer_id: String,
         sdp_type: String,
         sdp: String,
     },
     #[serde(rename = "add-ice-candidate")]
-    #[allow(dead_code)]
     AddIceCandidate { peer_id: String, candidate: String },
 }
 
@@ -339,7 +335,6 @@ pub fn pong_json(cap_ts: u64) -> String {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct LocalSdpMsg<'a> {
     op: &'static str,
     peer_id: &'a str,
@@ -348,14 +343,12 @@ struct LocalSdpMsg<'a> {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct LocalCandidateMsg<'a> {
     op: &'static str,
     peer_id: &'a str,
     candidate: &'a str,
 }
 
-#[allow(dead_code)]
 pub fn local_sdp_json(peer_id: &str, sdp_type: &str, sdp: &str) -> String {
     serde_json::to_string(&LocalSdpMsg {
         op: "local-sdp",
@@ -366,7 +359,6 @@ pub fn local_sdp_json(peer_id: &str, sdp_type: &str, sdp: &str) -> String {
     .expect("local-sdp serialize")
 }
 
-#[allow(dead_code)]
 pub fn local_candidate_json(peer_id: &str, candidate: &str) -> String {
     serde_json::to_string(&LocalCandidateMsg {
         op: "local-candidate",

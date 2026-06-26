@@ -2,12 +2,14 @@ use crate::audio::{
     enumerate_devices, enumerate_output_devices, now_ns, peak, spawn_cpal_capture,
     spawn_cpal_playback, ToneSource,
 };
+use crate::codec::OpusCodec;
 use crate::proto;
 use crate::proto::{
-    devices_json, encode_audio, encode_control, error_json, level_json, parse_inbound, pong_json,
-    ready_json, AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
-    PROTO_VERSION, RING_CAPACITY,
+    devices_json, encode_audio, encode_control, error_json, level_json, local_candidate_json,
+    local_sdp_json, parse_inbound, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
+    DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
+use crate::rtc::{LocalSignal, RtcEngine};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -266,6 +268,56 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
+    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
+    let rtc = Arc::new(Mutex::new(RtcEngine::new(local_signal_tx)));
+    let rtc_stop = Arc::new(AtomicBool::new(false));
+
+    let drain_rtc = rtc.clone();
+    let drain_stop = rtc_stop.clone();
+    let drain_playback = playback.clone();
+    let drain_handle = std::thread::spawn(move || {
+        let mut codec = OpusCodec::new().ok();
+        let mut pcm = [0f32; crate::codec::FRAME_SIZE];
+        let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
+        while !drain_stop.load(Ordering::Relaxed) {
+            let pkt = drain_rtc.lock().unwrap().recv();
+            match pkt {
+                Some((_peer, data)) => {
+                    if let Some(c) = codec.as_mut() {
+                        let n = c.decode(&data, &mut pcm);
+                        if n > 0 {
+                            for i in 0..n {
+                                stereo[2 * i] = pcm[i];
+                                stereo[2 * i + 1] = pcm[i];
+                            }
+                            drain_playback.lock().unwrap().push(&stereo[..n * 2]);
+                        }
+                    }
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    });
+
+    let signal_conn = conn.clone();
+    let signal_handle = std::thread::spawn(move || {
+        while let Ok(sig) = local_signal_rx.recv() {
+            let json = match sig {
+                LocalSignal::Sdp {
+                    peer_id,
+                    sdp_type,
+                    sdp,
+                } => local_sdp_json(&peer_id, &sdp_type, &sdp),
+                LocalSignal::Candidate { peer_id, candidate } => {
+                    local_candidate_json(&peer_id, &candidate)
+                }
+            };
+            if write_frame(&signal_conn, &encode_control(&json)).is_err() {
+                break;
+            }
+        }
+    });
+
     let mut last_out_spawn_ns: Option<u64> = None;
     loop {
         let frame = match read_frame_checked(&mut reader) {
@@ -367,10 +419,22 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     InboundOp::Ping => {
                         let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
                     }
-                    InboundOp::PeerAdd { .. } => {}
-                    InboundOp::PeerRemove { .. } => {}
-                    InboundOp::SetRemoteSdp { .. } => {}
-                    InboundOp::AddIceCandidate { .. } => {}
+                    InboundOp::PeerAdd { peer_id } => {
+                        rtc.lock().unwrap().add_peer(peer_id);
+                    }
+                    InboundOp::PeerRemove { peer_id } => {
+                        rtc.lock().unwrap().remove_peer(&peer_id);
+                    }
+                    InboundOp::SetRemoteSdp {
+                        peer_id,
+                        sdp_type,
+                        sdp,
+                    } => {
+                        rtc.lock().unwrap().set_remote_sdp(&peer_id, &sdp_type, &sdp);
+                    }
+                    InboundOp::AddIceCandidate { peer_id, candidate } => {
+                        rtc.lock().unwrap().add_ice_candidate(&peer_id, &candidate);
+                    }
                     InboundOp::Hello { .. } => {}
                 }
             }
@@ -381,6 +445,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     producer_stop.store(true, Ordering::Relaxed);
     stop.store(true, Ordering::Relaxed);
     out_stop.store(true, Ordering::Relaxed);
+    rtc_stop.store(true, Ordering::Relaxed);
     if let Some(h) = producer.lock().unwrap().take() {
         h.join().ok();
     }
@@ -388,6 +453,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         h.join().ok();
     }
     writer_handle.join().ok();
+    drain_handle.join().ok();
+    drop(rtc);
+    signal_handle.join().ok();
     Ok(())
 }
 
