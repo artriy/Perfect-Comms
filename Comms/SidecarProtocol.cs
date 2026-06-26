@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using SIPSorcery.Net;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -88,6 +89,31 @@ internal static class SidecarProtocol
 
     public static byte[] AddIceCandidateFrame(string peerId, string candidate)
         => EncodeControl($"{{\"op\":\"add-ice-candidate\",\"peer_id\":{JsonString(peerId)},\"candidate\":{JsonString(candidate)}}}");
+
+    public static byte[] SetIceServersFrame(IEnumerable<RTCIceServer> servers)
+    {
+        using var stream = new System.IO.MemoryStream();
+        using (var w = new Utf8JsonWriter(stream))
+        {
+            w.WriteStartObject();
+            w.WriteString("op", "set-ice-servers");
+            w.WriteStartArray("servers");
+            foreach (var s in servers)
+            {
+                if (string.IsNullOrEmpty(s.urls)) continue;
+                w.WriteStartObject();
+                w.WriteStartArray("urls");
+                w.WriteStringValue(s.urls);
+                w.WriteEndArray();
+                if (!string.IsNullOrEmpty(s.username)) w.WriteString("username", s.username);
+                if (!string.IsNullOrEmpty(s.credential)) w.WriteString("credential", s.credential);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+        return EncodeFrame(TypeControl, stream.ToArray());
+    }
 
     public readonly struct GameStatePeerInput
     {

@@ -10,6 +10,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS};
 use webrtc::api::{APIBuilder, API};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -42,6 +43,7 @@ struct PeerHandle {
 pub struct RtcEngine {
     rt: Runtime,
     peers: Mutex<HashMap<String, PeerHandle>>,
+    ice_servers: Mutex<Vec<RTCIceServer>>,
     out_local_signal: Sender<LocalSignal>,
     recv_tx: Sender<(String, Vec<u8>)>,
     recv_rx: Mutex<Receiver<(String, Vec<u8>)>>,
@@ -78,11 +80,16 @@ fn build_api() -> Result<API, webrtc::Error> {
 async fn create_peer(
     peer_id: String,
     offerer: bool,
+    ice_servers: Vec<RTCIceServer>,
     out_local_signal: Sender<LocalSignal>,
     recv_tx: Sender<(String, Vec<u8>)>,
 ) -> Result<PeerHandle, webrtc::Error> {
     let api = build_api()?;
-    let pc = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
+    let config = RTCConfiguration {
+        ice_servers,
+        ..Default::default()
+    };
+    let pc = Arc::new(api.new_peer_connection(config).await?);
 
     let track = Arc::new(TrackLocalStaticSample::new(
         opus_capability(),
@@ -157,10 +164,24 @@ impl RtcEngine {
         RtcEngine {
             rt,
             peers: Mutex::new(HashMap::new()),
+            ice_servers: Mutex::new(Vec::new()),
             out_local_signal,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
         }
+    }
+
+    pub fn set_ice_servers(&self, servers: &[crate::proto::IceServer]) {
+        let mapped = servers
+            .iter()
+            .map(|s| RTCIceServer {
+                urls: s.urls.clone(),
+                username: s.username.clone().unwrap_or_default(),
+                credential: s.credential.clone().unwrap_or_default(),
+                ..Default::default()
+            })
+            .collect();
+        *self.ice_servers.lock().unwrap() = mapped;
     }
 
     pub fn add_peer(&self, peer_id: String) {
@@ -169,8 +190,9 @@ impl RtcEngine {
         }
         let signal = self.out_local_signal.clone();
         let recv_tx = self.recv_tx.clone();
+        let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
-        if let Ok(handle) = self.rt.block_on(create_peer(pid, true, signal, recv_tx)) {
+        if let Ok(handle) = self.rt.block_on(create_peer(pid, true, servers, signal, recv_tx)) {
             self.peers.lock().unwrap().insert(peer_id, handle);
         }
     }
@@ -194,8 +216,9 @@ impl RtcEngine {
             None => {
                 let signal = self.out_local_signal.clone();
                 let recv_tx = self.recv_tx.clone();
+                let servers = self.ice_servers.lock().unwrap().clone();
                 let pid = peer_id.to_string();
-                match self.rt.block_on(create_peer(pid, false, signal, recv_tx)) {
+                match self.rt.block_on(create_peer(pid, false, servers, signal, recv_tx)) {
                     Ok(h) => {
                         let pc = Arc::clone(&h.pc);
                         self.peers.lock().unwrap().insert(peer_id.to_string(), h);
@@ -284,6 +307,11 @@ impl RtcEngine {
     pub fn recv(&self) -> Option<(String, Vec<u8>)> {
         self.recv_rx.lock().unwrap().try_recv().ok()
     }
+
+    #[cfg(test)]
+    pub fn ice_servers_snapshot(&self) -> Vec<RTCIceServer> {
+        self.ice_servers.lock().unwrap().clone()
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +319,33 @@ mod tests {
     use super::*;
     use std::sync::mpsc::channel;
     use std::time::Instant;
+
+    #[test]
+    fn set_ice_servers_stores_mapped_servers() {
+        let (tx, _rx) = channel::<LocalSignal>();
+        let engine = RtcEngine::new(tx);
+        assert!(engine.ice_servers_snapshot().is_empty());
+        engine.set_ice_servers(&[
+            crate::proto::IceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                username: None,
+                credential: None,
+            },
+            crate::proto::IceServer {
+                urls: vec!["turn:turn.example.com:3478".to_string()],
+                username: Some("u".to_string()),
+                credential: Some("c".to_string()),
+            },
+        ]);
+        let stored = engine.ice_servers_snapshot();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].urls, vec!["stun:stun.l.google.com:19302"]);
+        assert_eq!(stored[0].username, "");
+        assert_eq!(stored[0].credential, "");
+        assert_eq!(stored[1].urls, vec!["turn:turn.example.com:3478"]);
+        assert_eq!(stored[1].username, "u");
+        assert_eq!(stored[1].credential, "c");
+    }
 
     #[test]
     fn loopback_two_engines_exchange_opus() {

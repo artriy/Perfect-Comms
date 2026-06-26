@@ -499,6 +499,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     InboundOp::AddIceCandidate { peer_id, candidate } => {
                         rtc.lock().unwrap().add_ice_candidate(&peer_id, &candidate);
                     }
+                    InboundOp::SetIceServers { servers } => {
+                        rtc.lock().unwrap().set_ice_servers(&servers);
+                    }
                     InboundOp::GameState {
                         lx,
                         ly,

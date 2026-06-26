@@ -236,6 +236,8 @@ pub enum InboundOp {
     },
     #[serde(rename = "add-ice-candidate")]
     AddIceCandidate { peer_id: String, candidate: String },
+    #[serde(rename = "set-ice-servers")]
+    SetIceServers { servers: Vec<IceServer> },
     #[serde(rename = "game-state")]
     GameState {
         lx: f32,
@@ -265,6 +267,15 @@ pub struct GameStatePeer {
 
 fn default_peer_volume() -> f32 {
     1.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub credential: Option<String>,
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
@@ -478,6 +489,23 @@ mod tests {
                 assert_eq!(candidate, "c");
             }
             other => panic!("expected add-ice-candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_set_ice_servers() {
+        let json = r#"{"op":"set-ice-servers","servers":[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:turn.example.com:3478"],"username":"u","credential":"c"}]}"#;
+        match parse_inbound(json).unwrap() {
+            InboundOp::SetIceServers { servers } => {
+                assert_eq!(servers.len(), 2);
+                assert_eq!(servers[0].urls, vec!["stun:stun.l.google.com:19302"]);
+                assert!(servers[0].username.is_none());
+                assert!(servers[0].credential.is_none());
+                assert_eq!(servers[1].urls, vec!["turn:turn.example.com:3478"]);
+                assert_eq!(servers[1].username.as_deref(), Some("u"));
+                assert_eq!(servers[1].credential.as_deref(), Some("c"));
+            }
+            other => panic!("expected set-ice-servers, got {other:?}"),
         }
     }
 

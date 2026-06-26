@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using SIPSorcery.Net;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -232,6 +233,13 @@ internal sealed class SidecarVoiceClient : IDisposable
         if (!_running || string.IsNullOrEmpty(peerId)) return;
         try { Write(SidecarProtocol.AddIceCandidateFrame(peerId, candidate)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "add-ice-candidate write failed: " + ex.Message); }
+    }
+
+    public void SetIceServers(IEnumerable<RTCIceServer> servers)
+    {
+        if (!_running || servers == null) return;
+        try { Write(SidecarProtocol.SetIceServersFrame(servers)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-ice-servers write failed: " + ex.Message); }
     }
 
     public void SendGameState(
