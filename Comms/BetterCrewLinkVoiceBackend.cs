@@ -1447,6 +1447,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var frameGapTicks = _lastUpdateTicks == 0 ? 0 : lossReportNowUtc.Ticks - _lastUpdateTicks;
         _lastUpdateTicks = lossReportNowUtc.Ticks;
         var resumeFrame = IsResumeFrame(frameGapTicks, ResumeFrameThreshold.Ticks);
+        List<SidecarProtocol.GameStatePeerInput>? helperGameStatePeers = null;
+#if WINDOWS
+        if (HelperRtcRelay && _voice != null && listenerPos.HasValue)
+            helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
+#endif
         foreach (var peer in _updatePeerScratch)
         {
             if (peer.ClientId >= 0)
@@ -1480,6 +1485,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result); // proximity volumes only — volatile route writes, no _sync, no decode
+            if (helperGameStatePeers != null && target.HasValue)
+                helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
+                    peer.SocketId, target.Value.Position.x, target.Value.Position.y,
+                    !result.Audible, peer.ClientVolume, 0u));
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
             // Deliberately NOT calling peer.TryFlushBufferedVoice here. Doing so held the per-peer _sync lock
             // across the Concentus Opus decode ON THE UNITY MAIN/RENDER THREAD, so a packet arriving on the
@@ -1497,6 +1506,16 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             peer.SampleDiagnostics();
         }
         VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
+
+#if WINDOWS
+        if (helperGameStatePeers != null && listenerPos.HasValue)
+        {
+            var lp = listenerPos.Value;
+            var rs = VoiceRoomSettingsState.Current;
+            _voice?.SendGameState(lp.x, lp.y, 0f, VoiceChatHudState.IsSpeakerMuted,
+                _masterVolume, rs.MaxChatDistance, rs.FalloffMode, helperGameStatePeers);
+        }
+#endif
 
         MaybeLogStats(snapshot, "ok");
     }
@@ -4227,9 +4246,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             // on a genuine remap, so a transient unavailability frame doesn't wipe a valid channel.
             PlayerId = byte.MaxValue;
         }
+        public float ClientVolume { get; private set; } = 1f;
         public void SetVolume(float volume)
         {
             var clamped = Math.Clamp(volume, 0f, 2f);
+            ClientVolume = clamped;
             _mixer?.SetClientVolume(PlaybackGroupId, clamped);
         }
         public void MuteAll()

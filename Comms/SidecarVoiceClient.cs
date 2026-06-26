@@ -233,6 +233,21 @@ internal sealed class SidecarVoiceClient : IDisposable
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "add-ice-candidate write failed: " + ex.Message); }
     }
 
+    public void SendGameState(
+        float lx,
+        float ly,
+        float facing,
+        bool deaf,
+        float master,
+        float maxDistance,
+        int falloff,
+        IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
+    {
+        if (!_running) return;
+        try { Write(SidecarProtocol.GameStateFrame(lx, ly, facing, deaf, master, maxDistance, falloff, peers)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "game-state write failed: " + ex.Message); }
+    }
+
     private bool ReadReady(NetworkStream stream, out string[] outputDevices, out string error)
     {
         outputDevices = Array.Empty<string>();
