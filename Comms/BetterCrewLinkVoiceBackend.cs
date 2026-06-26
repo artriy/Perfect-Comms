@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,6 +43,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly byte[] KeepaliveMagic = [(byte)'P', (byte)'C', (byte)'K', (byte)'A'];
     private static readonly byte[] KeepaliveBytes = BuildKeepaliveMessage();
     private static readonly RTCIceServer[] DefaultIceServers = [new() { urls = "stun:stun.l.google.com:19302" }];
+    private static readonly HttpClient TurnHttp = new() { Timeout = TimeSpan.FromSeconds(6) };
 
     private readonly MicPreprocessor _micPreprocessor = new();
     private readonly ConcurrentQueue<Action> _mainThreadActions = new();
@@ -63,6 +65,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly TimeSpan DuplicateRouteLogInterval = TimeSpan.FromSeconds(2);
     // volatile: reassigned on a background socket callback, read on the main thread.
     private volatile List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
+    private CancellationTokenSource? _turnCts;
     // Set once when the room's recovery loop reports repeated total peer failure (peers=0 with remotePlayers>0):
     // direct/STUN clearly can't connect this client, so escalate to the SAME relay-only path the Wine fix uses.
     // Latched for the session (we never oscillate direct<->relay). volatile: set on the main thread, read by
@@ -202,6 +205,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
     private SidecarVoiceClient? _voice;
+    private volatile List<RTCIceServer>? _pendingIceServers;
     private Task _voiceStartTask = Task.CompletedTask;
     private int _voiceColdStartRetries;
     private readonly object _voiceSync = new();
@@ -279,6 +283,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
         _sendPacer = new BclSendPacer(SendFramedToChannels);
         ConnectSocket();
+        StartTurnCredentialFetch();
         WarmOpusCodec();
         VoiceDiagnostics.Log("bcl.created", $"room={RoomCode} region={Region} endpoint={ServerUrl}");
         if (WineEnvironment.IsWine)
@@ -308,6 +313,72 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
                 VoiceDiagnostics.Log("bcl.codec.warm.error", $"error=\"{ex.Message}\"");
             }
         });
+    }
+
+    private void StartTurnCredentialFetch()
+    {
+        var cached = TurnCredentialClient.Cached;
+        if (cached is { Count: > 0 })
+            ApplyIceServers(new List<RTCIceServer>(cached));
+        var cts = new CancellationTokenSource();
+        _turnCts = cts;
+        _ = Task.Run(() => TurnCredentialLoopAsync(cts.Token));
+    }
+
+    private async Task TurnCredentialLoopAsync(CancellationToken ct)
+    {
+        var url = TurnCredentialsUrl();
+        while (!ct.IsCancellationRequested && !_disposed)
+        {
+            TimeSpan wait;
+            try
+            {
+                if (TurnCredentialClient.NeedsRefresh(DateTime.UtcNow))
+                {
+                    var servers = await TurnCredentialClient.FetchAsync(TurnHttp, url, ct).ConfigureAwait(false);
+                    ApplyIceServers(servers);
+                    VoiceDiagnostics.Log("bcl.turn", $"ready=true iceServers={servers.Count}");
+                }
+                wait = TurnCredentialClient.CredentialTtl - TurnCredentialClient.RefreshMargin;
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("bcl.turn", $"ready=false error=\"{ex.Message}\"");
+                wait = TimeSpan.FromMinutes(5);
+            }
+            try { await Task.Delay(wait, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private void ApplyIceServers(List<RTCIceServer> servers)
+    {
+        if (servers == null || servers.Count == 0 || _disposed) return;
+#if WINDOWS
+        _pendingIceServers = servers;
+        SidecarVoiceClient? voice;
+        lock (_voiceSync) voice = _voice;
+        voice?.SetIceServers(servers);
+#else
+        _iceServers = servers;
+        DrainPeerConnectionPool();
+        RefillPeerConnectionPool();
+#endif
+    }
+
+    private static string TurnCredentialsUrl()
+    {
+        var baseUrl = "https://perfect-comms-lobbies.edgetel.workers.dev";
+        try
+        {
+            var configured = VoiceSettings.Instance?.LobbyRegistryUrl.Value;
+            if (!string.IsNullOrWhiteSpace(configured) &&
+                Uri.TryCreate(configured!.Trim(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps)
+                baseUrl = configured.Trim();
+        }
+        catch { }
+        return baseUrl.TrimEnd('/') + "/turn-credentials";
     }
 
     public string RoomCode { get; }
@@ -742,6 +813,8 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _voiceColdStartRetries = 0;
         voice.SetDsp(_captureOptions.EchoCancellationEnabled, _autoMicGain, _captureOptions.NoiseSuppressionEnabled, true);
         voice.SetMicActive(!Mute && _microphoneReady && !_captureOptions.SyntheticMicToneEnabled);
+        var pendingIce = _pendingIceServers;
+        if (pendingIce != null) voice.SetIceServers(pendingIce);
         _speakerReady = true;
         if (voice.OutputDevices.Count > 0)
             VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(voice.OutputDevices);
@@ -1586,6 +1659,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     public void Dispose()
     {
         _disposed = true;
+        try { _turnCts?.Cancel(); _turnCts?.Dispose(); } catch { }
         _sendPacer.Dispose();
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
