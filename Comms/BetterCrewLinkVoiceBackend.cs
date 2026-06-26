@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
@@ -1648,9 +1649,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result); // proximity volumes only — volatile route writes, no _sync, no decode
-            if (helperGameStatePeers != null && target.HasValue)
+            if (helperGameStatePeers != null && target.HasValue && peer.ClientId >= 0)
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
-                    peer.SocketId, target.Value.Position.x, target.Value.Position.y,
+                    peer.ClientId.ToString(CultureInfo.InvariantCulture), target.Value.Position.x, target.Value.Position.y,
                     !result.Audible, peer.ClientVolume, 0u));
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
             // Deliberately NOT calling peer.TryFlushBufferedVoice here. Doing so held the per-peer _sync lock
