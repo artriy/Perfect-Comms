@@ -41,7 +41,7 @@ def recv_frame():
         body += s.recv(ln - len(body))
     return t, body
 
-send_control({"op": "hello", "proto": 3, "token": "ci-token"})
+send_control({"op": "hello", "proto": 4, "token": "ci-token"})
 t, body = recv_frame()
 assert t == 0x01, "first reply not CONTROL"
 ready = json.loads(body)

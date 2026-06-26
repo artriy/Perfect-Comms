@@ -8,7 +8,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class SidecarVoiceClient : IDisposable
 {
-    public const int Proto = 3;
+    public const int Proto = 4;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
 
@@ -31,6 +31,8 @@ internal sealed class SidecarVoiceClient : IDisposable
 
     public event Action<float[], int>? OnFrame;
     public event Action<string>? OnDead;
+    public event Action<string, string, string>? OnLocalSdp;
+    public event Action<string, string>? OnLocalCandidate;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<string> OutputDevices => _outputDevices;
@@ -203,6 +205,34 @@ internal sealed class SidecarVoiceClient : IDisposable
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-output-device write failed: " + ex.Message); }
     }
 
+    public void AddPeer(string peerId)
+    {
+        if (!_running || string.IsNullOrEmpty(peerId)) return;
+        try { Write(SidecarProtocol.AddPeerFrame(peerId)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "peer-add write failed: " + ex.Message); }
+    }
+
+    public void RemovePeer(string peerId)
+    {
+        if (!_running || string.IsNullOrEmpty(peerId)) return;
+        try { Write(SidecarProtocol.RemovePeerFrame(peerId)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "peer-remove write failed: " + ex.Message); }
+    }
+
+    public void SetRemoteSdp(string peerId, string sdpType, string sdp)
+    {
+        if (!_running || string.IsNullOrEmpty(peerId)) return;
+        try { Write(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-remote-sdp write failed: " + ex.Message); }
+    }
+
+    public void AddIceCandidate(string peerId, string candidate)
+    {
+        if (!_running || string.IsNullOrEmpty(peerId)) return;
+        try { Write(SidecarProtocol.AddIceCandidateFrame(peerId, candidate)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "add-ice-candidate write failed: " + ex.Message); }
+    }
+
     private bool ReadReady(NetworkStream stream, out string[] outputDevices, out string error)
     {
         outputDevices = Array.Empty<string>();
@@ -368,6 +398,20 @@ internal sealed class SidecarVoiceClient : IDisposable
         else if (op == "pong")
         {
             Volatile.Write(ref _lastPongTick, Environment.TickCount64);
+        }
+        else if (op == "local-sdp")
+        {
+            if (SidecarProtocol.TryReadLocalSdp(json, out var peerId, out var sdpType, out var sdp))
+            {
+                try { OnLocalSdp?.Invoke(peerId, sdpType, sdp); } catch { }
+            }
+        }
+        else if (op == "local-candidate")
+        {
+            if (SidecarProtocol.TryReadLocalCandidate(json, out var peerId, out var candidate))
+            {
+                try { OnLocalCandidate?.Invoke(peerId, candidate); } catch { }
+            }
         }
     }
 

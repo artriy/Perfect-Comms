@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -223,6 +223,22 @@ pub enum InboundOp {
         ns: bool,
         hpf: bool,
     },
+    #[serde(rename = "peer-add")]
+    #[allow(dead_code)]
+    PeerAdd { peer_id: String },
+    #[serde(rename = "peer-remove")]
+    #[allow(dead_code)]
+    PeerRemove { peer_id: String },
+    #[serde(rename = "set-remote-sdp")]
+    #[allow(dead_code)]
+    SetRemoteSdp {
+        peer_id: String,
+        sdp_type: String,
+        sdp: String,
+    },
+    #[serde(rename = "add-ice-candidate")]
+    #[allow(dead_code)]
+    AddIceCandidate { peer_id: String, candidate: String },
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
@@ -322,13 +338,51 @@ pub fn pong_json(cap_ts: u64) -> String {
     serde_json::to_string(&PongMsg { op: "pong", cap_ts }).expect("pong serialize")
 }
 
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct LocalSdpMsg<'a> {
+    op: &'static str,
+    peer_id: &'a str,
+    sdp_type: &'a str,
+    sdp: &'a str,
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct LocalCandidateMsg<'a> {
+    op: &'static str,
+    peer_id: &'a str,
+    candidate: &'a str,
+}
+
+#[allow(dead_code)]
+pub fn local_sdp_json(peer_id: &str, sdp_type: &str, sdp: &str) -> String {
+    serde_json::to_string(&LocalSdpMsg {
+        op: "local-sdp",
+        peer_id,
+        sdp_type,
+        sdp,
+    })
+    .expect("local-sdp serialize")
+}
+
+#[allow(dead_code)]
+pub fn local_candidate_json(peer_id: &str, candidate: &str) -> String {
+    serde_json::to_string(&LocalCandidateMsg {
+        op: "local-candidate",
+        peer_id,
+        candidate,
+    })
+    .expect("local-candidate serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 3);
+        assert_eq!(PROTO_VERSION, 4);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -361,6 +415,58 @@ mod tests {
             InboundOp::SelectOutputDevice { id } => assert_eq!(id, "spk-1"),
             other => panic!("expected select-output-device, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_v4_peer_ops() {
+        match parse_inbound(r#"{"op":"peer-add","peer_id":"p1"}"#).unwrap() {
+            InboundOp::PeerAdd { peer_id } => assert_eq!(peer_id, "p1"),
+            other => panic!("expected peer-add, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"peer-remove","peer_id":"p2"}"#).unwrap() {
+            InboundOp::PeerRemove { peer_id } => assert_eq!(peer_id, "p2"),
+            other => panic!("expected peer-remove, got {other:?}"),
+        }
+        match parse_inbound(
+            r#"{"op":"set-remote-sdp","peer_id":"p3","sdp_type":"offer","sdp":"v=0"}"#,
+        )
+        .unwrap()
+        {
+            InboundOp::SetRemoteSdp {
+                peer_id,
+                sdp_type,
+                sdp,
+            } => {
+                assert_eq!(peer_id, "p3");
+                assert_eq!(sdp_type, "offer");
+                assert_eq!(sdp, "v=0");
+            }
+            other => panic!("expected set-remote-sdp, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"add-ice-candidate","peer_id":"p4","candidate":"c"}"#).unwrap()
+        {
+            InboundOp::AddIceCandidate { peer_id, candidate } => {
+                assert_eq!(peer_id, "p4");
+                assert_eq!(candidate, "c");
+            }
+            other => panic!("expected add-ice-candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_signal_json_shapes() {
+        let sv: serde_json::Value =
+            serde_json::from_str(&local_sdp_json("p1", "answer", "v=0")).unwrap();
+        assert_eq!(sv["op"], "local-sdp");
+        assert_eq!(sv["peer_id"], "p1");
+        assert_eq!(sv["sdp_type"], "answer");
+        assert_eq!(sv["sdp"], "v=0");
+
+        let cv: serde_json::Value =
+            serde_json::from_str(&local_candidate_json("p1", "cand")).unwrap();
+        assert_eq!(cv["op"], "local-candidate");
+        assert_eq!(cv["peer_id"], "p1");
+        assert_eq!(cv["candidate"], "cand");
     }
 
     #[test]
@@ -531,7 +637,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 3);
+        assert_eq!(v["proto"], 4);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

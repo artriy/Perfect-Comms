@@ -77,6 +77,18 @@ internal static class SidecarProtocol
     public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
         => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
 
+    public static byte[] AddPeerFrame(string peerId)
+        => EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)}}}");
+
+    public static byte[] RemovePeerFrame(string peerId)
+        => EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)}}}");
+
+    public static byte[] SetRemoteSdpFrame(string peerId, string sdpType, string sdp)
+        => EncodeControl($"{{\"op\":\"set-remote-sdp\",\"peer_id\":{JsonString(peerId)},\"sdp_type\":{JsonString(sdpType)},\"sdp\":{JsonString(sdp)}}}");
+
+    public static byte[] AddIceCandidateFrame(string peerId, string candidate)
+        => EncodeControl($"{{\"op\":\"add-ice-candidate\",\"peer_id\":{JsonString(peerId)},\"candidate\":{JsonString(candidate)}}}");
+
     private static string JsonBool(bool value) => value ? "true" : "false";
 
     public static string ReadOp(string json)
@@ -199,6 +211,48 @@ internal static class SidecarProtocol
                 return false;
             code = root.TryGetProperty("code", out var c) ? (c.GetString() ?? "") : "";
             msg = root.TryGetProperty("msg", out var m) ? (m.GetString() ?? "") : "";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadLocalSdp(string json, out string peerId, out string sdpType, out string sdp)
+    {
+        peerId = "";
+        sdpType = "";
+        sdp = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "local-sdp")
+                return false;
+            peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            sdpType = root.TryGetProperty("sdp_type", out var t) ? (t.GetString() ?? "") : "";
+            sdp = root.TryGetProperty("sdp", out var s) ? (s.GetString() ?? "") : "";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryReadLocalCandidate(string json, out string peerId, out string candidate)
+    {
+        peerId = "";
+        candidate = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "local-candidate")
+                return false;
+            peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            candidate = root.TryGetProperty("candidate", out var c) ? (c.GetString() ?? "") : "";
             return true;
         }
         catch

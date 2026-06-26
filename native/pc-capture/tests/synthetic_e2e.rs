@@ -105,7 +105,7 @@ fn synthetic_helper_streams_audio_end_to_end() {
     client.set_nodelay(true).ok();
     client
         .write_all(&encode_control(
-            r#"{"op":"hello","proto":3,"token":"e2e-token"}"#,
+            r#"{"op":"hello","proto":4,"token":"e2e-token"}"#,
         ))
         .unwrap();
 
