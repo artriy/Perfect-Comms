@@ -2951,7 +2951,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
         if (socket == null || conn == null) return;
 #if WINDOWS
-        _voice?.AddPeer(socketId);
         await Task.CompletedTask;
 #else
         VoiceDiagnostics.Log("bcl.offer", $"reason=start socket={socketId} client={peer.ClientId} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
@@ -3064,7 +3063,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (signal.Kind == "offer")
         {
 #if WINDOWS
-            _voice?.SetRemoteSdp(fromSocketId, "offer", signal.Sdp!);
 #else
             // Rebuild so this offer lands on a CLEAN connection whenever our current one cannot carry its
             // channel. A second OFFER only arrives for a peer when the initiator RE-created its connection
@@ -3114,7 +3112,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         else if (signal.Kind == "answer")
         {
 #if WINDOWS
-            _voice?.SetRemoteSdp(fromSocketId, "answer", signal.Sdp!);
 #else
             peer.Connection.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = signal.Sdp });
 #endif
@@ -3122,7 +3119,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         else if (signal.Kind == "candidate")
         {
 #if WINDOWS
-            _voice?.AddIceCandidate(fromSocketId, signal.Candidate!);
 #else
             peer.Connection.addIceCandidate(new RTCIceCandidateInit
             {
