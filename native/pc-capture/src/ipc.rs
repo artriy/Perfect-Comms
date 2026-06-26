@@ -232,6 +232,16 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    {
+        let dev = out_selected.lock().unwrap().clone();
+        let pb = playback.clone();
+        let st = out_stop.clone();
+        *out_thread.lock().unwrap() = Some(std::thread::spawn(move || {
+            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+                eprintln!("pc-capture: playback error: {e}");
+            }
+        }));
+    }
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
