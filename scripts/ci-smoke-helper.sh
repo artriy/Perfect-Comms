@@ -49,13 +49,16 @@ assert ready["op"] == "ready", ready
 assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
 send_control({"op": "start"})
-audio = 0
-while audio < 3:
+levels = 0
+while levels < 2:
     t, body = recv_frame()
-    if t != 0x02:
+    if t != 0x01:
         continue
-    assert len(body) == 8 + 960 * 4, f"bad audio len {len(body)}"
-    audio += 1
+    msg = json.loads(body)
+    if msg.get("op") != "level":
+        continue
+    assert "speaking" in msg, msg
+    levels += 1
 
 proc.kill()
 os.remove(hs)
