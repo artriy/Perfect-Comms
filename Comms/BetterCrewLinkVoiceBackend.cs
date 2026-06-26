@@ -212,6 +212,15 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private Thread? _voicePump;
     private volatile bool _voicePumpRunning;
     private readonly float[] _playbackBlock = new float[SidecarProtocol.AudioOutSamples];
+    private PeerSessionManager? _peerSession;
+    private SidecarVoiceTransport? _rpcTransport;
+    private readonly RpcSignalingSender _rpcSender = new();
+    private bool _rpcOnMessageHooked;
+    private DateTime _rpcPollNextUtc = DateTime.MinValue;
+    private static readonly TimeSpan RpcPollInterval = TimeSpan.FromSeconds(1);
+    private readonly HashSet<int> _rpcKnownClients = new();
+    private readonly HashSet<int> _rpcPresentScratch = new();
+    private readonly List<int> _rpcLeftScratch = new();
     private bool CaptureUsesUnity => _activeCaptureSlot == CaptureSlot.Unity;
 #else
     private bool CaptureUsesUnity => true;
@@ -764,13 +773,83 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             var voice = new SidecarVoiceClient(LaunchSidecarHelper);
             voice.OnFrame += ProcessBassMicFrame;
             voice.OnDead += r => OnSidecarHeartbeatLost(voice, r);
-            voice.OnLocalSdp += RelayHelperLocalSdp;
-            voice.OnLocalCandidate += RelayHelperLocalCandidate;
+            voice.OnLocalSdp += OnHelperLocalSdp;
+            voice.OnLocalCandidate += OnHelperLocalCandidate;
             voice.OnLevel += OnSidecarLevel;
             _voice = voice;
             var mic = _lastMicDeviceName;
             var spk = _lastSpeakerDeviceName;
             _voiceStartTask = Task.Run(() => RunVoiceStart(voice, mic, spk, reason));
+        }
+    }
+
+    private void OnHelperLocalSdp(string peerId, string sdpType, string sdp)
+    {
+        if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
+            _peerSession?.OnLocalSdp(clientId, sdpType, sdp);
+    }
+
+    private void OnHelperLocalCandidate(string peerId, string candidate)
+    {
+        if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
+            _peerSession?.OnLocalCandidate(clientId, candidate);
+    }
+
+    private void OnRpcSignal(int senderClientId, SignalMsgType type, byte[] payload)
+        => _peerSession?.OnSignal(senderClientId, type, payload);
+
+    private void PumpRpcSignaling(VoiceGameStateSnapshot? snapshot)
+    {
+        var now = DateTime.UtcNow;
+        if (now < _rpcPollNextUtc) return;
+        _rpcPollNextUtc = now + RpcPollInterval;
+
+        var client = AmongUsClient.Instance;
+        if (client == null || snapshot == null)
+        {
+            if (_peerSession != null && _rpcKnownClients.Count > 0)
+            {
+                _peerSession.Reset();
+                _rpcKnownClients.Clear();
+            }
+            return;
+        }
+
+        var localId = client.ClientId;
+        if (localId < 0) return;
+
+        if (_peerSession == null)
+        {
+            _rpcTransport = new SidecarVoiceTransport(() => _voice);
+            _peerSession = new PeerSessionManager(localId, _rpcTransport, _rpcSender);
+            if (!_rpcOnMessageHooked)
+            {
+                AmongUsRpcSignaling.OnMessage += OnRpcSignal;
+                _rpcOnMessageHooked = true;
+            }
+        }
+
+        _rpcPresentScratch.Clear();
+        foreach (var remote in client.allClients)
+        {
+            var id = remote.Id;
+            if (id < 0 || id == localId) continue;
+            _rpcPresentScratch.Add(id);
+            if (_rpcKnownClients.Add(id))
+                _peerSession.OnPlayerJoined(id);
+        }
+
+        if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
+        {
+            _rpcLeftScratch.Clear();
+            foreach (var id in _rpcKnownClients)
+                if (!_rpcPresentScratch.Contains(id))
+                    _rpcLeftScratch.Add(id);
+            foreach (var id in _rpcLeftScratch)
+            {
+                _peerSession.OnPlayerLeft(id);
+                _rpcKnownClients.Remove(id);
+            }
         }
     }
 
@@ -1501,6 +1580,10 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         MaybeReleaseBluetoothMutedMicrophone();
 #endif
 
+#if WINDOWS
+        PumpRpcSignaling(snapshot);
+#endif
+
         if (snapshot == null)
         {
             SnapshotPeersInto(_updatePeerScratch);
@@ -1662,6 +1745,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         try { _turnCts?.Cancel(); _turnCts?.Dispose(); } catch { }
         _sendPacer.Dispose();
 #if WINDOWS
+        if (_rpcOnMessageHooked)
+        {
+            AmongUsRpcSignaling.OnMessage -= OnRpcSignal;
+            _rpcOnMessageHooked = false;
+        }
+        _peerSession?.Reset();
+        _peerSession = null;
+        _rpcKnownClients.Clear();
         StopMicrophoneWorkerForDispose();
         StopVoiceSession("dispose");
         try { _androidSpeaker?.Dispose(); } catch { }
