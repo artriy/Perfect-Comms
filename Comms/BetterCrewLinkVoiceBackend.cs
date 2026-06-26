@@ -8,6 +8,9 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
+#if ANDROID
+using SIPSorceryMedia.Abstractions;
+#endif
 using SocketIOClient;
 using UnityEngine;
 using VoiceChatPlugin.Audio;
@@ -291,7 +294,11 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         Region = region;
         ServerUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
 
+#if ANDROID
+        _sendPacer = new BclSendPacer(SendOpusFrameToAudioTracks);
+#else
         _sendPacer = new BclSendPacer(SendFramedToChannels);
+#endif
         ConnectSocket();
         StartTurnCredentialFetch();
         WarmOpusCodec();
@@ -2685,6 +2692,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         try
         {
             peer.Connection = pc;
+#if ANDROID
+            pc.addTrack(CreateOpusAudioTrack());
+            pc.OnRtpPacketReceived += (System.Net.IPEndPoint ep, SDPMediaTypesEnum media, RTPPacket pkt) =>
+            {
+                if (media != SDPMediaTypesEnum.audio) return;
+                OnAudioTrackRtp(peer, pkt);
+            };
+#endif
             pc.ondatachannel += dc =>
             {
                 lock (_peerSync)
@@ -2731,6 +2746,74 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             if (!wired) { try { pc.close(); } catch { } }
         }
     }
+
+#if ANDROID
+    private static MediaStreamTrack CreateOpusAudioTrack()
+    {
+        var opus = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 2, "minptime=10;useinbandfec=1");
+        return new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            false,
+            new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(opus) },
+            MediaStreamStatusEnum.SendRecv);
+    }
+
+    private readonly List<RTCPeerConnection> _audioTrackPeerScratch = new();
+
+    private void SendOpusFrameToAudioTracks(byte[] framed)
+    {
+        if (!BclVoicePacket.TryRead(framed, out var packet)) return;
+        var payload = packet.Payload;
+        if (payload.Length == 0) return;
+        uint duration = packet.Duration == 0 ? (uint)AudioHelpers.FrameSize : packet.Duration;
+        var sent = false;
+        SnapshotAudioTrackPeersInto(_audioTrackPeerScratch);
+        foreach (var conn in _audioTrackPeerScratch)
+        {
+            try
+            {
+                conn.SendAudio(duration, payload);
+                sent = true;
+                Interlocked.Increment(ref _encodedTx);
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("bcl.mic.send_error", $"bytes={payload.Length} error=\"{ex.Message}\"");
+            }
+        }
+        if (!sent) Interlocked.Increment(ref _micNoOpenChannelDrops);
+    }
+
+    private void SnapshotAudioTrackPeersInto(List<RTCPeerConnection> buffer)
+    {
+        buffer.Clear();
+        lock (_peerSync)
+        {
+            foreach (var peer in _peersBySocket.Values)
+            {
+                var conn = peer.Connection;
+                if (conn != null && conn.connectionState == RTCPeerConnectionState.connected)
+                    buffer.Add(conn);
+            }
+        }
+    }
+
+    private void OnAudioTrackRtp(PeerConnection peer, RTPPacket pkt)
+    {
+        var payload = pkt.Payload;
+        if (payload == null || payload.Length == 0 || payload.Length > MaxIncomingDatagramBytes) return;
+        peer.StampInbound(DateTime.UtcNow.Ticks);
+        peer.TryReceiveAudioTrackOpus(payload, out var error, out var decodedFrames);
+        if (!string.IsNullOrEmpty(error))
+        {
+            Interlocked.Increment(ref _audioDecodeFailures);
+            if (peer.ShouldLogAudioDrop(out var suppressed))
+                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={payload.Length} error=\"{error}\" suppressed={suppressed} source=rtp");
+        }
+        if (decodedFrames > 0)
+            Interlocked.Add(ref _encodedRx, decodedFrames);
+    }
+#endif
 
     // Includes 'disconnected' on purpose: used by the offer-gate (LocalLinkNeedsRebuild) and the
     // request-offer handling, where a sustained disconnect should still permit a rebuild. The edge-
@@ -3635,7 +3718,9 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     // Reused open-channel list for the send loop. Only used inside SendFramedToChannels, which runs on the
     // single send-pacer timer thread, so it is effectively single-threaded; holds channel references (not
     // audio data), so no aliasing concern. Replaces the per-frame SnapshotOpenChannels LINQ array.
+#if !ANDROID
     private readonly List<RTCDataChannel> _openChannelScratch = new();
+#endif
     // Paces encoded frames out at a steady ~20 ms cadence (up to 300 ms buffered) so a local stall can't clump our send.
     private readonly BclSendPacer _sendPacer;
 
@@ -3829,6 +3914,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         _sendPacer.Enqueue(framed);
     }
 
+#if !ANDROID
     private void SendFramedToChannels(byte[] framed)
     {
         var sent = false;
@@ -3848,6 +3934,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
         if (!sent) Interlocked.Increment(ref _micNoOpenChannelDrops);
     }
+#endif
 
     private static bool IsSyntheticSource(string source)
         => string.Equals(source, "synthetic", StringComparison.OrdinalIgnoreCase);
@@ -3893,6 +3980,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     // Fill a caller-owned reusable buffer with the currently-open data channels instead of allocating a
     // LINQ Select/Where/Cast/ToArray per transmitted 20 ms voice frame.
+#if !ANDROID
     private void SnapshotOpenChannelsInto(List<RTCDataChannel> buffer)
     {
         buffer.Clear();
@@ -3906,6 +3994,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             }
         }
     }
+#endif
 
     private void RemovePeer(string socketId)
     {
@@ -4521,6 +4610,19 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
             var level = CurrentVoiceLevel;
             return new VoiceRemoteOverlayState(PlayerId, PlayerName, level, level >= RemoteSpeakingThreshold, _currentRoute.Audible, _currentRoute.Reason);
         }
+#if ANDROID
+        public bool TryReceiveAudioTrackOpus(byte[] payload, out string? error, out int decodedFrames)
+        {
+            lock (_sync)
+            {
+                error = null;
+                decodedFrames = 0;
+                if (_disposed) return false;
+                return DecodeLegacyPacket(payload, out error, out decodedFrames);
+            }
+        }
+#endif
+
         public bool TryReceiveVoicePacket(byte[] data, out string? error, out int decodedFrames)
         {
             lock (_sync)
