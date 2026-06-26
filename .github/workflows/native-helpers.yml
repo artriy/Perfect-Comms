@@ -2,7 +2,7 @@ name: Native helpers
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/crossplatform-capture-sidecar]
     tags: ["v*"]
   pull_request:
     paths:
@@ -24,6 +24,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: ilammy/setup-nasm@v1
       - name: Build helper
         shell: bash
         run: bash scripts/build-helpers.sh ${{ matrix.target }}
@@ -51,12 +54,14 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     container: rust:1-bullseye
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
-      - name: ALSA dev headers
+      - name: ALSA dev headers, cmake, nasm
         run: |
           apt-get update
-          apt-get install -y libasound2-dev pkg-config
+          apt-get install -y libasound2-dev pkg-config cmake nasm
       - name: Build helper
         run: bash scripts/build-helpers.sh x86_64-unknown-linux-gnu
       - uses: actions/upload-artifact@v4
@@ -67,6 +72,8 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
