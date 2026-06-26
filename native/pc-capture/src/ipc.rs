@@ -232,16 +232,6 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-    {
-        let dev = out_selected.lock().unwrap().clone();
-        let pb = playback.clone();
-        let st = out_stop.clone();
-        *out_thread.lock().unwrap() = Some(std::thread::spawn(move || {
-            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
-                eprintln!("pc-capture: playback error: {e}");
-            }
-        }));
-    }
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
@@ -476,6 +466,23 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     }
                     InboundOp::PeerAdd { peer_id } => {
                         rtc.lock().unwrap().add_peer(peer_id);
+                        let mut guard = out_thread.lock().unwrap();
+                        if guard.as_ref().map_or(false, |h| h.is_finished()) {
+                            if let Some(h) = guard.take() {
+                                h.join().ok();
+                            }
+                        }
+                        if guard.is_none() {
+                            let dev = out_selected.lock().unwrap().clone();
+                            let pb = playback.clone();
+                            let st = out_stop.clone();
+                            st.store(false, Ordering::Relaxed);
+                            *guard = Some(std::thread::spawn(move || {
+                                if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+                                    eprintln!("pc-capture: playback error: {e}");
+                                }
+                            }));
+                        }
                     }
                     InboundOp::PeerRemove { peer_id } => {
                         rtc.lock().unwrap().remove_peer(&peer_id);
