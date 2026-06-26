@@ -42,7 +42,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private static readonly byte[] KeepaliveMagic = [(byte)'P', (byte)'C', (byte)'K', (byte)'A'];
     private static readonly byte[] KeepaliveBytes = BuildKeepaliveMessage();
     private static readonly RTCIceServer[] DefaultIceServers = [new() { urls = "stun:stun.l.google.com:19302" }];
-    private static readonly bool HelperRtcRelay = Environment.GetEnvironmentVariable("PC_HELPER_RTC") == "1";
 
     private readonly MicPreprocessor _micPreprocessor = new();
     private readonly ConcurrentQueue<Action> _mainThreadActions = new();
@@ -1449,7 +1448,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         var resumeFrame = IsResumeFrame(frameGapTicks, ResumeFrameThreshold.Ticks);
         List<SidecarProtocol.GameStatePeerInput>? helperGameStatePeers = null;
 #if WINDOWS
-        if (HelperRtcRelay && _voice != null && listenerPos.HasValue)
+        if (_voice != null && listenerPos.HasValue)
             helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
 #endif
         foreach (var peer in _updatePeerScratch)
@@ -2779,7 +2778,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         }
         if (socket == null || conn == null) return;
 #if WINDOWS
-        if (HelperRtcRelay) _voice?.AddPeer(socketId);
+        _voice?.AddPeer(socketId);
 #endif
         VoiceDiagnostics.Log("bcl.offer", $"reason=start socket={socketId} client={peer.ClientId} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
         try
@@ -2827,7 +2826,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void RelayHelperLocalSdp(string peerId, string sdpType, string sdp)
     {
-        if (!HelperRtcRelay) return;
         var socket = _socket;
         if (socket == null || string.IsNullOrEmpty(peerId)) return;
         var data = JsonSerializer.Serialize(new { type = sdpType, sdp });
@@ -2836,7 +2834,6 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
 
     private void RelayHelperLocalCandidate(string peerId, string candidate)
     {
-        if (!HelperRtcRelay) return;
         var socket = _socket;
         if (socket == null || string.IsNullOrEmpty(peerId)) return;
         var data = JsonSerializer.Serialize(new { candidate });
@@ -2887,7 +2884,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         if (signal.Kind == "offer")
         {
 #if WINDOWS
-            if (HelperRtcRelay) _voice?.SetRemoteSdp(fromSocketId, "offer", signal.Sdp!);
+            _voice?.SetRemoteSdp(fromSocketId, "offer", signal.Sdp!);
 #endif
             // Rebuild so this offer lands on a CLEAN connection whenever our current one cannot carry its
             // channel. A second OFFER only arrives for a peer when the initiator RE-created its connection
@@ -2936,14 +2933,14 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
         else if (signal.Kind == "answer")
         {
 #if WINDOWS
-            if (HelperRtcRelay) _voice?.SetRemoteSdp(fromSocketId, "answer", signal.Sdp!);
+            _voice?.SetRemoteSdp(fromSocketId, "answer", signal.Sdp!);
 #endif
             peer.Connection.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = signal.Sdp });
         }
         else if (signal.Kind == "candidate")
         {
 #if WINDOWS
-            if (HelperRtcRelay) _voice?.AddIceCandidate(fromSocketId, signal.Candidate!);
+            _voice?.AddIceCandidate(fromSocketId, signal.Candidate!);
 #endif
             peer.Connection.addIceCandidate(new RTCIceCandidateInit
             {
@@ -3730,7 +3727,7 @@ internal sealed class BetterCrewLinkVoiceBackend : IVoiceBackend
     private void RemovePeer(string socketId)
     {
 #if WINDOWS
-        if (HelperRtcRelay) _voice?.RemovePeer(socketId);
+        _voice?.RemovePeer(socketId);
 #endif
         PeerConnection? peer;
         lock (_peerSync)
