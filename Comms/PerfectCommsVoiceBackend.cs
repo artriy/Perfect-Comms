@@ -22,15 +22,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private const int DataControlPrefixLength = 4;
     // Hard ceiling on an untrusted inbound datagram (largest legit message is a ~4 KB voice packet).
     private const int MaxIncomingDatagramBytes = 16 * 1024;
-    private static readonly int BclOpusBitrate = 48_000;
-    private static readonly bool BclOpusUseConstrainedVbr = true;
-    private static readonly bool BclOpusUseInbandFec = true;   // arm LossResistant flag (sender) + the jitter-buffer Fec drain arm
-    private static readonly int BclOpusPacketLossPercent = 15; // non-zero PLP so Opus embeds FEC redundancy in the wire frame
-    private const int BclPlaybackLatencyMs = 60;
-    private const int BclJitterTargetDelayFrames = 2;
-    private const int BclJitterMaxBufferedFrames = 25;
-    private const int BclJitterMinTargetFrames = 1;
-    private const int BclJitterMaxTargetFrames = 15;
+    private static readonly int PerfectCommsOpusBitrate = 48_000;
+    private static readonly bool PerfectCommsOpusUseConstrainedVbr = true;
+    private static readonly bool PerfectCommsOpusUseInbandFec = true;   // arm LossResistant flag (sender) + the jitter-buffer Fec drain arm
+    private static readonly int PerfectCommsOpusPacketLossPercent = 15; // non-zero PLP so Opus embeds FEC redundancy in the wire frame
+    private const int PlaybackLatencyMs = 60;
+    private const int JitterTargetDelayFrames = 2;
+    private const int JitterMaxBufferedFrames = 25;
+    private const int JitterMinTargetFrames = 1;
+    private const int JitterMaxTargetFrames = 15;
     private const int CodecAdaptIntervalFrames = 100;
     private const int PlpDeadbandPercent = 3;
     private const float RemoteSpeakingThreshold = 0.004f;
@@ -38,8 +38,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private const float SyntheticToneAmplitude = 0.012f;
     private static readonly TimeSpan RemoteActivityHold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MicCalibrationLogInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan BclQuietTailFlushDelay = TimeSpan.FromMilliseconds(30);
-    private static readonly TimeSpan BclQuietTailFlushTimerDelay = BclQuietTailFlushDelay + TimeSpan.FromMilliseconds(10);
+    private static readonly TimeSpan QuietTailFlushDelay = TimeSpan.FromMilliseconds(30);
+    private static readonly TimeSpan QuietTailFlushTimerDelay = QuietTailFlushDelay + TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan SignalRejectLogInterval = TimeSpan.FromSeconds(5);
     private static readonly byte[] DataControlPrefix = [(byte)'P', (byte)'C', (byte)'B', (byte)'C'];
     private static readonly byte[] LossReportMagic = [(byte)'P', (byte)'C', (byte)'L', (byte)'R'];
@@ -4068,7 +4068,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         var voiceFlags = VoicePacketFlags.None;
         if (VoiceTeamRadioChannels.IsActive(_lastLocalRadioChannel)) voiceFlags |= VoicePacketFlags.Radio;
-        if (BclOpusUseInbandFec) voiceFlags |= VoicePacketFlags.LossResistant;
+        if (PerfectCommsOpusUseInbandFec) voiceFlags |= VoicePacketFlags.LossResistant;
         if (IsSyntheticSource(source)) voiceFlags |= VoicePacketFlags.Synthetic;
         // Wrap directly from the reusable encode scratch (first `encoded` bytes), skipping the old
         // intermediate trimmed byte[] copy. The framed buffer itself stays a fresh per-frame allocation
@@ -4312,8 +4312,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
     }
 
-    private int _adaptedPacketLossPercent = BclOpusPacketLossPercent;
-    private int _adaptedBitrate = BclOpusBitrate;
+    private int _adaptedPacketLossPercent = PerfectCommsOpusPacketLossPercent;
+    private int _adaptedBitrate = PerfectCommsOpusBitrate;
     private int _framesSinceCodecAdaptCheck;
 
     // Capture thread under _captureFrameSync (same nesting into _peerSync as SnapshotOpenChannelsInto).
@@ -4358,14 +4358,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private static IVoiceEncoder CreateEncoder()
         => VoiceCodec.CreateEncoder(
-            bitrate: BclOpusBitrate,
+            bitrate: PerfectCommsOpusBitrate,
             complexity: AudioHelpers.OpusComplexity,
             voiceSignal: true,
             vbr: true,
-            constrainedVbr: BclOpusUseConstrainedVbr,
+            constrainedVbr: PerfectCommsOpusUseConstrainedVbr,
             dtx: false,
-            fec: BclOpusUseInbandFec,
-            packetLossPercent: BclOpusPacketLossPercent);
+            fec: PerfectCommsOpusUseInbandFec,
+            packetLossPercent: PerfectCommsOpusPacketLossPercent);
 
     private static void ApplySavedVolume(PeerConnection peer)
     {
@@ -4416,7 +4416,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         private readonly object _sync = new();
         private VoiceMixer? _mixer;
         public void SetMixer(VoiceMixer? mixer) => _mixer = mixer;
-        private readonly VoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: BclJitterTargetDelayFrames, maxBufferedFrames: BclJitterMaxBufferedFrames, minTargetDelayFrames: BclJitterMinTargetFrames, maxTargetDelayFrames: BclJitterMaxTargetFrames);
+        private readonly VoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: JitterTargetDelayFrames, maxBufferedFrames: JitterMaxBufferedFrames, minTargetDelayFrames: JitterMinTargetFrames, maxTargetDelayFrames: JitterMaxTargetFrames);
         private VoiceProximityResult _currentRoute = VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
         private float _levelPeakSinceStats;
         private float _packetLevelPeakSinceStats;
@@ -4858,7 +4858,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 decodedFrames = 0;
                 if (_disposed) return false;
 
-                var frames = _jitterBuffer.DrainDue(DateTime.UtcNow, BclQuietTailFlushDelay);
+                var frames = _jitterBuffer.DrainDue(DateTime.UtcNow, QuietTailFlushDelay);
                 for (int i = 0; i < frames.Count; i++)
                 {
                     var frame = frames[i];
@@ -4911,7 +4911,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         private void ScheduleTailFlushLocked()
         {
             if (_disposed) return;
-            try { _tailFlushTimer.Change(BclQuietTailFlushTimerDelay, Timeout.InfiniteTimeSpan); }
+            try { _tailFlushTimer.Change(QuietTailFlushTimerDelay, Timeout.InfiniteTimeSpan); }
             catch (ObjectDisposedException) { }
         }
 
@@ -5134,7 +5134,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private readonly struct PeerDiagnostics
     {
-        public PeerDiagnostics(int clientId, float levelPeak, float packetLevelPeak, int samples, int audibleSamples, int audibleSilentSamples, int routeClears, VoiceProximityResult route, float appliedPan, BclVoiceJitterWindowStats jitter, string bufferStats)
+        public PeerDiagnostics(int clientId, float levelPeak, float packetLevelPeak, int samples, int audibleSamples, int audibleSilentSamples, int routeClears, VoiceProximityResult route, float appliedPan, VoiceJitterWindowStats jitter, string bufferStats)
         {
             ClientId = clientId;
             LevelPeak = levelPeak;
@@ -5157,7 +5157,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         public int RouteClears { get; }
         public VoiceProximityResult Route { get; }
         public float AppliedPan { get; }
-        public BclVoiceJitterWindowStats Jitter { get; }
+        public VoiceJitterWindowStats Jitter { get; }
         public string BufferStats { get; }
         public string ToCompactString() => $"{ClientId}:{LevelPeak:0.000}/{PacketLevelPeak:0.000}/{Samples}/{AudibleSamples}/{AudibleSilentSamples}/route={Route.Reason}:{Route.NormalVolume:0.00},{Route.GhostVolume:0.00},{Route.RadioVolume:0.00},pan={Route.Pan:0.00},appliedPan={AppliedPan:0.00},clears={RouteClears}";
     }

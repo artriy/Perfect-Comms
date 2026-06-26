@@ -131,9 +131,9 @@ internal readonly struct VoicePacket
     }
 }
 
-internal readonly struct BclVoicePlayoutFrame
+internal readonly struct VoicePlayoutFrame
 {
-    public BclVoicePlayoutFrame(VoicePlayoutKind kind, VoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
+    public VoicePlayoutFrame(VoicePlayoutKind kind, VoicePacket? packet, ushort sequence, ushort duration, int dredOffset = 0)
     {
         Kind = kind;
         Packet = packet;
@@ -150,9 +150,9 @@ internal readonly struct BclVoicePlayoutFrame
     public int DredOffset { get; }
 }
 
-internal readonly struct BclVoiceJitterWindowStats
+internal readonly struct VoiceJitterWindowStats
 {
-    public BclVoiceJitterWindowStats(int v2Packets, int legacyPackets, int lateDrops, int duplicateDrops, int reorderedPackets, int lostFrames, int plcFrames, int fecFrames, int maxDepth, int currentDepth, int targetDelayFrames = 0, double jitterMs = 0.0)
+    public VoiceJitterWindowStats(int v2Packets, int legacyPackets, int lateDrops, int duplicateDrops, int reorderedPackets, int lostFrames, int plcFrames, int fecFrames, int maxDepth, int currentDepth, int targetDelayFrames = 0, double jitterMs = 0.0)
     {
         V2Packets = v2Packets;
         LegacyPackets = legacyPackets;
@@ -240,8 +240,8 @@ internal sealed class VoiceJitterBuffer
     internal double CurrentJitterSamples => System.Threading.Volatile.Read(ref _jitterSamples);
     // Reused scratch: Enqueue/DrainDue run under PeerConnection._sync and results are consumed
     // before the lock releases, so sharing a list avoids a per-packet alloc with no aliasing risk.
-    private readonly List<BclVoicePlayoutFrame> _enqueueScratch = new(MaxDrainFramesPerPacket);
-    private readonly List<BclVoicePlayoutFrame> _drainScratch = new(MaxDrainFramesPerPacket);
+    private readonly List<VoicePlayoutFrame> _enqueueScratch = new(MaxDrainFramesPerPacket);
+    private readonly List<VoicePlayoutFrame> _drainScratch = new(MaxDrainFramesPerPacket);
 
     public VoiceJitterBuffer(int targetDelayFrames = DefaultTargetDelayFrames, int maxBufferedFrames = DefaultMaxBufferedFrames, int? minTargetDelayFrames = null, int? maxTargetDelayFrames = null)
     {
@@ -302,7 +302,7 @@ internal sealed class VoiceJitterBuffer
             _targetDelayFrames--;
     }
 
-    public IReadOnlyList<BclVoicePlayoutFrame> Enqueue(VoicePacket packet)
+    public IReadOnlyList<VoicePlayoutFrame> Enqueue(VoicePacket packet)
     {
         _v2Packets++;
         var frames = _enqueueScratch;
@@ -411,7 +411,7 @@ internal sealed class VoiceJitterBuffer
         return frames;
     }
 
-    public IReadOnlyList<BclVoicePlayoutFrame> DrainDue(DateTime nowUtc, TimeSpan quietDelay)
+    public IReadOnlyList<VoicePlayoutFrame> DrainDue(DateTime nowUtc, TimeSpan quietDelay)
     {
         var frames = _drainScratch;
         frames.Clear();
@@ -424,9 +424,9 @@ internal sealed class VoiceJitterBuffer
 
     public void CountLegacyPacket() => _legacyPackets++;
 
-    public BclVoiceJitterWindowStats ConsumeStats()
+    public VoiceJitterWindowStats ConsumeStats()
     {
-        var stats = new BclVoiceJitterWindowStats(_v2Packets, _legacyPackets, _lateDrops, _duplicateDrops, _reorderedPackets, _lostFrames, _plcFrames, _fecFrames, _maxDepth, _packets.Count, _targetDelayFrames, CurrentJitterSamples * 1000.0 / AudioHelpers.ClockRate);
+        var stats = new VoiceJitterWindowStats(_v2Packets, _legacyPackets, _lateDrops, _duplicateDrops, _reorderedPackets, _lostFrames, _plcFrames, _fecFrames, _maxDepth, _packets.Count, _targetDelayFrames, CurrentJitterSamples * 1000.0 / AudioHelpers.ClockRate);
         _v2Packets = 0;
         _legacyPackets = 0;
         _lateDrops = 0;
@@ -439,13 +439,13 @@ internal sealed class VoiceJitterBuffer
         return stats;
     }
 
-    private void Drain(List<BclVoicePlayoutFrame> frames, bool force)
+    private void Drain(List<VoicePlayoutFrame> frames, bool force)
     {
         while ((_packets.Count > _targetDelayFrames || force && _packets.Count > 0) && frames.Count < MaxDrainFramesPerPacket)
         {
             if (_packets.Remove(_expectedSequence, out var packet))
             {
-                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Audio, packet, packet.Sequence, packet.Duration));
+                frames.Add(new VoicePlayoutFrame(VoicePlayoutKind.Audio, packet, packet.Sequence, packet.Duration));
                 _consecutiveConcealed = 0; // a real frame breaks the conceal run (Fix 2b-2)
                 _expectedSequence++;
                 continue;
@@ -472,7 +472,7 @@ internal sealed class VoiceJitterBuffer
             if (next.HasLossResistantFec && Distance(_expectedSequence, nextSequence.Value) == 1)
             {
                 _fecFrames++;
-                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Fec, next, _expectedSequence, next.Duration));
+                frames.Add(new VoicePlayoutFrame(VoicePlayoutKind.Fec, next, _expectedSequence, next.Duration));
             }
             else
             {
@@ -481,7 +481,7 @@ internal sealed class VoiceJitterBuffer
                 // falls back to neural PLC if `next` carries no DRED, so this is always at least as good as PLC.
                 // Offset = frames back from `next` to this lost frame, in samples.
                 int dredOffsetSamples = Distance(_expectedSequence, nextSequence.Value) * next.Duration;
-                frames.Add(new BclVoicePlayoutFrame(VoicePlayoutKind.Dred, next, _expectedSequence, next.Duration, dredOffsetSamples));
+                frames.Add(new VoicePlayoutFrame(VoicePlayoutKind.Dred, next, _expectedSequence, next.Duration, dredOffsetSamples));
             }
             _expectedSequence++;
         }

@@ -24,7 +24,7 @@ internal static class BetterCrewLinkLobbyPublisher
     {
         var signature = BetterCrewLinkLobbyMetadata.BuildSignature(request);
         var room = VoiceChatRoom.Current;
-        if (room?.IsBetterCrewLinkBackendActive == true)
+        if (room?.IsVoiceBackendActive == true)
         {
             ClearStandalone();
             PublishThroughBackendSocket(room, request, signature);

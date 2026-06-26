@@ -54,10 +54,10 @@ public class VoiceChatRoom
 
     // ── Microphone ─────────────────────────────────────────────────────────────
     public bool UsingMicrophone => _voiceBackend?.UsingMicrophone == true;
-    internal bool IsBetterCrewLinkBackendActive => _betterCrewLinkVoice != null;
-    internal int BetterCrewLinkPublicLobbyJoinEpoch => _betterCrewLinkVoice?.PublicLobbyJoinEpoch ?? 0;
+    internal bool IsVoiceBackendActive => _perfectCommsVoice != null;
+    internal int BetterCrewLinkPublicLobbyJoinEpoch => _perfectCommsVoice?.PublicLobbyJoinEpoch ?? 0;
     private IVoiceBackend? _voiceBackend;
-    private PerfectCommsVoiceBackend? _betterCrewLinkVoice;
+    private PerfectCommsVoiceBackend? _perfectCommsVoice;
     private VoiceRoomSettingsSnapshot? _lastSentHostSettings;
     private int _lastSentModOptionRevision = -1;
     private DateTime _lastSentHostSettingsUtc = DateTime.MinValue;
@@ -98,9 +98,9 @@ public class VoiceChatRoom
     internal int ResetRemotePeerMappingsNoMute()
         => _voiceBackend?.ResetPeerMappingsNoMute() ?? 0;
     internal bool TryPublishBetterCrewLinkLobby(VoiceLobbyPublishRequest request)
-        => _betterCrewLinkVoice?.TryPublishPublicLobby(request) == true;
+        => _perfectCommsVoice?.TryPublishPublicLobby(request) == true;
     internal bool TryRemoveBetterCrewLinkLobby(string code)
-        => _betterCrewLinkVoice?.TryRemovePublicLobby(code) == true;
+        => _perfectCommsVoice?.TryRemovePublicLobby(code) == true;
     public float LocalMicLevel => _voiceBackend?.LocalLevel ?? 0f;
     public bool LocalMicSpeaking => _voiceBackend?.LocalSpeaking == true;
     public bool Mute  { get; private set; }
@@ -227,7 +227,7 @@ public class VoiceChatRoom
             settings?.EchoCancellationEnabled.Value ?? true,
             settings?.MicSensitivity.Value ?? 1f);
 
-    public void RebuildCaptureSupervisor() => _betterCrewLinkVoice?.RebuildCaptureSupervisor();
+    public void RebuildCaptureSupervisor() => _perfectCommsVoice?.RebuildCaptureSupervisor();
 
     public void SetMute(bool mute)
     {
@@ -684,7 +684,7 @@ public class VoiceChatRoom
         _lastHostSettingsRequestUtc = DateTime.MinValue;
         ResetRadioStateSync();
         _voiceBackend = new PerfectCommsVoiceBackend(roomCode, region, endpoint.ServerUrl);
-        _betterCrewLinkVoice = _voiceBackend as PerfectCommsVoiceBackend;
+        _perfectCommsVoice = _voiceBackend as PerfectCommsVoiceBackend;
         // P1.2: pre-warm the one-time HUD init (sprite PNG decode + button/tooltip GameObjects) here, off the
         // game-entry frame — the same room-construction lifecycle slot as the backend's WarmOpusCodec. Runs on
         // the Unity main thread (this method already touches VoiceChatHudState below) and is idempotent, so the
@@ -808,7 +808,7 @@ public class VoiceChatRoom
         if (Time.time - _lastMissingPeerRecoveryTime < backoff)
             return;
 
-        bool deferRequested = _betterCrewLinkVoice?.ShouldDeferPeerEscalation == true;
+        bool deferRequested = _perfectCommsVoice?.ShouldDeferPeerEscalation == true;
         if (deferRequested && _consecutivePeerEscalationDeferrals < PeerEscalationDeferralMaxConsecutive)
         {
             _consecutivePeerEscalationDeferrals++;
@@ -846,7 +846,7 @@ public class VoiceChatRoom
             // same forceRelay path the Wine fix validated; only fires after total failure, so a client whose
             // voice already works never reaches here.
             if (mappedPeers == 0 && remotePlayers > 0 && _globalRebuildAttempts + 1 >= 2)
-                _betterCrewLinkVoice?.EscalateToRelayOnly($"global-attempt-{_globalRebuildAttempts + 1}");
+                _perfectCommsVoice?.EscalateToRelayOnly($"global-attempt-{_globalRebuildAttempts + 1}");
 
             ClearVoiceUiForLifecycleReset("missing peer recovery");
             // Force a full backend rebuild (dispose + reconnect => NEW socket id) rather than the backend's
@@ -1176,7 +1176,7 @@ public class VoiceChatRoom
             _voiceBackend.CustomMessageReceived -= HandleBackendCustomMessage;
         _voiceBackend?.Dispose();
         _voiceBackend = null;
-        _betterCrewLinkVoice = null;
+        _perfectCommsVoice = null;
     }
 
     private void DrainBackendCustomMessages()
