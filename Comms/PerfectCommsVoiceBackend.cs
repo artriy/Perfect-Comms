@@ -2607,10 +2607,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
 
         // The managed worker supplies TURN servers directly in baseServers; treat those as a usable relay too,
-        // so relay-only escalation works even without a bring-your-own TurnServerUrl.
+        // so relay-only escalation works even without a bring-your-own TurnServerUrl. Require credentials,
+        // matching the bring-your-own branch, so a credential-less TURN entry never forces relay-only.
         if (!turnUsable && servers.Any(s => s.urls != null
                 && (s.urls.StartsWith("turn:", StringComparison.OrdinalIgnoreCase)
-                    || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase))))
+                    || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase))
+                && !string.IsNullOrWhiteSpace(s.username)
+                && !string.IsNullOrWhiteSpace(s.credential)))
             turnUsable = true;
 
         // Relay-only is only safe when there is a usable TURN relay to route through; otherwise fall back to
