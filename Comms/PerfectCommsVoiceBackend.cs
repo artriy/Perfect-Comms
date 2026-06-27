@@ -46,7 +46,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private static readonly byte[] RadioStateMagic = [(byte)'P', (byte)'C', (byte)'R', (byte)'D'];
     private static readonly byte[] KeepaliveMagic = [(byte)'P', (byte)'C', (byte)'K', (byte)'A'];
     private static readonly byte[] KeepaliveBytes = BuildKeepaliveMessage();
-    private static readonly RTCIceServer[] DefaultIceServers = [new() { urls = "stun:stun.l.google.com:19302" }];
+    private static readonly RTCIceServer[] DefaultIceServers =
+    [
+        new() { urls = "stun:stun.l.google.com:19302" },
+        new() { urls = "stun:stun1.l.google.com:19302" },
+        new() { urls = "stun:stun.cloudflare.com:3478" },
+        new() { urls = "stun:global.stun.twilio.com:3478" },
+    ];
     private static readonly HttpClient TurnHttp = new() { Timeout = TimeSpan.FromSeconds(6) };
 
     private readonly MicPreprocessor _micPreprocessor = new();
@@ -2506,7 +2512,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void ReadIceSettings(out bool natFix, out string turnUrl, out string turnUser, out string turnCred, out bool forceRelay)
     {
         natFix = true;
-        turnUrl = "turn:turn.bettercrewl.ink:3478";
+        turnUrl = "";
         turnUser = "";
         turnCred = "";
         // Wine uses the same automatic ICE selection as native (host -> srflx -> relay),

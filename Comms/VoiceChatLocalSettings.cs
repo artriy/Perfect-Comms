@@ -417,14 +417,14 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Route voice through a TURN relay when a direct peer-to-peer connection can't be established (fixes no/garbled audio behind strict or symmetric NATs and firewalls). Only peers that actually need it relay; everyone else stays direct. BetterCrewLink backend only."));
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
-            "turn:turn.bettercrewl.ink:3478",
-            new ConfigDescription("TURN relay server used by Nat Fix (BetterCrewLink backend). Default is BetterCrewLink's public relay; override with your own coturn server if desired."));
+            "",
+            new ConfigDescription("Optional custom TURN relay for Nat Fix. Leave empty to use the project's managed TURN credentials (fetched at runtime); set your own coturn/TURN server here to override."));
         TurnUsername = config.Bind("Voice Server", "TurnUsername",
-            "M9DRVaByiujoXeuYAAAG",
-            new ConfigDescription("Username for the Nat Fix TURN relay."));
+            "",
+            new ConfigDescription("Username for a custom Nat Fix TURN relay (only used when TurnServerUrl is set)."));
         TurnCredential = config.Bind("Voice Server", "TurnCredential",
-            "TpHR9HQNZ8taxjb3",
-            new ConfigDescription("Credential (password) for the Nat Fix TURN relay."));
+            "",
+            new ConfigDescription("Credential (password) for a custom Nat Fix TURN relay (only used when TurnServerUrl is set)."));
         WineForceRelay = config.Bind("Voice Server", "WineForceRelay", false,
             new ConfigDescription("Wine/Proton (Linux) only opt-in: force TURN-relay-only voice (and add TURN-over-TCP). Off by default - Wine now uses the same automatic ICE selection as native Windows, using TURN only when direct/STUN fail. Enable only if your Wine setup still cannot connect. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
 
