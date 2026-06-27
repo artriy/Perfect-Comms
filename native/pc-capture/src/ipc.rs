@@ -18,7 +18,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MAX_FRAME_LEN: usize = proto::FRAME_BYTES * 4;
 
@@ -142,7 +142,7 @@ pub fn validate_hello(op: &InboundOp, expected_token: &str) -> HelloResult {
         InboundOp::Hello { proto, token } => {
             if *proto != PROTO_VERSION {
                 HelloResult::RejectProto
-            } else if token != expected_token {
+            } else if !ct_eq(token.as_bytes(), expected_token.as_bytes()) {
                 HelloResult::RejectToken
             } else {
                 HelloResult::Accept
@@ -150,6 +150,20 @@ pub fn validate_hello(op: &InboundOp, expected_token: &str) -> HelloResult {
         }
         _ => HelloResult::RejectToken,
     }
+}
+
+/// Constant-time byte-slice equality for the session auth token, so a local
+/// attacker can't recover it byte-by-byte via response-timing. The length
+/// branch is fine to leak: the token length is fixed and not secret.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn synthetic_devices() -> Vec<DeviceInfo> {
@@ -181,9 +195,42 @@ fn spawn_real_producer(
     conn: Arc<Mutex<TcpStream>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        if let Err(e) = spawn_cpal_capture(device_id, ring, stop) {
-            eprintln!("capture error: {e}");
-            let _ = write_frame(&conn, &encode_control(&error_json("mic-denied", &e)));
+        // Re-open the input device on transient loss (USB/Bluetooth unplug,
+        // default-device switch) without surfacing an error: emitting one makes
+        // the mod tear down and relaunch the whole helper, dropping every peer
+        // connection. We only escalate to the mod once a device that was already
+        // capturing stays gone past the grace window, or when the very first open
+        // fails (mic permission denied / no device) so the user gets prompt
+        // feedback. Either way we keep retrying so the mic recovers on its own.
+        const ESCALATE_AFTER: Duration = Duration::from_secs(10);
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
+        let healthy = Arc::new(AtomicBool::new(false));
+        let mut ever_healthy = false;
+        let mut outage_start: Option<Instant> = None;
+        let mut escalated = false;
+        while !stop.load(Ordering::Relaxed) {
+            healthy.store(false, Ordering::Relaxed);
+            match spawn_cpal_capture(device_id.clone(), ring.clone(), stop.clone(), healthy.clone()) {
+                Ok(()) => break,
+                Err(e) => {
+                    eprintln!("capture error: {e}");
+                    if healthy.load(Ordering::Relaxed) {
+                        ever_healthy = true;
+                        outage_start = None;
+                        escalated = false;
+                    }
+                    let grace = if ever_healthy { ESCALATE_AFTER } else { Duration::ZERO };
+                    let started = *outage_start.get_or_insert_with(Instant::now);
+                    if !escalated && started.elapsed() >= grace {
+                        let _ = write_frame(&conn, &encode_control(&error_json("mic-error", &e)));
+                        escalated = true;
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
         }
     })
 }

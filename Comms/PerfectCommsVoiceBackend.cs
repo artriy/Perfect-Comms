@@ -800,23 +800,27 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void OnHelperLocalSdp(string peerId, string sdpType, string sdp)
     {
         if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
-            _peerSession?.OnLocalSdp(clientId, sdpType, sdp);
+            _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(clientId, sdpType, sdp));
     }
 
     private void OnHelperLocalCandidate(string peerId, string candidate)
     {
         if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
-            _peerSession?.OnLocalCandidate(clientId, candidate);
+            _mainThreadActions.Enqueue(() => _peerSession?.OnLocalCandidate(clientId, candidate));
     }
 
     private void OnHelperPeerState(string peerId, string state)
     {
-        if (_peerSession == null) return;
         if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId)) return;
-        if (state == "connected")
-            _peerSession.OnPeerConnected(clientId);
-        else if (state is "failed" or "disconnected" or "closed")
-            _peerSession.OnPeerConnectionLost(clientId, Environment.TickCount64);
+        var nowMs = Environment.TickCount64;
+        _mainThreadActions.Enqueue(() =>
+        {
+            if (_peerSession == null) return;
+            if (state == "connected")
+                _peerSession.OnPeerConnected(clientId);
+            else if (state is "failed" or "disconnected" or "closed")
+                _peerSession.OnPeerConnectionLost(clientId, nowMs);
+        });
     }
 
     private void OnSidecarLevel(float peak, bool speaking)
@@ -2505,8 +2509,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         turnUrl = "turn:turn.bettercrewl.ink:3478";
         turnUser = "";
         turnCred = "";
-        // Default forceRelay on under Wine (its host/srflx gathering is broken), overridable via setting.
-        forceRelay = WineEnvironment.IsWine;
+        // Wine uses the same automatic ICE selection as native (host -> srflx -> relay),
+        // so TURN is only used when direct/STUN fail. Opt-in relay-only via WineForceRelay.
+        forceRelay = false;
         try
         {
             var settings = VoiceSettings.Instance;
@@ -2519,7 +2524,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 forceRelay = settings.WineForceRelay.Value && WineEnvironment.IsWine;
             }
         }
-        catch { /* settings not ready; fall back to defaults (Nat Fix on, relay forced under Wine) */ }
+        catch { /* settings not ready; fall back to defaults (Nat Fix on, automatic ICE relay selection) */ }
 
         // Runtime escalation: if direct/STUN repeatedly failed this session, force relay regardless of platform.
         forceRelay |= _forceRelayEscalated;
@@ -2770,7 +2775,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 if (_peerSession != null)
                 {
                     if (SipsorceryVoiceTransport.TryParseClientId(socketId, out var candClientId))
-                        _peerSession.OnLocalCandidate(candClientId, signalData);
+                        _mainThreadActions.Enqueue(() => _peerSession?.OnLocalCandidate(candClientId, signalData));
                     return;
                 }
 #endif
@@ -2924,7 +2929,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 if (_disposed || !_peersBySocket.TryGetValue(key, out var p) || !ReferenceEquals(p.Connection, conn)) return;
             }
             if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(key, out var clientId))
-                _peerSession.OnLocalSdp(clientId, "answer", answer.sdp);
+            {
+                var localSdp = answer.sdp;
+                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(clientId, "answer", localSdp));
+            }
         }
         catch (Exception ex)
         {
@@ -3248,7 +3256,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID
             if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(socketId, out var offerClientId))
             {
-                _peerSession.OnLocalSdp(offerClientId, "offer", offer.sdp);
+                var localSdp = offer.sdp;
+                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(offerClientId, "offer", localSdp));
             }
             else
 #endif

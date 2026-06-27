@@ -425,8 +425,8 @@ public class VoiceChatLocalSettings
         TurnCredential = config.Bind("Voice Server", "TurnCredential",
             "TpHR9HQNZ8taxjb3",
             new ConfigDescription("Credential (password) for the Nat Fix TURN relay."));
-        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", true,
-            new ConfigDescription("Wine/Proton (Linux) only: force TURN-relay-only voice (and add TURN-over-TCP) because Wine's local network/ICE gathering is unreliable, which otherwise leaves you unable to connect to anyone. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
+        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", false,
+            new ConfigDescription("Wine/Proton (Linux) only opt-in: force TURN-relay-only voice (and add TURN-over-TCP). Off by default - Wine now uses the same automatic ICE selection as native Windows, using TURN only when direct/STUN fail. Enable only if your Wine setup still cannot connect. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
 
         InterstellarServerUrl = config.Bind("Voice Server", "InterstellarServerUrl",
             VoiceEndpointSettings.DefaultInterstellarServerUrl,

@@ -72,8 +72,10 @@ non-host targets are produced on their own CI runners. Cross-target builds,
 crate.
 
 macOS ships universal (`lipo x86_64 + aarch64`) inside a minimal `.app` bundle
-with `Info.plist` `NSMicrophoneUsageDescription`, codesigned (Developer ID +
-hardened runtime + `com.apple.security.device.audio-input`), notarized + stapled.
+with `Info.plist` `NSMicrophoneUsageDescription`, ad-hoc codesigned (`codesign
+--sign -`, free, no Apple Developer account or notarization). The mod strips the
+Gatekeeper quarantine attribute and sets the exec bit on the extracted bundle,
+so the ad-hoc-signed helper launches and prompts for microphone access via TCC.
 
 Per-target binaries ship as side-files in the BepInEx plugin folder; the mod
 extracts them via the `NativeLibraryCache` pattern.

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using SIPSorcery.Net;
@@ -50,7 +51,7 @@ internal sealed class SidecarVoiceClient : IDisposable
         Stop();
         _running = false;
         var generation = Volatile.Read(ref _startGeneration);
-        var token = Guid.NewGuid().ToString("N");
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         SidecarLaunchResult launch;
         try
         {

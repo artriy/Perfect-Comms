@@ -3,17 +3,21 @@ set -euo pipefail
 
 dest="${1:?usage: fetch-bepinex.sh <dest-dir>}"
 unity_version="${UNITY_VERSION:-2022.3.44}"
+# Pin the BepInEx bleeding-edge build so release artifacts are reproducible and
+# a new upstream BE build can't silently change/break the bundle. Bumping this
+# is a deliberate, reviewable change; override with BEPINEX_BUILD when testing.
+bepinex_build="${BEPINEX_BUILD:-735}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 base="https://builds.bepinex.dev"
 
 rm -rf "$dest"
 mkdir -p "$dest"
 
-page="$(curl -fsSL "$base/projects/bepinex_be")"
-rel="$(grep -oE '/projects/bepinex_be/[0-9]+/BepInEx-Unity\.IL2CPP-win-x64-[^"]+\.zip' <<<"$page" || true)"
+page="$(curl -fsSL "$base/projects/bepinex_be/$bepinex_build")"
+rel="$(grep -oE "/projects/bepinex_be/$bepinex_build/BepInEx-Unity\.IL2CPP-win-x64-[^\"]+\.zip" <<<"$page" || true)"
 rel="${rel%%$'\n'*}"
 if [ -z "$rel" ]; then
-	echo "could not locate BepInEx IL2CPP win-x64 build" >&2
+	echo "could not locate BepInEx IL2CPP win-x64 build $bepinex_build" >&2
 	exit 1
 fi
 echo "BepInEx build: $rel"

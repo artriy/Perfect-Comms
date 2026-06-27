@@ -9,7 +9,7 @@ set -euo pipefail
 #   win-x64    -> webrtc-apm.x64.dll   (mingw cross: x86_64-w64-mingw32)
 #   win-x86    -> webrtc-apm.x86.dll   (mingw cross: i686-w64-mingw32)
 #   linux-x64  -> libwebrtc-apm.so     (native gcc)
-#   mac        -> libwebrtc-apm.dylib  (native clang, host arch)
+#   mac        -> libwebrtc-apm.dylib  (native clang, universal x86_64 + arm64)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src="$root/native/third_party/webrtc-audio-processing"
@@ -36,6 +36,17 @@ rm -rf "$build"
 
 setup_args=( "$build" "$src" --buildtype=release -Ddefault_library=shared )
 [[ -n "$crossfile" ]] && setup_args+=( --cross-file "$crossfile" )
+
+# macOS: emit a universal (x86_64 + arm64) dylib in a single clang pass so the
+# APM loads in both Apple-Silicon and Intel/Rosetta host processes. clang
+# compiles each translation unit once per arch and links a fat binary; meson's
+# run-time compiler checks still execute via the native host slice, so no
+# cross-file is needed.
+if [[ "$target" == "mac" ]]; then
+  arches="-arch x86_64 -arch arm64"
+  setup_args+=( -Dc_args="$arches" -Dcpp_args="$arches" \
+                -Dc_link_args="$arches" -Dcpp_link_args="$arches" )
+fi
 
 echo "==> meson setup ($target)"
 meson setup "${setup_args[@]}"

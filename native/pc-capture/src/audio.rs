@@ -185,6 +185,7 @@ pub fn spawn_cpal_capture(
     device_id: Option<String>,
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let device = pick_device(&device_id)?;
     let config = device
@@ -194,7 +195,14 @@ pub fn spawn_cpal_capture(
     let channels = config.channels() as usize;
     let resampler = Arc::new(Mutex::new(Resampler::new(in_rate)));
     let accumulator = Arc::new(Mutex::new(FrameAccumulator::new()));
-    let err_fn = |e| eprintln!("cpal stream error: {e}");
+    let errored = Arc::new(AtomicBool::new(false));
+    let make_err = || {
+        let ef = errored.clone();
+        move |e| {
+            eprintln!("cpal stream error: {e}");
+            ef.store(true, Ordering::Relaxed);
+        }
+    };
 
     let cb_ring = ring.clone();
     let cb_rs = resampler.clone();
@@ -222,7 +230,7 @@ pub fn spawn_cpal_capture(
         cpal::SampleFormat::F32 => device.build_input_stream(
             &stream_config,
             move |data: &[f32], _| push(data),
-            err_fn,
+            make_err(),
             None,
         ),
         cpal::SampleFormat::I16 => device.build_input_stream(
@@ -231,7 +239,7 @@ pub fn spawn_cpal_capture(
                 let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
                 push(&f);
             },
-            err_fn,
+            make_err(),
             None,
         ),
         cpal::SampleFormat::U16 => device.build_input_stream(
@@ -240,7 +248,7 @@ pub fn spawn_cpal_capture(
                 let f: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
                 push(&f);
             },
-            err_fn,
+            make_err(),
             None,
         ),
         fmt => return Err(format!("unsupported sample format: {fmt:?}")),
@@ -248,7 +256,12 @@ pub fn spawn_cpal_capture(
     .map_err(|e| format!("build input stream: {e}"))?;
 
     stream.play().map_err(|e| format!("stream play: {e}"))?;
+    healthy.store(true, Ordering::Relaxed);
     while !stop.load(Ordering::Relaxed) {
+        if errored.load(Ordering::Relaxed) {
+            drop(stream);
+            return Err("input device error (disconnected?)".into());
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     drop(stream);

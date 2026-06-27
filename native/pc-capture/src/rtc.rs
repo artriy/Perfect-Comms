@@ -182,7 +182,16 @@ impl RtcEngine {
         RtcEngine {
             rt,
             peers: Mutex::new(HashMap::new()),
-            ice_servers: Mutex::new(Vec::new()),
+            ice_servers: Mutex::new(vec![RTCIceServer {
+                urls: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                    "stun:stun2.l.google.com:19302".to_string(),
+                    "stun:stun.cloudflare.com:3478".to_string(),
+                    "stun:global.stun.twilio.com:3478".to_string(),
+                ],
+                ..Default::default()
+            }]),
             out_local_signal,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
@@ -342,7 +351,9 @@ mod tests {
     fn set_ice_servers_stores_mapped_servers() {
         let (tx, _rx) = channel::<LocalSignal>();
         let engine = RtcEngine::new(tx);
-        assert!(engine.ice_servers_snapshot().is_empty());
+        let default_servers = engine.ice_servers_snapshot();
+        assert_eq!(default_servers.len(), 1);
+        assert_eq!(default_servers[0].urls[0], "stun:stun.l.google.com:19302");
         engine.set_ice_servers(&[
             crate::proto::IceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_string()],
