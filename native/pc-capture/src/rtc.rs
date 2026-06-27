@@ -384,6 +384,10 @@ mod tests {
         let b = RtcEngine::new(b_tx);
 
         a.add_peer("B".to_string(), true);
+        // Answerer explicitly pre-creates its peer (mirrors PeerSessionManager.HandleOffer
+        // -> AddPeer(isOfferer:false)); with a hardcoded offerer=true this peer would be
+        // stuck in have-local-offer and never answer.
+        b.add_peer("A".to_string(), false);
 
         let payload: Vec<u8> = (0..80u8).map(|i| i ^ 0x5a).collect();
         let deadline = Instant::now() + Duration::from_secs(30);
