@@ -781,6 +781,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("bcl.voice", $"reason=heartbeat-lost detail={reason} restart=true");
             StopVoiceSession("heartbeat-lost");
             EnsureVoiceSession("heartbeat-lost");
+            // The restarted sidecar holds zero peers; drop our peer-session bookkeeping
+            // (sends Bye + clears _peers) and the RPC client set so the next signaling pump
+            // re-adds and renegotiates every peer against the fresh sidecar. Without this,
+            // peers we are the offerer for stay "Established" and never reconnect.
+            _peerSession?.Reset();
+            _rpcKnownClients.Clear();
         });
     }
 
@@ -824,7 +830,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (_peerSession == null) return;
             if (state == "connected")
                 _peerSession.OnPeerConnected(clientId);
-            else if (state is "failed" or "disconnected" or "closed")
+            else if (state is "failed" or "closed")
+                // Transient "disconnected" is the soft, self-healing consent-freshness state and
+                // must NOT force a teardown; webrtc-rs escalates a sustained drop to "failed".
                 _peerSession.OnPeerConnectionLost(clientId, nowMs);
         });
     }
@@ -3001,7 +3009,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (!SipsorceryVoiceTransport.TryParseClientId(socketId, out var clientId)) return;
         if (state == RTCPeerConnectionState.connected)
             _peerSession.OnPeerConnected(clientId);
-        else if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.disconnected or RTCPeerConnectionState.closed)
+        else if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
+            // Edge handler acts only on terminal states (see note below); transient 'disconnected'
+            // is left to the debounced LocalLinkNeedsRebuild poll so an auto-recovering blip is not
+            // torn down prematurely.
             _peerSession.OnPeerConnectionLost(clientId, Environment.TickCount64);
     }
 #endif

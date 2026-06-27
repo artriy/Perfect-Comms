@@ -286,11 +286,17 @@ internal sealed class PeerSessionManager
         if (!SignalPayload.TryReadSdp(payload, out var sdpType, out var sdp)) return;
 
         var peer = GetOrCreate(clientId);
-        if (!peer.Added)
+        // A fresh offer for a peer we already added means the offerer rebuilt its peer
+        // connection (new DTLS fingerprint). Recreate ours so we answer on a matching
+        // connection instead of applying the offer to a stale PC, which otherwise gives
+        // one-way audio until the old connection times out (~30s).
+        if (peer.Added)
         {
-            peer.Added = true;
-            _transport.AddPeer(clientId, isOfferer: false);
+            _transport.RemovePeer(clientId);
+            peer.Added = false;
         }
+        peer.Added = true;
+        _transport.AddPeer(clientId, isOfferer: false);
         peer.State = PeerState.Answering;
         peer.LastProgressMs = nowMs;
         _transport.SetRemoteSdp(clientId, sdpType, sdp);
