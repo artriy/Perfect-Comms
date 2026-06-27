@@ -8,7 +8,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal interface IVoiceTransport
 {
-    void AddPeer(int clientId);
+    void AddPeer(int clientId, bool isOfferer);
     void RemovePeer(int clientId);
     void SetRemoteSdp(int clientId, string sdpType, string sdp);
     void AddIceCandidate(int clientId, string candidate);
@@ -217,7 +217,7 @@ internal sealed class PeerSessionManager
             peer.Added = true;
             peer.State = PeerState.Offering;
             peer.LastProgressMs = nowMs;
-            _transport.AddPeer(clientId);
+            _transport.AddPeer(clientId, isOfferer: true);
         }
         else
         {
@@ -289,7 +289,7 @@ internal sealed class PeerSessionManager
         if (!peer.Added)
         {
             peer.Added = true;
-            _transport.AddPeer(clientId);
+            _transport.AddPeer(clientId, isOfferer: false);
         }
         peer.State = PeerState.Answering;
         peer.LastProgressMs = nowMs;
@@ -322,7 +322,7 @@ internal sealed class PeerSessionManager
             peer.Added = true;
             peer.State = PeerState.Offering;
             peer.LastProgressMs = nowMs;
-            _transport.AddPeer(clientId);
+            _transport.AddPeer(clientId, isOfferer: true);
         }
         else if (peer.State is PeerState.Idle or PeerState.Greeted)
         {

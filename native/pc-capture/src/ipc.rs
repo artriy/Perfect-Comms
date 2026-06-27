@@ -512,8 +512,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     InboundOp::Ping => {
                         let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
                     }
-                    InboundOp::PeerAdd { peer_id } => {
-                        rtc.lock().unwrap().add_peer(peer_id);
+                    InboundOp::PeerAdd { peer_id, offerer } => {
+                        rtc.lock().unwrap().add_peer(peer_id, offerer);
                         let mut guard = out_thread.lock().unwrap();
                         if guard.as_ref().map_or(false, |h| h.is_finished()) {
                             if let Some(h) = guard.take() {

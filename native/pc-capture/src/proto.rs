@@ -202,6 +202,10 @@ impl PlaybackRing {
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op")]
 pub enum InboundOp {
@@ -225,7 +229,11 @@ pub enum InboundOp {
         hpf: bool,
     },
     #[serde(rename = "peer-add")]
-    PeerAdd { peer_id: String },
+    PeerAdd {
+        peer_id: String,
+        #[serde(default = "default_true")]
+        offerer: bool,
+    },
     #[serde(rename = "peer-remove")]
     PeerRemove { peer_id: String },
     #[serde(rename = "set-remote-sdp")]
@@ -475,7 +483,17 @@ mod tests {
     #[test]
     fn parse_v4_peer_ops() {
         match parse_inbound(r#"{"op":"peer-add","peer_id":"p1"}"#).unwrap() {
-            InboundOp::PeerAdd { peer_id } => assert_eq!(peer_id, "p1"),
+            InboundOp::PeerAdd { peer_id, offerer } => {
+                assert_eq!(peer_id, "p1");
+                assert!(offerer);
+            }
+            other => panic!("expected peer-add, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"peer-add","peer_id":"p1b","offerer":false}"#).unwrap() {
+            InboundOp::PeerAdd { peer_id, offerer } => {
+                assert_eq!(peer_id, "p1b");
+                assert!(!offerer);
+            }
             other => panic!("expected peer-add, got {other:?}"),
         }
         match parse_inbound(r#"{"op":"peer-remove","peer_id":"p2"}"#).unwrap() {

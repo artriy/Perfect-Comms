@@ -24,7 +24,7 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId) => _voice()?.AddPeer(PeerId(clientId));
+    public void AddPeer(int clientId, bool isOfferer) => _voice()?.AddPeer(PeerId(clientId), isOfferer);
 
     public void RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId));
 
@@ -49,7 +49,8 @@ internal sealed class SipsorceryVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId) => _backend.RpcAddPeer(PeerId(clientId));
+    // Sipsorcery resolves the offerer role internally (RpcAddPeer -> StartOfferAsync -> ShouldInitiateOffer).
+    public void AddPeer(int clientId, bool isOfferer) => _backend.RpcAddPeer(PeerId(clientId));
 
     public void RemovePeer(int clientId) => _backend.RpcClosePeer(PeerId(clientId));
 

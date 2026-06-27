@@ -78,8 +78,8 @@ internal static class SidecarProtocol
     public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
         => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
 
-    public static byte[] AddPeerFrame(string peerId)
-        => EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)}}}");
+    public static byte[] AddPeerFrame(string peerId, bool isOfferer)
+        => EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{(isOfferer ? "true" : "false")}}}");
 
     public static byte[] RemovePeerFrame(string peerId)
         => EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)}}}");

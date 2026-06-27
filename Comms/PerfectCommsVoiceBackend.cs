@@ -1161,7 +1161,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
 #if WINDOWS || ANDROID
     private void OnRpcSignal(int senderClientId, SignalMsgType type, byte[] payload)
-        => _peerSession?.OnSignal(senderClientId, type, payload);
+        => _peerSession?.OnSignal(senderClientId, type, payload, Environment.TickCount64);
 
     private void PumpRpcSignaling(VoiceGameStateSnapshot? snapshot)
     {
@@ -2605,6 +2605,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 }
             }
         }
+
+        // The managed worker supplies TURN servers directly in baseServers; treat those as a usable relay too,
+        // so relay-only escalation works even without a bring-your-own TurnServerUrl.
+        if (!turnUsable && servers.Any(s => s.urls != null
+                && (s.urls.StartsWith("turn:", StringComparison.OrdinalIgnoreCase)
+                    || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase))))
+            turnUsable = true;
 
         // Relay-only is only safe when there is a usable TURN relay to route through; otherwise fall back to
         // 'all' so we don't strand the client with no reachable candidates at all.

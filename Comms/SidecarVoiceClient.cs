@@ -209,10 +209,10 @@ internal sealed class SidecarVoiceClient : IDisposable
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-output-device write failed: " + ex.Message); }
     }
 
-    public void AddPeer(string peerId)
+    public void AddPeer(string peerId, bool isOfferer)
     {
         if (!_running || string.IsNullOrEmpty(peerId)) return;
-        try { Write(SidecarProtocol.AddPeerFrame(peerId)); }
+        try { Write(SidecarProtocol.AddPeerFrame(peerId, isOfferer)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "peer-add write failed: " + ex.Message); }
     }
 

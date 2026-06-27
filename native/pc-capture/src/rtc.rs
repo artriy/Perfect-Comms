@@ -211,7 +211,7 @@ impl RtcEngine {
         *self.ice_servers.lock().unwrap() = mapped;
     }
 
-    pub fn add_peer(&self, peer_id: String) {
+    pub fn add_peer(&self, peer_id: String, offerer: bool) {
         if self.peers.lock().unwrap().contains_key(&peer_id) {
             return;
         }
@@ -219,7 +219,7 @@ impl RtcEngine {
         let recv_tx = self.recv_tx.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
-        if let Ok(handle) = self.rt.block_on(create_peer(pid, true, servers, signal, recv_tx)) {
+        if let Ok(handle) = self.rt.block_on(create_peer(pid, offerer, servers, signal, recv_tx)) {
             self.peers.lock().unwrap().insert(peer_id, handle);
         }
     }
@@ -383,7 +383,7 @@ mod tests {
         let a = RtcEngine::new(a_tx);
         let b = RtcEngine::new(b_tx);
 
-        a.add_peer("B".to_string());
+        a.add_peer("B".to_string(), true);
 
         let payload: Vec<u8> = (0..80u8).map(|i| i ^ 0x5a).collect();
         let deadline = Instant::now() + Duration::from_secs(30);
