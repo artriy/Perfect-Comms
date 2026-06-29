@@ -184,4 +184,69 @@ internal sealed class AndroidSampleProviderSpeaker : IDisposable
         VoiceDiagnostics.DebugInfo("[VC] Android BCL speaker disposed.");
     }
 }
+
+#if ANDROID
+// Playback for the pc-mobile path: Unity pulls interleaved stereo straight from the Rust
+// engine's mixed output (MobileVoiceClient.ReadPlayback), no managed VoiceMixer involved.
+internal sealed class AndroidEnginePcmSpeaker : IDisposable
+{
+    private const int SampleRate = 48000;
+    private const int Channels = 2;
+    private readonly AudioSource _source;
+    private readonly AudioClip _clip;
+    private readonly MobileVoiceClient _voice;
+    private int _readCallbacks;
+
+    public bool IsPlaying => _source != null && _source.isPlaying;
+    public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
+
+    public AndroidEnginePcmSpeaker(MobileVoiceClient voice)
+    {
+        _voice = voice ?? throw new ArgumentNullException(nameof(voice));
+
+        var host = VoiceChatPluginMain.ResidentObject
+            ?? throw new InvalidOperationException("[VC] ResidentObject is null");
+
+        int clipSamples = SampleRate / 2;
+
+        _source = host.AddComponent<AudioSource>();
+        _source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
+        _source.spatialBlend = 0f;
+        _source.volume = 1f;
+
+        _clip = AudioClip.Create(
+            "VCPcMobile",
+            clipSamples,
+            Channels,
+            SampleRate,
+            true,
+            (AudioClip.PCMReaderCallback)(ary => Read(ary)));
+
+        _source.clip = _clip;
+        _source.loop = true;
+        _source.Play();
+
+        VoiceDiagnostics.DebugInfo($"[VC] Android pc-mobile speaker initialised ({SampleRate} Hz, {Channels} ch).");
+    }
+
+    private float[] _scratch = Array.Empty<float>();
+    private void Read(Il2CppStructArray<float> data)
+    {
+        Interlocked.Increment(ref _readCallbacks);
+        int n = data.Length;
+        if (_scratch.Length != n) _scratch = new float[n];
+        try { _voice.ReadPlayback(_scratch); }
+        catch (Exception) { Array.Clear(_scratch, 0, n); }
+        for (int i = 0; i < n; i++) data[i] = _scratch[i];
+    }
+
+    public void Dispose()
+    {
+        _source.Stop();
+        if (_source != null) UnityEngine.Object.Destroy(_source);
+        if (_clip != null) UnityEngine.Object.Destroy(_clip);
+        VoiceDiagnostics.DebugInfo("[VC] Android pc-mobile speaker disposed.");
+    }
+}
+#endif
 #endif

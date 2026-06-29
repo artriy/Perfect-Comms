@@ -188,6 +188,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private AndroidMicrophone? _androidMicrophone;
     private AndroidSampleProviderSpeaker? _androidSpeaker;
 #endif
+#if ANDROID
+    private MobileVoiceClient? _mobileVoice;
+    private AndroidEnginePcmSpeaker? _mobileSpeaker;
+#endif
 #if WINDOWS
     private enum CaptureSlot { Sidecar, Bass, Unity }
     private CaptureSlot[] _captureSlots = Array.Empty<CaptureSlot>();
@@ -357,10 +361,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         SidecarVoiceClient? voice;
         lock (_voiceSync) voice = _voice;
         voice?.SetIceServers(servers);
-#else
+#elif ANDROID
         _iceServers = servers;
-        DrainPeerConnectionPool();
-        RefillPeerConnectionPool();
+        _mobileVoice?.SetIceServers(servers);
 #endif
     }
 
@@ -1145,7 +1148,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
             _rpcTransport = new SidecarVoiceTransport(() => _voice);
 #elif ANDROID
-            _rpcTransport = new SipsorceryVoiceTransport(this);
+            EnsureMobileVoice();
+            _rpcTransport = new MobileVoiceTransport(() => _mobileVoice);
 #endif
             _peerSession = new PeerSessionManager(localId, _rpcTransport!, _rpcSender);
             if (!_rpcOnMessageHooked)
@@ -1179,6 +1183,48 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
 
         _peerSession.Tick(nowMs);
+    }
+#endif
+
+#if ANDROID
+    private void EnsureMobileVoice()
+    {
+        if (_mobileVoice != null) return;
+        var mv = new MobileVoiceClient();
+        mv.OnLocalSdp += (peerId, type, sdp) =>
+        {
+            if (MobileVoiceTransport.TryParseClientId(peerId, out var cid))
+                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(cid, type, sdp));
+        };
+        mv.OnLocalCandidate += (peerId, cand) =>
+        {
+            if (MobileVoiceTransport.TryParseClientId(peerId, out var cid))
+                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalCandidate(cid, cand));
+        };
+        mv.OnPeerState += (peerId, state) =>
+        {
+            if (MobileVoiceTransport.TryParseClientId(peerId, out var cid))
+                _mainThreadActions.Enqueue(() => OnMobilePeerState(cid, state));
+        };
+        mv.OnLevel += (peak, speaking) => { _localLevel = peak; _localSpeaking = speaking; };
+        _mobileVoice = mv;
+        if (!mv.Start())
+        {
+            VoiceDiagnostics.Log("bcl.mobile", "state=start-failed");
+            return;
+        }
+        if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
+        mv.SetDsp(true, true, true, true);
+        VoiceDiagnostics.Log("bcl.mobile", "state=started backend=pc-mobile");
+    }
+
+    private void OnMobilePeerState(int clientId, string state)
+    {
+        if (_peerSession == null) return;
+        var nowMs = Environment.TickCount64;
+        if (state == "connected") _peerSession.OnPeerConnected(clientId);
+        else if (state is "failed" or "closed") _peerSession.OnPeerConnectionLost(clientId, nowMs);
+        else if (state == "disconnected") _peerSession.OnPeerConnectionDegraded(clientId, nowMs);
     }
 #endif
 
@@ -1351,7 +1397,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 if (epoch != _captureEpoch) continue;
                 try
                 {
+#if ANDROID
+                    _mobileVoice?.PushMic(buffer, samples);
+#else
                     ProcessMicrophoneCaptureSamples(buffer, samples);
+#endif
                 }
                 catch (Exception ex)
                 {
@@ -1396,20 +1446,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID
         try
         {
-            _androidSpeaker?.Dispose();
-            var mixer = _voiceMixer ?? new VoiceMixer();
-            _voiceMixer = mixer;
-            _androidSpeaker = new AndroidSampleProviderSpeaker(mixer);
-            _speakerReady = _androidSpeaker.IsPlaying;
-            lock (_peerSync)
-                foreach (var peer in _peersBySocket.Values)
-                    peer.SetMixer(mixer);
-            VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} device=\"{deviceName}\" backend=android-managed");
+            EnsureMobileVoice();
+            _mobileSpeaker?.Dispose();
+            _mobileSpeaker = _mobileVoice != null ? new AndroidEnginePcmSpeaker(_mobileVoice) : null;
+            _speakerReady = _mobileSpeaker?.IsPlaying ?? false;
+            VoiceDiagnostics.Log("bcl.speaker", $"ready={_speakerReady} device=\"{deviceName}\" backend=pc-mobile");
         }
         catch (Exception ex)
         {
-            try { _androidSpeaker?.Dispose(); } catch { }
-            _androidSpeaker = null;
+            try { _mobileSpeaker?.Dispose(); } catch { }
+            _mobileSpeaker = null;
             _speakerReady = false;
             VoiceDiagnostics.Log("bcl.speaker", $"ready=false device=\"{deviceName}\" error=\"{ex.Message}\"");
         }
@@ -1610,6 +1656,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
         if (_voice != null)
             helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
+#elif ANDROID
+        if (_mobileVoice != null)
+            helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
 #endif
         foreach (var peer in _updatePeerScratch)
         {
@@ -1669,6 +1718,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (helperGameStatePeers != null)
         {
             _voice?.SendGameState(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
+        }
+#elif ANDROID
+        if (helperGameStatePeers != null)
+        {
+            _mobileVoice?.SendGameState(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
         }
 #endif
 
