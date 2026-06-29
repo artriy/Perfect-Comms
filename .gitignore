@@ -8,6 +8,7 @@ obj/
 Libs/*.bak.*
 Libs/pc-capture/
 Libs/dsp/
+Libs/pc-mobile/
 PerfectComms.Tests/
 scripts/
 cloudflare/
