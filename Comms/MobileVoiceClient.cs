@@ -62,14 +62,15 @@ internal sealed class MobileVoiceClient : IDisposable
 
     private void Control(byte[] framed)
     {
-        var h = _h;
-        if (h == IntPtr.Zero) return;
         int jsonLen = framed.Length - SidecarProtocol.HeaderBytes;
         if (jsonLen <= 0) return;
         var json = new byte[jsonLen + 1];
         Array.Copy(framed, SidecarProtocol.HeaderBytes, json, 0, jsonLen);
         json[jsonLen] = 0;
-        lock (_ctrlLock) PcMobileNative.pc_control(h, json);
+        lock (_ctrlLock)
+        {
+            if (_h != IntPtr.Zero) PcMobileNative.pc_control(_h, json);
+        }
     }
 
     public void AddPeer(string peerId, bool isOfferer) => Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer));
@@ -85,10 +86,10 @@ internal sealed class MobileVoiceClient : IDisposable
     // runs DSP + Opus + WebRTC send. Returns nothing; OnLevel fires per pushed frame.
     public void PushMic(float[] mono, int count)
     {
-        var h = _h;
-        if (h == IntPtr.Zero || mono == null || count <= 0) return;
+        if (mono == null || count <= 0) return;
         lock (_micLock)
         {
+            if (_h == IntPtr.Zero) return;
             int i = 0;
             while (i < count)
             {
@@ -98,7 +99,7 @@ internal sealed class MobileVoiceClient : IDisposable
                 i += take;
                 if (_micFill == MicFrame)
                 {
-                    float peak = PcMobileNative.pc_push_mic(h, _micAccum, MicFrame);
+                    float peak = PcMobileNative.pc_push_mic(_h, _micAccum, MicFrame);
                     _micFill = 0;
                     OnLevel?.Invoke(peak, peak > 0.02f);
                 }
@@ -168,6 +169,8 @@ internal sealed class MobileVoiceClient : IDisposable
 
     private void Dispatch(string json)
     {
+        try
+        {
         switch (SidecarProtocol.ReadOp(json))
         {
             case "local-sdp":
@@ -183,16 +186,22 @@ internal sealed class MobileVoiceClient : IDisposable
                 if (SidecarProtocol.TryReadLevel(json, out var peak, out var speaking)) OnLevel?.Invoke(peak, speaking);
                 break;
         }
+        }
+        catch (Exception) { }
     }
 
     public void Dispose()
     {
         _running = false;
-        try { _pollThread?.Join(250); } catch { }
-        try { _pumpThread?.Join(250); } catch { }
-        var h = _h;
-        _h = IntPtr.Zero;
-        if (h != IntPtr.Zero) PcMobileNative.pc_engine_free(h);
+        try { _pollThread?.Join(); } catch { }
+        try { _pumpThread?.Join(); } catch { }
+        lock (_micLock)
+        lock (_ctrlLock)
+        {
+            var h = _h;
+            _h = IntPtr.Zero;
+            if (h != IntPtr.Zero) PcMobileNative.pc_engine_free(h);
+        }
         VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient disposed");
     }
 }

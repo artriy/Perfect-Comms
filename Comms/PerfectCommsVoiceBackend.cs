@@ -1143,12 +1143,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var localId = client.ClientId;
         if (localId < 0) return;
 
+#if ANDROID
+        EnsureMobileVoice();
+#endif
         if (_peerSession == null)
         {
 #if WINDOWS
             _rpcTransport = new SidecarVoiceTransport(() => _voice);
 #elif ANDROID
-            EnsureMobileVoice();
             _rpcTransport = new MobileVoiceTransport(() => _mobileVoice);
 #endif
             _peerSession = new PeerSessionManager(localId, _rpcTransport!, _rpcSender);
@@ -1207,14 +1209,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _mainThreadActions.Enqueue(() => OnMobilePeerState(cid, state));
         };
         mv.OnLevel += (peak, speaking) => { _localLevel = peak; _localSpeaking = speaking; };
-        _mobileVoice = mv;
         if (!mv.Start())
         {
+            mv.Dispose();
             VoiceDiagnostics.Log("bcl.mobile", "state=start-failed");
             return;
         }
         if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
         mv.SetDsp(true, true, true, true);
+        _mobileVoice = mv;
         VoiceDiagnostics.Log("bcl.mobile", "state=started backend=pc-mobile");
     }
 
@@ -1810,6 +1813,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         StopAndroidMicrophone("dispose");
         try { _androidSpeaker?.Dispose(); } catch { }
         _androidSpeaker = null;
+        try { _mobileSpeaker?.Dispose(); } catch { }
+        _mobileSpeaker = null;
+        try { _mobileVoice?.Dispose(); } catch { }
+        _mobileVoice = null;
 #endif
         lock (_captureFrameSync)
             _micPreprocessor.Dispose();
