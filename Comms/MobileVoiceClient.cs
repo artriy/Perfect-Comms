@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
-using SIPSorcery.Net;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -77,7 +76,7 @@ internal sealed class MobileVoiceClient : IDisposable
     public void RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
     public void SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
     public void AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
-    public void SetIceServers(IEnumerable<RTCIceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
+    public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf) => Control(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
     public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
         => Control(SidecarProtocol.GameStateFrame(deaf, master, peers));

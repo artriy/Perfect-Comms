@@ -15,9 +15,9 @@ internal enum WineHostOs
 }
 
 // Detects whether we're running under Wine/Proton (Linux) and provides a Wine-safe way to
-// learn our real local IPv4. Both matter for WebRTC: under Wine, SIPSorcery's ICE host-candidate
-// gathering (which leans on the Windows network-interface APIs) is unreliable and often yields
-// no candidates, so peers never connect. See docs/wine-nat-fix-plan.md.
+// learn our real local IPv4. Both matter for WebRTC: under Wine, ICE host-candidate gathering that
+// leans on the Windows network-interface APIs is unreliable and often yields no candidates, so peers
+// never connect. See docs/wine-nat-fix-plan.md.
 internal static class WineEnvironment
 {
     private static bool _probed;

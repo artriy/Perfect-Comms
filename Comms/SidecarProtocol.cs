@@ -3,9 +3,22 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
-using SIPSorcery.Net;
 
 namespace VoiceChatPlugin.VoiceChat;
+
+internal readonly struct IceServer
+{
+    public readonly string Urls;
+    public readonly string Username;
+    public readonly string Credential;
+
+    public IceServer(string urls, string username = "", string credential = "")
+    {
+        Urls = urls ?? "";
+        Username = username ?? "";
+        Credential = credential ?? "";
+    }
+}
 
 internal static class SidecarProtocol
 {
@@ -81,7 +94,7 @@ internal static class SidecarProtocol
     public static byte[] AddIceCandidateFrame(string peerId, string candidate)
         => EncodeControl($"{{\"op\":\"add-ice-candidate\",\"peer_id\":{JsonString(peerId)},\"candidate\":{JsonString(candidate)}}}");
 
-    public static byte[] SetIceServersFrame(IEnumerable<RTCIceServer> servers)
+    public static byte[] SetIceServersFrame(IEnumerable<IceServer> servers)
     {
         using var stream = new System.IO.MemoryStream();
         using (var w = new Utf8JsonWriter(stream))
@@ -91,13 +104,13 @@ internal static class SidecarProtocol
             w.WriteStartArray("servers");
             foreach (var s in servers)
             {
-                if (string.IsNullOrEmpty(s.urls)) continue;
+                if (string.IsNullOrEmpty(s.Urls)) continue;
                 w.WriteStartObject();
                 w.WriteStartArray("urls");
-                w.WriteStringValue(s.urls);
+                w.WriteStringValue(s.Urls);
                 w.WriteEndArray();
-                if (!string.IsNullOrEmpty(s.username)) w.WriteString("username", s.username);
-                if (!string.IsNullOrEmpty(s.credential)) w.WriteString("credential", s.credential);
+                if (!string.IsNullOrEmpty(s.Username)) w.WriteString("username", s.Username);
+                if (!string.IsNullOrEmpty(s.Credential)) w.WriteString("credential", s.Credential);
                 w.WriteEndObject();
             }
             w.WriteEndArray();

@@ -7,10 +7,6 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using SIPSorcery.Net;
-#if ANDROID
-using SIPSorceryMedia.Abstractions;
-#endif
 using SocketIOClient;
 using UnityEngine;
 using VoiceChatPlugin.Audio;
@@ -46,12 +42,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private static readonly byte[] RadioStateMagic = [(byte)'P', (byte)'C', (byte)'R', (byte)'D'];
     private static readonly byte[] KeepaliveMagic = [(byte)'P', (byte)'C', (byte)'K', (byte)'A'];
     private static readonly byte[] KeepaliveBytes = BuildKeepaliveMessage();
-    private static readonly RTCIceServer[] DefaultIceServers =
+    private static readonly IceServer[] DefaultIceServers =
     [
-        new() { urls = "stun:stun.l.google.com:19302" },
-        new() { urls = "stun:stun1.l.google.com:19302" },
-        new() { urls = "stun:stun.cloudflare.com:3478" },
-        new() { urls = "stun:global.stun.twilio.com:3478" },
+        new("stun:stun.l.google.com:19302"),
+        new("stun:stun1.l.google.com:19302"),
+        new("stun:stun.cloudflare.com:3478"),
+        new("stun:global.stun.twilio.com:3478"),
     ];
     private static readonly HttpClient TurnHttp = new() { Timeout = TimeSpan.FromSeconds(6) };
 
@@ -73,18 +69,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly Dictionary<int, DateTime> _duplicateRouteLogUtcByClient = new();
     private static readonly TimeSpan DuplicateRouteLogInterval = TimeSpan.FromSeconds(2);
 
-    private volatile List<RTCIceServer> _iceServers = DefaultIceServers.ToList();
+    private volatile List<IceServer> _iceServers = DefaultIceServers.ToList();
     private CancellationTokenSource? _turnCts;
 
-    private volatile bool _forceRelayEscalated;
-
-    private readonly ConcurrentQueue<PooledPeerConnection> _pcPool = new();
-
-    private const int PcPoolTarget = 4;
     private const int MaxPendingSignalsPerSocket = 32;
     private static readonly TimeSpan PendingSignalSocketMaxAge = TimeSpan.FromSeconds(30);
     private readonly Dictionary<string, DateTime> _pendingSignalFirstSeenUtc = new();
-    private int _pcPoolRefilling;
     private static readonly TimeSpan JoinRetryInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfferRetryInterval = TimeSpan.FromSeconds(3);
 
@@ -186,7 +176,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
 #if ANDROID || WINDOWS
     private AndroidMicrophone? _androidMicrophone;
-    private AndroidSampleProviderSpeaker? _androidSpeaker;
 #endif
 #if ANDROID
     private MobileVoiceClient? _mobileVoice;
@@ -199,7 +188,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
     private SidecarVoiceClient? _voice;
-    private volatile List<RTCIceServer>? _pendingIceServers;
+    private volatile List<IceServer>? _pendingIceServers;
     private Task _voiceStartTask = Task.CompletedTask;
     private int _voiceColdStartRetries;
     private readonly object _voiceSync = new();
@@ -221,7 +210,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly HashSet<int> _rpcPresentScratch = new();
     private readonly List<int> _rpcLeftScratch = new();
 #endif
-    private IVoiceEncoder _encoder = CreateEncoder();
     private Timer? _syntheticMicTimer;
     private string _lastMicDeviceName = string.Empty;
     private volatile float _micVolume = 1f;
@@ -232,7 +220,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private volatile bool _localSpeaking;
     private bool _microphoneReady;
     private volatile bool _speakerReady;
-    private VoiceMixer? _voiceMixer;
     private VoiceCaptureRuntimeOptions _captureOptions;
     private const float DeadInputPeakThreshold = 0.00012f;
     private const float LiveSignalPeakThreshold = 0.005f;
@@ -283,44 +270,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         Region = region;
         ServerUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
 
-#if ANDROID
-        _sendPacer = new VoiceSendPacer(SendOpusFrameToAudioTracks);
-#else
-        _sendPacer = new VoiceSendPacer(SendFramedToChannels);
-#endif
         ConnectSocket();
         StartTurnCredentialFetch();
-        WarmOpusCodec();
         VoiceDiagnostics.Log("bcl.created", $"room={RoomCode} region={Region} endpoint={ServerUrl}");
         if (WineEnvironment.IsWine)
         {
-            ReadIceSettings(out _, out _, out _, out _, out var forceRelay);
+            var forceRelay = VoiceSettings.Instance?.WineForceRelay.Value == true;
             VoiceDiagnostics.Log("env.wine", $"detected=true forceRelay={forceRelay} localIp={WineEnvironment.GetLocalIPv4()?.ToString() ?? "none"}");
         }
-    }
-
-    private static int _opusWarmed;
-    private static void WarmOpusCodec()
-    {
-        if (Interlocked.Exchange(ref _opusWarmed, 1) == 1) return;
-        Task.Run(() =>
-        {
-            try
-            {
-                VoiceCodec.CreateDecoder().Dispose();
-            }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("bcl.codec.warm.error", $"error=\"{ex.Message}\"");
-            }
-        });
     }
 
     private void StartTurnCredentialFetch()
     {
         var cached = TurnCredentialClient.Cached;
         if (cached is { Count: > 0 })
-            ApplyIceServers(new List<RTCIceServer>(cached));
+            ApplyIceServers(new List<IceServer>(cached));
         var cts = new CancellationTokenSource();
         _turnCts = cts;
         _ = Task.Run(() => TurnCredentialLoopAsync(cts.Token));
@@ -353,7 +317,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
     }
 
-    private void ApplyIceServers(List<RTCIceServer> servers)
+    private void ApplyIceServers(List<IceServer> servers)
     {
         if (servers == null || servers.Count == 0 || _disposed) return;
 #if WINDOWS
@@ -439,6 +403,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return count;
     }
 
+    // The C# backend no longer observes a per-peer data channel (the sidecar/pc-mobile engine owns the
+    // WebRTC links). Per the IVoiceBackend contract, a channel-less backend reports its mapped peers as the
+    // "healthy" count so the room's mesh-collapse supervisor does not false-trigger.
     public int CountPeersWithOpenChannel(VoiceGameStateSnapshot snapshot)
     {
         var count = 0;
@@ -447,7 +414,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             foreach (var peer in _peersBySocket.Values)
             {
                 if (peer.PlayerId == byte.MaxValue) continue;
-                if (peer.DataChannel?.readyState != RTCDataChannelState.open) continue;
                 foreach (var player in snapshot.Players)
                 {
                     if (!player.IsLocal && !player.Disconnected && !player.IsDummy && player.PlayerId == peer.PlayerId)
@@ -463,62 +429,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     public int CountOpenDataChannels()
     {
-        var count = 0;
         lock (_peerSync)
-        {
-            foreach (var peer in _peersBySocket.Values)
-                if (peer.DataChannel?.readyState == RTCDataChannelState.open) count++;
-        }
-        return count;
+            return _peersBySocket.Count;
     }
 
+    // Peer recovery is owned by the sidecar/pc-mobile engine (PeerSessionManager drives it over RPC). There
+    // is no C# targeted re-drive path anymore; return 0 so the room takes no destructive fallback.
     public int TryRecoverMissingClients(VoiceGameStateSnapshot snapshot)
     {
-        if (_disposed || snapshot == null) return 0;
-#if ANDROID
-        if (_peerSession != null) return 0;
-#endif
-
-        var targets = new List<(string SocketId, bool Initiator, bool Stuck)>();
-        var now = DateTime.UtcNow;
-        lock (_peerSync)
-        {
-            foreach (var peer in _peersBySocket.Values)
-            {
-                if (peer.PlayerId == byte.MaxValue) continue;
-
-                if (peer.DataChannel?.readyState == RTCDataChannelState.open) continue;
-                if (!ExpectsPlayer(snapshot, peer.PlayerId)) continue;
-                if (now < peer.NextRetryUtc) continue;
-                bool initiator = ShouldInitiateOffer(peer.SocketId);
-                bool stuck = IsStuckConnecting(peer, now);
-                targets.Add((peer.SocketId, initiator, stuck));
-            }
-        }
-        if (targets.Count == 0) return 0;
-        foreach (var (socketId, initiator, stuck) in targets)
-        {
-            VoiceDiagnostics.Log("bcl.peer.targeted-recovery", $"socket={socketId} initiator={initiator} stuck={stuck}");
-            if (initiator)
-            {
-
-                if (stuck) RecreatePeerConnection(socketId);
-                _ = StartOfferAsync(socketId);
-            }
-            else
-            {
-                RequestOfferFromPeer(socketId);
-            }
-            lock (_peerSync)
-            {
-                if (_peersBySocket.TryGetValue(socketId, out var peer))
-                {
-                    peer.RecoveryAttempts++;
-                    peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
-                }
-            }
-        }
-        return targets.Count;
+        return 0;
     }
 
     private static bool ExpectsPlayer(VoiceGameStateSnapshot snapshot, byte playerId)
@@ -564,7 +483,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     public void SetMasterVolume(float volume)
     {
         _masterVolume = Math.Clamp(volume, 0f, 2f);
-        _voiceMixer?.SetMasterVolume(_masterVolume);
     }
     public void SetMicVolume(float volume)
     {
@@ -896,13 +814,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             var voice = _voice;
             if (voice == null) break;
-            try
-            {
-                var mixer = _voiceMixer;
-                if (mixer != null) mixer.Read(_playbackBlock);
-                else Array.Clear(_playbackBlock, 0, _playbackBlock.Length);
-            }
-            catch { Array.Clear(_playbackBlock, 0, _playbackBlock.Length); }
+            // Sidecar renders and plays mixed remote audio directly to the output device; the C# pump no
+            // longer drives a managed mixer. ponytail: pump retained but idle (dead playout path).
+            Array.Clear(_playbackBlock, 0, _playbackBlock.Length);
 
             nextMs += frameMs;
             var sleep = nextMs - sw.ElapsedMilliseconds;
@@ -1471,19 +1385,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
     private void SetSpeakerSidecar(string deviceName)
     {
-        try { _androidSpeaker?.Dispose(); } catch { }
-        _androidSpeaker = null;
-        var mixer = _voiceMixer ?? new VoiceMixer();
-        _voiceMixer = mixer;
-        mixer.SetMasterVolume(_masterVolume);
-        lock (_peerSync)
-            foreach (var peer in _peersBySocket.Values)
-                peer.SetMixer(mixer);
         var voice = _voice;
         if (voice != null)
         {
             voice.SelectOutputDevice(deviceName);
-            StartVoicePump();
             _speakerReady = true;
             VoiceDiagnostics.Log("bcl.speaker", $"ready=true device=\"{deviceName}\" backend=sidecar reused=true");
         }
@@ -1520,23 +1425,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         SendCustomMessage([RadioStateMagic[0], RadioStateMagic[1], RadioStateMagic[2], RadioStateMagic[3], playerId, VoiceTeamRadioChannels.IsActive(channel) ? (byte)1 : (byte)0, (byte)channel]);
     }
 
+    // Custom data messages (radio state, loss reports, keepalive) rode the C# data channel. The
+    // sidecar/pc-mobile engine owns the WebRTC data path now and exposes no custom-message op, so this is a
+    // no-op. ponytail: kept on IVoiceBackend; radio-over-datachannel is gone on every transport.
     public void SendCustomMessage(byte[] payload)
     {
-        var wrapped = new byte[payload.Length + DataControlPrefixLength];
-        Array.Copy(DataControlPrefix, wrapped, DataControlPrefixLength);
-        Array.Copy(payload, 0, wrapped, DataControlPrefixLength, payload.Length);
-        foreach (var peer in SnapshotPeers())
-        {
-            try
-            {
-                if (peer.DataChannel?.readyState == RTCDataChannelState.open)
-                {
-                    peer.DataChannel.send(wrapped);
-                    Interlocked.Increment(ref _customTx);
-                }
-            }
-            catch { }
-        }
     }
 
     internal bool TryPublishPublicLobby(VoiceLobbyPublishRequest request)
@@ -1641,9 +1534,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         long joinTicks = VoiceFrameProfiler.Begin();
         _ = JoinAsync(snapshot);
         VoiceFrameProfiler.End("backend.join", joinTicks);
-        long retryTicks = VoiceFrameProfiler.Begin();
-        RetryClosedDataChannels();
-        VoiceFrameProfiler.End("backend.retry", retryTicks);
 
         var localPlayer = snapshot.TryGetLocalPlayer(out var local) ? local : (VoicePlayerSnapshot?)null;
         var listenerPos = localPlayer?.Position;
@@ -1707,12 +1597,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
 
-            peer.MaybeSendLossReport(lossReportNowUtc);
-            peer.MaybeSendKeepalive(lossReportNowUtc);
             if (resumeFrame)
                 peer.RebaseInbound(lossReportNowUtc.Ticks);
-            else
-                NotePeerLivenessForDiagnostics(peer, lossReportNowUtc);
             peer.SampleDiagnostics();
         }
         VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
@@ -1743,16 +1629,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             var secondMapped = string.Equals(mappedSocket, second.SocketId, StringComparison.Ordinal);
             if (firstMapped != secondMapped) return firstMapped ? first : second;
         }
-        var firstOpen = first.DataChannel?.readyState == RTCDataChannelState.open;
-        var secondOpen = second.DataChannel?.readyState == RTCDataChannelState.open;
-        if (firstOpen != secondOpen) return firstOpen ? first : second;
-        return ConnectionRecencyUtc(second) >= ConnectionRecencyUtc(first) ? second : first;
-    }
-
-    private static DateTime ConnectionRecencyUtc(PeerConnection peer)
-    {
-        var recency = peer.LastConnectionRebuildUtc > peer.LastRecoveryUtc ? peer.LastConnectionRebuildUtc : peer.LastRecoveryUtc;
-        return peer.OfferStartedUtc > recency ? peer.OfferStartedUtc : recency;
+        // Without a C# data channel or recovery timestamps to compare, prefer the most recently seen socket.
+        return second;
     }
 
     private void SuppressDuplicateRoutePeer(PeerConnection kept, PeerConnection muted)
@@ -1761,38 +1639,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var now = DateTime.UtcNow;
         if (_duplicateRouteLogUtcByClient.TryGetValue(muted.ClientId, out var lastLog) && now - lastLog < DuplicateRouteLogInterval) return;
         _duplicateRouteLogUtcByClient[muted.ClientId] = now;
-        var keptOpen = kept.DataChannel?.readyState == RTCDataChannelState.open;
-        var mutedOpen = muted.DataChannel?.readyState == RTCDataChannelState.open;
-        VoiceDiagnostics.Log("bcl.peer.duplicate", $"client={muted.ClientId} keptSocket={kept.SocketId} mutedSocket={muted.SocketId} keptOpen={keptOpen} mutedOpen={mutedOpen}");
-        if (keptOpen && !mutedOpen)
-        {
-            var mutedSocket = muted.SocketId;
-            var keptSocket = kept.SocketId;
-            _mainThreadActions.Enqueue(() => RemoveDuplicateRoutePeer(mutedSocket, keptSocket));
-        }
-    }
-
-    private void RemoveDuplicateRoutePeer(string mutedSocketId, string keptSocketId)
-    {
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(mutedSocketId, out var muted)) return;
-            if (!_peersBySocket.TryGetValue(keptSocketId, out var kept)) return;
-            if (muted.ClientId < 0 || muted.ClientId != kept.ClientId) return;
-            if (_clientToSocket.TryGetValue(muted.ClientId, out var mappedSocket)
-                && string.Equals(mappedSocket, mutedSocketId, StringComparison.Ordinal)) return;
-            if (muted.DataChannel?.readyState == RTCDataChannelState.open) return;
-            if (kept.DataChannel?.readyState != RTCDataChannelState.open) return;
-            VoiceDiagnostics.Log("bcl.peer.superseded", $"oldSocket={mutedSocketId} newSocket={keptSocketId} client={muted.ClientId} reason=route-duplicate");
-            RemovePeer(mutedSocketId);
-        }
+        VoiceDiagnostics.Log("bcl.peer.duplicate", $"client={muted.ClientId} keptSocket={kept.SocketId} mutedSocket={muted.SocketId}");
     }
 
     public void Dispose()
     {
         _disposed = true;
         try { _turnCts?.Cancel(); _turnCts?.Dispose(); } catch { }
-        _sendPacer.Dispose();
 #if WINDOWS || ANDROID
         if (_rpcOnMessageHooked)
         {
@@ -1806,13 +1659,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
         StopVoiceSession("dispose");
-        try { _androidSpeaker?.Dispose(); } catch { }
-        _androidSpeaker = null;
-        _voiceMixer = null;
 #elif ANDROID
         StopAndroidMicrophone("dispose");
-        try { _androidSpeaker?.Dispose(); } catch { }
-        _androidSpeaker = null;
         try { _mobileSpeaker?.Dispose(); } catch { }
         _mobileSpeaker = null;
         try { _mobileVoice?.Dispose(); } catch { }
@@ -1820,13 +1668,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
         lock (_captureFrameSync)
             _micPreprocessor.Dispose();
-        try { _encoder.Dispose(); } catch { }
         var socket = _socket;
         _socket = null;
         if (socket != null)
             _ = DisconnectAndDisposeSocketAsync(socket);
         ClearPeers();
-        DrainPeerConnectionPool();
         _lastCenteredLoudLogUtc.Clear();
     }
 
@@ -1884,11 +1730,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     {
                         if (kv.Key == null || kv.Value == null) continue;
                         if (MapClient(kv.Key, kv.Value))
-                        {
-                            var peer = EnsurePeer(kv.Key);
-                            if (peer != null && ShouldInitiateOffer(kv.Key))
-                                _ = StartOfferAsync(kv.Key);
-                        }
+                            EnsurePeer(kv.Key);
                     }
                 });
 #endif
@@ -1906,8 +1748,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if !ANDROID
                 _mainThreadActions.Enqueue(() =>
                 {
-                    if (MapClient(socketId, client) && EnsurePeer(socketId) != null && ShouldInitiateOffer(socketId))
-                        _ = StartOfferAsync(socketId);
+                    if (MapClient(socketId, client))
+                        EnsurePeer(socketId);
                 });
 #endif
             }
@@ -1927,20 +1769,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=leave error=\"{ex.Message}\""); }
             await Task.CompletedTask;
         });
-        _socket.On("signal", async ctx =>
-        {
-            try
-            {
-                var payload = ctx.GetValue<SignalPayload>(0);
-                if (payload == null) return;
-#if !ANDROID
-                VoiceDiagnostics.Log("bcl.signal.queued", $"fromSocket={payload.from} queueDepth={_mainThreadActions.Count + 1}");
-                _mainThreadActions.Enqueue(() => HandleQueuedSignal(payload.from, payload.data));
-#endif
-            }
-            catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=signal error=\"{ex.Message}\""); }
-            await Task.CompletedTask;
-        });
+        // P2P media signaling (offer/answer/candidate) moved to in-game RPC + the native engine; the legacy
+        // SocketIO "signal" channel is dead. The socket is kept for the roster (setClients/join/leave) and
+        // public-lobby features only.
+        _socket.On("signal", async _ => await Task.CompletedTask);
         _socket.On("clientPeerConfig", async ctx =>
         {
             try
@@ -1948,15 +1780,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 var config = ctx.GetValue<ClientPeerConfig>(0);
                 if (config?.iceServers != null && config.iceServers.Length > 0)
                 {
-                    _iceServers = config.iceServers.Select(server => new RTCIceServer
-                    {
-                        urls = server.urls,
-                        username = server.username,
-                        credential = server.credential,
-                    }).ToList();
-
-                    DrainPeerConnectionPool();
-                    RefillPeerConnectionPool();
+                    _iceServers = config.iceServers
+                        .Select(server => new IceServer(server.urls, server.username ?? "", server.credential ?? ""))
+                        .ToList();
                 }
             }
             catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"event=clientPeerConfig error=\"{ex.Message}\""); }
@@ -1964,8 +1790,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         });
         _socket.On("VAD", async _ => await Task.CompletedTask);
         _ = _socket.ConnectAsync();
-
-        RefillPeerConnectionPool();
     }
 
     private async Task JoinAsync(VoiceGameStateSnapshot? snapshot = null)
@@ -2101,49 +1925,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             return _socketToClient.ContainsKey(socketId);
     }
 
-    private void HandleQueuedSignal(string fromSocketId, string dataJson)
-    {
-        if (_disposed || string.IsNullOrWhiteSpace(fromSocketId)) return;
-        if (!IsMappedSocket(fromSocketId))
-        {
-            int pendingCount;
-            lock (_peerSync)
-            {
-                if (!_pendingSignalsBySocket.TryGetValue(fromSocketId, out var pending))
-                {
-                    pending = new Queue<string>();
-                    _pendingSignalsBySocket[fromSocketId] = pending;
-                    _pendingSignalFirstSeenUtc[fromSocketId] = DateTime.UtcNow;
-                }
-
-                pending.Enqueue(dataJson ?? string.Empty);
-                while (pending.Count > MaxPendingSignalsPerSocket) pending.Dequeue();
-                pendingCount = pending.Count;
-            }
-
-            VoiceDiagnostics.Log("bcl.signal.deferred", $"fromSocket={fromSocketId} pending={pendingCount}");
-            VoiceDiagnostics.Log("bcl.peer.mapping.unresolved", $"socket={fromSocketId} pendingSignals={pendingCount}");
-            return;
-        }
-
-        _ = RunSignalHandlerAsync(fromSocketId, dataJson);
-    }
-
     private void ReplayPendingSignals(string socketId)
     {
-        Queue<string>? pending;
+        // SocketIO media signaling is gone (RPC + native engine handle it), so no signals are ever pended.
         lock (_peerSync)
-        {
-            if (!_pendingSignalsBySocket.Remove(socketId, out pending))
-                return;
-        }
-
-        while (pending.Count > 0)
-        {
-            var data = pending.Dequeue();
-            VoiceDiagnostics.Log("bcl.signal.replayed", $"fromSocket={socketId} remaining={pending.Count}");
-            _ = RunSignalHandlerAsync(socketId, data);
-        }
+            _pendingSignalsBySocket.Remove(socketId);
     }
 
     private void DropPendingSignals(string socketId, string reason)
@@ -2210,39 +1996,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return !string.IsNullOrEmpty(localSocketId) && string.Equals(socketId, localSocketId, StringComparison.Ordinal);
     }
 
-    private bool ShouldInitiateOffer(string socketId)
-    {
-#if ANDROID
-        if (_peerSession != null)
-            return RpcLocalIsOfferer(socketId);
-#endif
-        var localSocketId = GetEffectiveLocalSocketId();
-        return !string.IsNullOrEmpty(localSocketId)
-            && !string.Equals(socketId, localSocketId, StringComparison.Ordinal)
-            && string.CompareOrdinal(localSocketId, socketId) < 0;
-    }
-
-    private static bool IsRetryableDataChannelState(RTCDataChannelState? state)
-        => state == null || state == RTCDataChannelState.closed;
-
-    private static bool WatchdogShouldRedrive(RTCPeerConnectionState connState, RTCDataChannelState? chanState, bool deficitExpired)
-    {
-        if (!deficitExpired) return false;
-        if (chanState == RTCDataChannelState.open) return false;
-
-        if (connState is RTCPeerConnectionState.connecting or RTCPeerConnectionState.@new) return false;
-        return true;
-    }
-
-    private static bool AnswererShouldRerequest(RTCPeerConnectionState connectionState, RTCDataChannelState? channelState)
-    {
-        if (channelState == RTCDataChannelState.open) return false;
-        if (connectionState is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed) return true;
-        if (connectionState == RTCPeerConnectionState.connected && IsRetryableDataChannelState(channelState)) return true;
-        if (connectionState == RTCPeerConnectionState.disconnected) return true;
-        return false;
-    }
-
     internal static bool IsOpusPacketStructurallyInvalid(byte[] data)
     {
         if (data == null || data.Length == 0) return true;
@@ -2260,126 +2013,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     internal static bool IsOpusDtxSilencePacket(byte[] data)
         => data != null && data.Length == 1 && (data[0] & 0x3) <= 1 && ((data[0] >> 3) & 0x1F) >= 12;
-
-    private void NotePeerLivenessForDiagnostics(PeerConnection peer, DateTime nowUtc)
-    {
-        if (peer.DataChannel?.readyState != RTCDataChannelState.open || !peer.HasOpenedAtLeastOnce) return;
-        if (IsPeerLive(true, true, peer.LastInboundTicks, nowUtc.Ticks, PeerSilenceTimeout.Ticks))
-        {
-            peer.SilentSinceLoggedUtc = DateTime.MinValue;
-            return;
-        }
-        if (!VoiceDiagnostics.IsEnabled) return;
-        if (peer.SilentSinceLoggedUtc != DateTime.MinValue && nowUtc - peer.SilentSinceLoggedUtc < SilenceLogInterval) return;
-        peer.SilentSinceLoggedUtc = nowUtc;
-        var connState = peer.Connection?.connectionState.ToString() ?? "none";
-        var corroborated = (peer.Connection != null && IsDeadConnectionState(peer.Connection.connectionState))
-                           || peer.ConsecutiveKeepaliveSendFailures > 0;
-        var silentMs = (nowUtc.Ticks - peer.LastInboundTicks) / TimeSpan.TicksPerMillisecond;
-        VoiceDiagnostics.Log("bcl.peer.silent",
-            $"client={peer.ClientId} silentMs={silentMs} conn={connState} sendFail={peer.ConsecutiveKeepaliveSendFailures} corroborated={corroborated}");
-    }
-
-    private void RetryClosedDataChannels()
-    {
-#if ANDROID
-        if (_peerSession != null) return;
-#endif
-        var now = DateTime.UtcNow;
-        if (now - _lastOfferRetryUtc < OfferRetryInterval) return;
-        EvictStalePendingSignals();
-        var peers = SnapshotPeers();
-
-        foreach (var peer in peers)
-        {
-            if (peer.DataChannel?.readyState == RTCDataChannelState.open)
-            {
-                peer.HasOpenedAtLeastOnce = true;
-                if (peer.RecoveryAttempts != 0 || peer.NextRetryUtc != DateTime.MinValue)
-                {
-                    peer.RecoveryAttempts = 0;
-                    peer.NextRetryUtc = DateTime.MinValue;
-                }
-                peer.ChannelDeficitSinceUtc = DateTime.MinValue;
-            }
-            else if (peer.Connection != null && !IsLocalSocket(peer.SocketId)
-                     && peer.Connection.connectionState is not (RTCPeerConnectionState.connecting or RTCPeerConnectionState.@new))
-            {
-                if (peer.ChannelDeficitSinceUtc == DateTime.MinValue)
-                    peer.ChannelDeficitSinceUtc = now;
-            }
-            else
-            {
-                peer.ChannelDeficitSinceUtc = DateTime.MinValue;
-            }
-        }
-        var retryPeers = peers
-            .Where(peer => ShouldInitiateOffer(peer.SocketId)
-                && now >= peer.NextRetryUtc
-                && (IsRetryableDataChannelState(peer.DataChannel?.readyState) || IsStuckConnecting(peer, now)))
-            .ToArray();
-
-        var rerequestPeers = peers
-            .Where(peer =>
-            {
-                if (ShouldInitiateOffer(peer.SocketId) || IsLocalSocket(peer.SocketId)) return false;
-                if (now < peer.NextRetryUtc) return false;
-                var conn = peer.Connection;
-                return conn != null && AnswererShouldRerequest(conn.connectionState, peer.DataChannel?.readyState);
-            })
-            .ToArray();
-
-        var watchdogPeers = peers
-            .Where(peer =>
-            {
-                if (IsLocalSocket(peer.SocketId)) return false;
-                var conn = peer.Connection;
-                if (conn == null) return false;
-                if (now < peer.NextRetryUtc) return false;
-                bool deficitExpired = peer.ChannelDeficitSinceUtc != DateTime.MinValue
-                    && now - peer.ChannelDeficitSinceUtc >= ChannelDeficitWatchdogTimeout;
-
-                return WatchdogShouldRedrive(conn.connectionState, peer.DataChannel?.readyState, deficitExpired);
-            })
-            .ToArray();
-        if (retryPeers.Length == 0 && rerequestPeers.Length == 0 && watchdogPeers.Length == 0) return;
-        _lastOfferRetryUtc = now;
-        foreach (var peer in retryPeers)
-        {
-            var stuck = IsStuckConnecting(peer, now);
-            VoiceDiagnostics.Log("bcl.offer", $"reason={(stuck ? "stuck-connecting" : "retry")} socket={peer.SocketId} client={peer.ClientId} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
-
-            if (stuck) RecreatePeerConnection(peer.SocketId);
-            _ = StartOfferAsync(peer.SocketId);
-            peer.RecoveryAttempts++;
-            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
-        }
-        foreach (var peer in rerequestPeers)
-        {
-            VoiceDiagnostics.Log("bcl.offer", $"reason=re-request socket={peer.SocketId} client={peer.ClientId} state=connection-{peer.Connection?.connectionState.ToString().ToLowerInvariant() ?? "none"} channel={peer.DataChannel?.readyState.ToString() ?? "none"}");
-            RequestOfferFromPeer(peer.SocketId);
-            peer.RecoveryAttempts++;
-            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
-        }
-        foreach (var peer in watchdogPeers)
-        {
-
-            if (Array.IndexOf(retryPeers, peer) >= 0 || Array.IndexOf(rerequestPeers, peer) >= 0) continue;
-            var initiator = ShouldInitiateOffer(peer.SocketId);
-            VoiceDiagnostics.Log("bcl.offer", $"reason=watchdog socket={peer.SocketId} client={peer.ClientId} initiator={initiator} deficitMs={(now - peer.ChannelDeficitSinceUtc).TotalMilliseconds:0} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
-            if (initiator)
-            {
-                RecreatePeerConnection(peer.SocketId);
-                _ = StartOfferAsync(peer.SocketId);
-            }
-            else
-            {
-                RequestOfferFromPeer(peer.SocketId);
-            }
-            peer.RecoveryAttempts++;
-            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
-        }
-    }
 
     private void EvictSameClientPeersLocked(string socketId)
     {
@@ -2402,501 +2035,30 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (IsLocalSocket(socketId)) return null;
         lock (_peerSync)
         {
-
             if (_peersBySocket.TryGetValue(socketId, out var known)) return known;
-
             EvictSameClientPeersLocked(socketId);
-        }
-
-        var pc = RentPeerConnection();
-        lock (_peerSync)
-        {
-            if (IsLocalSocket(socketId)) { CloseRented(pc); return null; }
-            if (_peersBySocket.TryGetValue(socketId, out var existing)) { CloseRented(pc); return existing; }
             var clientId = _socketToClient.TryGetValue(socketId, out var mappedClientId) ? mappedClientId : -1;
             var playbackGroupId = clientId >= 0 ? clientId : _nextProvisionalPeerGroupId--;
             var peer = new PeerConnection(socketId, clientId, playbackGroupId);
-            WireNewPeerConnection(peer, socketId, pc);
             _peersBySocket[socketId] = peer;
-            if (_voiceMixer != null)
-                peer.SetMixer(_voiceMixer);
             VoiceDiagnostics.Log("bcl.peer.created", $"socket={socketId} client={clientId} playbackGroup={playbackGroupId} provisional={(clientId < 0).ToString().ToLowerInvariant()}");
             VoiceDiagnostics.Log("bcl.peer-connected", $"socket={socketId} client={clientId}");
             return peer;
         }
     }
 
-    private readonly struct PooledPeerConnection
-    {
-        public readonly RTCPeerConnection Connection;
-        public readonly string Signature;
-        public PooledPeerConnection(RTCPeerConnection connection, string signature)
-        {
-            Connection = connection;
-            Signature = signature;
-        }
-    }
-
-    private PooledPeerConnection BuildPeerConnection()
-    {
-        var (cfg, signature) = ResolveIce();
-        long t = System.Diagnostics.Stopwatch.GetTimestamp();
-        var pc = new RTCPeerConnection(cfg);
-        if (VoiceDiagnostics.IsEnabled)
-        {
-            bool hasTurn = cfg.iceServers.Any(s => s.urls != null && s.urls.StartsWith("turn", StringComparison.OrdinalIgnoreCase));
-            VoiceDiagnostics.Log("bcl.pcpool.built",
-                $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} poolSize={_pcPool.Count} thread={Environment.CurrentManagedThreadId} policy={cfg.iceTransportPolicy} iceServers={cfg.iceServers.Count} turn={hasTurn}");
-        }
-        return new PooledPeerConnection(pc, signature);
-    }
-
-    private void ReadIceSettings(out bool natFix, out string turnUrl, out string turnUser, out string turnCred, out bool forceRelay)
-    {
-        natFix = true;
-        turnUrl = "";
-        turnUser = "";
-        turnCred = "";
-
-        forceRelay = false;
-        try
-        {
-            var settings = VoiceSettings.Instance;
-            if (settings != null)
-            {
-                natFix = settings.NatFix.Value;
-                turnUrl = settings.TurnServerUrl.Value;
-                turnUser = settings.TurnUsername.Value;
-                turnCred = settings.TurnCredential.Value;
-                forceRelay = settings.WineForceRelay.Value && WineEnvironment.IsWine;
-            }
-        }
-        catch {  }
-
-        forceRelay |= _forceRelayEscalated;
-    }
-
+    // Relay escalation now lives in the sidecar/pc-mobile engine (it owns the WebRTC peer connection). The
+    // C# backend only forwards ICE servers, so there is nothing to escalate here.
     public void EscalateToRelayOnly(string reason)
     {
-        if (_forceRelayEscalated || _disposed) return;
-        _forceRelayEscalated = true;
-        VoiceDiagnostics.Log("bcl.ice.escalate", $"forceRelay=true reason={reason} (repeated direct/STUN failure -> relay-only for session)");
-        DrainPeerConnectionPool();
-        RefillPeerConnectionPool();
-    }
-
-    private (RTCConfiguration Config, string Signature) ResolveIce()
-    {
-        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred, out var forceRelay);
-        var servers = _iceServers;
-        var cfg = BuildIceConfiguration(servers, natFix, turnUrl, turnUser, turnCred, forceRelay);
-        var sig = ComputeIceSignature(servers, natFix, turnUrl, turnUser, turnCred, forceRelay);
-        return (cfg, sig);
-    }
-
-    private string CurrentIceSignature()
-    {
-        ReadIceSettings(out var natFix, out var turnUrl, out var turnUser, out var turnCred, out var forceRelay);
-        return ComputeIceSignature(_iceServers, natFix, turnUrl, turnUser, turnCred, forceRelay);
-    }
-
-    internal static RTCConfiguration BuildIceConfiguration(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUsername, string turnCredential, bool forceRelay = false)
-    {
-        var servers = new List<RTCIceServer>();
-        if (baseServers != null) servers.AddRange(baseServers);
-        bool turnUsable = false;
-
-        if (natFix && !string.IsNullOrWhiteSpace(turnUrl))
-        {
-            if (!servers.Any(s => s.urls != null && s.urls.StartsWith("stun:", StringComparison.OrdinalIgnoreCase)))
-                servers.Add(new RTCIceServer { urls = "stun:stun.l.google.com:19302" });
-
-            if (!string.IsNullOrWhiteSpace(turnUsername) && !string.IsNullOrWhiteSpace(turnCredential))
-            {
-                turnUsable = true;
-                if (!servers.Any(s => string.Equals(s.urls, turnUrl, StringComparison.OrdinalIgnoreCase)))
-                    servers.Add(new RTCIceServer { urls = turnUrl, username = turnUsername, credential = turnCredential });
-
-                if (forceRelay)
-                {
-                    var tcpUrl = AppendTransportTcp(turnUrl);
-                    if (tcpUrl != null && !servers.Any(s => string.Equals(s.urls, tcpUrl, StringComparison.OrdinalIgnoreCase)))
-                        servers.Add(new RTCIceServer { urls = tcpUrl, username = turnUsername, credential = turnCredential });
-                }
-            }
-        }
-
-        if (!turnUsable && servers.Any(s => s.urls != null
-                && (s.urls.StartsWith("turn:", StringComparison.OrdinalIgnoreCase)
-                    || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase))
-                && !string.IsNullOrWhiteSpace(s.username)
-                && !string.IsNullOrWhiteSpace(s.credential)))
-            turnUsable = true;
-
-        var policy = (forceRelay && turnUsable) ? RTCIceTransportPolicy.relay : RTCIceTransportPolicy.all;
-        var cfg = new RTCConfiguration { iceServers = servers, iceTransportPolicy = policy };
-
-        if (forceRelay)
-        {
-            try
-            {
-                var local = WineEnvironment.GetLocalIPv4();
-                if (local != null) cfg.X_BindAddress = local;
-            }
-            catch {  }
-        }
-
-        return cfg;
-    }
-
-    private static string? AppendTransportTcp(string turnUrl)
-    {
-        if (string.IsNullOrWhiteSpace(turnUrl)) return null;
-        if (turnUrl.IndexOf("transport=", StringComparison.OrdinalIgnoreCase) >= 0) return null;
-        return turnUrl + (turnUrl.Contains('?') ? "&" : "?") + "transport=tcp";
-    }
-
-    private static string ComputeIceSignature(IReadOnlyList<RTCIceServer> baseServers, bool natFix, string turnUrl, string turnUser, string turnCred, bool forceRelay = false)
-    {
-        var baseUrls = baseServers == null ? "" : string.Join(",", baseServers.Select(s => s.urls));
-
-        var core = natFix
-            ? "1|" + turnUrl + "|" + turnUser + "|" + turnCred + "|" + baseUrls
-            : "0|" + baseUrls;
-        return (forceRelay ? "R|" : "D|") + core;
-    }
-
-    private RTCPeerConnection RentPeerConnection()
-    {
-        var liveSignature = CurrentIceSignature();
-        RTCPeerConnection? pc = null;
-        while (_pcPool.TryDequeue(out var pooled))
-        {
-            if (pooled.Signature == liveSignature) { pc = pooled.Connection; break; }
-
-            try { pooled.Connection.close(); } catch { }
-        }
-        bool hit = pc != null;
-        pc ??= BuildPeerConnection().Connection;
-        if (VoiceDiagnostics.IsEnabled)
-            VoiceDiagnostics.Log("bcl.pcpool.rent", $"hit={(hit ? "true" : "false")} poolSize={_pcPool.Count}");
-        RefillPeerConnectionPool();
-        return pc;
-    }
-
-    private void RefillPeerConnectionPool()
-    {
         if (_disposed) return;
-        if (Interlocked.Exchange(ref _pcPoolRefilling, 1) == 1) return;
-        Task.Run(() =>
-        {
-            try
-            {
-                while (!_disposed && _pcPool.Count < PcPoolTarget)
-                    _pcPool.Enqueue(BuildPeerConnection());
-            }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("bcl.pcpool.error", $"stage=refill error=\"{ex.Message}\"");
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _pcPoolRefilling, 0);
-                if (_disposed) DrainPeerConnectionPool();
-
-                else if (_pcPool.Count < PcPoolTarget) RefillPeerConnectionPool();
-            }
-        });
+        VoiceDiagnostics.Log("bcl.ice.escalate", $"reason={reason} (handled by native engine)");
     }
 
-    private static void CloseRented(RTCPeerConnection pc)
-    {
-        try { pc.close(); } catch { }
-    }
-
-    private void DrainPeerConnectionPool()
-    {
-        while (_pcPool.TryDequeue(out var pooled))
-            try { pooled.Connection.close(); } catch { }
-    }
-
+    // The sidecar/pc-mobile engine owns the WebRTC peer connections and their ICE lifecycle. There is no
+    // C# peer-connection pool to rebuild anymore; ICE servers are pushed via SetIceServers instead.
     public void RebuildIceConnectionPool()
     {
-        if (_disposed) return;
-        DrainPeerConnectionPool();
-        RefillPeerConnectionPool();
-    }
-
-    private void WireNewPeerConnection(PeerConnection peer, string socketId, RTCPeerConnection pc)
-    {
-
-        bool wired = false;
-        try
-        {
-            peer.Connection = pc;
-#if ANDROID
-            pc.addTrack(CreateOpusAudioTrack());
-            pc.OnRtpPacketReceived += (System.Net.IPEndPoint ep, SDPMediaTypesEnum media, RTPPacket pkt) =>
-            {
-                if (media != SDPMediaTypesEnum.audio) return;
-                OnAudioTrackRtp(peer, pkt);
-            };
-#endif
-            pc.ondatachannel += dc =>
-            {
-                lock (_peerSync)
-                    peer.DataChannel = dc;
-                dc.onopen += () =>
-                {
-
-                    lock (_peerSync)
-                    {
-                        peer.RecoveryAttempts = 0;
-                        peer.NextRetryUtc = DateTime.MinValue;
-                    }
-                    VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=true");
-                };
-                dc.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
-            };
-            pc.onicecandidate += candidate =>
-            {
-                if (candidate == null) return;
-
-                if (VoiceDiagnostics.IsEnabled)
-                    VoiceDiagnostics.Log("bcl.ice.candidate", $"socket={socketId} type={candidate.type} protocol={candidate.protocol}");
-                var signalData = JsonSerializer.Serialize(new { candidate = candidate.candidate, sdpMid = candidate.sdpMid, sdpMLineIndex = candidate.sdpMLineIndex });
-#if ANDROID
-                if (_peerSession != null)
-                {
-                    if (SipsorceryVoiceTransport.TryParseClientId(socketId, out var candClientId))
-                        _mainThreadActions.Enqueue(() => _peerSession?.OnLocalCandidate(candClientId, signalData));
-                    return;
-                }
-#endif
-                if (_socket == null) return;
-                _ = _socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
-            };
-            pc.oniceconnectionstatechange += iceState =>
-            {
-                if (VoiceDiagnostics.IsEnabled)
-                    VoiceDiagnostics.Log("bcl.ice.state", $"socket={socketId} client={peer.ClientId} iceState={iceState}");
-            };
-
-            pc.onconnectionstatechange += state =>
-            {
-#if ANDROID
-                if (_peerSession != null)
-                {
-                    _mainThreadActions.Enqueue(() => OnRpcPeerConnectionState(socketId, pc, state));
-                    return;
-                }
-#endif
-                if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
-                    _mainThreadActions.Enqueue(() => OnPeerConnectionDied(socketId, pc, state));
-            };
-            wired = true;
-        }
-        finally
-        {
-            if (!wired) { try { pc.close(); } catch { } }
-        }
-    }
-
-#if ANDROID
-    private static MediaStreamTrack CreateOpusAudioTrack()
-    {
-        var opus = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 2, "minptime=10;useinbandfec=1");
-        return new MediaStreamTrack(
-            SDPMediaTypesEnum.audio,
-            false,
-            new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(opus) },
-            MediaStreamStatusEnum.SendRecv);
-    }
-
-    private readonly List<RTCPeerConnection> _audioTrackPeerScratch = new();
-
-    private void SendOpusFrameToAudioTracks(byte[] framed)
-    {
-        if (!VoicePacket.TryRead(framed, out var packet)) return;
-        var payload = packet.Payload;
-        if (payload.Length == 0) return;
-        uint duration = packet.Duration == 0 ? (uint)AudioHelpers.FrameSize : packet.Duration;
-        var sent = false;
-        SnapshotAudioTrackPeersInto(_audioTrackPeerScratch);
-        foreach (var conn in _audioTrackPeerScratch)
-        {
-            try
-            {
-                conn.SendAudio(duration, payload);
-                sent = true;
-                Interlocked.Increment(ref _encodedTx);
-            }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("bcl.mic.send_error", $"bytes={payload.Length} error=\"{ex.Message}\"");
-            }
-        }
-        if (!sent) Interlocked.Increment(ref _micNoOpenChannelDrops);
-    }
-
-    private void SnapshotAudioTrackPeersInto(List<RTCPeerConnection> buffer)
-    {
-        buffer.Clear();
-        lock (_peerSync)
-        {
-            foreach (var peer in _peersBySocket.Values)
-            {
-                var conn = peer.Connection;
-                if (conn != null && conn.connectionState == RTCPeerConnectionState.connected)
-                    buffer.Add(conn);
-            }
-        }
-    }
-
-    private void OnAudioTrackRtp(PeerConnection peer, RTPPacket pkt)
-    {
-        var payload = pkt.Payload;
-        if (payload == null || payload.Length == 0 || payload.Length > MaxIncomingDatagramBytes) return;
-        peer.StampInbound(DateTime.UtcNow.Ticks);
-        peer.TryReceiveAudioTrackOpus(payload, out var error, out var decodedFrames);
-        if (!string.IsNullOrEmpty(error))
-        {
-            Interlocked.Increment(ref _audioDecodeFailures);
-            if (peer.ShouldLogAudioDrop(out var suppressed))
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={payload.Length} error=\"{error}\" suppressed={suppressed} source=rtp");
-        }
-        if (decodedFrames > 0)
-            Interlocked.Add(ref _encodedRx, decodedFrames);
-    }
-
-    internal void RpcAddPeer(string key)
-    {
-        var peer = EnsureRpcPeer(key);
-        if (peer == null) return;
-        _ = StartOfferAsync(key);
-    }
-
-    internal void RpcClosePeer(string key) => RemovePeer(key);
-
-    internal void RpcApplyRemoteSdp(string key, string sdpType, string sdp)
-    {
-        if (string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase))
-        {
-            _ = RpcAnswerOfferAsync(key, sdp);
-            return;
-        }
-        RTCPeerConnection? conn;
-        lock (_peerSync)
-            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
-        if (conn == null) return;
-        try { conn.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = sdp }); }
-        catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-answer"); }
-    }
-
-    internal void RpcApplyRemoteCandidate(string key, string candidate)
-    {
-        RTCPeerConnection? conn;
-        lock (_peerSync)
-            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
-        if (conn == null) return;
-        var init = TryDecodeSignal(candidate, out var signal, out _) && signal.Kind == "candidate"
-            ? new RTCIceCandidateInit { candidate = signal.Candidate, sdpMid = signal.SdpMid, sdpMLineIndex = signal.SdpMLineIndex }
-            : new RTCIceCandidateInit { candidate = candidate, sdpMid = "0", sdpMLineIndex = 0 };
-        try { conn.addIceCandidate(init); }
-        catch (Exception ex) { VoiceDiagnostics.Log("bcl.signal.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-candidate"); }
-    }
-
-    private async Task RpcAnswerOfferAsync(string key, string sdp)
-    {
-        RTCPeerConnection? conn;
-        lock (_peerSync)
-            conn = _peersBySocket.TryGetValue(key, out var peer) ? peer.Connection : null;
-        if (conn == null) return;
-        try
-        {
-            conn.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = sdp });
-            var answer = conn.createAnswer(null);
-            await conn.setLocalDescription(answer);
-            lock (_peerSync)
-            {
-                if (_disposed || !_peersBySocket.TryGetValue(key, out var p) || !ReferenceEquals(p.Connection, conn)) return;
-            }
-            if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(key, out var clientId))
-            {
-                var localSdp = answer.sdp;
-                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(clientId, "answer", localSdp));
-            }
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("bcl.offer.error", $"socket={key} error=\"{DiagnosticSafe(ex.Message)}\" source=rpc-answer");
-        }
-    }
-
-    private bool RpcLocalIsOfferer(string key)
-    {
-        var client = AmongUsClient.Instance;
-        return client != null
-            && SipsorceryVoiceTransport.TryParseClientId(key, out var remote)
-            && client.ClientId < remote;
-    }
-
-    private PeerConnection? EnsureRpcPeer(string key)
-    {
-        lock (_peerSync)
-            if (_peersBySocket.TryGetValue(key, out var known)) return known;
-
-        var pc = RentPeerConnection();
-        lock (_peerSync)
-        {
-            if (_peersBySocket.TryGetValue(key, out var existing)) { CloseRented(pc); return existing; }
-            var clientId = SipsorceryVoiceTransport.TryParseClientId(key, out var parsed) ? parsed : -1;
-            if (clientId >= 0)
-            {
-                _clientToSocket[clientId] = key;
-                _socketToClient[key] = clientId;
-            }
-            var playbackGroupId = clientId >= 0 ? clientId : _nextProvisionalPeerGroupId--;
-            var peer = new PeerConnection(key, clientId, playbackGroupId);
-            WireNewPeerConnection(peer, key, pc);
-            _peersBySocket[key] = peer;
-            if (_voiceMixer != null)
-                peer.SetMixer(_voiceMixer);
-            VoiceDiagnostics.Log("bcl.peer.created", $"socket={key} client={clientId} playbackGroup={playbackGroupId} source=rpc");
-            return peer;
-        }
-    }
-
-    private void OnRpcPeerConnectionState(string socketId, RTCPeerConnection pc, RTCPeerConnectionState state)
-    {
-        if (_peerSession == null) return;
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(socketId, out var peer)) return;
-            if (!ReferenceEquals(peer.Connection, pc)) return;
-        }
-        if (!SipsorceryVoiceTransport.TryParseClientId(socketId, out var clientId)) return;
-        if (state == RTCPeerConnectionState.connected)
-            _peerSession.OnPeerConnected(clientId);
-        else if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
-
-            _peerSession.OnPeerConnectionLost(clientId, Environment.TickCount64);
-    }
-#endif
-
-    private static bool IsDeadConnectionState(RTCPeerConnectionState state)
-        => state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed or RTCPeerConnectionState.disconnected;
-
-    private static bool IsStuckConnecting(PeerConnection peer, DateTime now)
-        => peer.DataChannel?.readyState == RTCDataChannelState.connecting
-           && peer.OfferStartedUtc != DateTime.MinValue
-           && now - peer.OfferStartedUtc > StuckConnectingTimeout;
-
-    private static bool LocalLinkNeedsRebuild(PeerConnection peer)
-    {
-        if (peer.DataChannel?.readyState != RTCDataChannelState.open) return true;
-        var connection = peer.Connection;
-        return connection == null || IsDeadConnectionState(connection.connectionState);
     }
 
     internal static bool RemoteConnectionWasRecreated(string previousUfrag, string incomingUfrag)
@@ -2910,333 +2072,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return m.Success ? m.Groups[1].Value : string.Empty;
     }
 
-    private static bool OfferRequiresRebuild(RTCPeerConnectionState connState, RTCDataChannelState? channelState)
-    {
-        if (IsDeadConnectionState(connState)) return true;
-        if (channelState == RTCDataChannelState.open) return false;
-        return connState != RTCPeerConnectionState.@new;
-    }
-
-    private void RecreatePeerConnection(string socketId)
-    {
-        if (IsLocalSocket(socketId)) return;
-
-        var pc = RentPeerConnection();
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(socketId, out var peer)) { CloseRented(pc); return; }
-            try { peer.DataChannel?.close(); } catch { }
-            try { peer.Connection?.close(); } catch { }
-            peer.DataChannel = null;
-            peer.ResetLiveness();
-            peer.OfferStartedUtc = DateTime.MinValue;
-            peer.LastConnectionRebuildUtc = DateTime.UtcNow;
-            WireNewPeerConnection(peer, socketId, pc);
-        }
-        VoiceDiagnostics.Log("bcl.peer.recreated", $"socket={socketId}");
-    }
-
-    private void OnPeerConnectionDied(string socketId, RTCPeerConnection pc, RTCPeerConnectionState state)
-    {
-#if ANDROID
-        if (_peerSession != null) return;
-#endif
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(socketId, out var peer)) return;
-            if (!ReferenceEquals(peer.Connection, pc)) return;
-            NoteConnectionFailureLocked(socketId);
-        }
-        if (!TryBeginRecovery(socketId)) return;
-
-        VoiceDiagnostics.Log("bcl.peer.recovery", $"socket={socketId} reason=connection-{state.ToString().ToLowerInvariant()} initiator={ShouldInitiateOffer(socketId)}");
-        if (ShouldInitiateOffer(socketId))
-        {
-            RecreatePeerConnection(socketId);
-            _ = StartOfferAsync(socketId);
-        }
-        else
-        {
-            RequestOfferFromPeer(socketId);
-        }
-    }
-
-    private void MarkPeerForImmediateRecovery(string socketId)
-    {
-        if (_disposed || !TryBeginRecovery(socketId)) return;
-        VoiceDiagnostics.Log("bcl.peer.recovery", $"socket={socketId} reason=signal-failure initiator={ShouldInitiateOffer(socketId)}");
-        if (ShouldInitiateOffer(socketId))
-        {
-            RecreatePeerConnection(socketId);
-            _ = StartOfferAsync(socketId);
-        }
-        else
-        {
-            RequestOfferFromPeer(socketId);
-        }
-    }
-
-    private void RequestOfferFromPeer(string socketId)
-    {
-        var socket = _socket;
-        if (socket == null) return;
-
-        bool senderLinkWedged;
-        lock (_peerSync)
-            senderLinkWedged = _peersBySocket.TryGetValue(socketId, out var peer) && LocalLinkNeedsRebuild(peer);
-        var signalData = JsonSerializer.Serialize(new { type = "request-offer", rebuild = senderLinkWedged });
-        _ = socket.EmitAsync("signal", new object[] { new { to = socketId, data = signalData } });
-        VoiceDiagnostics.Log("bcl.offer", $"reason=request socket={socketId} rebuild={senderLinkWedged.ToString().ToLowerInvariant()}");
-    }
-
-    private static TimeSpan RecoveryBackoff(int attempts)
-        => TimeSpan.FromSeconds(Math.Min(30.0, PeerRecoveryDebounce.TotalSeconds * Math.Pow(2, Math.Max(0, attempts - 1))));
-
-    private bool TryBeginRecovery(string socketId)
-    {
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(socketId, out var peer)) return false;
-            var now = DateTime.UtcNow;
-            if (now < peer.NextRetryUtc) return false;
-            peer.LastRecoveryUtc = now;
-            peer.RecoveryAttempts++;
-            peer.NextRetryUtc = now + RecoveryBackoff(peer.RecoveryAttempts);
-            return true;
-        }
-    }
-
-    private void NoteConnectionFailureLocked(string socketId)
-    {
-        var now = DateTime.UtcNow;
-        List<string>? stale = null;
-        foreach (var pair in _recentConnectionFailureUtcBySocket)
-        {
-            if (now - pair.Value >= MassConnectionFailureWindow)
-                (stale ??= new List<string>()).Add(pair.Key);
-        }
-        if (stale != null)
-            foreach (var key in stale)
-                _recentConnectionFailureUtcBySocket.Remove(key);
-        _recentConnectionFailureUtcBySocket[socketId] = now;
-
-        int remotePeers = 0;
-        foreach (var peer in _peersBySocket.Values)
-        {
-            if (!IsLocalSocket(peer.SocketId)) remotePeers++;
-        }
-        if (remotePeers == 0 || _recentConnectionFailureUtcBySocket.Count < 2 || _recentConnectionFailureUtcBySocket.Count * 2 < remotePeers) return;
-        if (now - _lastMassConnectionFailureUtc < MassConnectionFailureRearmInterval) return;
-        _lastMassConnectionFailureUtc = now;
-        VoiceDiagnostics.Log("bcl.peer.massfailure", $"failed={_recentConnectionFailureUtcBySocket.Count} remotePeers={remotePeers}");
-    }
-
-    public bool ShouldDeferPeerEscalation
-    {
-        get
-        {
-            var now = DateTime.UtcNow;
-            lock (_peerSync)
-            {
-                if (!HasPeerEscalationDeferralLocked(now))
-                {
-                    _deferralEpisodeStartUtc = DateTime.MinValue;
-                    return false;
-                }
-                if (_deferralEpisodeStartUtc == DateTime.MinValue)
-                    _deferralEpisodeStartUtc = now;
-                return now - _deferralEpisodeStartUtc <= PeerEscalationDeferralEpisodeMax;
-            }
-        }
-    }
-
-    private bool HasPeerEscalationDeferralLocked(DateTime now)
-    {
-        if (_lastMassConnectionFailureUtc != DateTime.MinValue && now - _lastMassConnectionFailureUtc < PeerEscalationDeferralWindow)
-            return true;
-        foreach (var peer in _peersBySocket.Values)
-        {
-            if (IsLocalSocket(peer.SocketId)) continue;
-            if (peer.DataChannel?.readyState == RTCDataChannelState.open) continue;
-            if (peer.RecoveryAttempts > PeerRecoveryInFlightMaxAttempts) continue;
-            var anchor = peer.LastConnectionRebuildUtc > peer.LastRecoveryUtc ? peer.LastConnectionRebuildUtc : peer.LastRecoveryUtc;
-            if (anchor != DateTime.MinValue && now - anchor < PeerEscalationDeferralWindow)
-                return true;
-        }
-        return false;
-    }
-
-    private async Task StartOfferAsync(string socketId)
-    {
-        PeerConnection? peer;
-        SocketIOClient.SocketIO? socket;
-        RTCPeerConnection? conn;
-        lock (_peerSync)
-        {
-            if (!_peersBySocket.TryGetValue(socketId, out peer)) return;
-            if (!ShouldInitiateOffer(socketId)) return;
-            if (!IsRetryableDataChannelState(peer.DataChannel?.readyState)) return;
-            socket = _socket;
-            conn = peer.Connection;
-        }
-        if (conn == null) return;
-#if WINDOWS
-        await Task.CompletedTask;
-#else
-        VoiceDiagnostics.Log("bcl.offer", $"reason=start socket={socketId} client={peer.ClientId} state={peer.DataChannel?.readyState.ToString() ?? "none"}");
-        try
-        {
-
-            var channel = await conn.createDataChannel("audio", new RTCDataChannelInit { ordered = false, maxRetransmits = 0 });
-            lock (_peerSync)
-            {
-                if (_disposed || !ReferenceEquals(peer.Connection, conn))
-                {
-                    try { channel.close(); } catch { }
-                    return;
-                }
-                peer.ResetLiveness();
-                peer.DataChannel = channel;
-                peer.OfferStartedUtc = DateTime.UtcNow;
-            }
-            channel.onopen += () =>
-            {
-
-                lock (_peerSync)
-                {
-                    peer.RecoveryAttempts = 0;
-                    peer.NextRetryUtc = DateTime.MinValue;
-                }
-                VoiceDiagnostics.Log("bcl.channel", $"socket={socketId} client={peer.ClientId} state=open inbound=false");
-            };
-            channel.onmessage += (_, _, data) => OnDataChannelMessage(peer, data);
-            var offer = conn.createOffer(null);
-            await conn.setLocalDescription(offer);
-            lock (_peerSync)
-            {
-                if (_disposed || !ReferenceEquals(peer.Connection, conn)) return;
-            }
-#if ANDROID
-            if (_peerSession != null && SipsorceryVoiceTransport.TryParseClientId(socketId, out var offerClientId))
-            {
-                var localSdp = offer.sdp;
-                _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(offerClientId, "offer", localSdp));
-            }
-            else
-#endif
-            {
-                if (socket == null) return;
-                var sdpJson = JsonSerializer.Serialize(new { type = "offer", sdp = offer.sdp });
-                await socket.EmitAsync("signal", new object[] { new { to = socketId, data = sdpJson } });
-            }
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("bcl.offer.error", $"socket={socketId} error=\"{DiagnosticSafe(ex.Message)}\"");
-        }
-#endif
-    }
-
-    private async Task RunSignalHandlerAsync(string fromSocketId, string dataJson)
-    {
-        try
-        {
-            await HandleSignalAsync(fromSocketId, dataJson);
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("bcl.signal.error", $"fromSocket={fromSocketId} error=\"{DiagnosticSafe(ex.Message)}\"");
-
-            _mainThreadActions.Enqueue(() => MarkPeerForImmediateRecovery(fromSocketId));
-        }
-    }
-
-    private async Task HandleSignalAsync(string fromSocketId, string dataJson)
-    {
-        if (_disposed || string.IsNullOrWhiteSpace(fromSocketId)) return;
-        VoiceDiagnostics.Log("bcl.signal.received", $"fromSocket={fromSocketId} bytes={(dataJson ?? string.Empty).Length}");
-        if (!TryDecodeSignal(dataJson, out var signal, out var rejectReason))
-        {
-            LogSignalRejected(fromSocketId, rejectReason);
-            return;
-        }
-
-        var peer = EnsurePeer(fromSocketId);
-        if (peer?.Connection == null || _socket == null) return;
-        VoiceDiagnostics.Log("bcl.signal.accepted", $"fromSocket={fromSocketId} client={peer.ClientId} type={signal.Kind}");
-#if WINDOWS
-        await Task.CompletedTask;
-#endif
-        if (signal.Kind == "request-offer")
-        {
-
-            if (ShouldInitiateOffer(fromSocketId) && (LocalLinkNeedsRebuild(peer) || signal.RebuildRequested) && TryBeginRecovery(fromSocketId))
-            {
-#if !WINDOWS
-                RecreatePeerConnection(fromSocketId);
-#endif
-                _ = StartOfferAsync(fromSocketId);
-            }
-            return;
-        }
-        if (signal.Kind == "offer")
-        {
-#if WINDOWS
-#else
-
-            string incomingUfrag = ExtractIceUfrag(signal.Sdp);
-            string prevUfrag;
-            lock (_peerSync) { prevUfrag = peer.LastRemoteIceUfrag; }
-            bool ufragDriven = RemoteConnectionWasRecreated(prevUfrag, incomingUfrag);
-            if (ufragDriven)
-                VoiceDiagnostics.Log("bcl.offer.rebuild", $"reason=ufrag-changed socket={fromSocketId}");
-            if (OfferRequiresRebuild(peer.Connection.connectionState, peer.DataChannel?.readyState) || ufragDriven)
-            {
-                RecreatePeerConnection(fromSocketId);
-                PeerConnection? rebuilt = null;
-                lock (_peerSync)
-                {
-                    if (_peersBySocket.TryGetValue(fromSocketId, out var found)) rebuilt = found;
-                }
-                if (rebuilt?.Connection == null) return;
-                peer = rebuilt;
-            }
-
-            RTCPeerConnection? answerConn;
-            lock (_peerSync) { answerConn = peer.Connection; }
-            if (answerConn == null) return;
-            answerConn.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = signal.Sdp });
-            var answer = answerConn.createAnswer(null);
-            await answerConn.setLocalDescription(answer);
-            lock (_peerSync)
-            {
-                if (_disposed || !ReferenceEquals(peer.Connection, answerConn)) return;
-                peer.LastRemoteIceUfrag = incomingUfrag;
-            }
-            var answerJson = JsonSerializer.Serialize(new { type = "answer", sdp = answer.sdp });
-            await _socket.EmitAsync("signal", new object[] { new { to = fromSocketId, data = answerJson } });
-#endif
-        }
-        else if (signal.Kind == "answer")
-        {
-#if WINDOWS
-#else
-            peer.Connection.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = signal.Sdp });
-#endif
-        }
-        else if (signal.Kind == "candidate")
-        {
-#if WINDOWS
-#else
-            peer.Connection.addIceCandidate(new RTCIceCandidateInit
-            {
-                candidate = signal.Candidate,
-                sdpMid = signal.SdpMid,
-                sdpMLineIndex = signal.SdpMLineIndex,
-            });
-#endif
-        }
-    }
+    // Relay/connection recovery is handled by the sidecar/pc-mobile engine; the C# backend no longer
+    // tracks per-peer escalation deferral. ponytail: dead control-plane knob, never defer.
+    public bool ShouldDeferPeerEscalation => false;
 
     private static bool TryDecodeSignal(string? dataJson, out DecodedSignal signal, out string reason)
     {
@@ -3363,36 +2201,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _lastSignalRejectLogUtc[key] = now;
             return true;
         }
-    }
-
-    private void OnDataChannelMessage(PeerConnection peer, byte[] data)
-    {
-        if (data.Length > MaxIncomingDatagramBytes) return;
-        peer.StampInbound(DateTime.UtcNow.Ticks);
-        if (HasDataControlPrefix(data))
-        {
-            var payload = new byte[data.Length - DataControlPrefixLength];
-            Array.Copy(data, DataControlPrefixLength, payload, 0, payload.Length);
-            if (TryHandleRadioState(payload, peer.PlayerId)) return;
-            if (TryHandleLossReport(payload, peer)) return;
-            if (TryParseKeepalivePayload(payload)) return;
-            Interlocked.Increment(ref _customRx);
-
-            CustomMessageReceived?.Invoke(VoiceBackendCustomMessage.Unknown(payload, peer.SocketId));
-            return;
-        }
-
-        if (TryHandleRadioState(data, peer.PlayerId)) return;
-
-        peer.TryReceiveVoicePacket(data, out var error, out var decodedFrames);
-        if (!string.IsNullOrEmpty(error))
-        {
-            Interlocked.Increment(ref _audioDecodeFailures);
-            if (peer.ShouldLogAudioDrop(out var suppressed))
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={peer.ClientId} bytes={data.Length} error=\"{error}\" suppressed={suppressed}");
-        }
-        if (decodedFrames > 0)
-            Interlocked.Add(ref _encodedRx, decodedFrames);
     }
 
     private static bool HasDataControlPrefix(byte[] data)
@@ -3722,15 +2530,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return sample / 8388608f;
     }
 
-    private readonly short[] _encodePcm = new short[AudioHelpers.FrameSize];
-    private readonly byte[] _encodeScratch = new byte[1024];
-
-#if !ANDROID
-    private readonly List<RTCDataChannel> _openChannelScratch = new();
-#endif
-
-    private readonly VoiceSendPacer _sendPacer;
-
     private float[] _micConvertScratch = Array.Empty<float>();
 
     private float[] EnsureMicConvertCapacity(int frames)
@@ -3782,8 +2581,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("bcl.mic.encode_error", $"source={source} samples={samples} expected={AudioHelpers.FrameSize} error=\"invalid-opus-frame-size\"");
             return;
         }
-
-        MaybeAdaptEncoderLocked();
 
         var captureOptions = _captureOptions;
 
@@ -3849,88 +2646,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (captureOptions.MicCalibrationDiagnostics)
             MaybeLogMicCalibration(source, decision, false, speakingThreshold, nearClipSamples, zeroCrossings, samples, agcGain);
 
-        var frameTimestamp = _sendTimestamp;
+        // The native sidecar/pc-mobile engine performs Opus encoding and WebRTC transmission. The C# capture
+        // path now only computes local mic level/VAD for the overlay and diagnostics. ponytail: encode/send
+        // tail removed (it fed the dead data-channel transport), not stubbed.
+        _ = transmitGain;
         unchecked { _sendTimestamp += (uint)samples; }
-
-        if (!decision.ShouldTransmit)
-            return;
-
-        var transmitPeak = 0f;
-        double transmitSquareSum = 0.0;
-        var pcm = _encodePcm;
-        for (var i = 0; i < samples; i++)
-        {
-            var scaled = Math.Clamp(floatPcm[i], -1f, 1f);
-            var pcmSample = (short)MathF.Round(scaled * short.MaxValue);
-            pcm[i] = pcmSample;
-            transmitSquareSum += (double)(scaled * short.MaxValue) * (scaled * short.MaxValue);
-            var abs = Math.Abs(scaled);
-            if (abs > transmitPeak) transmitPeak = abs;
-        }
-        _lastTransmitGain = transmitGain;
-        _lastTransmitPeak = transmitPeak;
-
-        var packet = _encodeScratch;
-        int encoded;
-        try
-        {
-#pragma warning disable CS0618
-            encoded = _encoder.Encode(pcm, 0, samples, packet, 0, packet.Length);
-#pragma warning restore CS0618
-        }
-        catch (Exception ex)
-        {
-            Interlocked.Increment(ref _micEncodeFailures);
-            VoiceDiagnostics.Log("bcl.mic.encode_error", $"source={source} samples={samples} error=\"{ex.Message}\"");
-            return;
-        }
-        if (encoded <= 0)
-        {
-            Interlocked.Increment(ref _micEncodeFailures);
-            VoiceDiagnostics.Log("bcl.mic.encode_error", $"source={source} samples={samples} encoded={encoded} error=\"empty-opus-packet\"");
-            return;
-        }
-        Interlocked.Increment(ref _micEncodedFrames);
-        lock (_micStatsLock)
-        {
-            _opusBytesSinceStats += encoded;
-            _opusFramesSinceStats++;
-            _opusMinBytesSinceStats = _opusMinBytesSinceStats == 0 ? encoded : Math.Min(_opusMinBytesSinceStats, encoded);
-            _opusMaxBytesSinceStats = Math.Max(_opusMaxBytesSinceStats, encoded);
-            _txPeakSinceStats = Math.Max(_txPeakSinceStats, transmitPeak);
-            _txSquareSumSinceStats += transmitSquareSum;
-            _txSamplesSinceStats += samples;
-        }
-        var voiceFlags = VoicePacketFlags.None;
-        if (VoiceTeamRadioChannels.IsActive(_lastLocalRadioChannel)) voiceFlags |= VoicePacketFlags.Radio;
-        if (PerfectCommsOpusUseInbandFec) voiceFlags |= VoicePacketFlags.LossResistant;
-        if (IsSyntheticSource(source)) voiceFlags |= VoicePacketFlags.Synthetic;
-
-        var framed = VoicePacket.Wrap(packet, encoded, _sendSequence++, frameTimestamp, (ushort)samples, voiceFlags, VoicePacket.QuantizeLevel(transmitPeak));
-        _sendPacer.Enqueue(framed);
     }
-
-#if !ANDROID
-    private void SendFramedToChannels(byte[] framed)
-    {
-        var sent = false;
-        SnapshotOpenChannelsInto(_openChannelScratch);
-        foreach (var channel in _openChannelScratch)
-        {
-            try
-            {
-                channel.send(framed);
-                sent = true;
-                Interlocked.Increment(ref _encodedTx);
-            }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("bcl.mic.send_error", $"bytes={framed.Length} error=\"{ex.Message}\"");
-            }
-        }
-        if (!sent) Interlocked.Increment(ref _micNoOpenChannelDrops);
-    }
-#endif
 
     private static bool IsSyntheticSource(string source)
         => string.Equals(source, "synthetic", StringComparison.OrdinalIgnoreCase);
@@ -3968,22 +2689,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         lock (_peerSync)
             return _socketToClient.Keys.ToArray();
     }
-
-#if !ANDROID
-    private void SnapshotOpenChannelsInto(List<RTCDataChannel> buffer)
-    {
-        buffer.Clear();
-        lock (_peerSync)
-        {
-            foreach (var peer in _peersBySocket.Values)
-            {
-                var channel = peer.DataChannel;
-                if (channel != null && channel.readyState == RTCDataChannelState.open)
-                    buffer.Add(channel);
-            }
-        }
-    }
-#endif
 
     private void RemovePeer(string socketId)
     {
@@ -4042,12 +2747,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var peerWindows = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.ToCompactString()));
         var peerJitter = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.Jitter.ToCompactString()));
         var peerBuffers = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => $"{item.ClientId}:{item.BufferStats}"));
-        var openChannels = peers.Count(peer => peer.DataChannel?.readyState == RTCDataChannelState.open);
-
+        // WebRTC transport state lives in the sidecar/pc-mobile engine, not C#. Report the mapped roster.
+        var openChannels = peers.Length;
         var peerTransport = peers.Length == 0
             ? "none"
-            : string.Join("|", peers.Select(peer =>
-                $"{peer.ClientId}:{(peer.DataChannel?.readyState.ToString() ?? "none")}/{(peer.Connection?.connectionState.ToString() ?? "none")}/{(peer.Connection?.iceConnectionState.ToString() ?? "none")}"));
+            : string.Join("|", peers.Select(peer => $"{peer.ClientId}:engine"));
         float micPeak;
         double micRms;
         int micWindowSamples;
@@ -4114,8 +2818,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
         if (CaptureUsesUnity)
             VoiceDiagnostics.Log("bcl.unity",
-                $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} encodedTx={Volatile.Read(ref _encodedTx)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady} speakerPlaying={_androidSpeaker?.IsPlaying} speakerReads={_androidSpeaker?.ReadCallbacks ?? 0}");
-        VoiceDiagnostics.Log("bcl.playout", _voiceMixer?.FormatPlayoutDiagnostics() ?? "no-mixer");
+                $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} encodedTx={Volatile.Read(ref _encodedTx)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady}");
+        VoiceDiagnostics.Log("bcl.playout", "engine");
     }
 
     private string DescribeCaptureMode()
@@ -4134,55 +2838,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private int _adaptedPacketLossPercent = PerfectCommsOpusPacketLossPercent;
     private int _adaptedBitrate = PerfectCommsOpusBitrate;
     private int _framesSinceCodecAdaptCheck;
-
-    private void MaybeAdaptEncoderLocked()
-    {
-        if (++_framesSinceCodecAdaptCheck < CodecAdaptIntervalFrames) return;
-        _framesSinceCodecAdaptCheck = 0;
-
-        int maxLossPermille = -1;
-        var nowUtc = DateTime.UtcNow;
-        lock (_peerSync)
-        {
-            foreach (var peer in _peersBySocket.Values)
-            {
-                var reported = peer.GetFreshLossReportPermille(nowUtc);
-                if (reported > maxLossPermille) maxLossPermille = reported;
-            }
-        }
-
-        if (maxLossPermille < 0) return;
-
-        int targetPlp = AudioHelpers.ComputeAdaptedPacketLossPercent(maxLossPermille);
-        if (Math.Abs(targetPlp - _adaptedPacketLossPercent) < PlpDeadbandPercent) return;
-
-        int targetBitrate = AudioHelpers.ComputeAdaptedBitrate(targetPlp);
-        try
-        {
-            _encoder.PacketLossPercent = targetPlp;
-            if (targetBitrate != _adaptedBitrate)
-                _encoder.Bitrate = targetBitrate;
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("bcl.codec.adapt", $"error=\"{ex.Message}\"");
-            return;
-        }
-        _adaptedPacketLossPercent = targetPlp;
-        _adaptedBitrate = targetBitrate;
-        VoiceDiagnostics.Log("bcl.codec.adapt", $"plp={targetPlp} bitrate={targetBitrate} maxLossPermille={maxLossPermille}");
-    }
-
-    private static IVoiceEncoder CreateEncoder()
-        => VoiceCodec.CreateEncoder(
-            bitrate: PerfectCommsOpusBitrate,
-            complexity: AudioHelpers.OpusComplexity,
-            voiceSignal: true,
-            vbr: true,
-            constrainedVbr: PerfectCommsOpusUseConstrainedVbr,
-            dtx: false,
-            fec: PerfectCommsOpusUseInbandFec,
-            packetLossPercent: PerfectCommsOpusPacketLossPercent);
 
     private static void ApplySavedVolume(PeerConnection peer)
     {
@@ -4227,12 +2882,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"targetName=\"{(target?.PlayerName ?? "<none>")}\" targetPlayerId={(target.HasValue ? target.Value.PlayerId : (byte)255)} targetClientId={(target.HasValue ? target.Value.ClientId : -1)}");
     }
 
+    // The sidecar/pc-mobile engine owns each WebRTC peer connection, Opus decode, jitter buffering and the
+    // mixer. The C# PeerConnection is now only a roster + proximity-route record: it carries the
+    // socket/client/player identity and the computed gain/pan/radio used to build the engine game-state.
     private sealed class PeerConnection : IDisposable
     {
         private readonly object _sync = new();
-        private VoiceMixer? _mixer;
-        public void SetMixer(VoiceMixer? mixer) => _mixer = mixer;
-        private readonly VoiceJitterBuffer _jitterBuffer = new(targetDelayFrames: JitterTargetDelayFrames, maxBufferedFrames: JitterMaxBufferedFrames, minTargetDelayFrames: JitterMinTargetFrames, maxTargetDelayFrames: JitterMaxTargetFrames);
         private VoiceProximityResult _currentRoute = VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
         private float _levelPeakSinceStats;
         private float _packetLevelPeakSinceStats;
@@ -4243,25 +2898,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         private int _audibleSilentSamplesSinceStats;
         private int _routeClearsSinceStats;
         private float _appliedPan;
-        private readonly Timer _tailFlushTimer;
-
-        private short[] _decodePcm = System.Array.Empty<short>();
-
-        private int _decodeFailures;
-        private bool _decodeSuppressed;
-        private DateTime _decodeReprobeUtc;
-        private const int DecodeFailureSuppressThreshold = 10;
-
-        private int _consecutiveThrows;
-        private DateTime _firstThrowUtc;
-        private const int ConsecutiveThrowSuppressRun = 8;
-        private static readonly TimeSpan ThrowSuppressWindow = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan AudioDropLogInterval = TimeSpan.FromSeconds(5);
-        private DateTime _lastAudioDropLogUtc = DateTime.MinValue;
-        private int _suppressedAudioDropLogs;
         private static readonly TimeSpan RouteDivergenceLogInterval = TimeSpan.FromSeconds(2);
         private DateTime _lastRouteDivergenceLogUtc = DateTime.MinValue;
-        private float[] _decodeFloat = System.Array.Empty<float>();
         private bool _disposed;
 
         public PeerConnection(string socketId, int clientId)
@@ -4274,73 +2912,18 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             SocketId = socketId;
             ClientId = clientId;
             PlaybackGroupId = playbackGroupId;
-            _tailFlushTimer = new Timer(static state => ((PeerConnection)state!).FlushBufferedVoiceFromTimer(), this, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            _jitterBuffer.DredCapable = Decoder.SupportsDred;
-            MuteAll();
         }
-
-        private object _lrSync = new();
-        public void SetInterleaveSync(object sync) => _lrSync = sync;
 
         public void FadeClearRoutes()
         {
         }
 
-        private const int MinPacketsForLossReport = 25;
-        private static readonly TimeSpan LossReportInterval = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan LossReportFreshness = TimeSpan.FromSeconds(6);
-        private int _reportedLossPermille = -1;
-        private long _reportedLossAtTicks;
-        private DateTime _lastLossReportSentUtc = DateTime.MinValue;
-        private long _lastReportedAcceptedPackets;
-        private long _lastReportedLostFrames;
+        // Loss reporting and keepalive used the C# data channel, which the sidecar/pc-mobile engine has
+        // replaced. ponytail: kept as no-ops because the per-frame maintenance loop still calls them.
+        public void StoreLossReport(int lossPermille) { }
+        public void MaybeSendLossReport(DateTime nowUtc) { }
+        public void MaybeSendKeepalive(DateTime nowUtc) { }
 
-        public void StoreLossReport(int lossPermille)
-        {
-            Volatile.Write(ref _reportedLossPermille, lossPermille);
-            Interlocked.Exchange(ref _reportedLossAtTicks, DateTime.UtcNow.Ticks);
-            if (VoiceDiagnostics.IsEnabled)
-                VoiceDiagnostics.Log("bcl.lossreport.rx", $"client={ClientId} permille={lossPermille}");
-        }
-
-        public int GetFreshLossReportPermille(DateTime nowUtc)
-        {
-            long atTicks = Interlocked.Read(ref _reportedLossAtTicks);
-            if (atTicks == 0 || nowUtc.Ticks - atTicks > LossReportFreshness.Ticks) return -1;
-            return Volatile.Read(ref _reportedLossPermille);
-        }
-
-        public void MaybeSendLossReport(DateTime nowUtc)
-        {
-            if (nowUtc - _lastLossReportSentUtc < LossReportInterval) return;
-            _lastLossReportSentUtc = nowUtc;
-            long accepted = _jitterBuffer.CumulativeAcceptedPackets;
-            long lost = _jitterBuffer.CumulativeLostFrames;
-            long deltaAccepted = accepted - _lastReportedAcceptedPackets;
-            long deltaLost = lost - _lastReportedLostFrames;
-            long total = deltaAccepted + deltaLost;
-            if (total < MinPacketsForLossReport) return;
-            var channel = DataChannel;
-            if (channel?.readyState != RTCDataChannelState.open) return;
-            int lossPermille = (int)Math.Clamp(deltaLost * 1000 / total, 0, 1000);
-            try
-            {
-                channel.send(BuildLossReportMessage(lossPermille));
-                _lastReportedAcceptedPackets = accepted;
-                _lastReportedLostFrames = lost;
-                if (VoiceDiagnostics.IsEnabled)
-                    VoiceDiagnostics.Log("bcl.lossreport.tx",
-                        $"client={ClientId} permille={lossPermille} lostDelta={deltaLost} acceptedDelta={deltaAccepted}");
-            }
-            catch
-            {
-            }
-        }
-
-        private static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(1);
-        private long _lastKeepaliveSentTicks;
-        private volatile int _consecutiveKeepaliveSendFailures;
-        public int ConsecutiveKeepaliveSendFailures => _consecutiveKeepaliveSendFailures;
         private long _lastInboundTicks;
         public long LastInboundTicks => Interlocked.Read(ref _lastInboundTicks);
         public void StampInbound(long nowTicks) => Interlocked.Exchange(ref _lastInboundTicks, nowTicks);
@@ -4352,58 +2935,20 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             Interlocked.Exchange(ref _lastInboundTicks, 0);
             HasOpenedAtLeastOnce = false;
-            _consecutiveKeepaliveSendFailures = 0;
-            Interlocked.Exchange(ref _lastKeepaliveSentTicks, 0);
             SilentSinceLoggedUtc = DateTime.MinValue;
-        }
-
-        public void MaybeSendKeepalive(DateTime nowUtc)
-        {
-            if (nowUtc.Ticks - Interlocked.Read(ref _lastKeepaliveSentTicks) < KeepaliveInterval.Ticks) return;
-            Interlocked.Exchange(ref _lastKeepaliveSentTicks, nowUtc.Ticks);
-            var channel = DataChannel;
-            if (channel?.readyState != RTCDataChannelState.open) return;
-            try
-            {
-                channel.send(KeepaliveBytes);
-                _consecutiveKeepaliveSendFailures = 0;
-            }
-            catch
-            {
-                if (_consecutiveKeepaliveSendFailures < int.MaxValue) _consecutiveKeepaliveSendFailures++;
-            }
         }
 
         public string SocketId { get; }
         public int ClientId { get; private set; }
         public int PlaybackGroupId { get; }
-        public RTCPeerConnection? Connection { get; set; }
-        public RTCDataChannel? DataChannel { get; set; }
 
-        public string LastRemoteIceUfrag { get; set; } = string.Empty;
-
-        public DateTime OfferStartedUtc { get; set; } = DateTime.MinValue;
-
-        public DateTime LastRecoveryUtc { get; set; } = DateTime.MinValue;
-        public DateTime LastConnectionRebuildUtc { get; set; } = DateTime.MinValue;
-
-        public int RecoveryAttempts { get; set; }
-        public DateTime NextRetryUtc { get; set; } = DateTime.MinValue;
-
-        public DateTime ChannelDeficitSinceUtc { get; set; } = DateTime.MinValue;
-#pragma warning disable CS0618
-        public IVoiceDecoder Decoder { get; } = VoiceCodec.CreateDecoder();
-#pragma warning restore CS0618
         private volatile byte _playerId = byte.MaxValue;
         public byte PlayerId { get => _playerId; private set => _playerId = value; }
         public string PlayerName { get; private set; } = "Unknown";
         private volatile VoiceTeamRadioChannel _radioChannel = VoiceTeamRadioChannel.None;
-
         private volatile byte _radioChannelOwner = byte.MaxValue;
         private int _consecutiveNonRadioVoicePackets;
         private long _lastRadioChannelAppliedTicks;
-        private const int RadioStaleClearPacketThreshold = 5;
-        private static readonly TimeSpan RadioStaleClearActivationGrace = TimeSpan.FromMilliseconds(500);
         public bool RadioActive
         {
             get => VoiceTeamRadioChannels.IsActive(_radioChannel);
@@ -4447,13 +2992,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
         }
 
-        private void ObserveVoiceLevel(float level)
-        {
-            if (level <= 0f) return;
-            Volatile.Write(ref _recentVoiceLevel, Math.Clamp(level, 0f, 1f));
-            Interlocked.Exchange(ref _lastVoiceLevelTicks, DateTime.UtcNow.Ticks);
-        }
-
         public bool UpdateProfile(byte playerId, string playerName)
         {
             var normalized = string.IsNullOrWhiteSpace(playerName) ? "Unknown" : playerName;
@@ -4473,19 +3011,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         public void ResetMappingNoMute()
         {
-
             PlayerId = byte.MaxValue;
         }
         public float ClientVolume { get; private set; } = 1f;
         public void SetVolume(float volume)
         {
-            var clamped = Math.Clamp(volume, 0f, 2f);
-            ClientVolume = clamped;
-            _mixer?.SetClientVolume(PlaybackGroupId, clamped);
+            ClientVolume = Math.Clamp(volume, 0f, 2f);
         }
         public void MuteAll()
         {
-            _mixer?.SetPeer(PlaybackGroupId, 0f, _appliedPan, VoiceAudioFilterMode.None);
         }
 
         public void Apply(VoiceProximityResult result)
@@ -4505,9 +3039,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _currentRoute = result;
             WallCoefficient = result.WallCoefficient;
             _appliedPan = result.Pan;
-
-            var routeVolume = Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f);
-            _mixer?.SetPeer(PlaybackGroupId, routeVolume, result.Pan, result.FilterMode);
         }
         public void SampleDiagnostics()
         {
@@ -4520,39 +3051,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _audibleSamplesSinceStats++;
                 if (!speaking) _audibleSilentSamplesSinceStats++;
             }
-
-            var targetFrames = _jitterBuffer.CurrentTargetDelayFrames;
-            if (targetFrames != _lastLoggedJitterTarget)
-            {
-                if (_lastLoggedJitterTarget > 0 && VoiceDiagnostics.IsEnabled)
-                    VoiceDiagnostics.Log("bcl.jitter.window",
-                        $"client={ClientId} target={targetFrames} prev={_lastLoggedJitterTarget} jitterMs={_jitterBuffer.CurrentJitterSamples * 1000.0 / AudioHelpers.ClockRate:0.0}");
-                _lastLoggedJitterTarget = targetFrames;
-            }
-
-            if (++_lrDivergenceCheckCounter >= 30)
-            {
-                _lrDivergenceCheckCounter = 0;
-                RealignRoutes();
-            }
         }
 
-        private int _lastLoggedJitterTarget;
-        private int _lrDivergenceCheckCounter;
-        private DateTime _lastLrDivergenceLogUtc = DateTime.MinValue;
-        private static readonly TimeSpan LrDivergenceLogInterval = TimeSpan.FromSeconds(5);
-
-        private void RealignRoutes()
-        {
-            _ = _lastLrDivergenceLogUtc;
-            _ = LrDivergenceLogInterval;
-        }
         public PeerDiagnostics ConsumeDiagnostics()
         {
             lock (_sync)
             {
-                var bufferStats = "bass";
-                var result = new PeerDiagnostics(ClientId, _levelPeakSinceStats, _packetLevelPeakSinceStats, _samplesSinceStats, _audibleSamplesSinceStats, _audibleSilentSamplesSinceStats, _routeClearsSinceStats, _currentRoute, _appliedPan, _jitterBuffer.ConsumeStats(), bufferStats);
+                var result = new PeerDiagnostics(ClientId, _levelPeakSinceStats, _packetLevelPeakSinceStats, _samplesSinceStats, _audibleSamplesSinceStats, _audibleSilentSamplesSinceStats, _routeClearsSinceStats, _currentRoute, _appliedPan, default, "sidecar");
                 _levelPeakSinceStats = 0f;
                 _packetLevelPeakSinceStats = 0f;
                 _samplesSinceStats = 0;
@@ -4567,313 +3072,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             var level = CurrentVoiceLevel;
             return new VoiceRemoteOverlayState(PlayerId, PlayerName, level, level >= RemoteSpeakingThreshold, _currentRoute.Audible, _currentRoute.Reason);
         }
-#if ANDROID
-        public bool TryReceiveAudioTrackOpus(byte[] payload, out string? error, out int decodedFrames)
-        {
-            lock (_sync)
-            {
-                error = null;
-                decodedFrames = 0;
-                if (_disposed) return false;
-                return DecodeLegacyPacket(payload, out error, out decodedFrames);
-            }
-        }
-#endif
 
-        public bool TryReceiveVoicePacket(byte[] data, out string? error, out int decodedFrames)
-        {
-            lock (_sync)
-            {
-                error = null;
-                decodedFrames = 0;
-                if (_disposed) return false;
-
-                if (!VoicePacket.HasMagic(data))
-                    return DecodeLegacyPacket(data, out error, out decodedFrames);
-
-                if (!VoicePacket.TryRead(data, out var packet))
-                {
-
-                    error = "invalid-bcl-packet";
-                    return false;
-                }
-
-                if ((packet.Flags & VoicePacketFlags.Radio) != 0)
-                    Interlocked.Exchange(ref _consecutiveNonRadioVoicePackets, 0);
-                else if (RadioActive
-                         && DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastRadioChannelAppliedTicks)) > RadioStaleClearActivationGrace
-                         && Interlocked.Increment(ref _consecutiveNonRadioVoicePackets) >= RadioStaleClearPacketThreshold)
-                {
-                    var staleChannel = _radioChannel;
-                    ApplyRadioChannel(VoiceTeamRadioChannel.None);
-                    VoiceDiagnostics.Log("bcl.radio.stale-cleared", $"client={ClientId} player={PlayerId} channel={staleChannel} packets={RadioStaleClearPacketThreshold}");
-                }
-                var packetLevel = packet.Level / (float)byte.MaxValue;
-                _packetLevelPeakSinceStats = Math.Max(_packetLevelPeakSinceStats, packetLevel);
-                ObserveVoiceLevel(packetLevel);
-
-                var frames = _jitterBuffer.Enqueue(packet);
-                ScheduleTailFlushLocked();
-                if (frames.Count == 0) return true;
-
-                for (int i = 0; i < frames.Count; i++)
-                {
-                    var frame = frames[i];
-                    var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
-                    var isDred = frame.Kind == VoicePlayoutKind.Dred;
-                    var decodeFec = frame.Kind == VoicePlayoutKind.Fec;
-
-                    var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
-
-                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded, isDred ? frame.DredOffset : -1))
-                        decodedFrames += decoded > 0 ? 1 : 0;
-                    else if (string.IsNullOrEmpty(error))
-                        error = frameError;
-                }
-
-                return true;
-            }
-        }
-
-        public bool TryFlushBufferedVoice(out string? error, out int decodedFrames)
-        {
-            lock (_sync)
-            {
-                error = null;
-                decodedFrames = 0;
-                if (_disposed) return false;
-
-                var frames = _jitterBuffer.DrainDue(DateTime.UtcNow, QuietTailFlushDelay);
-                for (int i = 0; i < frames.Count; i++)
-                {
-                    var frame = frames[i];
-                    if (frame.Kind == VoicePlayoutKind.Plc)
-                    {
-                        RouteSilence(NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration)));
-                        continue;
-                    }
-                    var payload = frame.Packet?.Payload ?? Array.Empty<byte>();
-                    var isDred = frame.Kind == VoicePlayoutKind.Dred;
-                    var decodeFec = frame.Kind == VoicePlayoutKind.Fec;
-
-                    var frameSize = NormalizeOpusFrameSize(Math.Max(AudioHelpers.FrameSize, (int)frame.Duration));
-
-                    if (DecodeAndAddSamples(payload, false, decodeFec, frameSize, out var frameError, out var decoded, isDred ? frame.DredOffset : -1))
-                        decodedFrames += decoded > 0 ? 1 : 0;
-                    else if (string.IsNullOrEmpty(error))
-                        error = frameError;
-                }
-
-                if (frames.Count > 0 && _jitterBuffer.HasBufferedPackets)
-                {
-                    ScheduleTailFlushLocked();
-                    if (VoiceDiagnostics.IsEnabled)
-                        VoiceDiagnostics.Log("bcl.audio.tailflush.rearm", $"client={ClientId} drained={frames.Count}");
-                }
-
-                return true;
-            }
-        }
-
-        private static readonly int[] OpusFrameSizes = { 120, 240, 480, 960, 1920, 2880 };
-        private static int NormalizeOpusFrameSize(int frameSize)
-        {
-            int best = OpusFrameSizes[0];
-            foreach (var size in OpusFrameSizes)
-            {
-                if (size <= frameSize) best = size;
-                else break;
-            }
-            return best;
-        }
-
-        private void ScheduleTailFlushLocked()
-        {
-            if (_disposed) return;
-            try { _tailFlushTimer.Change(QuietTailFlushTimerDelay, Timeout.InfiniteTimeSpan); }
-            catch (ObjectDisposedException) { }
-        }
-
-        private void FlushBufferedVoiceFromTimer()
-        {
-            TryFlushBufferedVoice(out var error, out _);
-            if (!string.IsNullOrEmpty(error) && ShouldLogAudioDrop(out var suppressed))
-                VoiceDiagnostics.Log("bcl.audio.drop", $"client={ClientId} error=\"{error}\" source=tail-timer suppressed={suppressed}");
-        }
-
-        public bool ShouldLogAudioDrop(out int suppressed)
-        {
-            lock (_sync)
-            {
-                var now = DateTime.UtcNow;
-                if (_lastAudioDropLogUtc != DateTime.MinValue && now - _lastAudioDropLogUtc < AudioDropLogInterval)
-                {
-                    _suppressedAudioDropLogs++;
-                    suppressed = 0;
-                    return false;
-                }
-                suppressed = _suppressedAudioDropLogs;
-                _suppressedAudioDropLogs = 0;
-                _lastAudioDropLogUtc = now;
-                return true;
-            }
-        }
-
-        private const int MinLegacyOpusBytes = 3;
-
-        private bool DecodeLegacyPacket(byte[] data, out string? error, out int decodedFrames)
-        {
-            _jitterBuffer.CountLegacyPacket();
-            if (data.Length < MinLegacyOpusBytes)
-            {
-                error = data.Length == 0 ? "legacy-empty" : "legacy-too-small";
-                RouteSilence(AudioHelpers.FrameSize);
-                decodedFrames = 0;
-                return false;
-            }
-            return DecodeAndAddSamples(data, isLegacy: true, decodeFec: false, AudioHelpers.FrameSize, out error, out decodedFrames);
-        }
-
-        private const int MaxDecodeCapacitySamples = 5760;
-
-        private bool TryHandleSuppressedDecode(int frameSize)
-        {
-            if (!_decodeSuppressed || DateTime.UtcNow >= _decodeReprobeUtc) return false;
-            RouteSilence(frameSize);
-            return true;
-        }
-
-        private void NoteDecodeFailure()
-        {
-            _decodeFailures++;
-            if (_decodeFailures < DecodeFailureSuppressThreshold) return;
-            bool wasSuppressed = _decodeSuppressed;
-            _decodeSuppressed = true;
-
-            int over = _decodeFailures - DecodeFailureSuppressThreshold;
-            double sec = Math.Min(60.0, 5.0 * Math.Pow(2, Math.Min(over, 4)));
-            _decodeReprobeUtc = DateTime.UtcNow + TimeSpan.FromSeconds(sec);
-            if (!wasSuppressed)
-                VoiceDiagnostics.Log("bcl.decode.suppressed", $"client={ClientId} failures={_decodeFailures} reprobeSec={sec:0}");
-        }
-
-        private void NoteDecodeThrottledFailure()
-        {
-            var now = DateTime.UtcNow;
-            if (_consecutiveThrows == 0 || now - _firstThrowUtc > ThrowSuppressWindow)
-            {
-                _consecutiveThrows = 0;
-                _firstThrowUtc = now;
-            }
-            _consecutiveThrows++;
-            if (_consecutiveThrows >= ConsecutiveThrowSuppressRun)
-            {
-                NoteDecodeFailure();
-                _consecutiveThrows = 0;
-            }
-        }
-
-        private void NoteDecodeSuccess()
-        {
-            _consecutiveThrows = 0;
-            if (_decodeSuppressed)
-                VoiceDiagnostics.Log("bcl.decode.resumed", $"client={ClientId} afterFailures={_decodeFailures}");
-            _decodeFailures = 0;
-            _decodeSuppressed = false;
-        }
-
-        private bool DecodeAndAddSamples(byte[] data, bool isLegacy, bool decodeFec, int frameSize, out string? error, out int decodedFrames, int dredOffsetSamples = -1)
-        {
-            error = null;
-            decodedFrames = 0;
-
-            if (TryHandleSuppressedDecode(frameSize))
-                return false;
-
-            if (dredOffsetSamples < 0 && IsOpusDtxSilencePacket(data))
-            {
-                RouteSilence(frameSize);
-                NoteDecodeSuccess();
-                return true;
-            }
-
-            var conceal = data.Length == 0 || decodeFec || dredOffsetSamples >= 0;
-
-            if (!conceal && IsOpusPacketStructurallyInvalid(data))
-            {
-                error = "opus-toc-invalid";
-                RouteSilence(frameSize);
-                NoteDecodeThrottledFailure();
-                return false;
-            }
-
-            int capacity = MaxDecodeCapacitySamples * AudioHelpers.Channels;
-            if (_decodePcm.Length < capacity) _decodePcm = new short[capacity];
-            var pcm = _decodePcm;
-            int decodeFrameSize = conceal ? frameSize : MaxDecodeCapacitySamples;
-            int decoded;
-            try
-            {
-                decoded = dredOffsetSamples >= 0
-                    ? Decoder.DecodeDred(data, dredOffsetSamples, pcm.AsSpan(0, capacity), frameSize)
-                    : Decoder.Decode(data.AsSpan(0, data.Length), pcm.AsSpan(0, capacity), decodeFrameSize, decodeFec);
-            }
-            catch (Exception ex)
-            {
-
-                error = data.Length > 0
-                    ? $"{ex.Message} toc=0x{data[0]:X2} len={data.Length} fec={decodeFec} legacy={isLegacy}"
-                    : $"{ex.Message} len=0 fec={decodeFec} legacy={isLegacy}";
-                RouteSilence(frameSize);
-
-                if (!conceal || isLegacy) NoteDecodeThrottledFailure();
-                return false;
-            }
-
-            if (decoded <= 0)
-            {
-
-                error = "decode-empty";
-                RouteSilence(frameSize);
-                if (!conceal) NoteDecodeFailure();
-                return false;
-            }
-            if (!conceal) NoteDecodeSuccess();
-            if (_decodeFloat.Length < decoded) _decodeFloat = new float[decoded];
-            var samples = _decodeFloat;
-            var peak = 0f;
-            for (var i = 0; i < decoded; i++)
-            {
-                var sample = pcm[i] / (float)short.MaxValue;
-                samples[i] = sample;
-                var abs = Math.Abs(sample);
-                if (abs > peak) peak = abs;
-            }
-            ObserveVoiceLevel(peak);
-            _mixer?.AddSamples(PlaybackGroupId, samples, decoded, silent: false);
-            decodedFrames = 1;
-            return true;
-        }
-
-        private void RouteSilence(int frameSize)
-        {
-            int n = frameSize * AudioHelpers.Channels;
-            if (n <= 0) return;
-            if (_decodeFloat.Length < n) _decodeFloat = new float[n];
-            Array.Clear(_decodeFloat, 0, n);
-            _mixer?.AddSamples(PlaybackGroupId, _decodeFloat, n, silent: true);
-        }
         public void Dispose()
         {
             lock (_sync)
             {
                 if (_disposed) return;
                 _disposed = true;
-                try { DataChannel?.close(); } catch { }
-                try { Connection?.close(); } catch { }
-                try { Decoder.Dispose(); } catch { }
-                try { _tailFlushTimer.Dispose(); } catch { }
-                try { _mixer?.Remove(PlaybackGroupId); } catch { }
             }
         }
     }

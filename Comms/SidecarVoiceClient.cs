@@ -4,7 +4,6 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using SIPSorcery.Net;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -224,7 +223,7 @@ internal sealed class SidecarVoiceClient : IDisposable
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "add-ice-candidate write failed: " + ex.Message); }
     }
 
-    public void SetIceServers(IEnumerable<RTCIceServer> servers)
+    public void SetIceServers(IEnumerable<IceServer> servers)
     {
         if (!_running || servers == null) return;
         try { Write(SidecarProtocol.SetIceServersFrame(servers)); }

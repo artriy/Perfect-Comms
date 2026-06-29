@@ -35,30 +35,6 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
 #endif
 
 #if ANDROID
-internal sealed class SipsorceryVoiceTransport : IVoiceTransport
-{
-    private readonly PerfectCommsVoiceBackend _backend;
-
-    public SipsorceryVoiceTransport(PerfectCommsVoiceBackend backend)
-    {
-        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
-    }
-
-    public static string PeerId(int clientId) => clientId.ToString(CultureInfo.InvariantCulture);
-
-    public static bool TryParseClientId(string peerId, out int clientId)
-        => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
-
-    // Sipsorcery resolves the offerer role internally (RpcAddPeer -> StartOfferAsync -> ShouldInitiateOffer).
-    public void AddPeer(int clientId, bool isOfferer) => _backend.RpcAddPeer(PeerId(clientId));
-
-    public void RemovePeer(int clientId) => _backend.RpcClosePeer(PeerId(clientId));
-
-    public void SetRemoteSdp(int clientId, string sdpType, string sdp) => _backend.RpcApplyRemoteSdp(PeerId(clientId), sdpType, sdp);
-
-    public void AddIceCandidate(int clientId, string candidate) => _backend.RpcApplyRemoteCandidate(PeerId(clientId), candidate);
-}
-
 internal sealed class MobileVoiceTransport : IVoiceTransport
 {
     private readonly Func<MobileVoiceClient?> _voice;
