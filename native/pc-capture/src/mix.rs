@@ -10,7 +10,15 @@ const PAN_FAR_SIDE: f32 = 0.25;
 const RADIO_DRIVE: f32 = 2.0;
 const RADIO_LEVEL: f32 = 0.75;
 const WALL_DRY: f32 = 0.85;
+const WALL_WET: f32 = 0.12;
 const GHOST_DRY: f32 = 0.6;
+const GHOST_WET: f32 = 0.08;
+const GHOST_COMBS: [usize; 4] = [1214, 1293, 1390, 1476];
+const GHOST_ALLPASS: [usize; 2] = [605, 480];
+const WALL_COMBS: [usize; 4] = [397, 439, 491, 547];
+const WALL_ALLPASS: [usize; 2] = [185, 141];
+const GHOST_TAIL_SAMPLES: usize = crate::codec::SAMPLE_RATE as usize * 2;
+const WALL_TAIL_SAMPLES: usize = crate::codec::SAMPLE_RATE as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterMode {
@@ -121,9 +129,116 @@ fn apply_filter(
             let h = hp650.process(z1, z2, s);
             (h * RADIO_DRIVE).tanh() * RADIO_LEVEL
         }
-        FilterMode::WallMuffle | FilterMode::ListenerMuffle => lp650.process(z1, z2, s) * WALL_DRY,
-        FilterMode::Ghost => s * GHOST_DRY,
+        FilterMode::WallMuffle | FilterMode::ListenerMuffle => lp650.process(z1, z2, s),
+        FilterMode::Ghost => s,
         FilterMode::None => s,
+    }
+}
+
+struct Reverb {
+    feedback: f32,
+    comb_l: Vec<Vec<f32>>,
+    comb_r: Vec<Vec<f32>>,
+    ci_l: Vec<usize>,
+    ci_r: Vec<usize>,
+    filt_l: Vec<f32>,
+    filt_r: Vec<f32>,
+    ap_l: Vec<Vec<f32>>,
+    ap_r: Vec<Vec<f32>>,
+    ai_l: Vec<usize>,
+    ai_r: Vec<usize>,
+}
+
+impl Reverb {
+    const DAMP1: f32 = 0.2;
+    const DAMP2: f32 = 0.8;
+    const AP_FEEDBACK: f32 = 0.5;
+    const IN_GAIN: f32 = 0.5;
+
+    fn new(comb_len: &[usize], ap_len: &[usize], feedback: f32, spread: usize) -> Reverb {
+        Reverb {
+            feedback,
+            comb_l: comb_len.iter().map(|&n| vec![0.0; n]).collect(),
+            comb_r: comb_len.iter().map(|&n| vec![0.0; n + spread]).collect(),
+            ci_l: vec![0; comb_len.len()],
+            ci_r: vec![0; comb_len.len()],
+            filt_l: vec![0.0; comb_len.len()],
+            filt_r: vec![0.0; comb_len.len()],
+            ap_l: ap_len.iter().map(|&n| vec![0.0; n]).collect(),
+            ap_r: ap_len.iter().map(|&n| vec![0.0; n + spread]).collect(),
+            ai_l: vec![0; ap_len.len()],
+            ai_r: vec![0; ap_len.len()],
+        }
+    }
+
+    fn comb(buf: &mut [f32], idx: &mut usize, store: &mut f32, input: f32, feedback: f32) -> f32 {
+        let y = buf[*idx];
+        *store = y * Reverb::DAMP2 + *store * Reverb::DAMP1;
+        buf[*idx] = input + *store * feedback;
+        *idx += 1;
+        if *idx >= buf.len() {
+            *idx = 0;
+        }
+        y
+    }
+
+    fn allpass(buf: &mut [f32], idx: &mut usize, input: f32) -> f32 {
+        let y = buf[*idx];
+        let output = y - input;
+        buf[*idx] = input + y * Reverb::AP_FEEDBACK;
+        *idx += 1;
+        if *idx >= buf.len() {
+            *idx = 0;
+        }
+        output
+    }
+
+    fn process(&mut self, input: f32) -> (f32, f32) {
+        let x = input * Reverb::IN_GAIN;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        for i in 0..self.comb_l.len() {
+            l += Reverb::comb(
+                &mut self.comb_l[i],
+                &mut self.ci_l[i],
+                &mut self.filt_l[i],
+                x,
+                self.feedback,
+            );
+            r += Reverb::comb(
+                &mut self.comb_r[i],
+                &mut self.ci_r[i],
+                &mut self.filt_r[i],
+                x,
+                self.feedback,
+            );
+        }
+        for i in 0..self.ap_l.len() {
+            l = Reverb::allpass(&mut self.ap_l[i], &mut self.ai_l[i], l);
+            r = Reverb::allpass(&mut self.ap_r[i], &mut self.ai_r[i], r);
+        }
+        (l, r)
+    }
+
+    fn reset(&mut self) {
+        for b in self.comb_l.iter_mut() {
+            b.iter_mut().for_each(|s| *s = 0.0);
+        }
+        for b in self.comb_r.iter_mut() {
+            b.iter_mut().for_each(|s| *s = 0.0);
+        }
+        for b in self.ap_l.iter_mut() {
+            b.iter_mut().for_each(|s| *s = 0.0);
+        }
+        for b in self.ap_r.iter_mut() {
+            b.iter_mut().for_each(|s| *s = 0.0);
+        }
+        self.ci_l.iter_mut().for_each(|i| *i = 0);
+        self.ci_r.iter_mut().for_each(|i| *i = 0);
+        self.ai_l.iter_mut().for_each(|i| *i = 0);
+        self.ai_r.iter_mut().for_each(|i| *i = 0);
+        self.filt_l.iter_mut().for_each(|s| *s = 0.0);
+        self.filt_r.iter_mut().for_each(|s| *s = 0.0);
     }
 }
 
@@ -140,6 +255,15 @@ pub struct Mixer {
     glide: HashMap<String, Glide>,
     lp650: Biquad,
     hp650: Biquad,
+    lp1900: Biquad,
+    ghost_reverb: Reverb,
+    wall_reverb: Reverb,
+    ghost_send: Vec<f32>,
+    wall_send: Vec<f32>,
+    ghost_lp_z1: f32,
+    ghost_lp_z2: f32,
+    ghost_tail: usize,
+    wall_tail: usize,
 }
 
 impl Default for Mixer {
@@ -155,6 +279,15 @@ impl Mixer {
             glide: HashMap::new(),
             lp650: Biquad::lowpass(650.0, 0.7),
             hp650: Biquad::highpass(650.0, 0.9),
+            lp1900: Biquad::lowpass(1900.0, 0.7),
+            ghost_reverb: Reverb::new(&GHOST_COMBS, &GHOST_ALLPASS, 0.82, 25),
+            wall_reverb: Reverb::new(&WALL_COMBS, &WALL_ALLPASS, 0.6, 11),
+            ghost_send: Vec::new(),
+            wall_send: Vec::new(),
+            ghost_lp_z1: 0.0,
+            ghost_lp_z2: 0.0,
+            ghost_tail: 0,
+            wall_tail: 0,
         }
     }
 
@@ -167,7 +300,20 @@ impl Mixer {
             return;
         }
         let frames = out_stereo.len() / 2;
+        if self.ghost_send.len() != out_stereo.len() {
+            self.ghost_send = vec![0.0; out_stereo.len()];
+            self.wall_send = vec![0.0; out_stereo.len()];
+        } else {
+            for s in self.ghost_send.iter_mut() {
+                *s = 0.0;
+            }
+            for s in self.wall_send.iter_mut() {
+                *s = 0.0;
+            }
+        }
         let (lp650, hp650) = (self.lp650, self.hp650);
+        let mut any_ghost = false;
+        let mut any_wall = false;
         for (peer_id, mono) in per_peer {
             let (target, mode) = match snap.peers.get(peer_id) {
                 Some(p) => {
@@ -193,8 +339,76 @@ impl Mixer {
                 let s = apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, mono[f]);
                 g.left += GAIN_GLIDE_K * (target.0 - g.left);
                 g.right += GAIN_GLIDE_K * (target.1 - g.right);
-                out_stereo[2 * f] += s * g.left;
-                out_stereo[2 * f + 1] += s * g.right;
+                let sl = s * g.left;
+                let sr = s * g.right;
+                // Ghost / occlusion routes go to a reverb send bus (mixed back below with their
+                // dry+wet levels); everyone else mixes straight to the output.
+                match mode {
+                    FilterMode::Ghost => {
+                        self.ghost_send[2 * f] += sl;
+                        self.ghost_send[2 * f + 1] += sr;
+                    }
+                    FilterMode::WallMuffle | FilterMode::ListenerMuffle => {
+                        self.wall_send[2 * f] += sl;
+                        self.wall_send[2 * f + 1] += sr;
+                    }
+                    _ => {
+                        out_stereo[2 * f] += sl;
+                        out_stereo[2 * f + 1] += sr;
+                    }
+                }
+            }
+            match mode {
+                FilterMode::Ghost => any_ghost = true,
+                FilterMode::WallMuffle | FilterMode::ListenerMuffle => any_wall = true,
+                _ => {}
+            }
+        }
+
+        // Ghost reverb: band-limit the send, run the reverb, add GhostDry*dry + GhostWet*wet.
+        // A tail keeps the reverb ringing for ~2s after the last ghost peer, then it is reset.
+        if any_ghost {
+            self.ghost_tail = GHOST_TAIL_SAMPLES;
+        }
+        if any_ghost || self.ghost_tail > 0 {
+            let lp1900 = self.lp1900;
+            for f in 0..frames {
+                let l = self.ghost_send[2 * f];
+                let r = self.ghost_send[2 * f + 1];
+                let mono =
+                    lp1900.process(&mut self.ghost_lp_z1, &mut self.ghost_lp_z2, (l + r) * 0.5);
+                let (wl, wr) = self.ghost_reverb.process(mono);
+                out_stereo[2 * f] += GHOST_DRY * l + GHOST_WET * wl;
+                out_stereo[2 * f + 1] += GHOST_DRY * r + GHOST_WET * wr;
+            }
+            if !any_ghost {
+                self.ghost_tail = self.ghost_tail.saturating_sub(frames);
+                if self.ghost_tail == 0 {
+                    self.ghost_reverb.reset();
+                    self.ghost_lp_z1 = 0.0;
+                    self.ghost_lp_z2 = 0.0;
+                }
+            }
+        }
+
+        // Wall/occlusion reverb: the send is already 650Hz low-passed per peer; add the small
+        // room tail. ~1s tail after the last occluded peer.
+        if any_wall {
+            self.wall_tail = WALL_TAIL_SAMPLES;
+        }
+        if any_wall || self.wall_tail > 0 {
+            for f in 0..frames {
+                let l = self.wall_send[2 * f];
+                let r = self.wall_send[2 * f + 1];
+                let (wl, wr) = self.wall_reverb.process((l + r) * 0.5);
+                out_stereo[2 * f] += WALL_DRY * l + WALL_WET * wl;
+                out_stereo[2 * f + 1] += WALL_DRY * r + WALL_WET * wr;
+            }
+            if !any_wall {
+                self.wall_tail = self.wall_tail.saturating_sub(frames);
+                if self.wall_tail == 0 {
+                    self.wall_reverb.reset();
+                }
             }
         }
 
@@ -390,28 +604,87 @@ mod tests {
     }
 
     #[test]
-    fn filter_dry_levels_match_csharp() {
+    fn filter_returns_send_signal_without_dry_levels() {
         let lp = Biquad::lowpass(650.0, 0.7);
         let hp = Biquad::highpass(650.0, 0.9);
 
+        // None and Ghost pass the raw sample through; the GhostDry level is applied at the mix
+        // stage, not here.
         let (mut z1, mut z2) = (0.0f32, 0.0f32);
         approx(
             apply_filter(FilterMode::None, &lp, &hp, &mut z1, &mut z2, 0.42),
             0.42,
         );
-
         let (mut gz1, mut gz2) = (0.0f32, 0.0f32);
         approx(
-            apply_filter(FilterMode::Ghost, &lp, &hp, &mut gz1, &mut gz2, 0.5),
-            0.5 * GHOST_DRY,
+            apply_filter(FilterMode::Ghost, &lp, &hp, &mut gz1, &mut gz2, 0.42),
+            0.42,
         );
 
+        // Wall is the 650Hz low-pass with no level trim (WallDry is applied at the mix stage):
+        // steady DC settles to the low-pass DC gain of 1.0.
         let (mut wz1, mut wz2) = (0.0f32, 0.0f32);
         let mut wall = 0.0;
         for _ in 0..4000 {
             wall = apply_filter(FilterMode::WallMuffle, &lp, &hp, &mut wz1, &mut wz2, 1.0);
         }
-        approx_tol(wall, WALL_DRY, 1e-2);
+        approx_tol(wall, 1.0, 1e-2);
+    }
+
+    #[test]
+    fn ghost_and_wall_reverb_stays_bounded_and_decays() {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            1.0,
+            vec![
+                (
+                    "g",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 1,
+                    },
+                ),
+                (
+                    "w",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 3,
+                    },
+                ),
+            ],
+        );
+        let mut mixer = Mixer::new();
+        let g = vec![0.2f32; 960];
+        let w = vec![0.2f32; 960];
+        let per_peer = vec![
+            ("g".to_string(), g.as_slice()),
+            ("w".to_string(), w.as_slice()),
+        ];
+        let mut out = vec![0.0f32; 1920];
+        for _ in 0..10 {
+            mixer.mix(&per_peer, &gs, &mut out);
+            assert!(out
+                .iter()
+                .all(|s| s.is_finite() && (-1.0..=1.0).contains(s)));
+        }
+        assert!(
+            out.iter().any(|&s| s.abs() > 0.0),
+            "ghost/wall produced no output"
+        );
+
+        // Go silent: the reverb tail must ring out, stay finite, and decay (never run away).
+        let empty: Vec<(String, &[f32])> = vec![];
+        let mut peak = 0.0f32;
+        for _ in 0..60 {
+            mixer.mix(&empty, &gs, &mut out);
+            peak = out.iter().fold(0.0f32, |m, &s| {
+                assert!(s.is_finite());
+                m.max(s.abs())
+            });
+        }
+        assert!(peak < 0.2, "reverb tail did not decay: {peak}");
     }
 
     #[test]

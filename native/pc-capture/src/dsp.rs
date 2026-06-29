@@ -145,8 +145,8 @@ impl Dsp {
 
     pub fn capture(&mut self, mic: &mut [f32]) {
         if let Some(apm) = self.apm.as_mut() {
-            const RENDER_TO_CAPTURE_DELAY_MS: i32 = 0;
-            apm.set_stream_delay_ms(RENDER_TO_CAPTURE_DELAY_MS);
+            // AEC3 (the echo canceller is created in desktop mode) estimates the render-to-capture
+            // delay internally, so no manual stream-delay hint is set or needed.
             apm.process_capture(mic);
         }
         if let Some(ns) = self.ns.as_mut() {
