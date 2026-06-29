@@ -7,7 +7,9 @@ Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
 control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
 stdin token auth) to the PerfectComms BepInEx mod.
 
-Capture-only: no Opus, no VAD, no DSP. Protocol version 1.
+Also runs DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus
+encode/decode, and the WebRTC (webrtc-rs) peer transport with proximity mixing,
+so mic, peer audio, and playback all live in this helper. Protocol version 4.
 
 ## Run
 
@@ -26,10 +28,15 @@ pc-capture --handshake <path> [--synthetic-tone]
 
 Frame: `[u8 type][u32 len little-endian][payload]`.
 - `0x01` CONTROL: payload = UTF-8 JSON.
-- `0x02` AUDIO: payload = `[u64 LE captureTsNs][f32 LE PCM * 960]`.
+- `0x02` AUDIO: payload = `[u64 LE captureTsNs][f32 LE PCM * 960]` (helper->mod mic capture).
+- `0x03` AUDIO_OUT: legacy speaker block (`f32 LE interleaved-stereo * 960`). The sidecar now
+  owns the speaker mix end to end and parses-but-discards this; kept only for the wire contract.
 
-Control ops (mod->helper): `hello`, `select-device`, `start`, `stop`, `ping`.
-Control ops (helper->mod): `ready`, `devices`, `level`, `error`, `pong`.
+Control ops (mod->helper): `hello`, `select-device`, `select-output-device`, `start`, `stop`,
+`ping`, `set-dsp`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
+`add-ice-candidate`, `game-state`.
+Control ops (helper->mod): `ready`, `devices`, `outputDevices`, `level`, `error`, `pong`,
+`local-sdp`, `local-candidate`, `peer-state`.
 
 ## Test
 

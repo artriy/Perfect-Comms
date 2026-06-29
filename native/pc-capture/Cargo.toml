@@ -9,8 +9,13 @@ license = "MIT"
 name = "pc-capture"
 path = "src/main.rs"
 
+# The processing core (codec/dsp/mix/gamestate/proto/rtc) is a library so the Android
+# cdylib (native/pc-mobile) can reuse it without the desktop-only IPC server + cpal.
+[lib]
+name = "pc_capture"
+path = "src/lib.rs"
+
 [dependencies]
-cpal = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 apm-sys = { path = "../apm-sys" }
@@ -19,6 +24,12 @@ audiopus = "0.3.0-rc.0"
 webrtc = "0.11"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
+
+# cpal (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
+# Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from
+# the Android build keeps the cross-compile free of the oboe/JNI backend.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal = "0.15"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

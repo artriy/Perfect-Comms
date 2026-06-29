@@ -82,6 +82,12 @@ pub struct FrameAccumulator {
     buf: Vec<f32>,
 }
 
+impl Default for FrameAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrameAccumulator {
     pub fn new() -> FrameAccumulator {
         FrameAccumulator {
@@ -120,6 +126,12 @@ pub fn peak(samples: &[f32]) -> f32 {
 
 pub struct ToneSource {
     phase: f32,
+}
+
+impl Default for ToneSource {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToneSource {
@@ -245,7 +257,10 @@ pub fn spawn_cpal_capture(
         cpal::SampleFormat::U16 => device.build_input_stream(
             &stream_config,
             move |data: &[u16], _| {
-                let f: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                let f: Vec<f32> = data
+                    .iter()
+                    .map(|&s| (s as f32 - 32768.0) / 32768.0)
+                    .collect();
                 push(&f);
             },
             make_err(),
@@ -290,7 +305,10 @@ pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
     out
 }
 
-fn pick_output_device(host: &cpal::Host, device_id: &Option<String>) -> Result<cpal::Device, String> {
+fn pick_output_device(
+    host: &cpal::Host,
+    device_id: &Option<String>,
+) -> Result<cpal::Device, String> {
     if let Some(id) = device_id {
         if let Ok(devices) = host.output_devices() {
             for d in devices {

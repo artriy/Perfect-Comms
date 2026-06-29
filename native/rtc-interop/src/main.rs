@@ -185,5 +185,9 @@ async fn main() -> Result<()> {
         total
     );
     pc.close().await?;
+
+    if total == 0 {
+        anyhow::bail!("no RTP received from the SIPSorcery answer peer: interop FAILED");
+    }
     Ok(())
 }

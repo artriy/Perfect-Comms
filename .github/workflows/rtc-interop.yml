@@ -1,0 +1,44 @@
+name: RTC interop gate
+
+# Proves the desktop (webrtc-rs) <-> Android (SIPSorcery) media path actually works:
+# a real DTLS-SRTP handshake with bidirectional Opus RTP. This is the single riskiest
+# cross-stack assumption in the sidecar/P2P design, so it gates changes to the RTC and
+# codec layers. The bridge exits non-zero unless BOTH peers receive RTP.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "native/rtc-interop/**"
+      - "native/pc-capture/src/rtc.rs"
+      - "native/pc-capture/src/codec.rs"
+      - ".github/workflows/rtc-interop.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  interop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build webrtc-rs offer peer
+        working-directory: native/rtc-interop
+        run: cargo build
+      - name: Build SIPSorcery answer peer
+        working-directory: native/rtc-interop/sipsorcery-answer
+        run: dotnet build -c Release --nologo
+      - name: webrtc-rs <-> SIPSorcery DTLS-SRTP / Opus interop
+        working-directory: native/rtc-interop
+        run: python signal-bridge.py

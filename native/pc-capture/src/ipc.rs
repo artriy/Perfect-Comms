@@ -3,24 +3,24 @@ use crate::audio::{
     spawn_cpal_playback, ToneSource,
 };
 use crate::codec::OpusCodec;
+use crate::gamestate::{GameState, LocalState, PeerState};
+use crate::mix::{FalloffMode, Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
     devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
     parse_inbound, peer_state_json, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
     DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
-use crate::gamestate::{GameState, LocalState, PeerState};
-use crate::mix::{FalloffMode, Mixer};
 use crate::rtc::{LocalSignal, RtcEngine};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const MAX_FRAME_LEN: usize = proto::FRAME_BYTES * 4;
+pub const MAX_FRAME_LEN: usize = 1 << 20;
 
 const SPEAKING_PEAK: f32 = 0.02;
 
@@ -82,9 +82,6 @@ pub fn check_frame_len(len: usize) -> Result<(), proto::DecodeError> {
     Ok(())
 }
 
-// Reads one frame after enforcing check_frame_len on the declared body length,
-// so an attacker-supplied len can never drive an unbounded allocation
-// (proto::read_frame allocates vec![0u8; len] for CONTROL with no bound).
 pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeError> {
     let mut header = [0u8; 5];
     r.read_exact(&mut header)?;
@@ -152,9 +149,6 @@ pub fn validate_hello(op: &InboundOp, expected_token: &str) -> HelloResult {
     }
 }
 
-/// Constant-time byte-slice equality for the session auth token, so a local
-/// attacker can't recover it byte-by-byte via response-timing. The length
-/// branch is fine to leak: the token length is fixed and not secret.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -195,13 +189,6 @@ fn spawn_real_producer(
     conn: Arc<Mutex<TcpStream>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        // Re-open the input device on transient loss (USB/Bluetooth unplug,
-        // default-device switch) without surfacing an error: emitting one makes
-        // the mod tear down and relaunch the whole helper, dropping every peer
-        // connection. We only escalate to the mod once a device that was already
-        // capturing stays gone past the grace window, or when the very first open
-        // fails (mic permission denied / no device) so the user gets prompt
-        // feedback. Either way we keep retrying so the mic recovers on its own.
         const ESCALATE_AFTER: Duration = Duration::from_secs(10);
         const RETRY_DELAY: Duration = Duration::from_millis(500);
         let healthy = Arc::new(AtomicBool::new(false));
@@ -210,7 +197,12 @@ fn spawn_real_producer(
         let mut escalated = false;
         while !stop.load(Ordering::Relaxed) {
             healthy.store(false, Ordering::Relaxed);
-            match spawn_cpal_capture(device_id.clone(), ring.clone(), stop.clone(), healthy.clone()) {
+            match spawn_cpal_capture(
+                device_id.clone(),
+                ring.clone(),
+                stop.clone(),
+                healthy.clone(),
+            ) {
                 Ok(()) => break,
                 Err(e) => {
                     eprintln!("capture error: {e}");
@@ -219,7 +211,11 @@ fn spawn_real_producer(
                         outage_start = None;
                         escalated = false;
                     }
-                    let grace = if ever_healthy { ESCALATE_AFTER } else { Duration::ZERO };
+                    let grace = if ever_healthy {
+                        ESCALATE_AFTER
+                    } else {
+                        Duration::ZERO
+                    };
                     let started = *outage_start.get_or_insert_with(Instant::now);
                     if !escalated && started.elapsed() >= grace {
                         let _ = write_frame(&conn, &encode_control(&error_json("mic-error", &e)));
@@ -241,8 +237,65 @@ fn write_frame(conn: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> std::io::Result<()
     s.flush()
 }
 
+fn ensure_playback(
+    out_thread: &Mutex<Option<std::thread::JoinHandle<()>>>,
+    out_selected: &Mutex<Option<String>>,
+    out_stop: &Arc<AtomicBool>,
+    playback: &Arc<Mutex<PlaybackRing>>,
+    last_spawn_ns: &AtomicU64,
+) {
+    let mut guard = out_thread.lock().unwrap();
+    if guard.as_ref().is_some_and(|h| h.is_finished()) {
+        if let Some(h) = guard.take() {
+            h.join().ok();
+        }
+    }
+    if guard.is_none() {
+        let now = now_ns();
+        let last = last_spawn_ns.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < 1_000_000_000 {
+            return;
+        }
+        last_spawn_ns.store(now, Ordering::Relaxed);
+        let dev = out_selected.lock().unwrap().clone();
+        let pb = playback.clone();
+        let st = out_stop.clone();
+        st.store(false, Ordering::Relaxed);
+        *guard = Some(std::thread::spawn(move || {
+            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+                eprintln!("pc-capture: playback error: {e}");
+            }
+        }));
+    }
+}
+
+enum RtcOp {
+    AddPeer {
+        peer_id: String,
+        offerer: bool,
+    },
+    RemovePeer {
+        peer_id: String,
+    },
+    SetRemoteSdp {
+        peer_id: String,
+        sdp_type: String,
+        sdp: String,
+    },
+    AddIce {
+        peer_id: String,
+        candidate: String,
+    },
+    SetIceServers {
+        servers: Vec<crate::proto::IceServer>,
+    },
+}
+
+#[allow(clippy::while_let_loop)]
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
     stream.set_nodelay(true).ok();
+
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
     let conn = Arc::new(Mutex::new(stream.try_clone()?));
 
@@ -257,6 +310,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     if validate_hello(&op, &cfg.token) != HelloResult::Accept {
         return Ok(());
     }
+    stream.set_read_timeout(None).ok();
 
     let devices = if cfg.synthetic {
         synthetic_devices()
@@ -273,12 +327,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         &encode_control(&ready_json(&devices, &output_devices)),
     )?;
 
-    let dsp = Arc::new(Mutex::new(crate::dsp::Dsp::new(crate::dsp::DspConfig::default())));
+    let dsp = Arc::new(Mutex::new(crate::dsp::Dsp::new(
+        crate::dsp::DspConfig::default(),
+    )));
 
     let playback = Arc::new(Mutex::new(PlaybackRing::new(8 * proto::AUDIO_OUT_FRAMES)));
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let out_spawn_ns = Arc::new(AtomicU64::new(0));
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
@@ -287,8 +344,29 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let producer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
-    let rtc = Arc::new(Mutex::new(RtcEngine::new(local_signal_tx)));
+
+    let rtc = Arc::new(RtcEngine::new(local_signal_tx));
     let rtc_stop = Arc::new(AtomicBool::new(false));
+
+    let (rtc_op_tx, rtc_op_rx) = std::sync::mpsc::channel::<RtcOp>();
+    let ctrl_rtc = rtc.clone();
+    let ctrl_handle = std::thread::spawn(move || {
+        while let Ok(op) = rtc_op_rx.recv() {
+            match op {
+                RtcOp::AddPeer { peer_id, offerer } => ctrl_rtc.add_peer(peer_id, offerer),
+                RtcOp::RemovePeer { peer_id } => ctrl_rtc.remove_peer(&peer_id),
+                RtcOp::SetRemoteSdp {
+                    peer_id,
+                    sdp_type,
+                    sdp,
+                } => ctrl_rtc.set_remote_sdp(&peer_id, &sdp_type, &sdp),
+                RtcOp::AddIce { peer_id, candidate } => {
+                    ctrl_rtc.add_ice_candidate(&peer_id, &candidate)
+                }
+                RtcOp::SetIceServers { servers } => ctrl_rtc.set_ice_servers(&servers),
+            }
+        }
+    });
 
     let writer_ring = ring.clone();
     let writer_stop = stop.clone();
@@ -311,7 +389,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     if let Some(enc) = encoder.as_mut() {
                         let pkt = enc.encode(&f.samples);
                         if !pkt.is_empty() {
-                            writer_rtc.lock().unwrap().send_opus(&pkt);
+                            writer_rtc.send_opus(&pkt);
                         }
                     }
                     since_level += 1;
@@ -340,24 +418,29 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_rtc = rtc.clone();
     let drain_stop = rtc_stop.clone();
     let drain_playback = playback.clone();
+    let drain_dsp = dsp.clone();
     let drain_gs = game_state.clone();
+    let drain_out_thread = out_thread.clone();
+    let drain_out_selected = out_selected.clone();
+    let drain_out_stop = out_stop.clone();
+    let drain_out_spawn = out_spawn_ns.clone();
     let drain_handle = std::thread::spawn(move || {
         let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
         let mut mixer = Mixer::new();
-        let mut frames: HashMap<String, Vec<f32>> = HashMap::new();
+
+        let mut jitter = PeerJitter::new();
         let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
+
+        let frame_dur = Duration::from_millis(20);
+        let mut next_tick = Instant::now();
         while !drain_stop.load(Ordering::Relaxed) {
             while let Ok(id) = dec_remove_rx.try_recv() {
                 decoders.remove(&id);
+                jitter.remove(&id);
             }
-            frames.clear();
+
             let mut drained = 0;
-            loop {
-                let pkt = drain_rtc.lock().unwrap().recv();
-                let (peer, data) = match pkt {
-                    Some(p) => p,
-                    None => break,
-                };
+            while let Some((peer, data)) = drain_rtc.recv() {
                 if !decoders.contains_key(&peer) {
                     match OpusCodec::new() {
                         Ok(c) => {
@@ -370,24 +453,48 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 let mut pcm = [0f32; crate::codec::FRAME_SIZE];
                 let n = codec.decode(&data, &mut pcm);
                 if n > 0 {
-                    frames.insert(peer, pcm[..n].to_vec());
+                    jitter.push(&peer, pcm[..n].to_vec());
                 }
                 drained += 1;
                 if drained >= 256 {
                     break;
                 }
             }
-            if frames.is_empty() {
+            if jitter.is_idle() {
                 std::thread::sleep(Duration::from_millis(5));
+                next_tick = Instant::now();
                 continue;
             }
-            let snap = drain_gs.snapshot();
-            mixer.set_master(snap.master);
-            mixer.set_deafened(snap.local.deafened);
-            let per_peer: Vec<(String, &[f32])> =
-                frames.iter().map(|(k, v)| (k.clone(), v.as_slice())).collect();
-            mixer.mix(&per_peer, &drain_gs, &mut stereo);
-            drain_playback.lock().unwrap().push(&stereo);
+
+            let round = jitter.playout_round();
+            if !round.is_empty() {
+                let snap = drain_gs.snapshot();
+                mixer.set_master(snap.master);
+                mixer.set_deafened(snap.local.deafened);
+                let per_peer: Vec<(String, &[f32])> = round
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_slice()))
+                    .collect();
+                mixer.mix(&per_peer, &drain_gs, &mut stereo);
+
+                ensure_playback(
+                    &drain_out_thread,
+                    &drain_out_selected,
+                    &drain_out_stop,
+                    &drain_playback,
+                    &drain_out_spawn,
+                );
+                drain_playback.lock().unwrap().push(&stereo);
+                drain_dsp.lock().unwrap().far_end(&stereo);
+            }
+
+            next_tick += frame_dur;
+            let now = Instant::now();
+            if next_tick > now {
+                std::thread::sleep(next_tick - now);
+            } else {
+                next_tick = now;
+            }
         }
     });
 
@@ -411,39 +518,20 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
-    let mut last_out_spawn_ns: Option<u64> = None;
     loop {
         let frame = match read_frame_checked(&mut reader) {
             Ok(f) => f,
             Err(_) => break,
         };
         match frame {
-            Frame::AudioOut(f) => {
-                playback.lock().unwrap().push(&f.samples);
-                dsp.lock().unwrap().far_end(&f.samples);
-                let mut guard = out_thread.lock().unwrap();
-                if guard.as_ref().map_or(false, |h| h.is_finished()) {
-                    if let Some(h) = guard.take() {
-                        h.join().ok();
-                    }
-                }
-                if guard.is_none() {
-                    let now = now_ns();
-                    let due = last_out_spawn_ns
-                        .map_or(true, |t| now.saturating_sub(t) >= 1_000_000_000);
-                    if due {
-                        last_out_spawn_ns = Some(now);
-                        let dev = out_selected.lock().unwrap().clone();
-                        let pb = playback.clone();
-                        let st = out_stop.clone();
-                        st.store(false, Ordering::Relaxed);
-                        *guard = Some(std::thread::spawn(move || {
-                            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
-                                eprintln!("pc-capture: playback error: {e}");
-                            }
-                        }));
-                    }
-                }
+            Frame::AudioOut(_) => {
+                ensure_playback(
+                    &out_thread,
+                    &out_selected,
+                    &out_stop,
+                    &playback,
+                    &out_spawn_ns,
+                );
             }
             Frame::Control(text) => {
                 let op = match parse_inbound(&text) {
@@ -467,16 +555,25 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     }
                     InboundOp::SelectOutputDevice { id } => {
                         *out_selected.lock().unwrap() = Some(id);
+
                         out_stop.store(true, Ordering::Relaxed);
                         if let Some(h) = out_thread.lock().unwrap().take() {
                             h.join().ok();
                         }
                         out_stop.store(false, Ordering::Relaxed);
+                        out_spawn_ns.store(0, Ordering::Relaxed);
+                        ensure_playback(
+                            &out_thread,
+                            &out_selected,
+                            &out_stop,
+                            &playback,
+                            &out_spawn_ns,
+                        );
                     }
                     InboundOp::Start => {
                         producer_stop.store(false, Ordering::Relaxed);
                         let mut guard = producer.lock().unwrap();
-                        if guard.as_ref().map_or(false, |h| h.is_finished()) {
+                        if guard.as_ref().is_some_and(|h| h.is_finished()) {
                             if let Some(h) = guard.take() {
                                 h.join().ok();
                             }
@@ -513,27 +610,19 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
                     }
                     InboundOp::PeerAdd { peer_id, offerer } => {
-                        rtc.lock().unwrap().add_peer(peer_id, offerer);
-                        let mut guard = out_thread.lock().unwrap();
-                        if guard.as_ref().map_or(false, |h| h.is_finished()) {
-                            if let Some(h) = guard.take() {
-                                h.join().ok();
-                            }
-                        }
-                        if guard.is_none() {
-                            let dev = out_selected.lock().unwrap().clone();
-                            let pb = playback.clone();
-                            let st = out_stop.clone();
-                            st.store(false, Ordering::Relaxed);
-                            *guard = Some(std::thread::spawn(move || {
-                                if let Err(e) = spawn_cpal_playback(dev, pb, st) {
-                                    eprintln!("pc-capture: playback error: {e}");
-                                }
-                            }));
-                        }
+                        let _ = rtc_op_tx.send(RtcOp::AddPeer { peer_id, offerer });
+                        ensure_playback(
+                            &out_thread,
+                            &out_selected,
+                            &out_stop,
+                            &playback,
+                            &out_spawn_ns,
+                        );
                     }
                     InboundOp::PeerRemove { peer_id } => {
-                        rtc.lock().unwrap().remove_peer(&peer_id);
+                        let _ = rtc_op_tx.send(RtcOp::RemovePeer {
+                            peer_id: peer_id.clone(),
+                        });
                         game_state.remove_peer(&peer_id);
                         let _ = dec_remove_tx.send(peer_id);
                     }
@@ -542,13 +631,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         sdp_type,
                         sdp,
                     } => {
-                        rtc.lock().unwrap().set_remote_sdp(&peer_id, &sdp_type, &sdp);
+                        let _ = rtc_op_tx.send(RtcOp::SetRemoteSdp {
+                            peer_id,
+                            sdp_type,
+                            sdp,
+                        });
                     }
                     InboundOp::AddIceCandidate { peer_id, candidate } => {
-                        rtc.lock().unwrap().add_ice_candidate(&peer_id, &candidate);
+                        let _ = rtc_op_tx.send(RtcOp::AddIce { peer_id, candidate });
                     }
                     InboundOp::SetIceServers { servers } => {
-                        rtc.lock().unwrap().set_ice_servers(&servers);
+                        let _ = rtc_op_tx.send(RtcOp::SetIceServers { servers });
                     }
                     InboundOp::GameState {
                         lx,
@@ -577,11 +670,19 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                                         muted: p.muted,
                                         volume: p.vol,
                                         role_flags: p.roles,
+                                        mode: p.mode,
+                                        nvol: p.nvol,
                                     },
                                 )
                             })
                             .collect();
-                        game_state.apply(local, master, maxd, FalloffMode::from_i32(falloff), peer_states);
+                        game_state.apply(
+                            local,
+                            master,
+                            maxd,
+                            FalloffMode::from_i32(falloff),
+                            peer_states,
+                        );
                     }
                     InboundOp::Hello { .. } => {}
                 }
@@ -602,6 +703,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     }
     writer_handle.join().ok();
     drain_handle.join().ok();
+    drop(rtc_op_tx);
+    ctrl_handle.join().ok();
     drop(rtc);
     signal_handle.join().ok();
     Ok(())

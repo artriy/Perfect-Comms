@@ -168,19 +168,6 @@ internal sealed class SidecarVoiceClient : IDisposable
         }
     }
 
-    public void SendPlayback(float[] stereoBlock)
-    {
-        if (!_running) return;
-        try
-        {
-            Write(SidecarProtocol.EncodeAudioOut(stereoBlock, stereoBlock.Length));
-        }
-        catch
-        {
-            RaiseDead("playback write failed");
-        }
-    }
-
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf)
     {
         if (!_running) return;
@@ -406,7 +393,12 @@ internal sealed class SidecarVoiceClient : IDisposable
             }
 
             if (have == buffer.Length)
-                break;
+            {
+
+                var cap = SidecarProtocol.HeaderBytes + SidecarProtocol.MaxPayloadBytes;
+                if (buffer.Length >= cap) break;
+                Array.Resize(ref buffer, Math.Min(buffer.Length * 2, cap));
+            }
         }
         if (_running)
             SetHealth(CaptureHealth.Dead);

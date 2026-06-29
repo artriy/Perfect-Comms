@@ -1,8 +1,8 @@
 # pc-capture: build, sign, ship
 
-Capture and playback helper. No Opus, no VAD, no DSP. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 2.
+Capture, playback, DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus codec, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 4.
 
-The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through the existing `NativeLibraryCache.Extract` path (the same mechanism `bass.x64.dll` uses). When no helper resource is present for the running target, the mod simply never offers the Sidecar capture slot and behaves exactly as it does today (in-proc BASS/Unity). The helper is strictly an upgrade: worst case is never below today's behavior.
+The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through the existing `NativeLibraryCache.Extract` path (the same mechanism the embedded `opus.x64.dll` uses). Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If no helper resource is present for the running target, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged via `bcl.voice`); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android is unaffected (it uses the Unity Microphone/AudioSource path, not the sidecar).
 
 ## Targets
 
@@ -60,13 +60,13 @@ The managed build embeds each helper as `Lib.pc-capture.<file>` (mirrors `Lib.ba
 
 - **Native Windows:** `Process.Start(helper.exe, --handshake <path>)`, token written to the helper's stdin.
 - **Wine (CrossOver / Proton):** host-exec via `start.exe /unix "<hostpath>" --handshake <path>`. The Windows-side path is translated to a host path with `winepath -u` (`WineEnvironment.ResolveHostPath`). Token is written to stdin. This is what runs the native mac/linux helper outside the Wine boundary.
-- **Host-exec blocked:** the handshake times out; the supervisor falls through to in-proc BASS/Unity with a one-time hint. No regression.
+- **Host-exec blocked:** the handshake times out; the `CaptureSupervisor` retries within its restart budget and, if the helper never starts, enters the all-failed "voice unavailable" state (logged). There is no in-proc desktop fallback since BASS was removed in 4.0.
 
 The helper binds `127.0.0.1:0`, writes `{port, pid}` to the handshake file, and the mod connects over loopback (Wine Winsock bridges to host loopback).
 
 ## Mic permission (TCC) and fallback
 
-On macOS, mic permission (TCC) attributes to the **CrossOver / host process that launches the helper**, not to a separate signed app identity. If the user can already talk in-game, that grant is in place and the helper inherits it. If mic access is blocked, the `CaptureSupervisor` falls back to the in-proc BASS/Unity capture path, which is no worse than today. Mic permission is an OS-level grant and is not something the mod can fix in code; the failover is the safety net.
+On macOS, mic permission (TCC) attributes to the **CrossOver / host process that launches the helper**, not to a separate signed app identity. If the user can already talk in-game, that grant is in place and the helper inherits it. If mic access is blocked, the helper cannot capture and the `CaptureSupervisor` surfaces the all-failed "voice unavailable" state; there is no in-proc desktop fallback (BASS was removed in 4.0). Mic permission is an OS-level grant and is not something the mod can fix in code.
 
 ## CI
 
@@ -75,4 +75,4 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 3` (the inline `Proto` check in `SidecarCaptureSource`/`SidecarStereoOutput`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 4` (the `Proto` constant in `SidecarVoiceClient`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.

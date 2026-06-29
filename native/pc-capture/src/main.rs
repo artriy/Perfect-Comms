@@ -1,17 +1,5 @@
-mod audio;
-#[allow(dead_code)]
-mod codec;
-mod dsp;
-#[allow(dead_code)]
-mod gamestate;
-mod ipc;
-#[allow(dead_code)]
-mod mix;
-mod proto;
-#[allow(dead_code)]
-mod rtc;
-
-use ipc::ServerConfig;
+use pc_capture::ipc::ServerConfig;
+use pc_capture::{audio, ipc, proto};
 use std::path::PathBuf;
 
 #[derive(Debug)]

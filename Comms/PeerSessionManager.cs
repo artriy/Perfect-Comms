@@ -286,10 +286,7 @@ internal sealed class PeerSessionManager
         if (!SignalPayload.TryReadSdp(payload, out var sdpType, out var sdp)) return;
 
         var peer = GetOrCreate(clientId);
-        // A fresh offer for a peer we already added means the offerer rebuilt its peer
-        // connection (new DTLS fingerprint). Recreate ours so we answer on a matching
-        // connection instead of applying the offer to a stale PC, which otherwise gives
-        // one-way audio until the old connection times out (~30s).
+
         if (peer.Added)
         {
             _transport.RemovePeer(clientId);
@@ -314,7 +311,8 @@ internal sealed class PeerSessionManager
     private void HandleCandidate(int clientId, byte[] payload)
     {
         if (!SignalPayload.TryReadCandidate(payload, out var candidate)) return;
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.Added) return;
+
+        if (!_peers.ContainsKey(clientId)) return;
         _transport.AddIceCandidate(clientId, candidate);
     }
 
@@ -347,8 +345,9 @@ internal sealed class PeerSessionManager
 
     private void DropPeer(int clientId)
     {
-        if (!_peers.TryGetValue(clientId, out var peer)) return;
-        if (peer.Added) _transport.RemovePeer(clientId);
+        if (!_peers.ContainsKey(clientId)) return;
+
+        _transport.RemovePeer(clientId);
         _peers.Remove(clientId);
     }
 

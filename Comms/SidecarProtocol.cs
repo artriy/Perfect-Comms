@@ -62,15 +62,6 @@ internal static class SidecarProtocol
     public static byte[] SelectOutputDeviceFrame(string id)
         => EncodeControl($"{{\"op\":\"select-output-device\",\"id\":{JsonString(id)}}}");
 
-    public static byte[] EncodeAudioOut(float[] interleavedStereo, int sampleCount)
-    {
-        var payload = new byte[AudioOutPayloadBytes];
-        var n = Math.Min(sampleCount, AudioOutSamples);
-        for (int i = 0; i < n; i++)
-            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(i * 4, 4), interleavedStereo[i]);
-        return EncodeFrame(TypeAudioOut, payload);
-    }
-
     public static byte[] StartFrame() => EncodeControl("{\"op\":\"start\"}");
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
     public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
@@ -115,6 +106,8 @@ internal static class SidecarProtocol
         return EncodeFrame(TypeControl, stream.ToArray());
     }
 
+    public const uint RoleForceAudible = 1u;
+
     public readonly struct GameStatePeerInput
     {
         public readonly string Id;
@@ -124,7 +117,11 @@ internal static class SidecarProtocol
         public readonly float Volume;
         public readonly uint Roles;
 
-        public GameStatePeerInput(string id, float x, float y, bool muted, float volume, uint roles)
+        public readonly int Mode;
+
+        public readonly float Nvol;
+
+        public GameStatePeerInput(string id, float x, float y, bool muted, float volume, uint roles, int mode, float nvol)
         {
             Id = id;
             X = x;
@@ -132,6 +129,8 @@ internal static class SidecarProtocol
             Muted = muted;
             Volume = volume;
             Roles = roles;
+            Mode = mode;
+            Nvol = nvol;
         }
     }
 
@@ -168,6 +167,8 @@ internal static class SidecarProtocol
                 w.WriteBoolean("muted", p.Muted);
                 w.WriteNumber("vol", p.Volume);
                 w.WriteNumber("roles", p.Roles);
+                w.WriteNumber("mode", p.Mode);
+                w.WriteNumber("nvol", p.Nvol);
                 w.WriteEndObject();
             }
             w.WriteEndArray();

@@ -17,3 +17,5 @@ build-apm-*/
 build-df-*/
 PerfectComms.sln
 .superpowers/
+.claude/
+.serena/

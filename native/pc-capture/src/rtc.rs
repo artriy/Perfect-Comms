@@ -52,6 +52,8 @@ pub struct RtcEngine {
     out_local_signal: Sender<LocalSignal>,
     recv_tx: Sender<(String, Vec<u8>)>,
     recv_rx: Mutex<Receiver<(String, Vec<u8>)>>,
+
+    pending_ice: Mutex<HashMap<String, Vec<String>>>,
 }
 
 fn opus_capability() -> RTCRtpCodecCapability {
@@ -195,6 +197,7 @@ impl RtcEngine {
             out_local_signal,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
+            pending_ice: Mutex::new(HashMap::new()),
         }
     }
 
@@ -219,12 +222,16 @@ impl RtcEngine {
         let recv_tx = self.recv_tx.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
-        if let Ok(handle) = self.rt.block_on(create_peer(pid, offerer, servers, signal, recv_tx)) {
+        if let Ok(handle) = self
+            .rt
+            .block_on(create_peer(pid, offerer, servers, signal, recv_tx))
+        {
             self.peers.lock().unwrap().insert(peer_id, handle);
         }
     }
 
     pub fn remove_peer(&self, peer_id: &str) {
+        self.pending_ice.lock().unwrap().remove(peer_id);
         let handle = self.peers.lock().unwrap().remove(peer_id);
         if let Some(h) = handle {
             let _ = self.rt.block_on(async move { h.pc.close().await });
@@ -245,7 +252,10 @@ impl RtcEngine {
                 let recv_tx = self.recv_tx.clone();
                 let servers = self.ice_servers.lock().unwrap().clone();
                 let pid = peer_id.to_string();
-                match self.rt.block_on(create_peer(pid, false, servers, signal, recv_tx)) {
+                match self
+                    .rt
+                    .block_on(create_peer(pid, false, servers, signal, recv_tx))
+                {
                     Ok(h) => {
                         let pc = Arc::clone(&h.pc);
                         self.peers.lock().unwrap().insert(peer_id.to_string(), h);
@@ -269,8 +279,24 @@ impl RtcEngine {
         let signal = self.out_local_signal.clone();
         let pid = peer_id.to_string();
         let is_offer = sdp_type == "offer";
+
+        let pending = self
+            .pending_ice
+            .lock()
+            .unwrap()
+            .remove(peer_id)
+            .unwrap_or_default();
         let _ = self.rt.block_on(async move {
             pc.set_remote_description(desc).await?;
+            for cand in pending {
+                let init = serde_json::from_str::<RTCIceCandidateInit>(&cand).unwrap_or(
+                    RTCIceCandidateInit {
+                        candidate: cand,
+                        ..Default::default()
+                    },
+                );
+                let _ = pc.add_ice_candidate(init).await;
+            }
             if is_offer {
                 let answer = pc.create_answer(None).await?;
                 pc.set_local_description(answer).await?;
@@ -287,24 +313,45 @@ impl RtcEngine {
     }
 
     pub fn add_ice_candidate(&self, peer_id: &str, candidate: &str) {
-        let pc = match self
+        let pc = self
             .peers
             .lock()
             .unwrap()
             .get(peer_id)
-            .map(|h| Arc::clone(&h.pc))
-        {
+            .map(|h| Arc::clone(&h.pc));
+        let pc = match pc {
             Some(p) => p,
-            None => return,
+            None => {
+                self.buffer_ice(peer_id, candidate);
+                return;
+            }
         };
-        let init = match serde_json::from_str::<RTCIceCandidateInit>(candidate) {
-            Ok(i) => i,
-            Err(_) => RTCIceCandidateInit {
+
+        let has_remote = self
+            .rt
+            .block_on(async { pc.remote_description().await.is_some() });
+        if !has_remote {
+            self.buffer_ice(peer_id, candidate);
+            return;
+        }
+        let init =
+            serde_json::from_str::<RTCIceCandidateInit>(candidate).unwrap_or(RTCIceCandidateInit {
                 candidate: candidate.to_string(),
                 ..Default::default()
-            },
-        };
-        let _ = self.rt.block_on(async move { pc.add_ice_candidate(init).await });
+            });
+        let _ = self
+            .rt
+            .block_on(async move { pc.add_ice_candidate(init).await });
+    }
+
+    fn buffer_ice(&self, peer_id: &str, candidate: &str) {
+        const MAX_PENDING_ICE: usize = 64;
+        let mut pending = self.pending_ice.lock().unwrap();
+        let q = pending.entry(peer_id.to_string()).or_default();
+        if q.len() >= MAX_PENDING_ICE {
+            q.remove(0);
+        }
+        q.push(candidate.to_string());
     }
 
     pub fn send_opus(&self, pkt: &[u8]) {
@@ -384,9 +431,7 @@ mod tests {
         let b = RtcEngine::new(b_tx);
 
         a.add_peer("B".to_string(), true);
-        // Answerer explicitly pre-creates its peer (mirrors PeerSessionManager.HandleOffer
-        // -> AddPeer(isOfferer:false)); with a hardcoded offerer=true this peer would be
-        // stuck in have-local-offer and never answer.
+
         b.add_peer("A".to_string(), false);
 
         let payload: Vec<u8> = (0..80u8).map(|i| i ^ 0x5a).collect();
@@ -398,8 +443,12 @@ mod tests {
         while Instant::now() < deadline {
             while let Ok(sig) = a_rx.try_recv() {
                 match sig {
-                    LocalSignal::Sdp { sdp_type, sdp, .. } => b.set_remote_sdp("A", &sdp_type, &sdp),
-                    LocalSignal::Candidate { candidate, .. } => b.add_ice_candidate("A", &candidate),
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        b.set_remote_sdp("A", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        b.add_ice_candidate("A", &candidate)
+                    }
                     LocalSignal::PeerState { state, .. } => {
                         if state == "connected" {
                             saw_connected = true;
@@ -409,8 +458,12 @@ mod tests {
             }
             while let Ok(sig) = b_rx.try_recv() {
                 match sig {
-                    LocalSignal::Sdp { sdp_type, sdp, .. } => a.set_remote_sdp("B", &sdp_type, &sdp),
-                    LocalSignal::Candidate { candidate, .. } => a.add_ice_candidate("B", &candidate),
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        a.set_remote_sdp("B", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        a.add_ice_candidate("B", &candidate)
+                    }
                     LocalSignal::PeerState { .. } => {}
                 }
             }

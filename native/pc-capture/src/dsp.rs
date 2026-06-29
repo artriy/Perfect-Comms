@@ -44,6 +44,11 @@ const APM_LIB: &str = "libwebrtc-apm.dylib";
 #[cfg(target_os = "macos")]
 const DF_LIB: &str = "libdf.dylib";
 
+#[cfg(target_os = "android")]
+const APM_LIB: &str = "libwebrtc-apm.so";
+#[cfg(target_os = "android")]
+const DF_LIB: &str = "libdf.so";
+
 fn lib_path(name: &str) -> String {
     let dir = std::env::current_exe()
         .ok()
@@ -140,7 +145,8 @@ impl Dsp {
 
     pub fn capture(&mut self, mic: &mut [f32]) {
         if let Some(apm) = self.apm.as_mut() {
-            apm.set_stream_delay_ms(0);
+            const RENDER_TO_CAPTURE_DELAY_MS: i32 = 0;
+            apm.set_stream_delay_ms(RENDER_TO_CAPTURE_DELAY_MS);
             apm.process_capture(mic);
         }
         if let Some(ns) = self.ns.as_mut() {

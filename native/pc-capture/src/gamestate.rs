@@ -31,6 +31,10 @@ pub struct PeerState {
     pub muted: bool,
     pub volume: f32,
     pub role_flags: u32,
+
+    pub mode: i32,
+
+    pub nvol: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,12 @@ impl Default for GameSnapshot {
 
 pub struct GameState {
     inner: Mutex<GameSnapshot>,
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GameState {
@@ -115,7 +125,12 @@ mod tests {
     #[test]
     fn snapshot_reflects_local_and_settings() {
         let gs = GameState::new();
-        gs.set_local(LocalState { x: 1.0, y: 2.0, facing: 0.5, deafened: true });
+        gs.set_local(LocalState {
+            x: 1.0,
+            y: 2.0,
+            facing: 0.5,
+            deafened: true,
+        });
         gs.set_settings(0.5, 9.0, FalloffMode::VoiceFocused);
         let s = gs.snapshot();
         assert_eq!(s.local.x, 1.0);
@@ -129,13 +144,35 @@ mod tests {
     #[test]
     fn apply_replaces_peers_atomically() {
         let gs = GameState::new();
-        gs.upsert_peer("old".to_string(), PeerState { x: 0.0, y: 0.0, muted: false, volume: 1.0, role_flags: 0 });
+        gs.upsert_peer(
+            "old".to_string(),
+            PeerState {
+                x: 0.0,
+                y: 0.0,
+                muted: false,
+                volume: 1.0,
+                role_flags: 0,
+                mode: 0,
+                nvol: 1.0,
+            },
+        );
         gs.apply(
             LocalState::default(),
             1.0,
             6.0,
             FalloffMode::Linear,
-            vec![("new".to_string(), PeerState { x: 4.0, y: 5.0, muted: true, volume: 0.5, role_flags: 3 })],
+            vec![(
+                "new".to_string(),
+                PeerState {
+                    x: 4.0,
+                    y: 5.0,
+                    muted: true,
+                    volume: 0.5,
+                    role_flags: 3,
+                    mode: 0,
+                    nvol: 1.0,
+                },
+            )],
         );
         let s = gs.snapshot();
         assert!(!s.peers.contains_key("old"));
@@ -150,7 +187,18 @@ mod tests {
     #[test]
     fn remove_peer_drops_entry() {
         let gs = GameState::new();
-        gs.upsert_peer("p".to_string(), PeerState { x: 1.0, y: 1.0, muted: false, volume: 1.0, role_flags: 0 });
+        gs.upsert_peer(
+            "p".to_string(),
+            PeerState {
+                x: 1.0,
+                y: 1.0,
+                muted: false,
+                volume: 1.0,
+                role_flags: 0,
+                mode: 0,
+                nvol: 1.0,
+            },
+        );
         gs.remove_peer("p");
         assert!(gs.snapshot().peers.is_empty());
     }

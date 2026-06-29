@@ -1,2 +1,3 @@
 /target
-Cargo.lock
+# Cargo.lock is committed: pc-capture is a shipped binary, so its dependency tree
+# (webrtc-rs, ring, libopus) must be pinned for reproducible interop/codec behavior.

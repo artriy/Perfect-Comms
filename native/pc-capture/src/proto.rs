@@ -20,6 +20,7 @@ pub struct AudioFrame {
     pub samples: Vec<f32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AudioOutFrame {
     pub samples: Vec<f32>,
@@ -28,9 +29,11 @@ pub struct AudioOutFrame {
 #[derive(Debug)]
 pub enum Frame {
     Control(String),
-    // Decoded inbound audio is never read by the helper (audio flows helper->mod only); kept for the wire contract and tests.
+
     #[allow(dead_code)]
     Audio(AudioFrame),
+
+    #[allow(dead_code)]
     AudioOut(AudioOutFrame),
 }
 
@@ -127,6 +130,7 @@ pub struct AudioRing {
     dropped: u64,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl AudioRing {
     pub fn new(capacity: usize) -> AudioRing {
         AudioRing {
@@ -164,6 +168,7 @@ pub struct PlaybackRing {
     dropped: u64,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl PlaybackRing {
     pub fn new(capacity_pairs: usize) -> PlaybackRing {
         let cap = capacity_pairs.max(2);
@@ -271,6 +276,12 @@ pub struct GameStatePeer {
     pub vol: f32,
     #[serde(default)]
     pub roles: u32,
+
+    #[serde(default)]
+    pub mode: i32,
+
+    #[serde(default = "default_peer_volume")]
+    pub nvol: f32,
 }
 
 fn default_peer_volume() -> f32 {
@@ -585,6 +596,9 @@ mod tests {
                 assert_eq!(peers[0].vol, 1.0);
                 assert!(!peers[0].muted);
                 assert_eq!(peers[0].roles, 0);
+
+                assert_eq!(peers[0].nvol, 1.0);
+                assert_eq!(peers[0].mode, 0);
             }
             other => panic!("expected game-state, got {other:?}"),
         }

@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "native/pc-capture/**"
+      - "native/pc-mobile/**"
       - "native/apm-sys/**"
       - "native/df-sys/**"
       - "native/rtc-interop/**"
@@ -50,6 +51,24 @@ jobs:
           name: ${{ matrix.artifact }}
           path: Libs/pc-capture/${{ matrix.dest }}
           if-no-files-found: error
+
+  # pc-mobile is a cdylib over pc-capture's lib (the shared voice core for Android). Nothing
+  # else builds it and pc-capture's lib API is edited often, so compile + clippy it on every
+  # relevant change to catch "one shared core" drift before it would reach an Android build.
+  # Host-only (no NDK); the aarch64-linux-android cross-compile is validated when the NDK is wired.
+  pc-mobile:
+    runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ilammy/setup-nasm@v1
+      - name: clippy pc-mobile (host)
+        shell: bash
+        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
 
   linux:
     runs-on: ubuntu-latest
