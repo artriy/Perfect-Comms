@@ -17,6 +17,7 @@ fn peak(samples: &[f32]) -> f32 {
 
 struct DecodeState {
     decoders: HashMap<String, OpusCodec>,
+    last_seq: HashMap<String, u16>,
     mixer: Mixer,
     jitter: PeerJitter,
     stereo: Vec<f32>,
@@ -43,6 +44,7 @@ impl Engine {
             enc: Mutex::new(OpusCodec::new().ok()),
             dec: Mutex::new(DecodeState {
                 decoders: HashMap::new(),
+                last_seq: HashMap::new(),
                 mixer: Mixer::new(),
                 jitter: PeerJitter::new(),
                 stereo: vec![0.0; FRAME_SIZE * 2],
@@ -77,7 +79,7 @@ impl Engine {
         let mut state = self.dec.lock().unwrap();
 
         let mut drained = 0;
-        while let Some((peer, data)) = self.rtc.recv() {
+        while let Some((peer, seq, data)) = self.rtc.recv() {
             if !state.decoders.contains_key(&peer) {
                 match OpusCodec::new() {
                     Ok(c) => {
@@ -86,11 +88,19 @@ impl Engine {
                     Err(_) => continue,
                 }
             }
-            let codec = state.decoders.get_mut(&peer).unwrap();
-            let mut pcm = [0f32; FRAME_SIZE];
-            let n = codec.decode(&data, &mut pcm);
-            if n > 0 {
-                state.jitter.push(&peer, pcm[..n].to_vec());
+            let last = state.last_seq.get(&peer).copied();
+
+            // Decode + conceal into a local batch first so the &mut borrow of `decoders` is
+            // released before we touch `jitter`.
+            let (frames, advance) = {
+                let codec = state.decoders.get_mut(&peer).unwrap();
+                crate::codec::decode_with_concealment(codec, last, seq, &data)
+            };
+            for f in frames {
+                state.jitter.push(&peer, f);
+            }
+            if advance {
+                state.last_seq.insert(peer.clone(), seq);
             }
             drained += 1;
             if drained >= 256 {
@@ -159,6 +169,7 @@ impl Engine {
                 let mut dec = self.dec.lock().unwrap();
                 dec.decoders.remove(&peer_id);
                 dec.jitter.remove(&peer_id);
+                dec.last_seq.remove(&peer_id);
             }
             InboundOp::SetRemoteSdp {
                 peer_id,

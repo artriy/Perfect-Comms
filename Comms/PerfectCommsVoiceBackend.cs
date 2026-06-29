@@ -191,6 +191,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private volatile List<IceServer>? _pendingIceServers;
     private Task _voiceStartTask = Task.CompletedTask;
     private int _voiceColdStartRetries;
+    private int _voiceHeartbeatRestarts;
+    private long _voiceStartedAtTicks;
+    private const int VoiceHeartbeatRestartBudget = 3;
+    private static readonly TimeSpan VoiceStableThreshold = TimeSpan.FromSeconds(30);
     private readonly object _voiceSync = new();
     private Thread? _voicePump;
     private volatile bool _voicePumpRunning;
@@ -630,8 +634,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             sourceCount: _captureSlots.Length,
             restartInPlace: ApplyCaptureSwitch,
             switchTo: ApplyCaptureSwitch,
-            onAllFailed: reason => VoiceDiagnostics.Log("bcl.mic.capture-all-failed",
-                $"reason={reason} slot={_activeCaptureSlot} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine} hint=check-os-mic-permission"),
+            onAllFailed: reason => EnterVoiceUnavailable($"capture-all-failed reason={reason}"),
             restartBudget: restartBudget);
     }
 
@@ -654,13 +657,44 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 return;
             if (CaptureTransitionInFlight())
                 return;
-            VoiceDiagnostics.Log("bcl.voice", $"reason=heartbeat-lost detail={reason} restart=true");
+
+            // A session that stayed up past the stable threshold earned a fresh restart budget; a
+            // connect-then-die flap never does, so it can't respawn forever (was: unbounded restart).
+            long startedTicks = Interlocked.Read(ref _voiceStartedAtTicks);
+            if (startedTicks > 0 &&
+                DateTime.UtcNow - new DateTime(startedTicks, DateTimeKind.Utc) >= VoiceStableThreshold)
+                _voiceHeartbeatRestarts = 0;
+
+            if (_voiceHeartbeatRestarts >= VoiceHeartbeatRestartBudget)
+            {
+                StopVoiceSession("voice-unavailable");
+                _peerSession?.Reset();
+                _rpcKnownClients.Clear();
+                EnterVoiceUnavailable($"heartbeat-lost detail={reason} restarts-exhausted={_voiceHeartbeatRestarts}/{VoiceHeartbeatRestartBudget}");
+                return;
+            }
+
+            _voiceHeartbeatRestarts++;
+            VoiceDiagnostics.Log("bcl.voice", $"reason=heartbeat-lost detail={reason} restart={_voiceHeartbeatRestarts}/{VoiceHeartbeatRestartBudget}");
             StopVoiceSession("heartbeat-lost");
             EnsureVoiceSession("heartbeat-lost");
 
             _peerSession?.Reset();
             _rpcKnownClients.Clear();
         });
+    }
+
+    // Single chokepoint for "voice cannot run and there is no desktop fallback" (BASS removed in 4.0):
+    // always logs to the BepInEx log (not the debug-gated diagnostics file) and shows the user an
+    // on-screen banner, so a terminal failure is never silent.
+    private void EnterVoiceUnavailable(string detail)
+    {
+        VoiceChatPluginMain.Logger.LogWarning(
+            $"[VC] Voice unavailable: {detail}. No desktop fallback (BASS removed in 4.0). " +
+            $"slot={_activeCaptureSlot} device=\"{_lastMicDeviceName}\" wine={WineEnvironment.IsWine} " +
+            "hint=check OS mic permission / antivirus quarantine / helper extraction");
+        VoiceDiagnostics.Log("bcl.voice.unavailable", detail);
+        try { VoiceChatHudState.ShowToastThreadSafe("Voice unavailable - check mic permission"); } catch { }
     }
 
     private void EnsureVoiceSession(string reason)
@@ -742,11 +776,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 VoiceDiagnostics.Log("bcl.voice", $"ready=false reason={reason} error=\"sidecar voice start failed\"");
                 if (!_disposed && _voiceColdStartRetries++ < 2)
                     Task.Run(async () => { try { await Task.Delay(700); if (!_disposed) EnsureVoiceSession("voice-cold-retry"); } catch { } });
+                else if (!_disposed)
+                    EnterVoiceUnavailable($"cold-start-failed reason={reason} retries={_voiceColdStartRetries}");
             }
             return;
         }
 
         _voiceColdStartRetries = 0;
+        Interlocked.Exchange(ref _voiceStartedAtTicks, DateTime.UtcNow.Ticks);
         voice.SetDsp(_captureOptions.EchoCancellationEnabled, _autoMicGain, _captureOptions.NoiseSuppressionEnabled, true);
         voice.SetMicActive(!Mute && _microphoneReady && !_captureOptions.SyntheticMicToneEnabled);
         var pendingIce = _pendingIceServers;

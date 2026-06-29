@@ -92,7 +92,12 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-        run: cargo ndk -t arm64-v8a build --release
+        run: cargo ndk -t arm64-v8a -o ./jniLibs build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-android-arm64
+          path: native/pc-mobile/jniLibs/arm64-v8a/libpc_mobile.so
+          if-no-files-found: error
 
   linux:
     runs-on: ubuntu-latest

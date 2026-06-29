@@ -50,8 +50,8 @@ pub struct RtcEngine {
     peers: Mutex<HashMap<String, PeerHandle>>,
     ice_servers: Mutex<Vec<RTCIceServer>>,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: Sender<(String, Vec<u8>)>,
-    recv_rx: Mutex<Receiver<(String, Vec<u8>)>>,
+    recv_tx: Sender<(String, u16, Vec<u8>)>,
+    recv_rx: Mutex<Receiver<(String, u16, Vec<u8>)>>,
 
     pending_ice: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -89,7 +89,7 @@ async fn create_peer(
     offerer: bool,
     ice_servers: Vec<RTCIceServer>,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: Sender<(String, Vec<u8>)>,
+    recv_tx: Sender<(String, u16, Vec<u8>)>,
 ) -> Result<PeerHandle, webrtc::Error> {
     let api = build_api()?;
     let config = RTCConfiguration {
@@ -151,7 +151,11 @@ async fn create_peer(
             tokio::spawn(async move {
                 while let Ok((pkt, _attr)) = track.read_rtp().await {
                     if !pkt.payload.is_empty() {
-                        let _ = tx.send((pid.clone(), pkt.payload.to_vec()));
+                        let _ = tx.send((
+                            pid.clone(),
+                            pkt.header.sequence_number,
+                            pkt.payload.to_vec(),
+                        ));
                     }
                 }
             });
@@ -378,7 +382,7 @@ impl RtcEngine {
         });
     }
 
-    pub fn recv(&self) -> Option<(String, Vec<u8>)> {
+    pub fn recv(&self) -> Option<(String, u16, Vec<u8>)> {
         self.recv_rx.lock().unwrap().try_recv().ok()
     }
 
@@ -468,7 +472,7 @@ mod tests {
                 }
             }
             a.send_opus(&payload);
-            while let Some((_pid, pkt)) = b.recv() {
+            while let Some((_pid, _seq, pkt)) = b.recv() {
                 count += 1;
                 if received.is_none() {
                     received = Some(pkt);

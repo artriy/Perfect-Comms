@@ -31,36 +31,48 @@ def send_control(obj):
     b = json.dumps(obj).encode()
     s.sendall(bytes([0x01]) + struct.pack("<I", len(b)) + b)
 
+def recv_exact(n):
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            raise RuntimeError("helper closed the connection before sending a full frame "
+                               "(proto mismatch or early exit?)")
+        buf += chunk
+    return buf
+
 def recv_frame():
-    hdr = b""
-    while len(hdr) < 5:
-        hdr += s.recv(5 - len(hdr))
+    hdr = recv_exact(5)
     t, ln = hdr[0], struct.unpack("<I", hdr[1:5])[0]
-    body = b""
-    while len(body) < ln:
-        body += s.recv(ln - len(body))
-    return t, body
+    return t, recv_exact(ln)
 
-send_control({"op": "hello", "proto": 4, "token": "ci-token"})
-t, body = recv_frame()
-assert t == 0x01, "first reply not CONTROL"
-ready = json.loads(body)
-assert ready["op"] == "ready", ready
-assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
-
-send_control({"op": "start"})
-levels = 0
-while levels < 2:
+try:
+    send_control({"op": "hello", "proto": 5, "token": "ci-token"})
     t, body = recv_frame()
-    if t != 0x01:
-        continue
-    msg = json.loads(body)
-    if msg.get("op") != "level":
-        continue
-    assert "speaking" in msg, msg
-    levels += 1
+    assert t == 0x01, "first reply not CONTROL"
+    ready = json.loads(body)
+    assert ready["op"] == "ready", ready
+    assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
-proc.kill()
-os.remove(hs)
+    send_control({"op": "start"})
+    levels = 0
+    deadline2 = time.time() + 15
+    while levels < 2:
+        if time.time() > deadline2:
+            raise RuntimeError("did not receive 2 level frames within 15s")
+        t, body = recv_frame()
+        if t != 0x01:
+            continue
+        msg = json.loads(body)
+        if msg.get("op") != "level":
+            continue
+        assert "speaking" in msg, msg
+        levels += 1
+finally:
+    proc.kill()
+    try:
+        os.remove(hs)
+    except OSError:
+        pass
 print(f"SMOKE_OK {name}")
 PY

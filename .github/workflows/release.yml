@@ -46,6 +46,10 @@ jobs:
           cp dl/df-win-x86/df.x86.dll Libs/dsp/
           cp dl/df-linux-x64/libdf.so Libs/dsp/
           cp dl/df-mac/libdf.dylib Libs/dsp/
+      - name: Stage Android voice engine into Libs
+        run: |
+          mkdir -p Libs/pc-mobile
+          cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
       - name: Assemble BepInEx dependency bundle source
         run: bash scripts/fetch-bepinex.sh "${{ runner.temp }}/bepinex-deps"
       - name: Package (Release + dependencies)

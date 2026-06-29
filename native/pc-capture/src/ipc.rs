@@ -426,6 +426,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_out_spawn = out_spawn_ns.clone();
     let drain_handle = std::thread::spawn(move || {
         let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
+        let mut last_seq: HashMap<String, u16> = HashMap::new();
         let mut mixer = Mixer::new();
 
         let mut jitter = PeerJitter::new();
@@ -437,10 +438,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             while let Ok(id) = dec_remove_rx.try_recv() {
                 decoders.remove(&id);
                 jitter.remove(&id);
+                last_seq.remove(&id);
             }
 
             let mut drained = 0;
-            while let Some((peer, data)) = drain_rtc.recv() {
+            while let Some((peer, seq, data)) = drain_rtc.recv() {
                 if !decoders.contains_key(&peer) {
                     match OpusCodec::new() {
                         Ok(c) => {
@@ -449,11 +451,16 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         Err(_) => continue,
                     }
                 }
-                let codec = decoders.get_mut(&peer).unwrap();
-                let mut pcm = [0f32; crate::codec::FRAME_SIZE];
-                let n = codec.decode(&data, &mut pcm);
-                if n > 0 {
-                    jitter.push(&peer, pcm[..n].to_vec());
+                let last = last_seq.get(&peer).copied();
+                let (frames, advance) = {
+                    let codec = decoders.get_mut(&peer).unwrap();
+                    crate::codec::decode_with_concealment(codec, last, seq, &data)
+                };
+                for f in frames {
+                    jitter.push(&peer, f);
+                }
+                if advance {
+                    last_seq.insert(peer.clone(), seq);
                 }
                 drained += 1;
                 if drained >= 256 {

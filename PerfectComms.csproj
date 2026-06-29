@@ -116,7 +116,7 @@
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' == 'Android'">
-		<EmbeddedResource Include="Libs\pc-mobile\libpc_mobile.so" Condition="Exists('Libs\pc-mobile\libpc_mobile.so')">
+		<EmbeddedResource Include="Libs\pc-mobile\libpc_mobile.so" Condition="'$(Configuration)' == 'Android' And Exists('Libs\pc-mobile\libpc_mobile.so')">
 			<LogicalName>Lib.pc-mobile.libpc_mobile.so</LogicalName>
 		</EmbeddedResource>
 	</ItemGroup>
@@ -124,6 +124,11 @@
 	<Target Name="AssertHelperEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' != 'Android'">
 		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe') And !Exists('Libs\pc-capture\pc-capture-win-x86.exe') And !Exists('Libs\pc-capture\pc-capture-linux-x64') And !Exists('Libs\pc-capture\pc-capture-mac.zip')"
 			Text="No pc-capture helper found in Libs\pc-capture\. Desktop capture/playback is sidecar-only; run scripts/build-helpers.sh (or stage a prebuilt helper) before a non-Android build." />
+	</Target>
+
+	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' == 'Android'">
+		<Error Condition="!Exists('Libs\pc-mobile\libpc_mobile.so')"
+			Text="No pc-mobile engine found at Libs\pc-mobile\libpc_mobile.so. Android voice runs on the Rust core; build it (cd native/pc-mobile &amp;&amp; cargo ndk -t arm64-v8a -o ./jniLibs build --release, then copy jniLibs/arm64-v8a/libpc_mobile.so) or stage the prebuilt .so before an Android build. Shipping without it makes Android voice silently dead." />
 	</Target>
 
 	<ItemGroup>

@@ -88,6 +88,13 @@ public static class VoiceChatHudState
         _toastExpiry = Time.time + ToastDurationSeconds;
     }
 
+    // Time.time is main-thread-only, so off-thread callers (sidecar supervisor / voice worker
+    // threads) stash the message here; UpdateHud drains it into ShowToast on the main thread.
+    private static volatile string? _pendingToast;
+
+    internal static void ShowToastThreadSafe(string message)
+        => _pendingToast = message ?? "";
+
     internal static void Init()
     {
         if (_initialized) return;
@@ -285,6 +292,9 @@ public static class VoiceChatHudState
         var hud = HudManager.Instance;
         if (hud == null) return;
         if (PlayerControl.LocalPlayer == null) return;
+
+        var pendingToast = _pendingToast;
+        if (pendingToast != null) { _pendingToast = null; ShowToast(pendingToast); }
 
         long bTicks = VoiceFrameProfiler.Begin();
         EnsureHudButtons(hud);
