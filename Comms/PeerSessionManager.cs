@@ -120,6 +120,7 @@ internal sealed class PeerSessionManager
     private const long HelloResendIntervalMs = 3000;
     private const long HandshakeTimeoutMs = 12000;
     private const long ReinitThrottleMs = 3000;
+    private const long DisconnectedGraceMs = 8000;
 
     private sealed class PeerEntry
     {
@@ -130,6 +131,7 @@ internal sealed class PeerSessionManager
         public long LastHelloSentMs;
         public long LastProgressMs;
         public long LastReinitMs;
+        public long DegradedSinceMs;
     }
 
     private readonly int _localClientId;
@@ -186,6 +188,15 @@ internal sealed class PeerSessionManager
                 if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
                 Reinitiate(pair.Key, peer, nowMs);
             }
+            else if (peer.State == PeerState.Established && peer.DegradedSinceMs != 0)
+            {
+                // Backstop for a peer stuck in ICE "disconnected" that never escalates to "failed"
+                // (so OnPeerConnectionLost never fires): re-initiate after a grace period that lets
+                // transient blips self-heal. The reinit throttle below prevents re-offer storms.
+                if (nowMs - peer.DegradedSinceMs < DisconnectedGraceMs) continue;
+                if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                Reinitiate(pair.Key, peer, nowMs);
+            }
         }
     }
 
@@ -195,6 +206,7 @@ internal sealed class PeerSessionManager
         peer.State = PeerState.Established;
         peer.LastProgressMs = 0;
         peer.LastReinitMs = 0;
+        peer.DegradedSinceMs = 0;
     }
 
     public void OnPeerConnectionLost(int clientId, long nowMs = 0)
@@ -204,9 +216,19 @@ internal sealed class PeerSessionManager
         Reinitiate(clientId, peer, nowMs);
     }
 
+    // ICE reported "disconnected" (a transient/soft drop, not "failed"). Mark when it began so
+    // Tick can re-initiate if it does not recover within the grace period.
+    public void OnPeerConnectionDegraded(int clientId, long nowMs = 0)
+    {
+        if (!_peers.TryGetValue(clientId, out var peer)) return;
+        if (peer.State == PeerState.Established && peer.DegradedSinceMs == 0)
+            peer.DegradedSinceMs = nowMs;
+    }
+
     private void Reinitiate(int clientId, PeerEntry peer, long nowMs)
     {
         peer.LastReinitMs = nowMs;
+        peer.DegradedSinceMs = 0;
         if (peer.Added)
         {
             _transport.RemovePeer(clientId);

@@ -783,8 +783,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (state == "connected")
                 _peerSession.OnPeerConnected(clientId);
             else if (state is "failed" or "closed")
-
                 _peerSession.OnPeerConnectionLost(clientId, nowMs);
+            else if (state == "disconnected")
+                _peerSession.OnPeerConnectionDegraded(clientId, nowMs);
         });
     }
 
