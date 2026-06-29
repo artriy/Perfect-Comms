@@ -10,7 +10,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class SidecarVoiceClient : IDisposable
 {
-    public const int Proto = 4;
+    public const int Proto = 5;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
 
@@ -232,17 +232,12 @@ internal sealed class SidecarVoiceClient : IDisposable
     }
 
     public void SendGameState(
-        float lx,
-        float ly,
-        float facing,
         bool deaf,
         float master,
-        float maxDistance,
-        int falloff,
         IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
     {
         if (!_running) return;
-        try { Write(SidecarProtocol.GameStateFrame(lx, ly, facing, deaf, master, maxDistance, falloff, peers)); }
+        try { Write(SidecarProtocol.GameStateFrame(deaf, master, peers)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "game-state write failed: " + ex.Message); }
     }
 

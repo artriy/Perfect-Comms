@@ -106,42 +106,25 @@ internal static class SidecarProtocol
         return EncodeFrame(TypeControl, stream.ToArray());
     }
 
-    public const uint RoleForceAudible = 1u;
-
     public readonly struct GameStatePeerInput
     {
         public readonly string Id;
-        public readonly float X;
-        public readonly float Y;
-        public readonly bool Muted;
-        public readonly float Volume;
-        public readonly uint Roles;
-
+        public readonly float Gain;
+        public readonly float Pan;
         public readonly int Mode;
 
-        public readonly float Nvol;
-
-        public GameStatePeerInput(string id, float x, float y, bool muted, float volume, uint roles, int mode, float nvol)
+        public GameStatePeerInput(string id, float gain, float pan, int mode)
         {
             Id = id;
-            X = x;
-            Y = y;
-            Muted = muted;
-            Volume = volume;
-            Roles = roles;
+            Gain = gain;
+            Pan = pan;
             Mode = mode;
-            Nvol = nvol;
         }
     }
 
     public static byte[] GameStateFrame(
-        float lx,
-        float ly,
-        float facing,
         bool deaf,
         float master,
-        float maxDistance,
-        int falloff,
         IReadOnlyList<GameStatePeerInput> peers)
     {
         using var stream = new System.IO.MemoryStream();
@@ -149,26 +132,17 @@ internal static class SidecarProtocol
         {
             w.WriteStartObject();
             w.WriteString("op", "game-state");
-            w.WriteNumber("lx", lx);
-            w.WriteNumber("ly", ly);
-            w.WriteNumber("facing", facing);
             w.WriteBoolean("deaf", deaf);
             w.WriteNumber("master", master);
-            w.WriteNumber("maxd", maxDistance);
-            w.WriteNumber("falloff", falloff);
             w.WriteStartArray("peers");
             for (int i = 0; i < peers.Count; i++)
             {
                 var p = peers[i];
                 w.WriteStartObject();
                 w.WriteString("id", p.Id);
-                w.WriteNumber("x", p.X);
-                w.WriteNumber("y", p.Y);
-                w.WriteBoolean("muted", p.Muted);
-                w.WriteNumber("vol", p.Volume);
-                w.WriteNumber("roles", p.Roles);
+                w.WriteNumber("gain", p.Gain);
+                w.WriteNumber("pan", p.Pan);
                 w.WriteNumber("mode", p.Mode);
-                w.WriteNumber("nvol", p.Nvol);
                 w.WriteEndObject();
             }
             w.WriteEndArray();

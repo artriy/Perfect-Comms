@@ -9,7 +9,7 @@ stdin token auth) to the PerfectComms BepInEx mod.
 
 Also runs DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus
 encode/decode, and the WebRTC (webrtc-rs) peer transport with proximity mixing,
-so mic, peer audio, and playback all live in this helper. Protocol version 4.
+so mic, peer audio, and playback all live in this helper. Protocol version 5.
 
 ## Run
 

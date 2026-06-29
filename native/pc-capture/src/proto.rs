@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 4;
+pub const PROTO_VERSION: u32 = 5;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -253,14 +253,8 @@ pub enum InboundOp {
     SetIceServers { servers: Vec<IceServer> },
     #[serde(rename = "game-state")]
     GameState {
-        lx: f32,
-        ly: f32,
-        #[serde(default)]
-        facing: f32,
         deaf: bool,
         master: f32,
-        maxd: f32,
-        falloff: i32,
         peers: Vec<GameStatePeer>,
     },
 }
@@ -268,24 +262,12 @@ pub enum InboundOp {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameStatePeer {
     pub id: String,
-    pub x: f32,
-    pub y: f32,
     #[serde(default)]
-    pub muted: bool,
-    #[serde(default = "default_peer_volume")]
-    pub vol: f32,
+    pub gain: f32,
     #[serde(default)]
-    pub roles: u32,
-
+    pub pan: f32,
     #[serde(default)]
     pub mode: i32,
-
-    #[serde(default = "default_peer_volume")]
-    pub nvol: f32,
-}
-
-fn default_peer_volume() -> f32 {
-    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -456,7 +438,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 4);
+        assert_eq!(PROTO_VERSION, 5);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -556,32 +538,22 @@ mod tests {
 
     #[test]
     fn parse_game_state_op() {
-        let json = r#"{"op":"game-state","lx":1.5,"ly":-2.0,"facing":0.0,"deaf":false,"master":1.0,"maxd":6.0,"falloff":1,"peers":[{"id":"sock1","x":3.0,"y":0.0,"muted":false,"vol":1.0,"roles":0},{"id":"sock2","x":-4.0,"y":2.0,"muted":true,"vol":0.5,"roles":7}]}"#;
+        let json = r#"{"op":"game-state","deaf":false,"master":1.0,"peers":[{"id":"sock1","gain":1.0,"pan":0.0,"mode":0},{"id":"sock2","gain":0.5,"pan":-0.7,"mode":2}]}"#;
         match parse_inbound(json).unwrap() {
             InboundOp::GameState {
-                lx,
-                ly,
                 deaf,
                 master,
-                maxd,
-                falloff,
                 peers,
-                ..
             } => {
-                assert_eq!(lx, 1.5);
-                assert_eq!(ly, -2.0);
                 assert!(!deaf);
                 assert_eq!(master, 1.0);
-                assert_eq!(maxd, 6.0);
-                assert_eq!(falloff, 1);
                 assert_eq!(peers.len(), 2);
                 assert_eq!(peers[0].id, "sock1");
-                assert_eq!(peers[0].x, 3.0);
-                assert!(!peers[0].muted);
+                assert_eq!(peers[0].gain, 1.0);
                 assert_eq!(peers[1].id, "sock2");
-                assert!(peers[1].muted);
-                assert_eq!(peers[1].vol, 0.5);
-                assert_eq!(peers[1].roles, 7);
+                assert_eq!(peers[1].gain, 0.5);
+                assert_eq!(peers[1].pan, -0.7);
+                assert_eq!(peers[1].mode, 2);
             }
             other => panic!("expected game-state, got {other:?}"),
         }
@@ -589,15 +561,12 @@ mod tests {
 
     #[test]
     fn parse_game_state_peer_defaults() {
-        let json = r#"{"op":"game-state","lx":0.0,"ly":0.0,"deaf":true,"master":1.0,"maxd":6.0,"falloff":0,"peers":[{"id":"s","x":1.0,"y":1.0}]}"#;
+        let json = r#"{"op":"game-state","deaf":true,"master":1.0,"peers":[{"id":"s"}]}"#;
         match parse_inbound(json).unwrap() {
             InboundOp::GameState { peers, deaf, .. } => {
                 assert!(deaf);
-                assert_eq!(peers[0].vol, 1.0);
-                assert!(!peers[0].muted);
-                assert_eq!(peers[0].roles, 0);
-
-                assert_eq!(peers[0].nvol, 1.0);
+                assert_eq!(peers[0].gain, 0.0);
+                assert_eq!(peers[0].pan, 0.0);
                 assert_eq!(peers[0].mode, 0);
             }
             other => panic!("expected game-state, got {other:?}"),
@@ -794,7 +763,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 4);
+        assert_eq!(v["proto"], 5);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

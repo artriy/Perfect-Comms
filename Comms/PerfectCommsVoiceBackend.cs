@@ -1607,7 +1607,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var resumeFrame = IsResumeFrame(frameGapTicks, ResumeFrameThreshold.Ticks);
         List<SidecarProtocol.GameStatePeerInput>? helperGameStatePeers = null;
 #if WINDOWS
-        if (_voice != null && listenerPos.HasValue)
+        if (_voice != null)
             helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
 #endif
         foreach (var peer in _updatePeerScratch)
@@ -1643,16 +1643,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
             peer.Apply(result);
-            if (helperGameStatePeers != null && target.HasValue && peer.ClientId >= 0)
+            if (helperGameStatePeers != null && peer.ClientId >= 0)
             {
-
-                var roles = result.RadioVolume > 0f ? SidecarProtocol.RoleForceAudible : 0u;
-
-                float nvol = (result.GhostVolume > 0f || result.RadioVolume > 0f) ? 1f : result.WallCoefficient;
-
+                float gain = result.Audible
+                    ? Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f) * peer.ClientVolume
+                    : 0f;
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
-                    peer.ClientId.ToString(CultureInfo.InvariantCulture), target.Value.Position.x, target.Value.Position.y,
-                    !result.Audible, peer.ClientVolume, roles, (int)result.FilterMode, nvol));
+                    peer.ClientId.ToString(CultureInfo.InvariantCulture),
+                    gain, result.Pan, (int)result.FilterMode));
             }
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
 
@@ -1667,12 +1665,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
 
 #if WINDOWS
-        if (helperGameStatePeers != null && listenerPos.HasValue)
+        if (helperGameStatePeers != null)
         {
-            var lp = listenerPos.Value;
-            var rs = VoiceRoomSettingsState.Current;
-            _voice?.SendGameState(lp.x, lp.y, 0f, VoiceChatHudState.IsSpeakerMuted,
-                _masterVolume, rs.MaxChatDistance, rs.FalloffMode, helperGameStatePeers);
+            _voice?.SendGameState(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
         }
 #endif
 

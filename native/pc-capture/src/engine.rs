@@ -1,7 +1,7 @@
 use crate::codec::{OpusCodec, FRAME_SIZE};
 use crate::dsp::{Dsp, DspConfig};
 use crate::gamestate::{GameState, LocalState, PeerState};
-use crate::mix::{FalloffMode, Mixer, PeerJitter};
+use crate::mix::{Mixer, PeerJitter};
 use crate::proto::{
     local_candidate_json, local_sdp_json, parse_inbound, peer_state_json, InboundOp,
 };
@@ -102,9 +102,6 @@ impl Engine {
         if round.is_empty() {
             return 0;
         }
-        let snap = self.gs.snapshot();
-        state.mixer.set_master(snap.master);
-        state.mixer.set_deafened(snap.local.deafened);
         let per_peer: Vec<(String, &[f32])> = round
             .iter()
             .map(|(k, v)| (k.clone(), v.as_slice()))
@@ -178,45 +175,25 @@ impl Engine {
                     .set(DspConfig { aec, agc, ns, hpf })
             }
             InboundOp::GameState {
-                lx,
-                ly,
-                facing,
                 deaf,
                 master,
-                maxd,
-                falloff,
                 peers,
             } => {
-                let local = LocalState {
-                    x: lx,
-                    y: ly,
-                    facing,
-                    deafened: deaf,
-                };
+                let local = LocalState { deafened: deaf };
                 let peer_states: Vec<(String, PeerState)> = peers
                     .into_iter()
                     .map(|p| {
                         (
                             p.id,
                             PeerState {
-                                x: p.x,
-                                y: p.y,
-                                muted: p.muted,
-                                volume: p.vol,
-                                role_flags: p.roles,
+                                gain: p.gain,
+                                pan: p.pan,
                                 mode: p.mode,
-                                nvol: p.nvol,
                             },
                         )
                     })
                     .collect();
-                self.gs.apply(
-                    local,
-                    master,
-                    maxd,
-                    FalloffMode::from_i32(falloff),
-                    peer_states,
-                );
+                self.gs.apply(local, master, peer_states);
             }
             InboundOp::Hello { .. }
             | InboundOp::SelectDevice { .. }

@@ -4,7 +4,7 @@ use crate::audio::{
 };
 use crate::codec::OpusCodec;
 use crate::gamestate::{GameState, LocalState, PeerState};
-use crate::mix::{FalloffMode, Mixer, PeerJitter};
+use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
     devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
@@ -468,9 +468,6 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
             let round = jitter.playout_round();
             if !round.is_empty() {
-                let snap = drain_gs.snapshot();
-                mixer.set_master(snap.master);
-                mixer.set_deafened(snap.local.deafened);
                 let per_peer: Vec<(String, &[f32])> = round
                     .iter()
                     .map(|(k, v)| (k.clone(), v.as_slice()))
@@ -644,45 +641,25 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         let _ = rtc_op_tx.send(RtcOp::SetIceServers { servers });
                     }
                     InboundOp::GameState {
-                        lx,
-                        ly,
-                        facing,
                         deaf,
                         master,
-                        maxd,
-                        falloff,
                         peers,
                     } => {
-                        let local = LocalState {
-                            x: lx,
-                            y: ly,
-                            facing,
-                            deafened: deaf,
-                        };
+                        let local = LocalState { deafened: deaf };
                         let peer_states: Vec<(String, PeerState)> = peers
                             .into_iter()
                             .map(|p| {
                                 (
                                     p.id,
                                     PeerState {
-                                        x: p.x,
-                                        y: p.y,
-                                        muted: p.muted,
-                                        volume: p.vol,
-                                        role_flags: p.roles,
+                                        gain: p.gain,
+                                        pan: p.pan,
                                         mode: p.mode,
-                                        nvol: p.nvol,
                                     },
                                 )
                             })
                             .collect();
-                        game_state.apply(
-                            local,
-                            master,
-                            maxd,
-                            FalloffMode::from_i32(falloff),
-                            peer_states,
-                        );
+                        game_state.apply(local, master, peer_states);
                     }
                     InboundOp::Hello { .. } => {}
                 }
@@ -816,13 +793,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":4,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":5,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":4,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":5,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -866,7 +843,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":4,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":5,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -875,7 +852,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 4);
+                assert_eq!(v["proto"], 5);
                 assert_eq!(v["format"]["rate"], 48_000);
             }
             other => panic!("expected ready, got {other:?}"),
@@ -949,7 +926,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":4,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":5,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -1019,7 +996,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":4,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":5,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());
