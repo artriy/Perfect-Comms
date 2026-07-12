@@ -1,8 +1,8 @@
 # pc-capture: build, sign, ship
 
-Capture, playback, DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus codec, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 5.
+Capture, playback, DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus codec, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 7.
 
-The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through the existing `NativeLibraryCache.Extract` path (the same mechanism the embedded `opus.x64.dll` uses). Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If no helper resource is present for the running target, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged via `bcl.voice`); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android is unaffected (it uses the Unity Microphone/AudioSource path, not the sidecar).
+The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through the existing `NativeLibraryCache.Extract` path (the same mechanism the embedded `opus.x64.dll` uses). Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If no helper resource is present for the running target, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged via `bcl.voice`); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android intentionally captures and plays through Unity while `pc-mobile` owns Opus, WebRTC, and mixing. Desktop APM/DeepFilter DSP is disabled on Android by design.
 
 ## Targets
 
@@ -75,4 +75,4 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 5` (the `Proto` constant in `SidecarVoiceClient`). The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 7` (the `Proto` constant in `SidecarVoiceClient`). Protocol 7 adds restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of protocol 6's per-peer relay-only ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.

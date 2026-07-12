@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-helper="${1:?usage: ci-smoke-helper.sh <helper-binary>}"
+helper="${1:?usage: ci-smoke-helper.sh <helper-binary> [--require-dsp]}"
+require_dsp="${2:-}"
 name="$(basename "$helper")"
 hs="$(mktemp -u)-pc-smoke.json"
 rm -f "$hs"
 
-python3 - "$helper" "$hs" "$name" <<'PY'
+if python3 -c 'import sys' >/dev/null 2>&1; then
+  python_cmd=python3
+elif python -c 'import sys' >/dev/null 2>&1; then
+  python_cmd=python
+else
+  echo "Python 3 is required for the helper smoke" >&2
+  exit 1
+fi
+
+"$python_cmd" - "$helper" "$hs" "$name" "$require_dsp" <<'PY'
 import json, socket, struct, subprocess, sys, time, os
 
-helper, hs, name = sys.argv[1], sys.argv[2], sys.argv[3]
+helper, hs, name, require_dsp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 proc = subprocess.Popen([helper, "--synthetic-tone", "--handshake", hs],
-                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=False)
 proc.stdin.write(b"ci-token\n"); proc.stdin.flush()
 
 deadline = time.time() + 15
@@ -47,13 +58,16 @@ def recv_frame():
     return t, recv_exact(ln)
 
 try:
-    send_control({"op": "hello", "proto": 5, "token": "ci-token"})
+    send_control({"op": "hello", "proto": 7, "token": "ci-token"})
     t, body = recv_frame()
     assert t == 0x01, "first reply not CONTROL"
     ready = json.loads(body)
     assert ready["op"] == "ready", ready
     assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
+    send_control({"op": "set-dsp", "aec": True, "agc": True, "ns": True, "hpf": True})
+    send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01})
+    send_control({"op": "set-synthetic", "enabled": True})
     send_control({"op": "start"})
     levels = 0
     deadline2 = time.time() + 15
@@ -70,9 +84,14 @@ try:
         levels += 1
 finally:
     proc.kill()
+    _, stderr = proc.communicate(timeout=5)
     try:
         os.remove(hs)
     except OSError:
         pass
+if require_dsp == "--require-dsp":
+    log = stderr.decode("utf-8", errors="replace")
+    assert "dsp set aec/agc/hpf=true ns=true" in log, \
+        "final helper bundle could not load both DSP libraries:\n" + log
 print(f"SMOKE_OK {name}")
 PY

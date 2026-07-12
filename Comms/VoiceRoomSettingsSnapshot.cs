@@ -92,7 +92,9 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         var s = VoiceChatGameOptions.GetInstance();
         var role = VoiceRoleIntegrationOptions.GetInstance();
         var local = VoiceSettings.Instance;
-        var backend = (VoiceTransportBackend)s.VoiceBackend.Value;
+        var backend = VoiceEndpointSettings.InterstellarEnabled
+            ? (VoiceTransportBackend)s.VoiceBackend.Value
+            : VoiceTransportBackend.BetterCrewLink;
         var endpoint = VoiceEndpointSettings.Resolve(
             backend,
             local?.BetterCrewLinkServerUrl.Value,

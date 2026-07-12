@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::gamestate::GameState;
 
@@ -443,10 +444,24 @@ impl Mixer {
 
 pub const JITTER_PRIME_FRAMES: usize = 2;
 pub const JITTER_CAP_FRAMES: usize = 12;
+const JITTER_FRAME_DURATION: Duration = Duration::from_millis(20);
+const JITTER_TALKSPURT_RESET: Duration = Duration::from_millis(250);
+const JITTER_UNDERRUN_REBUFFER: Duration = Duration::from_millis(40);
+const JITTER_SAME_DRAIN_THRESHOLD: Duration = Duration::from_millis(2);
+const JITTER_EWMA_GAIN: f64 = 1.0 / 16.0;
+const JITTER_TARGET_GAIN: f64 = 2.5;
+const JITTER_STABLE_ARRIVALS_TO_DECAY: usize = 250;
+const JITTER_QUIET_PEAK: f32 = 0.003;
+const JITTER_QUIET_RMS: f32 = 0.001;
 
 struct PeerQueue {
     frames: VecDeque<Vec<f32>>,
     primed: bool,
+    target: usize,
+    last_arrival: Option<Instant>,
+    jitter_frames: f64,
+    stable_arrivals: usize,
+    shed_quiet_frame: bool,
 }
 
 pub struct PeerJitter {
@@ -476,17 +491,92 @@ impl PeerJitter {
     }
 
     pub fn push(&mut self, peer: &str, frame: Vec<f32>) {
+        self.push_at(peer, frame, Instant::now());
+    }
+
+    fn push_at(&mut self, peer: &str, frame: Vec<f32>, now: Instant) {
+        let base_prime = self.prime;
+        let cap = self.cap;
         let q = self
             .peers
             .entry(peer.to_string())
             .or_insert_with(|| PeerQueue {
                 frames: VecDeque::new(),
                 primed: false,
+                target: base_prime,
+                last_arrival: None,
+                jitter_frames: 0.0,
+                stable_arrivals: 0,
+                shed_quiet_frame: false,
             });
-        if q.frames.len() >= self.cap {
+
+        let interval = q
+            .last_arrival
+            .map(|previous| now.saturating_duration_since(previous));
+        let was_empty = q.frames.is_empty();
+        Self::observe_arrival(q, now, base_prime, cap);
+
+        // A long transport stall or a measured empty-queue underrun starts a new playout
+        // generation. The quiet-frame hold in playout_round grows a live buffer without freezing
+        // speech; this reset is the fallback when no quiet audio is available.
+        if interval.is_some_and(|elapsed| elapsed >= JITTER_TALKSPURT_RESET) {
+            q.frames.clear();
+            q.primed = false;
+            q.shed_quiet_frame = false;
+        } else if q.primed
+            && was_empty
+            && interval.is_some_and(|elapsed| elapsed >= JITTER_UNDERRUN_REBUFFER)
+        {
+            q.primed = false;
+        }
+        if q.frames.len() >= cap {
             q.frames.pop_front();
         }
         q.frames.push_back(frame);
+    }
+
+    fn observe_arrival(q: &mut PeerQueue, now: Instant, base_prime: usize, cap: usize) {
+        let Some(previous) = q.last_arrival else {
+            q.last_arrival = Some(now);
+            return;
+        };
+        let interval = now.saturating_duration_since(previous);
+
+        // A decoder drain may enqueue PLC/FEC plus the live frame back-to-back. Those are one
+        // network arrival, not zero-millisecond packet jitter, so leave the timestamp anchored
+        // to the first frame in the drain. Likewise, a long mute/talkspurt gap starts a fresh
+        // measurement instead of permanently increasing the next utterance's latency.
+        if interval <= JITTER_SAME_DRAIN_THRESHOLD {
+            return;
+        }
+        q.last_arrival = Some(now);
+        if interval >= JITTER_TALKSPURT_RESET {
+            q.stable_arrivals = 0;
+            return;
+        }
+
+        let interval_frames = interval.as_secs_f64() / JITTER_FRAME_DURATION.as_secs_f64();
+        let deviation = (interval_frames - 1.0).abs();
+        q.jitter_frames += (deviation - q.jitter_frames) * JITTER_EWMA_GAIN;
+
+        let extra = (q.jitter_frames * JITTER_TARGET_GAIN).round() as usize;
+        let desired = base_prime.saturating_add(extra).clamp(base_prime, cap);
+        if desired > q.target {
+            // React quickly to a worsening route, but recover latency slowly so a short calm
+            // window does not make a still-jittery peer oscillate between depths.
+            q.target = desired;
+            q.stable_arrivals = 0;
+            q.shed_quiet_frame = false;
+        } else if desired < q.target {
+            q.stable_arrivals += 1;
+            if q.stable_arrivals >= JITTER_STABLE_ARRIVALS_TO_DECAY {
+                q.target -= 1;
+                q.stable_arrivals = 0;
+                q.shed_quiet_frame = true;
+            }
+        } else {
+            q.stable_arrivals = 0;
+        }
     }
 
     pub fn remove(&mut self, peer: &str) {
@@ -494,15 +584,31 @@ impl PeerJitter {
     }
 
     pub fn playout_round(&mut self) -> Vec<(String, Vec<f32>)> {
-        let prime = self.prime;
         let mut out = Vec::new();
         for (peer, q) in self.peers.iter_mut() {
             if !q.primed {
-                if q.frames.len() >= prime {
+                if q.frames.len() >= q.target {
                     q.primed = true;
                 } else {
                     continue;
                 }
+            }
+
+            // Adapt an already-playing stream without clipping words. If the route needs more
+            // cushion, hold only decoded near-silence for one round so the queue can grow. When
+            // the target later falls, discard at most one quiet surplus frame to shed latency.
+            // Voiced frames are never held or dropped; they wait for a real underrun boundary.
+            if q.frames.len() < q.target
+                && q.frames.front().is_some_and(|frame| is_quiet_frame(frame))
+            {
+                continue;
+            }
+            if q.shed_quiet_frame
+                && q.frames.len() > q.target
+                && q.frames.front().is_some_and(|frame| is_quiet_frame(frame))
+            {
+                q.frames.pop_front();
+                q.shed_quiet_frame = false;
             }
             match q.frames.pop_front() {
                 Some(frame) => out.push((peer.clone(), frame)),
@@ -515,6 +621,30 @@ impl PeerJitter {
     pub fn is_idle(&self) -> bool {
         self.peers.values().all(|q| q.frames.is_empty())
     }
+
+    #[cfg(test)]
+    fn target_for(&self, peer: &str) -> Option<usize> {
+        self.peers.get(peer).map(|q| q.target)
+    }
+
+    #[cfg(test)]
+    fn primed_for(&self, peer: &str) -> Option<bool> {
+        self.peers.get(peer).map(|q| q.primed)
+    }
+}
+
+fn is_quiet_frame(frame: &[f32]) -> bool {
+    if frame.is_empty() {
+        return true;
+    }
+    let mut peak = 0.0f32;
+    let mut squares = 0.0f64;
+    for &sample in frame {
+        peak = peak.max(sample.abs());
+        squares += f64::from(sample) * f64::from(sample);
+    }
+    let rms = (squares / frame.len() as f64).sqrt() as f32;
+    peak <= JITTER_QUIET_PEAK && rms <= JITTER_QUIET_RMS
 }
 
 #[cfg(test)]
@@ -568,6 +698,116 @@ mod tests {
         assert!(jb.playout_round().is_empty(), "below prime: no playout yet");
         jb.push("a", vec![2.0]);
         assert_eq!(jb.playout_round().len(), 1, "reached prime: playout starts");
+    }
+
+    #[test]
+    fn jitter_adapts_per_peer_to_sustained_arrival_variance() {
+        let mut jb = PeerJitter::with_limits(2, 12);
+        let start = Instant::now();
+        jb.push_at("steady", vec![0.0], start);
+        jb.push_at("jittery", vec![0.0], start);
+
+        let mut steady_at = start;
+        let mut jittery_at = start;
+        for i in 0..24 {
+            steady_at += Duration::from_millis(20);
+            jb.push_at("steady", vec![0.0], steady_at);
+
+            // Alternating 10/50 ms delivery preserves the average rate but has enough sustained
+            // variance to need more than the healthy peer's 40 ms starting cushion.
+            jittery_at += if i % 2 == 0 {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(50)
+            };
+            jb.push_at("jittery", vec![0.0], jittery_at);
+        }
+
+        assert_eq!(jb.target_for("steady"), Some(2));
+        assert!(jb.target_for("jittery").unwrap() > 2);
+    }
+
+    #[test]
+    fn jitter_ignores_decoder_batches_and_long_talkspurt_gaps() {
+        let mut jb = PeerJitter::with_limits(2, 12);
+        let start = Instant::now();
+        jb.push_at("a", vec![0.0], start);
+        jb.push_at("a", vec![0.0], start + Duration::from_micros(100));
+        jb.push_at("a", vec![0.0], start + Duration::from_secs(2));
+        assert_eq!(jb.target_for("a"), Some(2));
+    }
+
+    #[test]
+    fn new_talkspurt_reprimes_instead_of_bypassing_the_target() {
+        let mut jb = PeerJitter::with_limits(2, 12);
+        let start = Instant::now();
+        jb.push_at("a", vec![1.0], start);
+        jb.push_at("a", vec![1.0], start + Duration::from_millis(20));
+        assert_eq!(jb.playout_round().len(), 1);
+        assert_eq!(jb.playout_round().len(), 1);
+        assert_eq!(jb.primed_for("a"), Some(true));
+
+        jb.push_at("a", vec![2.0], start + Duration::from_secs(1));
+        assert_eq!(jb.primed_for("a"), Some(false));
+        assert!(
+            jb.playout_round().is_empty(),
+            "one new frame must not bypass reprime"
+        );
+        jb.push_at("a", vec![2.0], start + Duration::from_millis(1020));
+        assert_eq!(jb.playout_round().len(), 1);
+    }
+
+    #[test]
+    fn adaptive_growth_holds_only_quiet_frames_and_keeps_other_peers_playing() {
+        let mut jb = PeerJitter::with_limits(2, 12);
+        let start = Instant::now();
+        for peer in ["quiet", "voice"] {
+            jb.push_at(peer, vec![0.0], start);
+            jb.push_at(peer, vec![0.0], start + Duration::from_millis(20));
+        }
+        assert_eq!(jb.playout_round().len(), 2);
+
+        let quiet = jb.peers.get_mut("quiet").unwrap();
+        quiet.target = 3;
+        quiet.frames.push_back(vec![0.0]);
+        let voice = jb.peers.get_mut("voice").unwrap();
+        voice.target = 3;
+        voice.frames.clear();
+        voice.frames.push_back(vec![0.25]);
+
+        let round = jb.playout_round();
+        assert_eq!(
+            round.len(),
+            1,
+            "quiet peer holds while the voiced peer keeps playing"
+        );
+        assert_eq!(round[0].0, "voice");
+        assert_eq!(jb.peers["quiet"].frames.len(), 2);
+        assert!(jb.peers["voice"].frames.is_empty());
+    }
+
+    #[test]
+    fn jitter_depth_decays_after_a_sustained_stable_route() {
+        let mut jb = PeerJitter::with_limits(2, 12);
+        let start = Instant::now();
+        jb.push_at("a", vec![0.0], start);
+        let mut at = start;
+        for i in 0..24 {
+            at += if i % 2 == 0 {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(50)
+            };
+            jb.push_at("a", vec![0.0], at);
+        }
+        let raised = jb.target_for("a").unwrap();
+        assert!(raised > 2);
+
+        for _ in 0..800 {
+            at += Duration::from_millis(20);
+            jb.push_at("a", vec![0.0], at);
+        }
+        assert!(jb.target_for("a").unwrap() < raised);
     }
 
     #[test]

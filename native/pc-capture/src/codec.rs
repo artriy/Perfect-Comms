@@ -88,9 +88,9 @@ impl OpusCodec {
 
 // Decode `data` (RTP payload with sequence number `seq`) against the peer's last in-order seq,
 // emitting concealment frames for any gap: older losses via PLC, the frame immediately before
-// `data` via this packet's in-band FEC, then the packet itself. Returns the frames to enqueue in
-// playout order plus whether `last_seq` should advance to `seq` (false for out-of-order/duplicate
-// packets, so a late arrival can't rewind the gap tracking).
+// `data` via this packet's in-band FEC, then the packet itself. Late and duplicate RTP is dropped:
+// its playout slot has already been concealed, and decoding it would both repeat old speech and
+// corrupt the stateful Opus decoder's forward timeline.
 pub fn decode_with_concealment(
     codec: &mut OpusCodec,
     last: Option<u16>,
@@ -111,10 +111,6 @@ pub fn decode_with_concealment(
     };
     let delta = seq.wrapping_sub(last) as i16;
     if delta <= 0 {
-        let n = codec.decode(data, &mut pcm);
-        if n > 0 {
-            frames.push(pcm[..n].to_vec());
-        }
         return (frames, false);
     }
     let lost = (delta - 1) as usize;
@@ -208,14 +204,18 @@ mod tests {
         assert_eq!(f.len(), 3, "two-packet gap must conceal then play");
         assert!(adv);
 
-        // Out-of-order / duplicate (seq <= last): one frame, do NOT advance last_seq.
+        // Out-of-order / duplicate (seq <= last): its slot was already concealed, so drop it.
         let (f, adv) = decode_with_concealment(&mut codec, Some(104), 102, &pkt);
-        assert_eq!(f.len(), 1);
+        assert!(f.is_empty());
         assert!(!adv, "late packet must not rewind gap tracking");
 
         // Huge gap beyond the cap: treat as restart, no concealment flood (just the live frame).
         let (f, adv) = decode_with_concealment(&mut codec, Some(104), 1000, &pkt);
-        assert_eq!(f.len(), 1, "oversized gap is a restart, not a conceal flood");
+        assert_eq!(
+            f.len(),
+            1,
+            "oversized gap is a restart, not a conceal flood"
+        );
         assert!(adv);
     }
 }

@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 5;
+pub const PROTO_VERSION: u32 = 7;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -152,6 +152,10 @@ impl AudioRing {
         self.queue.pop_front()
     }
 
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.queue.len()
@@ -233,11 +237,18 @@ pub enum InboundOp {
         ns: bool,
         hpf: bool,
     },
+    #[serde(rename = "set-synthetic")]
+    SetSynthetic { enabled: bool },
+    #[serde(rename = "set-input")]
+    SetInput { gain: f32, vad_threshold: f32 },
     #[serde(rename = "peer-add")]
     PeerAdd {
         peer_id: String,
         #[serde(default = "default_true")]
         offerer: bool,
+        #[serde(default)]
+        relay_only: bool,
+        generation: u32,
     },
     #[serde(rename = "peer-remove")]
     PeerRemove { peer_id: String },
@@ -322,6 +333,18 @@ struct LevelMsg {
     speaking: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PeerLevel {
+    pub peer_id: String,
+    pub peak: f32,
+}
+
+#[derive(Serialize)]
+struct PeerLevelsMsg<'a> {
+    op: &'static str,
+    levels: &'a [PeerLevel],
+}
+
 #[derive(Serialize)]
 struct ErrorMsg<'a> {
     op: &'static str,
@@ -369,6 +392,14 @@ pub fn level_json(peak: f32, speaking: bool) -> String {
     .expect("level serialize")
 }
 
+pub fn peer_levels_json(levels: &[PeerLevel]) -> String {
+    serde_json::to_string(&PeerLevelsMsg {
+        op: "peer-levels",
+        levels,
+    })
+    .expect("peer-levels serialize")
+}
+
 pub fn error_json(code: &str, msg: &str) -> String {
     serde_json::to_string(&ErrorMsg {
         op: "error",
@@ -386,6 +417,7 @@ pub fn pong_json(cap_ts: u64) -> String {
 struct LocalSdpMsg<'a> {
     op: &'static str,
     peer_id: &'a str,
+    generation: u32,
     sdp_type: &'a str,
     sdp: &'a str,
 }
@@ -394,6 +426,7 @@ struct LocalSdpMsg<'a> {
 struct LocalCandidateMsg<'a> {
     op: &'static str,
     peer_id: &'a str,
+    generation: u32,
     candidate: &'a str,
 }
 
@@ -401,32 +434,36 @@ struct LocalCandidateMsg<'a> {
 struct PeerStateMsg<'a> {
     op: &'static str,
     peer_id: &'a str,
+    generation: u32,
     state: &'a str,
 }
 
-pub fn local_sdp_json(peer_id: &str, sdp_type: &str, sdp: &str) -> String {
+pub fn local_sdp_json(peer_id: &str, generation: u32, sdp_type: &str, sdp: &str) -> String {
     serde_json::to_string(&LocalSdpMsg {
         op: "local-sdp",
         peer_id,
+        generation,
         sdp_type,
         sdp,
     })
     .expect("local-sdp serialize")
 }
 
-pub fn local_candidate_json(peer_id: &str, candidate: &str) -> String {
+pub fn local_candidate_json(peer_id: &str, generation: u32, candidate: &str) -> String {
     serde_json::to_string(&LocalCandidateMsg {
         op: "local-candidate",
         peer_id,
+        generation,
         candidate,
     })
     .expect("local-candidate serialize")
 }
 
-pub fn peer_state_json(peer_id: &str, state: &str) -> String {
+pub fn peer_state_json(peer_id: &str, generation: u32, state: &str) -> String {
     serde_json::to_string(&PeerStateMsg {
         op: "peer-state",
         peer_id,
+        generation,
         state,
     })
     .expect("peer-state serialize")
@@ -438,7 +475,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 5);
+        assert_eq!(PROTO_VERSION, 7);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -474,21 +511,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_v4_peer_ops() {
-        match parse_inbound(r#"{"op":"peer-add","peer_id":"p1"}"#).unwrap() {
-            InboundOp::PeerAdd { peer_id, offerer } => {
+    fn parse_v7_peer_and_capture_ops() {
+        match parse_inbound(r#"{"op":"set-synthetic","enabled":true}"#).unwrap() {
+            InboundOp::SetSynthetic { enabled } => assert!(enabled),
+            other => panic!("expected set-synthetic, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"set-input","gain":1.25,"vad_threshold":0.006}"#).unwrap() {
+            InboundOp::SetInput {
+                gain,
+                vad_threshold,
+            } => {
+                assert_eq!(gain, 1.25);
+                assert_eq!(vad_threshold, 0.006);
+            }
+            other => panic!("expected set-input, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"peer-add","peer_id":"p1","generation":41}"#).unwrap() {
+            InboundOp::PeerAdd {
+                peer_id,
+                offerer,
+                relay_only,
+                generation,
+            } => {
                 assert_eq!(peer_id, "p1");
                 assert!(offerer);
+                assert!(!relay_only);
+                assert_eq!(generation, 41);
             }
             other => panic!("expected peer-add, got {other:?}"),
         }
-        match parse_inbound(r#"{"op":"peer-add","peer_id":"p1b","offerer":false}"#).unwrap() {
-            InboundOp::PeerAdd { peer_id, offerer } => {
+        match parse_inbound(
+            r#"{"op":"peer-add","peer_id":"p1b","offerer":false,"relay_only":true,"generation":42}"#,
+        )
+        .unwrap()
+        {
+            InboundOp::PeerAdd {
+                peer_id,
+                offerer,
+                relay_only,
+                generation,
+            } => {
                 assert_eq!(peer_id, "p1b");
                 assert!(!offerer);
+                assert!(relay_only);
+                assert_eq!(generation, 42);
             }
             other => panic!("expected peer-add, got {other:?}"),
         }
+        assert!(parse_inbound(r#"{"op":"peer-add","peer_id":"missing-generation"}"#).is_err());
         match parse_inbound(r#"{"op":"peer-remove","peer_id":"p2"}"#).unwrap() {
             InboundOp::PeerRemove { peer_id } => assert_eq!(peer_id, "p2"),
             other => panic!("expected peer-remove, got {other:?}"),
@@ -576,22 +646,25 @@ mod tests {
     #[test]
     fn local_signal_json_shapes() {
         let sv: serde_json::Value =
-            serde_json::from_str(&local_sdp_json("p1", "answer", "v=0")).unwrap();
+            serde_json::from_str(&local_sdp_json("p1", 41, "answer", "v=0")).unwrap();
         assert_eq!(sv["op"], "local-sdp");
         assert_eq!(sv["peer_id"], "p1");
+        assert_eq!(sv["generation"], 41);
         assert_eq!(sv["sdp_type"], "answer");
         assert_eq!(sv["sdp"], "v=0");
 
         let cv: serde_json::Value =
-            serde_json::from_str(&local_candidate_json("p1", "cand")).unwrap();
+            serde_json::from_str(&local_candidate_json("p1", 41, "cand")).unwrap();
         assert_eq!(cv["op"], "local-candidate");
         assert_eq!(cv["peer_id"], "p1");
+        assert_eq!(cv["generation"], 41);
         assert_eq!(cv["candidate"], "cand");
 
         let pv: serde_json::Value =
-            serde_json::from_str(&peer_state_json("p1", "connected")).unwrap();
+            serde_json::from_str(&peer_state_json("p1", 41, "connected")).unwrap();
         assert_eq!(pv["op"], "peer-state");
         assert_eq!(pv["peer_id"], "p1");
+        assert_eq!(pv["generation"], 41);
         assert_eq!(pv["state"], "connected");
     }
 
@@ -707,6 +780,16 @@ mod tests {
     }
 
     #[test]
+    fn ring_clear_removes_stale_capture_frames() {
+        let mut ring = AudioRing::new(3);
+        ring.push(frame_with(1));
+        ring.push(frame_with(2));
+        ring.clear();
+        assert_eq!(ring.len(), 0);
+        assert!(ring.pop().is_none());
+    }
+
+    #[test]
     fn ring_capacity_constant_is_tiny() {
         assert_eq!(RING_CAPACITY, 8);
     }
@@ -763,7 +846,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 5);
+        assert_eq!(v["proto"], 7);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");
@@ -787,6 +870,21 @@ mod tests {
         assert_eq!(lv["op"], "level");
         assert!((lv["peak"].as_f64().unwrap() - 0.5).abs() < 1e-6);
         assert_eq!(lv["speaking"], true);
+
+        let pv: serde_json::Value = serde_json::from_str(&peer_levels_json(&[
+            PeerLevel {
+                peer_id: "p1".into(),
+                peak: 0.75,
+            },
+            PeerLevel {
+                peer_id: "p2".into(),
+                peak: 0.25,
+            },
+        ]))
+        .unwrap();
+        assert_eq!(pv["op"], "peer-levels");
+        assert_eq!(pv["levels"][0]["peer_id"], "p1");
+        assert_eq!(pv["levels"][0]["peak"], 0.75);
 
         let ev: serde_json::Value =
             serde_json::from_str(&error_json("mic-denied", "no mic")).unwrap();

@@ -87,7 +87,11 @@ impl Ns {
                 let ip = frame.as_mut_ptr().add(off);
                 let op = self.out.as_mut_ptr();
                 (self.api.process)(self.state, ip, op);
-                std::ptr::copy_nonoverlapping(self.out.as_ptr(), frame.as_mut_ptr().add(off), self.hop);
+                std::ptr::copy_nonoverlapping(
+                    self.out.as_ptr(),
+                    frame.as_mut_ptr().add(off),
+                    self.hop,
+                );
                 off += self.hop;
             }
         }
@@ -111,7 +115,8 @@ mod tests {
     #[test]
     #[ignore]
     fn loads_and_processes_a_frame() {
-        let path = std::env::var("DF_LIB").expect("set DF_LIB to the deep-filter shared library path");
+        let path =
+            std::env::var("DF_LIB").expect("set DF_LIB to the deep-filter shared library path");
         let mut ns = Ns::load(&path).expect("load");
         assert!(ns.frame_length() > 0);
         let mut frame = vec![0.0f32; 960];

@@ -33,7 +33,33 @@ function Write-LiveMatch([string]$Name, [string]$Path, [string]$ExpectedHash) {
     Write-Host "release.package.live_match target=$Name match=$match path=$Path sha256=$actual"
 }
 
+function Assert-ReleaseAsset([string]$RelativePath) {
+    $path = Join-Path $root $RelativePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {
+        throw "missing or empty release asset: $RelativePath"
+    }
+}
+
 Write-Host "release.package.start configuration=$Configuration"
+
+if ($Configuration -eq "Android") {
+    Assert-ReleaseAsset "Libs\pc-mobile\libpc_mobile.so"
+} else {
+    @(
+        "Libs\pc-capture\pc-capture-win-x64.exe",
+        "Libs\pc-capture\pc-capture-win-x86.exe",
+        "Libs\pc-capture\pc-capture-linux-x64",
+        "Libs\pc-capture\pc-capture-mac.zip",
+        "Libs\dsp\webrtc-apm.x64.dll",
+        "Libs\dsp\webrtc-apm.x86.dll",
+        "Libs\dsp\libwebrtc-apm.so",
+        "Libs\dsp\libwebrtc-apm.dylib",
+        "Libs\dsp\df.x64.dll",
+        "Libs\dsp\df.x86.dll",
+        "Libs\dsp\libdf.so",
+        "Libs\dsp\libdf.dylib"
+    ) | ForEach-Object { Assert-ReleaseAsset $_ }
+}
 
 if ($Version) {
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z (got '$Version')" }
@@ -58,7 +84,7 @@ if ($csprojVersion -and $pluginVersion -ne $csprojVersion) {
     Write-Host "release.package.version_ok VoiceChatPluginMain.cs=$pluginVersion"
 }
 
-$buildOutput = & dotnet build $project -c $Configuration --nologo 2>&1
+$buildOutput = & dotnet build $project -c $Configuration --nologo -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
 $buildExit = $LASTEXITCODE
 $buildOutput | ForEach-Object { Write-Host $_ }
 if ($buildExit -ne 0) { throw "dotnet build failed with exit code $buildExit" }
@@ -72,12 +98,12 @@ Copy-Item $dll (Join-Path $output "BepInEx\plugins\PerfectComms.dll")
 if ($Configuration -ne "Android") {
     $helperSrc = Join-Path $root "Libs\pc-capture"
     $helperDst = Join-Path $output "BepInEx\plugins\pc-capture"
-    if (Test-Path $helperSrc) {
-        New-Item -ItemType Directory -Force -Path $helperDst | Out-Null
-        foreach ($f in @("pc-capture-win-x64.exe","pc-capture-win-x86.exe","pc-capture-linux-x64","pc-capture-mac.zip")) {
-            $p = Join-Path $helperSrc $f
-            if (Test-Path $p) { Copy-Item $p (Join-Path $helperDst $f) -Force }
-        }
+    New-Item -ItemType Directory -Force -Path $helperDst | Out-Null
+    foreach ($f in @("pc-capture-win-x64.exe","pc-capture-win-x86.exe","pc-capture-linux-x64","pc-capture-mac.zip")) {
+        $p = Join-Path $helperSrc $f
+        $destination = Join-Path $helperDst $f
+        Copy-Item $p $destination -Force
+        if ((Get-Item -LiteralPath $destination).Length -eq 0) { throw "packaged helper is empty: $f" }
     }
 }
 Copy-Item $dll $releaseDll

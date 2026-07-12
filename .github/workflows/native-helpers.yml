@@ -2,15 +2,13 @@ name: Native helpers
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [main, feat/crossplatform-capture-sidecar]
   pull_request:
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
       - "native/apm-sys/**"
       - "native/df-sys/**"
-      - "native/rtc-interop/**"
       - "native/third_party/webrtc-audio-processing/**"
       - "native/third_party/deep-filter/**"
       - "scripts/build-apm.sh"
@@ -82,11 +80,11 @@ jobs:
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r27c
+          ndk-version: r27d
       - name: ninja-build
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: cargo-ndk
-        run: cargo install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
       - name: cross-compile pc-mobile (arm64-v8a)
         working-directory: native/pc-mobile
         env:
@@ -131,18 +129,23 @@ jobs:
         run: bash scripts/build-mac.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: helper-mac
+          # The helper is signed again after the two DSP dylibs are staged.
+          # Never ship or smoke this base bundle as the release artifact.
+          name: helper-mac-base
           path: Libs/pc-capture/pc-capture-mac.zip
           if-no-files-found: error
 
   smoke:
-    needs: [windows, linux, macos]
+    needs: [windows, linux, mac-bundle]
     strategy:
       matrix:
         include:
           - artifact: helper-win-x64
             os: windows-latest
             bin: pc-capture-win-x64.exe
+          - artifact: helper-win-x86
+            os: windows-latest
+            bin: pc-capture-win-x86.exe
           - artifact: helper-linux-x64
             os: ubuntu-latest
             bin: pc-capture-linux-x64
@@ -409,40 +412,47 @@ jobs:
           path: artifacts/df/libdf.dylib
           if-no-files-found: error
 
-  rtc-interop-win:
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: ilammy/setup-nasm@v1
-      - name: Build rtc-interop (${{ matrix.target }}) [i686 is the ring/webrtc GATE]
-        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target ${{ matrix.target }}
-
-  rtc-interop-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-      - name: Build rtc-interop (x86_64-unknown-linux-gnu)
-        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target x86_64-unknown-linux-gnu
-
-  rtc-interop-mac:
+  # Assemble exactly what SidecarLauncher extracts at runtime, then apply the
+  # final ad-hoc signature. Copying dylibs into an already-signed .app changes
+  # the signed bundle and can make macOS reject libloading.
+  mac-bundle:
+    needs: [macos, apm-mac, df-mac]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
         with:
-          targets: aarch64-apple-darwin
-      - name: Build rtc-interop (aarch64-apple-darwin)
-        run: cargo build --manifest-path native/rtc-interop/Cargo.toml --target aarch64-apple-darwin
+          name: helper-mac-base
+          path: dl/helper
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac
+          path: dl/apm
+      - uses: actions/download-artifact@v4
+        with:
+          name: df-mac
+          path: dl/df
+      - name: Stage DSP, sign, verify, and smoke final app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle Libs/pc-capture
+          ditto -x -k dl/helper/pc-capture-mac.zip bundle
+          app="$PWD/bundle/PerfectCommsAudio.app"
+          test -x "$app/Contents/MacOS/PerfectCommsAudio"
+          cp dl/apm/libwebrtc-apm.dylib "$app/Contents/MacOS/"
+          cp dl/df/libdf.dylib "$app/Contents/MacOS/"
+          chmod 755 "$app/Contents/MacOS/"*.dylib
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          bash scripts/ci-smoke-helper.sh \
+            "$app/Contents/MacOS/PerfectCommsAudio" --require-dsp
+          ditto -c -k --keepParent "$app" Libs/pc-capture/pc-capture-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-mac
+          path: Libs/pc-capture/pc-capture-mac.zip
+          if-no-files-found: error
 
   # ---- helper-to-helper webrtc loopback (Phase 3 RtcEngine gate) ----
   # Two in-process RtcEngines cross-feed offer/answer/ICE over their LocalSignal

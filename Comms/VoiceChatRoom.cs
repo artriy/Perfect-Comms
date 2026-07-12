@@ -12,9 +12,8 @@ namespace VoiceChatPlugin.VoiceChat;
 /// <summary>
 /// Manages the in-game voice chat session.
 ///
-/// Audio transport uses the Interstellar voice backend instead of custom Among Us voice RPCs.
-///
-/// Remote voice playback and routing are owned by the Interstellar backend.
+/// C# owns game-state routing and authenticated Among Us RPC signaling. Native pc-capture/pc-mobile
+/// engines own capture, WebRTC RTP media, jitter buffering, mixing, and playback.
 /// </summary>
 public class VoiceChatRoom
 {
@@ -925,7 +924,11 @@ public class VoiceChatRoom
     internal static float RecoveryBackoffSeconds(int attempts)
         => MissingPeerRecoveryIntervalSeconds * (1 << Math.Min(Math.Max(attempts, 0), MissingPeerRecoveryBackoffShiftCap));
 
-    private static int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    private bool IsExpectedRemotePlayer(VoicePlayerSnapshot player)
+        => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0 &&
+           (_perfectCommsVoice == null || _perfectCommsVoice.IsCompatibleRemoteClient(player.ClientId));
+
+    private int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
     {
         // Indexed loop over IReadOnlyList instead of LINQ .Count(predicate): the latter boxes a heap
         // enumerator on every call, and this runs per-frame via TryRecoverMissingBackendPeers (before its
@@ -935,7 +938,7 @@ public class VoiceChatRoom
         for (int i = 0; i < players.Count; i++)
         {
             var player = players[i];
-            if (!player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+            if (IsExpectedRemotePlayer(player))
                 count++;
         }
         return count;
@@ -946,14 +949,14 @@ public class VoiceChatRoom
     // don't build/compare the human-readable LINQ signature on every shortfall frame. Matches the de-LINQ'd
     // indexed-loop style of CountExpectedRemotePlayers. The human-readable signature (DescribeExpected...) is
     // only built once recovery actually fires.
-    private static int HashExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    private int HashExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
     {
         var players = snapshot.Players;
         int acc = 0;
         for (int i = 0; i < players.Count; i++)
         {
             var player = players[i];
-            if (player.IsLocal || player.Disconnected || player.IsDummy || player.ClientId < 0)
+            if (!IsExpectedRemotePlayer(player))
                 continue;
             // FNV-1a over the clientId bytes, XOR-accumulated so roster order doesn't change the result.
             uint h = 2166136261u;
@@ -967,9 +970,9 @@ public class VoiceChatRoom
         return acc;
     }
 
-    private static string DescribeExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    private string DescribeExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
         => string.Join(",", snapshot.Players
-            .Where(player => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+            .Where(IsExpectedRemotePlayer)
             .Select(player => $"{player.ClientId}:{LogSafe(player.PlayerName)}"));
 
     private static bool TryGetVoiceRoomIdentity(VoiceGameStateSnapshot? snapshot, VoiceTransportBackend backend, out string roomCode, out string region)

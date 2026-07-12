@@ -9,7 +9,9 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class SidecarVoiceClient : IDisposable
 {
-    public const int Proto = 5;
+    // Protocol 7 adds native input gain/VAD, runtime synthetic capture, and batched remote levels.
+    // Reject older helpers so managed settings and speaking telemetry cannot silently become no-ops.
+    public const int Proto = 7;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
 
@@ -32,10 +34,11 @@ internal sealed class SidecarVoiceClient : IDisposable
 
     public event Action<float[], int>? OnFrame;
     public event Action<string>? OnDead;
-    public event Action<string, string, string>? OnLocalSdp;
-    public event Action<string, string>? OnLocalCandidate;
-    public event Action<string, string>? OnPeerState;
+    public event Action<string, int, string, string>? OnLocalSdp;
+    public event Action<string, int, string>? OnLocalCandidate;
+    public event Action<string, int, string>? OnPeerState;
     public event Action<float, bool>? OnLevel;
+    public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<string> OutputDevices => _outputDevices;
@@ -174,6 +177,59 @@ internal sealed class SidecarVoiceClient : IDisposable
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-dsp write failed: " + ex.Message); }
     }
 
+    public void SetSynthetic(bool enabled)
+    {
+        if (!_running) return;
+        try { Write(SidecarProtocol.SetSyntheticFrame(enabled)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-synthetic write failed: " + ex.Message); }
+    }
+
+    public void SetInput(float gain, float vadThreshold)
+    {
+        if (!_running) return;
+        try { Write(SidecarProtocol.SetInputFrame(gain, vadThreshold)); }
+        catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "set-input write failed: " + ex.Message); }
+    }
+
+    public bool TryConfigureInitialCapture(
+        string micDevice,
+        string outputDevice,
+        bool aec,
+        bool agc,
+        bool ns,
+        bool hpf,
+        float gain,
+        float vadThreshold,
+        bool synthetic,
+        bool micActive,
+        IEnumerable<IceServer>? iceServers)
+    {
+        if (!_running) return false;
+        try
+        {
+            // Start() opens capture as part of the existing helper lifecycle. Quiesce it before
+            // applying the latest settings so a device change made during handshake cannot be
+            // lost and no frame is encoded with stale gain/VAD/synthetic state.
+            Write(SidecarProtocol.StopFrame());
+            // Empty ids explicitly mean the OS default device; they are not "no change".
+            Write(SidecarProtocol.SelectDeviceFrame(micDevice ?? string.Empty));
+            Write(SidecarProtocol.SelectOutputDeviceFrame(outputDevice ?? string.Empty));
+            Write(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
+            Write(SidecarProtocol.SetInputFrame(gain, vadThreshold));
+            Write(SidecarProtocol.SetSyntheticFrame(synthetic));
+            if (iceServers != null)
+                Write(SidecarProtocol.SetIceServersFrame(iceServers));
+            if (micActive)
+                Write(SidecarProtocol.StartFrame());
+            return true;
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("sidecar", "initial configuration failed: " + ex.Message);
+            return false;
+        }
+    }
+
     public void SetMicActive(bool active)
     {
         if (!_running) return;
@@ -183,22 +239,22 @@ internal sealed class SidecarVoiceClient : IDisposable
 
     public void SelectMicDevice(string deviceId)
     {
-        if (!_running || string.IsNullOrEmpty(deviceId)) return;
-        try { Write(SidecarProtocol.SelectDeviceFrame(deviceId)); }
+        if (!_running) return;
+        try { Write(SidecarProtocol.SelectDeviceFrame(deviceId ?? string.Empty)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-device write failed: " + ex.Message); }
     }
 
     public void SelectOutputDevice(string deviceId)
     {
-        if (!_running || string.IsNullOrEmpty(deviceId)) return;
-        try { Write(SidecarProtocol.SelectOutputDeviceFrame(deviceId)); }
+        if (!_running) return;
+        try { Write(SidecarProtocol.SelectOutputDeviceFrame(deviceId ?? string.Empty)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "select-output-device write failed: " + ex.Message); }
     }
 
-    public void AddPeer(string peerId, bool isOfferer)
+    public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
     {
         if (!_running || string.IsNullOrEmpty(peerId)) return;
-        try { Write(SidecarProtocol.AddPeerFrame(peerId, isOfferer)); }
+        try { Write(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation)); }
         catch (Exception ex) { VoiceDiagnostics.Log("sidecar", "peer-add write failed: " + ex.Message); }
     }
 
@@ -413,23 +469,23 @@ internal sealed class SidecarVoiceClient : IDisposable
         }
         else if (op == "local-sdp")
         {
-            if (SidecarProtocol.TryReadLocalSdp(json, out var peerId, out var sdpType, out var sdp))
+            if (SidecarProtocol.TryReadLocalSdp(json, out var peerId, out var generation, out var sdpType, out var sdp))
             {
-                try { OnLocalSdp?.Invoke(peerId, sdpType, sdp); } catch { }
+                try { OnLocalSdp?.Invoke(peerId, generation, sdpType, sdp); } catch { }
             }
         }
         else if (op == "local-candidate")
         {
-            if (SidecarProtocol.TryReadLocalCandidate(json, out var peerId, out var candidate))
+            if (SidecarProtocol.TryReadLocalCandidate(json, out var peerId, out var generation, out var candidate))
             {
-                try { OnLocalCandidate?.Invoke(peerId, candidate); } catch { }
+                try { OnLocalCandidate?.Invoke(peerId, generation, candidate); } catch { }
             }
         }
         else if (op == "peer-state")
         {
-            if (SidecarProtocol.TryReadPeerState(json, out var peerId, out var state))
+            if (SidecarProtocol.TryReadPeerState(json, out var peerId, out var generation, out var state))
             {
-                try { OnPeerState?.Invoke(peerId, state); } catch { }
+                try { OnPeerState?.Invoke(peerId, generation, state); } catch { }
             }
         }
         else if (op == "level")
@@ -437,6 +493,13 @@ internal sealed class SidecarVoiceClient : IDisposable
             if (SidecarProtocol.TryReadLevel(json, out var peak, out var speaking))
             {
                 try { OnLevel?.Invoke(peak, speaking); } catch { }
+            }
+        }
+        else if (op == "peer-levels")
+        {
+            if (SidecarProtocol.TryReadPeerLevels(json, out var levels))
+            {
+                try { OnPeerLevels?.Invoke(levels); } catch { }
             }
         }
     }

@@ -1,6 +1,7 @@
 #if ANDROID
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using System.Threading;
 
@@ -34,10 +35,11 @@ internal sealed class MobileVoiceClient : IDisposable
     private readonly object _ringLock = new();
     private readonly float[] _pumpBuf = new float[PlaybackFrame];
 
-    public event Action<string, string, string>? OnLocalSdp;
-    public event Action<string, string>? OnLocalCandidate;
-    public event Action<string, string>? OnPeerState;
+    public event Action<string, int, string, string>? OnLocalSdp;
+    public event Action<string, int, string>? OnLocalCandidate;
+    public event Action<string, int, string>? OnPeerState;
     public event Action<float, bool>? OnLevel;
+    public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
 
     public bool IsRunning => _running && _h != IntPtr.Zero;
 
@@ -72,12 +74,15 @@ internal sealed class MobileVoiceClient : IDisposable
         }
     }
 
-    public void AddPeer(string peerId, bool isOfferer) => Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer));
+    public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+        => Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
     public void RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
     public void SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
     public void AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
     public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf) => Control(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
+    public void SetSynthetic(bool enabled) => Control(SidecarProtocol.SetSyntheticFrame(enabled));
+    public void SetInput(float gain, float vadThreshold) => Control(SidecarProtocol.SetInputFrame(gain, vadThreshold));
     public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
         => Control(SidecarProtocol.GameStateFrame(deaf, master, peers));
 
@@ -98,9 +103,10 @@ internal sealed class MobileVoiceClient : IDisposable
                 i += take;
                 if (_micFill == MicFrame)
                 {
-                    float peak = PcMobileNative.pc_push_mic(_h, _micAccum, MicFrame);
+                    // Native emits the configured gain/VAD level event at a bounded 100 ms cadence.
+                    // Do not race it with a per-frame hard-coded speaking threshold here.
+                    _ = PcMobileNative.pc_push_mic(_h, _micAccum, MicFrame);
                     _micFill = 0;
-                    OnLevel?.Invoke(peak, peak > 0.02f);
                 }
             }
         }
@@ -125,6 +131,7 @@ internal sealed class MobileVoiceClient : IDisposable
 
     private void PumpLoop()
     {
+        long nextDeadline = 0;
         while (_running)
         {
             var h = _h;
@@ -146,7 +153,15 @@ internal sealed class MobileVoiceClient : IDisposable
                     }
                 }
             }
-            Thread.Sleep(got > 0 ? 10 : 5);
+
+            var now = Stopwatch.GetTimestamp();
+            nextDeadline = MobilePlaybackCadence.NextDeadline(nextDeadline, now, Stopwatch.Frequency);
+            var delayMs = MobilePlaybackCadence.DelayMilliseconds(
+                Stopwatch.GetTimestamp(),
+                nextDeadline,
+                Stopwatch.Frequency);
+            if (delayMs > 0) Thread.Sleep(delayMs);
+            else Thread.Yield();
         }
     }
 
@@ -173,16 +188,19 @@ internal sealed class MobileVoiceClient : IDisposable
         switch (SidecarProtocol.ReadOp(json))
         {
             case "local-sdp":
-                if (SidecarProtocol.TryReadLocalSdp(json, out var sp, out var st, out var sd)) OnLocalSdp?.Invoke(sp, st, sd);
+                if (SidecarProtocol.TryReadLocalSdp(json, out var sp, out var sdpGeneration, out var st, out var sd)) OnLocalSdp?.Invoke(sp, sdpGeneration, st, sd);
                 break;
             case "local-candidate":
-                if (SidecarProtocol.TryReadLocalCandidate(json, out var cp, out var cc)) OnLocalCandidate?.Invoke(cp, cc);
+                if (SidecarProtocol.TryReadLocalCandidate(json, out var cp, out var candidateGeneration, out var cc)) OnLocalCandidate?.Invoke(cp, candidateGeneration, cc);
                 break;
             case "peer-state":
-                if (SidecarProtocol.TryReadPeerState(json, out var pp, out var ps)) OnPeerState?.Invoke(pp, ps);
+                if (SidecarProtocol.TryReadPeerState(json, out var pp, out var stateGeneration, out var ps)) OnPeerState?.Invoke(pp, stateGeneration, ps);
                 break;
             case "level":
                 if (SidecarProtocol.TryReadLevel(json, out var peak, out var speaking)) OnLevel?.Invoke(peak, speaking);
+                break;
+            case "peer-levels":
+                if (SidecarProtocol.TryReadPeerLevels(json, out var levels)) OnPeerLevels?.Invoke(levels);
                 break;
         }
         }

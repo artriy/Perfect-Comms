@@ -24,7 +24,8 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId, bool isOfferer) => _voice()?.AddPeer(PeerId(clientId), isOfferer);
+    public void AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation);
 
     public void RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId));
 
@@ -49,7 +50,8 @@ internal sealed class MobileVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId, bool isOfferer) => _voice()?.AddPeer(PeerId(clientId), isOfferer);
+    public void AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation);
 
     public void RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId));
 

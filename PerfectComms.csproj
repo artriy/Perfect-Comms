@@ -19,6 +19,11 @@
 		<!-- Among Us/BepInEx IL2CPP currently targets net6.0; selected transitive libraries are runtime-compatible here despite newer TFM support warnings. -->
 		<SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
 		<GenerateAssemblyInfo>True</GenerateAssemblyInfo>
+		<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+		<NuGetAudit>true</NuGetAudit>
+		<NuGetAuditMode>all</NuGetAuditMode>
+		<NuGetAuditLevel>low</NuGetAuditLevel>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
 		<Configurations>Debug;Release;Android;Windows</Configurations>
 		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;cloudflare/**;scripts/**;native/**</DefaultItemExcludes>
 	</PropertyGroup>
@@ -42,11 +47,24 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<!-- 735 is the newest pinned runtime compatible with the current official
+		     BepInEx.IL2CPP.MSBuild generator. 738+ removed CecilMetadataAccess and
+		     makes clean interop generation fail before compilation. -->
 		<PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.735" Private="false" ExcludeAssets="runtime;native" />
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.AutoPlugin" Version="1.1.0" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
-		<PackageReference Include="SocketIOClient" Version="3.1.2" />
+		<!-- These assemblies are loaded from embedded resources at runtime. Keep them
+		     explicit so a clean restore always stages the exact files embedded below. -->
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Json" Version="8.0.6" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIOClient" Version="3.1.2" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Serializer.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Serializer.SystemTextJson" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -121,14 +139,29 @@
 		</EmbeddedResource>
 	</ItemGroup>
 
-	<Target Name="AssertHelperEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' != 'Android'">
-		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe') And !Exists('Libs\pc-capture\pc-capture-win-x86.exe') And !Exists('Libs\pc-capture\pc-capture-linux-x64') And !Exists('Libs\pc-capture\pc-capture-mac.zip')"
-			Text="No pc-capture helper found in Libs\pc-capture\. Desktop capture/playback is sidecar-only; run scripts/build-helpers.sh (or stage a prebuilt helper) before a non-Android build." />
+	<!-- A normal build validates managed code and may intentionally omit native release
+	     payloads. The packaging scripts set ValidateReleaseAssets=true and require the
+	     complete platform set so a partial local helper cannot produce a green release. -->
+	<Target Name="AssertDesktopReleaseAssets" BeforeTargets="PrepareResources"
+		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' != 'Android'">
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x64.exe" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x86.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x86.exe" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-linux-x64')" Text="Missing release helper: Libs\pc-capture\pc-capture-linux-x64" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-mac.zip')" Text="Missing release helper: Libs\pc-capture\pc-capture-mac.zip" />
+		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x64.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x64.dll" />
+		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
+		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
+		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.dylib')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.dylib" />
+		<Error Condition="!Exists('Libs\dsp\df.x64.dll')" Text="Missing release DSP: Libs\dsp\df.x64.dll" />
+		<Error Condition="!Exists('Libs\dsp\df.x86.dll')" Text="Missing release DSP: Libs\dsp\df.x86.dll" />
+		<Error Condition="!Exists('Libs\dsp\libdf.so')" Text="Missing release DSP: Libs\dsp\libdf.so" />
+		<Error Condition="!Exists('Libs\dsp\libdf.dylib')" Text="Missing release DSP: Libs\dsp\libdf.dylib" />
 	</Target>
 
-	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="Build" Condition="'$(Configuration)' == 'Android'">
+	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="PrepareResources"
+		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' == 'Android'">
 		<Error Condition="!Exists('Libs\pc-mobile\libpc_mobile.so')"
-			Text="No pc-mobile engine found at Libs\pc-mobile\libpc_mobile.so. Android voice runs on the Rust core; build it (cd native/pc-mobile &amp;&amp; cargo ndk -t arm64-v8a -o ./jniLibs build --release, then copy jniLibs/arm64-v8a/libpc_mobile.so) or stage the prebuilt .so before an Android build. Shipping without it makes Android voice silently dead." />
+			Text="Missing Android release engine: Libs\pc-mobile\libpc_mobile.so. Build it with cargo-ndk for arm64-v8a before packaging." />
 	</Target>
 
 	<ItemGroup>
@@ -138,31 +171,31 @@
 		<EmbeddedResource Include="Libs\Interstellar.Messages.dll">
 			<LogicalName>Lib.Interstellar.Messages.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)microsoft.extensions.dependencyinjection.abstractions\10.0.7\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll">
+		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_DependencyInjection_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll">
 			<LogicalName>Lib.Microsoft.Extensions.DependencyInjection.Abstractions.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)microsoft.extensions.logging.abstractions\10.0.7\lib\netstandard2.0\Microsoft.Extensions.Logging.Abstractions.dll">
+		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Logging_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.Logging.Abstractions.dll">
 			<LogicalName>Lib.Microsoft.Extensions.Logging.Abstractions.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.diagnostics.diagnosticsource\10.0.7\lib\netstandard2.0\System.Diagnostics.DiagnosticSource.dll">
+		<EmbeddedResource Include="$(PkgSystem_Diagnostics_DiagnosticSource)\lib\netstandard2.0\System.Diagnostics.DiagnosticSource.dll">
 			<LogicalName>Lib.System.Diagnostics.DiagnosticSource.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.text.encodings.web\8.0.0\lib\net6.0\System.Text.Encodings.Web.dll">
+		<EmbeddedResource Include="$(PkgSystem_Text_Encodings_Web)\lib\net6.0\System.Text.Encodings.Web.dll">
 			<LogicalName>Lib.System.Text.Encodings.Web.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.text.json\8.0.4\lib\net6.0\System.Text.Json.dll">
+		<EmbeddedResource Include="$(PkgSystem_Text_Json)\lib\net6.0\System.Text.Json.dll">
 			<LogicalName>Lib.System.Text.Json.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketioclient\3.1.2\lib\net6.0\SocketIOClient.dll">
+		<EmbeddedResource Include="$(PkgSocketIOClient)\lib\net6.0\SocketIOClient.dll">
 			<LogicalName>Lib.SocketIOClient.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.core\3.1.2\lib\netstandard2.0\SocketIO.Core.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Core)\lib\netstandard2.0\SocketIO.Core.dll">
 			<LogicalName>Lib.SocketIO.Core.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.serializer.core\3.1.2\lib\netstandard2.0\SocketIO.Serializer.Core.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Serializer_Core)\lib\netstandard2.0\SocketIO.Serializer.Core.dll">
 			<LogicalName>Lib.SocketIO.Serializer.Core.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.serializer.systemtextjson\3.1.2\lib\netstandard2.0\SocketIO.Serializer.SystemTextJson.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Serializer_SystemTextJson)\lib\netstandard2.0\SocketIO.Serializer.SystemTextJson.dll">
 			<LogicalName>Lib.SocketIO.Serializer.SystemTextJson.dll</LogicalName>
 		</EmbeddedResource>
 	</ItemGroup>

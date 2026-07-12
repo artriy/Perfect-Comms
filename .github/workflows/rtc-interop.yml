@@ -1,18 +1,21 @@
-name: RTC interop gate
+name: RTC shared-core gate
 
-# Proves the desktop (webrtc-rs) <-> Android (SIPSorcery) media path actually works:
-# a real DTLS-SRTP handshake with bidirectional Opus RTP. This is the single riskiest
-# cross-stack assumption in the sidecar/P2P design, so it gates changes to the RTC and
-# codec layers. The bridge exits non-zero unless BOTH peers receive RTP.
-
+# Desktop and Android now use the same webrtc-rs RtcEngine. This gate exercises
+# the production offer/answer/ICE/Opus path directly instead of the retired
+# desktop-webrtc-rs-to-Android-SIPSorcery bridge.
 on:
   push:
-    branches: [main]
+    branches: [main, feat/crossplatform-capture-sidecar]
+    paths:
+      - "native/pc-capture/**"
+      - "native/pc-mobile/**"
+      - "scripts/live-turn-smoke.py"
+      - ".github/workflows/rtc-interop.yml"
   pull_request:
     paths:
-      - "native/rtc-interop/**"
-      - "native/pc-capture/src/rtc.rs"
-      - "native/pc-capture/src/codec.rs"
+      - "native/pc-capture/**"
+      - "native/pc-mobile/**"
+      - "scripts/live-turn-smoke.py"
       - ".github/workflows/rtc-interop.yml"
   workflow_dispatch:
   workflow_call:
@@ -21,24 +24,41 @@ permissions:
   contents: read
 
 jobs:
-  interop:
-    runs-on: windows-latest
+  shared-core-loopback:
+    name: WebRTC/Opus loopback (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: ilammy/setup-nasm@v1
-      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+      - name: Linux audio build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Offer/answer/ICE and Opus RTP loopback
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+      - name: Build helper for live TURN gate
+        if: runner.os == 'Linux'
+        run: cargo build --release --manifest-path native/pc-capture/Cargo.toml
+      - name: Two-helper Cloudflare TURN relay and voice gate
+        if: runner.os == 'Linux'
+        run: python3 scripts/live-turn-smoke.py native/pc-capture/target/release/pc-capture --timeout 45
+
+  mobile-shared-core:
+    name: Mobile wrapper uses the shared RTC core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          dotnet-version: "10.0.x"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Build webrtc-rs offer peer
-        working-directory: native/rtc-interop
-        run: cargo build
-      - name: Build SIPSorcery answer peer
-        working-directory: native/rtc-interop/sipsorcery-answer
-        run: dotnet build -c Release --nologo
-      - name: webrtc-rs <-> SIPSorcery DTLS-SRTP / Opus interop
-        working-directory: native/rtc-interop
-        run: python signal-bridge.py
+          components: clippy
+      - name: Lint host build of pc-mobile
+        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings

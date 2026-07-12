@@ -9,7 +9,7 @@ stdin token auth) to the PerfectComms BepInEx mod.
 
 Also runs DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus
 encode/decode, and the WebRTC (webrtc-rs) peer transport with proximity mixing,
-so mic, peer audio, and playback all live in this helper. Protocol version 5.
+so mic, peer audio, and playback all live in this helper. Protocol version 7.
 
 ## Run
 
@@ -21,7 +21,7 @@ pc-capture --handshake <path> [--synthetic-tone]
   STDIN.
 - The helper binds 127.0.0.1:0, writes `{"port":<int>,"pid":<int>}` atomically
   to `<path>`, then accepts a single client (a second connection is rejected).
-- `--synthetic-tone` replaces real capture with a 440 Hz sine (CI / field
+- `--synthetic-tone` replaces real capture with a 220 Hz, 0.012-peak sine (CI / field
   diagnostic; no microphone required).
 
 ## Wire protocol
@@ -33,10 +33,16 @@ Frame: `[u8 type][u32 len little-endian][payload]`.
   owns the speaker mix end to end and parses-but-discards this; kept only for the wire contract.
 
 Control ops (mod->helper): `hello`, `select-device`, `select-output-device`, `start`, `stop`,
-`ping`, `set-dsp`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
+`ping`, `set-dsp`, `set-input`, `set-synthetic`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
 `add-ice-candidate`, `game-state`.
 Control ops (helper->mod): `ready`, `devices`, `outputDevices`, `level`, `error`, `pong`,
-`local-sdp`, `local-candidate`, `peer-state`.
+`local-sdp`, `local-candidate`, `peer-state`, `peer-levels`.
+
+`set-input` carries finite/clamped `gain` and `vad_threshold`. Gain is applied before Opus;
+VAD only classifies the local speaking meter and never gates encoded audio. `level` and batched
+decoded pre-route `peer-levels` telemetry are emitted every 100 ms through bounded latest-wins
+mailboxes, so a slow UI/IPC consumer cannot stall capture or playout. `set-synthetic` switches
+between the selected live microphone and the diagnostic tone without restarting the helper.
 
 ## Test
 

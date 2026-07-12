@@ -32,6 +32,11 @@ internal static class SidecarProtocol
     public const int AudioOutPayloadBytes = AudioOutSamples * 4;
     public const int HeaderBytes = 5;
     public const int MaxPayloadBytes = 1 << 20;
+    public const int MaxPeerLevelsPerBatch = 32;
+    public const int MobileAbi = 3;
+    private const int MaxPeerIdChars = 32;
+    private const float DefaultInputGain = 1f;
+    private const float DefaultVadThreshold = 0.004f;
 
     public static byte[] EncodeFrame(byte type, byte[] payload)
     {
@@ -82,8 +87,28 @@ internal static class SidecarProtocol
     public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
         => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
 
-    public static byte[] AddPeerFrame(string peerId, bool isOfferer)
-        => EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{(isOfferer ? "true" : "false")}}}");
+    public static byte[] SetSyntheticFrame(bool enabled)
+        => EncodeControl($"{{\"op\":\"set-synthetic\",\"enabled\":{JsonBool(enabled)}}}");
+
+    public static byte[] SetInputFrame(float gain, float vadThreshold)
+    {
+        gain = NormalizeInputGain(gain);
+        vadThreshold = NormalizeVadThreshold(vadThreshold);
+        return EncodeControl(
+            $"{{\"op\":\"set-input\",\"gain\":{gain.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"vad_threshold\":{vadThreshold.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}}}");
+    }
+
+    internal static float NormalizeInputGain(float gain)
+        => float.IsFinite(gain) ? Math.Clamp(gain, 0f, 2f) : DefaultInputGain;
+
+    internal static float NormalizeVadThreshold(float threshold)
+        => float.IsFinite(threshold) ? Math.Clamp(threshold, 0.0001f, 1f) : DefaultVadThreshold;
+
+    public static byte[] AddPeerFrame(string peerId, bool isOfferer, bool relayOnly, int generation)
+    {
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        return EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{JsonBool(isOfferer)},\"relay_only\":{JsonBool(relayOnly)},\"generation\":{generation}}}");
+    }
 
     public static byte[] RemovePeerFrame(string peerId)
         => EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)}}}");
@@ -305,6 +330,8 @@ internal static class SidecarProtocol
             if (!root.TryGetProperty("op", out var op) || op.GetString() != "level")
                 return false;
             peak = root.TryGetProperty("peak", out var p) ? p.GetSingle() : 0f;
+            if (!float.IsFinite(peak)) return false;
+            peak = Math.Clamp(peak, 0f, 1f);
             speaking = root.TryGetProperty("speaking", out var s) && s.GetBoolean();
             return true;
         }
@@ -314,9 +341,60 @@ internal static class SidecarProtocol
         }
     }
 
-    public static bool TryReadLocalSdp(string json, out string peerId, out string sdpType, out string sdp)
+    public readonly struct PeerLevel
+    {
+        public PeerLevel(string peerId, float peak)
+        {
+            PeerId = peerId;
+            Peak = peak;
+        }
+
+        public string PeerId { get; }
+        public float Peak { get; }
+    }
+
+    public static bool TryReadPeerLevels(string json, out List<PeerLevel> levels)
+    {
+        levels = new List<PeerLevel>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "peer-levels" ||
+                !root.TryGetProperty("levels", out var values) || values.ValueKind != JsonValueKind.Array)
+                return false;
+            if (values.GetArrayLength() > MaxPeerLevelsPerBatch)
+                return false;
+
+            foreach (var value in values.EnumerateArray())
+            {
+                if (value.ValueKind != JsonValueKind.Object ||
+                    !value.TryGetProperty("peer_id", out var idElement) ||
+                    idElement.ValueKind != JsonValueKind.String ||
+                    !value.TryGetProperty("peak", out var peakElement) ||
+                    peakElement.ValueKind != JsonValueKind.Number ||
+                    !peakElement.TryGetSingle(out var peak) ||
+                    !float.IsFinite(peak))
+                    continue;
+
+                var peerId = idElement.GetString() ?? string.Empty;
+                if (peerId.Length == 0 || peerId.Length > MaxPeerIdChars)
+                    continue;
+                levels.Add(new PeerLevel(peerId, Math.Clamp(peak, 0f, 1f)));
+            }
+            return true;
+        }
+        catch
+        {
+            levels.Clear();
+            return false;
+        }
+    }
+
+    public static bool TryReadLocalSdp(string json, out string peerId, out int generation, out string sdpType, out string sdp)
     {
         peerId = "";
+        generation = 0;
         sdpType = "";
         sdp = "";
         try
@@ -326,6 +404,8 @@ internal static class SidecarProtocol
             if (!root.TryGetProperty("op", out var op) || op.GetString() != "local-sdp")
                 return false;
             peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            if (!root.TryGetProperty("generation", out var g) || !g.TryGetInt32(out generation) || generation <= 0)
+                return false;
             sdpType = root.TryGetProperty("sdp_type", out var t) ? (t.GetString() ?? "") : "";
             sdp = root.TryGetProperty("sdp", out var s) ? (s.GetString() ?? "") : "";
             return true;
@@ -336,9 +416,10 @@ internal static class SidecarProtocol
         }
     }
 
-    public static bool TryReadLocalCandidate(string json, out string peerId, out string candidate)
+    public static bool TryReadLocalCandidate(string json, out string peerId, out int generation, out string candidate)
     {
         peerId = "";
+        generation = 0;
         candidate = "";
         try
         {
@@ -347,6 +428,8 @@ internal static class SidecarProtocol
             if (!root.TryGetProperty("op", out var op) || op.GetString() != "local-candidate")
                 return false;
             peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            if (!root.TryGetProperty("generation", out var g) || !g.TryGetInt32(out generation) || generation <= 0)
+                return false;
             candidate = root.TryGetProperty("candidate", out var c) ? (c.GetString() ?? "") : "";
             return true;
         }
@@ -356,9 +439,10 @@ internal static class SidecarProtocol
         }
     }
 
-    public static bool TryReadPeerState(string json, out string peerId, out string state)
+    public static bool TryReadPeerState(string json, out string peerId, out int generation, out string state)
     {
         peerId = "";
+        generation = 0;
         state = "";
         try
         {
@@ -367,6 +451,8 @@ internal static class SidecarProtocol
             if (!root.TryGetProperty("op", out var op) || op.GetString() != "peer-state")
                 return false;
             peerId = root.TryGetProperty("peer_id", out var p) ? (p.GetString() ?? "") : "";
+            if (!root.TryGetProperty("generation", out var g) || !g.TryGetInt32(out generation) || generation <= 0)
+                return false;
             state = root.TryGetProperty("state", out var s) ? (s.GetString() ?? "") : "";
             return true;
         }

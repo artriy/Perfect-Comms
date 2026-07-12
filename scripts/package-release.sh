@@ -11,13 +11,50 @@ release_dll_name="PerfectComms.dll"
 if [[ "$config" == "Android" ]]; then
 	release_dll_name="PerfectCommsAndroid.dll"
 fi
+
+source_version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
+plugin_version="$(grep -m1 'public const string Version =' "$root/VoiceChatPluginMain.cs" | sed -E 's/.*Version = "([^"]+)".*/\1/')"
+if [[ -z "$source_version" || "$plugin_version" != "$source_version" ]]; then
+	echo "source version mismatch: project=$source_version plugin=$plugin_version" >&2
+	exit 1
+fi
 release_dll="$root/artifacts/$release_dll_name"
+
+require_nonempty() {
+	local path="$1"
+	if [[ ! -s "$path" ]]; then
+		echo "missing or empty release asset: ${path#"$root/"}" >&2
+		exit 1
+	fi
+}
+
+if [[ "$config" == "Android" ]]; then
+	require_nonempty "$root/Libs/pc-mobile/libpc_mobile.so"
+else
+	required_desktop_assets=(
+		"Libs/pc-capture/pc-capture-win-x64.exe"
+		"Libs/pc-capture/pc-capture-win-x86.exe"
+		"Libs/pc-capture/pc-capture-linux-x64"
+		"Libs/pc-capture/pc-capture-mac.zip"
+		"Libs/dsp/webrtc-apm.x64.dll"
+		"Libs/dsp/webrtc-apm.x86.dll"
+		"Libs/dsp/libwebrtc-apm.so"
+		"Libs/dsp/libwebrtc-apm.dylib"
+		"Libs/dsp/df.x64.dll"
+		"Libs/dsp/df.x86.dll"
+		"Libs/dsp/libdf.so"
+		"Libs/dsp/libdf.dylib"
+	)
+	for asset in "${required_desktop_assets[@]}"; do
+		require_nonempty "$root/$asset"
+	done
+fi
 
 if command -v cygpath >/dev/null 2>&1; then
 	dotnet_project="$(cygpath -w "$project")"
 fi
 
-dotnet build "$dotnet_project" -c "$config" --nologo
+dotnet build "$dotnet_project" -c "$config" --nologo -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true
 
 rm -rf "$output"
 mkdir -p "$output/BepInEx/plugins"
@@ -25,12 +62,11 @@ cp "$dll" "$output/BepInEx/plugins/PerfectComms.dll"
 if [[ "$config" != "Android" ]]; then
 	helper_src="$root/Libs/pc-capture"
 	helper_dst="$output/BepInEx/plugins/pc-capture"
-	if [[ -d "$helper_src" ]]; then
-		mkdir -p "$helper_dst"
-		for f in pc-capture-win-x64.exe pc-capture-win-x86.exe pc-capture-linux-x64 pc-capture-mac.zip; do
-			test -e "$helper_src/$f" && cp "$helper_src/$f" "$helper_dst/$f"
-		done
-	fi
+	mkdir -p "$helper_dst"
+	for f in pc-capture-win-x64.exe pc-capture-win-x86.exe pc-capture-linux-x64 pc-capture-mac.zip; do
+		cp "$helper_src/$f" "$helper_dst/$f"
+		require_nonempty "$helper_dst/$f"
+	done
 fi
 cp "$dll" "$release_dll"
 cp "$root/README.md" "$output/README.md"
@@ -38,7 +74,7 @@ cp "$root/LICENSE" "$output/LICENSE"
 cp "$root/THIRD_PARTY_NOTICES.md" "$output/THIRD_PARTY_NOTICES.md"
 cp "$root/PRIVACY.md" "$output/PRIVACY.md"
 
-version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
+version="$source_version"
 protocol="$(grep -m1 'ProtocolVersion =' "$root/Comms/VoiceProtocol.cs" | sed -E 's/.*ProtocolVersion = ([0-9]+).*/\1/')"
 {
 	echo "Perfect Comms $version"

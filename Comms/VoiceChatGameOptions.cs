@@ -39,7 +39,12 @@ public class VoiceChatGameOptions
         PublicVoiceLobby = new ToggleHolder(cfg, Section, "PublicVoiceLobby", "Public Voice Lobby", false);
         VoiceBackend = new EnumHolder(cfg, Section, "VoiceBackend", "Voice Backend",
             (int)VoiceTransportBackend.BetterCrewLink, typeof(VoiceTransportBackend),
-            new[] { "BetterCrewLink", "Interstellar" });
+            new[] { "BetterCrewLink", "Interstellar" })
+        {
+            Visible = () => VoiceEndpointSettings.InterstellarEnabled,
+        };
+        if (!VoiceEndpointSettings.InterstellarEnabled)
+            VoiceBackend.Value = (int)VoiceTransportBackend.BetterCrewLink;
         LobbyBrowserBackend = new EnumHolder(cfg, Section, "LobbyBrowserBackend", "Lobby Browser Backend",
             (int)VoiceLobbyBrowserSource.BetterCrewLink, typeof(VoiceLobbyBrowserSource),
             new[] { "BCL Live", "Cloudflare (Limited)" });

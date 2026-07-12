@@ -5,7 +5,8 @@ use std::ffi::{c_char, c_float, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{ptr, slice};
 
-pub const PC_ABI_VERSION: c_int = 1;
+// ABI 3 adds protocol-7 input/synthetic controls and bounded peer-level telemetry.
+pub const PC_ABI_VERSION: c_int = 3;
 
 const _: fn() = || {
     fn assert_sync_send<T: Sync + Send>() {}
@@ -110,4 +111,27 @@ pub unsafe extern "C" fn pc_poll_signal(
         }
     }))
     .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abi_version_matches_protocol_7_contract() {
+        assert_eq!(PC_ABI_VERSION, 3);
+        assert_eq!(pc_abi_version(), 3);
+    }
+
+    #[test]
+    fn null_handles_are_safe_at_ffi_boundary() {
+        unsafe {
+            pc_engine_free(ptr::null_mut());
+            pc_control(ptr::null_mut(), ptr::null());
+            assert_eq!(pc_push_mic(ptr::null_mut(), ptr::null(), 0), 0.0);
+            assert_eq!(pc_pull_playback(ptr::null_mut(), ptr::null_mut(), 0), 0);
+            assert_eq!(pc_mic_level(ptr::null_mut()), 0.0);
+            assert_eq!(pc_poll_signal(ptr::null_mut(), ptr::null_mut(), 0), 0);
+        }
+    }
 }

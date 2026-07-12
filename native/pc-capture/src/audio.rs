@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const TONE_HZ: f32 = 440.0;
+pub use crate::input::SyntheticTone as ToneSource;
+pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
 
 pub fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
@@ -122,38 +123,6 @@ pub fn now_ns() -> u64 {
 
 pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
-}
-
-pub struct ToneSource {
-    phase: f32,
-}
-
-impl Default for ToneSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ToneSource {
-    pub fn new() -> ToneSource {
-        ToneSource { phase: 0.0 }
-    }
-
-    pub fn fill_frame(&mut self) -> AudioFrame {
-        let step = std::f32::consts::TAU * TONE_HZ / SAMPLE_RATE as f32;
-        let mut samples = Vec::with_capacity(FRAME_SAMPLES);
-        for _ in 0..FRAME_SAMPLES {
-            samples.push(0.5 * self.phase.sin());
-            self.phase += step;
-            if self.phase >= std::f32::consts::TAU {
-                self.phase -= std::f32::consts::TAU;
-            }
-        }
-        AudioFrame {
-            capture_ts_ns: now_ns(),
-            samples,
-        }
-    }
 }
 
 pub fn enumerate_devices() -> Vec<DeviceInfo> {
@@ -544,20 +513,20 @@ mod tests {
     #[test]
     fn tone_frame_is_full_and_audible() {
         let mut src = ToneSource::new();
-        let f = src.fill_frame();
+        let f = src.fill_frame(now_ns());
         assert_eq!(f.samples.len(), FRAME_SAMPLES);
         let p = peak(&f.samples);
-        assert!(p > 0.1, "tone too quiet: {p}");
-        assert!(p <= 1.0, "tone clips: {p}");
+        assert!(p > 0.011, "tone too quiet: {p}");
+        assert!(p <= 0.012_01, "tone exceeds diagnostic amplitude: {p}");
     }
 
     #[test]
     fn tone_is_continuous_across_frames() {
         let mut src = ToneSource::new();
-        let f1 = src.fill_frame();
-        let f2 = src.fill_frame();
+        let f1 = src.fill_frame(now_ns());
+        let f2 = src.fill_frame(now_ns());
         assert_ne!(f1.samples, f2.samples);
-        assert!(peak(&f2.samples) > 0.1);
+        assert!(peak(&f2.samples) > 0.011);
     }
 
     #[test]

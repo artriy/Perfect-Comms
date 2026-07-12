@@ -675,11 +675,11 @@ public class VoiceChatLocalSettings
             VoiceChatRoom.Current?.Rejoin();
         }
         else if (configEntry == NatFix || configEntry == TurnServerUrl ||
-                 configEntry == TurnUsername || configEntry == TurnCredential)
+                 configEntry == TurnUsername || configEntry == TurnCredential ||
+                 configEntry == WineForceRelay)
         {
-            // Rebuild the BetterCrewLink ICE/peer-connection pool off the main thread so the new Nat Fix /
-            // TURN policy takes effect on the next peer-join without a render-thread DTLS-cert stall. No
-            // rejoin: existing peers keep their connections.
+            // Recreate the native peer generation so the new direct/relay policy takes effect immediately.
+            // This does not leave or rejoin the game lobby.
             VoiceChatRoom.Current?.RebuildIceConnectionPool();
         }
     }

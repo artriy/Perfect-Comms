@@ -10,11 +10,13 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS};
 use webrtc::api::{APIBuilder, API};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::{
@@ -23,19 +25,24 @@ use webrtc::rtp_transceiver::rtp_codec::{
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
+type ReceivedPacket = (String, u32, u16, Vec<u8>);
+
 #[derive(Debug, Clone)]
 pub enum LocalSignal {
     Sdp {
         peer_id: String,
+        generation: u32,
         sdp_type: String,
         sdp: String,
     },
     Candidate {
         peer_id: String,
+        generation: u32,
         candidate: String,
     },
     PeerState {
         peer_id: String,
+        generation: u32,
         state: String,
     },
 }
@@ -43,15 +50,23 @@ pub enum LocalSignal {
 struct PeerHandle {
     pc: Arc<RTCPeerConnection>,
     track: Arc<TrackLocalStaticSample>,
+    generation: u32,
+}
+
+#[derive(Clone, Copy)]
+struct PeerConfig {
+    relay_only: bool,
+    generation: u32,
 }
 
 pub struct RtcEngine {
     rt: Runtime,
     peers: Mutex<HashMap<String, PeerHandle>>,
+    peer_configs: Mutex<HashMap<String, PeerConfig>>,
     ice_servers: Mutex<Vec<RTCIceServer>>,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: Sender<(String, u16, Vec<u8>)>,
-    recv_rx: Mutex<Receiver<(String, u16, Vec<u8>)>>,
+    recv_tx: Sender<ReceivedPacket>,
+    recv_rx: Mutex<Receiver<ReceivedPacket>>,
 
     pending_ice: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -88,12 +103,19 @@ async fn create_peer(
     peer_id: String,
     offerer: bool,
     ice_servers: Vec<RTCIceServer>,
+    relay_only: bool,
+    generation: u32,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: Sender<(String, u16, Vec<u8>)>,
+    recv_tx: Sender<ReceivedPacket>,
 ) -> Result<PeerHandle, webrtc::Error> {
     let api = build_api()?;
     let config = RTCConfiguration {
-        ice_servers,
+        ice_servers: servers_for_policy(&ice_servers, relay_only),
+        ice_transport_policy: if relay_only {
+            RTCIceTransportPolicy::Relay
+        } else {
+            RTCIceTransportPolicy::All
+        },
         ..Default::default()
     };
     let pc = Arc::new(api.new_peer_connection(config).await?);
@@ -122,6 +144,7 @@ async fn create_peer(
                     if let Ok(s) = serde_json::to_string(&init) {
                         let _ = signal.send(LocalSignal::Candidate {
                             peer_id: pid,
+                            generation,
                             candidate: s,
                         });
                     }
@@ -138,6 +161,7 @@ async fn create_peer(
         Box::pin(async move {
             let _ = signal.send(LocalSignal::PeerState {
                 peer_id: pid,
+                generation,
                 state: s.to_string(),
             });
         })
@@ -153,6 +177,7 @@ async fn create_peer(
                     if !pkt.payload.is_empty() {
                         let _ = tx.send((
                             pid.clone(),
+                            generation,
                             pkt.header.sequence_number,
                             pkt.payload.to_vec(),
                         ));
@@ -168,13 +193,52 @@ async fn create_peer(
         if let Some(local) = pc.local_description().await {
             let _ = out_local_signal.send(LocalSignal::Sdp {
                 peer_id: peer_id.clone(),
+                generation,
                 sdp_type: local.sdp_type.to_string(),
                 sdp: local.sdp,
             });
         }
     }
 
-    Ok(PeerHandle { pc, track })
+    Ok(PeerHandle {
+        pc,
+        track,
+        generation,
+    })
+}
+
+fn is_turn_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("turn:"))
+        || trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("turns:"))
+}
+
+/// Direct attempts deliberately omit TURN URLs so healthy peers never allocate a relay.
+/// Relay retries receive only TURN URLs and use WebRTC's relay-only gather policy. Splitting
+/// mixed URL entries preserves the username/credential attached to the original ICE server.
+fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceServer> {
+    servers
+        .iter()
+        .filter_map(|server| {
+            let urls: Vec<String> = server
+                .urls
+                .iter()
+                .filter(|url| is_turn_url(url) == relay_only)
+                .cloned()
+                .collect();
+            if urls.is_empty() {
+                None
+            } else {
+                let mut selected = server.clone();
+                selected.urls = urls;
+                Some(selected)
+            }
+        })
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -188,6 +252,7 @@ impl RtcEngine {
         RtcEngine {
             rt,
             peers: Mutex::new(HashMap::new()),
+            peer_configs: Mutex::new(HashMap::new()),
             ice_servers: Mutex::new(vec![RTCIceServer {
                 urls: vec![
                     "stun:stun.l.google.com:19302".to_string(),
@@ -212,30 +277,63 @@ impl RtcEngine {
                 urls: s.urls.clone(),
                 username: s.username.clone().unwrap_or_default(),
                 credential: s.credential.clone().unwrap_or_default(),
-                ..Default::default()
+                // TURN API/custom coturn credentials are long-term username/password values.
+                // webrtc-rs rejects a populated credential whose type remains Unspecified before
+                // ICE gathering, so relay fallback would otherwise fail without one candidate.
+                credential_type: RTCIceCredentialType::Password,
             })
             .collect();
         *self.ice_servers.lock().unwrap() = mapped;
     }
 
-    pub fn add_peer(&self, peer_id: String, offerer: bool) {
-        if self.peers.lock().unwrap().contains_key(&peer_id) {
-            return;
+    fn emit_failed(&self, peer_id: &str, generation: u32) {
+        let _ = self.out_local_signal.send(LocalSignal::PeerState {
+            peer_id: peer_id.to_string(),
+            generation,
+            state: "failed".to_string(),
+        });
+    }
+
+    pub fn add_peer(&self, peer_id: String, offerer: bool, relay_only: bool, generation: u32) {
+        let config = PeerConfig {
+            relay_only,
+            generation,
+        };
+        self.peer_configs
+            .lock()
+            .unwrap()
+            .insert(peer_id.clone(), config);
+
+        let existing = self.peers.lock().unwrap().remove(&peer_id);
+        if let Some(handle) = existing {
+            if handle.generation == generation {
+                self.peers.lock().unwrap().insert(peer_id, handle);
+                return;
+            }
+            let _ = self.rt.block_on(async move { handle.pc.close().await });
         }
         let signal = self.out_local_signal.clone();
         let recv_tx = self.recv_tx.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
-        if let Ok(handle) = self
-            .rt
-            .block_on(create_peer(pid, offerer, servers, signal, recv_tx))
-        {
-            self.peers.lock().unwrap().insert(peer_id, handle);
+        match self.rt.block_on(create_peer(
+            pid, offerer, servers, relay_only, generation, signal, recv_tx,
+        )) {
+            Ok(handle) => {
+                self.peers.lock().unwrap().insert(peer_id, handle);
+            }
+            Err(error) => {
+                eprintln!(
+                    "pc-capture: peer creation failed peer={peer_id} generation={generation} relay_only={relay_only}: {error}"
+                );
+                self.emit_failed(&peer_id, generation);
+            }
         }
     }
 
     pub fn remove_peer(&self, peer_id: &str) {
         self.pending_ice.lock().unwrap().remove(peer_id);
+        self.peer_configs.lock().unwrap().remove(peer_id);
         let handle = self.peers.lock().unwrap().remove(peer_id);
         if let Some(h) = handle {
             let _ = self.rt.block_on(async move { h.pc.close().await });
@@ -252,36 +350,64 @@ impl RtcEngine {
         let pc = match existing {
             Some(p) => p,
             None => {
+                let config = match self.peer_configs.lock().unwrap().get(peer_id).copied() {
+                    Some(config) => config,
+                    None => return,
+                };
                 let signal = self.out_local_signal.clone();
                 let recv_tx = self.recv_tx.clone();
                 let servers = self.ice_servers.lock().unwrap().clone();
                 let pid = peer_id.to_string();
-                match self
-                    .rt
-                    .block_on(create_peer(pid, false, servers, signal, recv_tx))
-                {
+                match self.rt.block_on(create_peer(
+                    pid,
+                    false,
+                    servers,
+                    config.relay_only,
+                    config.generation,
+                    signal,
+                    recv_tx,
+                )) {
                     Ok(h) => {
                         let pc = Arc::clone(&h.pc);
                         self.peers.lock().unwrap().insert(peer_id.to_string(), h);
                         pc
                     }
-                    Err(_) => return,
+                    Err(error) => {
+                        eprintln!(
+                            "pc-capture: answer peer creation failed peer={peer_id} generation={} relay_only={}: {error}",
+                            config.generation, config.relay_only
+                        );
+                        self.emit_failed(peer_id, config.generation);
+                        return;
+                    }
                 }
             }
         };
 
+        let generation = match self.peers.lock().unwrap().get(peer_id) {
+            Some(handle) => handle.generation,
+            None => return,
+        };
         let desc = match sdp_type {
             "offer" => RTCSessionDescription::offer(sdp.to_string()),
             "answer" => RTCSessionDescription::answer(sdp.to_string()),
             "pranswer" => RTCSessionDescription::pranswer(sdp.to_string()),
-            _ => return,
+            _ => {
+                self.emit_failed(peer_id, generation);
+                return;
+            }
         };
         let desc = match desc {
             Ok(d) => d,
-            Err(_) => return,
+            Err(_) => {
+                self.emit_failed(peer_id, generation);
+                return;
+            }
         };
         let signal = self.out_local_signal.clone();
         let pid = peer_id.to_string();
+        let failed_signal = self.out_local_signal.clone();
+        let failed_peer = peer_id.to_string();
         let is_offer = sdp_type == "offer";
 
         let pending = self
@@ -290,7 +416,7 @@ impl RtcEngine {
             .unwrap()
             .remove(peer_id)
             .unwrap_or_default();
-        let _ = self.rt.block_on(async move {
+        if let Err(error) = self.rt.block_on(async move {
             pc.set_remote_description(desc).await?;
             for cand in pending {
                 let init = serde_json::from_str::<RTCIceCandidateInit>(&cand).unwrap_or(
@@ -307,13 +433,23 @@ impl RtcEngine {
                 if let Some(local) = pc.local_description().await {
                     let _ = signal.send(LocalSignal::Sdp {
                         peer_id: pid,
+                        generation,
                         sdp_type: local.sdp_type.to_string(),
                         sdp: local.sdp,
                     });
                 }
             }
             Ok::<(), webrtc::Error>(())
-        });
+        }) {
+            eprintln!(
+                "pc-capture: remote SDP failed peer={peer_id} generation={generation} type={sdp_type}: {error}"
+            );
+            let _ = failed_signal.send(LocalSignal::PeerState {
+                peer_id: failed_peer,
+                generation,
+                state: "failed".to_string(),
+            });
+        }
     }
 
     pub fn add_ice_candidate(&self, peer_id: &str, candidate: &str) {
@@ -382,8 +518,20 @@ impl RtcEngine {
         });
     }
 
-    pub fn recv(&self) -> Option<(String, u16, Vec<u8>)> {
-        self.recv_rx.lock().unwrap().try_recv().ok()
+    pub fn recv(&self) -> Option<(String, u32, u16, Vec<u8>)> {
+        let receiver = self.recv_rx.lock().unwrap();
+        while let Ok((peer_id, generation, sequence, payload)) = receiver.try_recv() {
+            let is_current = self
+                .peer_configs
+                .lock()
+                .unwrap()
+                .get(&peer_id)
+                .is_some_and(|config| config.generation == generation);
+            if is_current {
+                return Some((peer_id, generation, sequence, payload));
+            }
+        }
+        None
     }
 
     #[cfg(test)]
@@ -425,6 +573,83 @@ mod tests {
         assert_eq!(stored[1].urls, vec!["turn:turn.example.com:3478"]);
         assert_eq!(stored[1].username, "u");
         assert_eq!(stored[1].credential, "c");
+        assert_eq!(stored[1].credential_type, RTCIceCredentialType::Password);
+    }
+
+    #[test]
+    fn direct_and_relay_policies_split_mixed_ice_servers() {
+        let mixed = vec![
+            RTCIceServer {
+                urls: vec![
+                    "stun:stun.example.com:3478".to_string(),
+                    "turn:turn.example.com:3478?transport=udp".to_string(),
+                    "turns:turn.example.com:5349?transport=tcp".to_string(),
+                ],
+                username: "user".to_string(),
+                credential: "secret".to_string(),
+                ..Default::default()
+            },
+            RTCIceServer {
+                urls: vec!["STUN:backup.example.com:3478".to_string()],
+                ..Default::default()
+            },
+        ];
+
+        let direct = servers_for_policy(&mixed, false);
+        assert_eq!(direct.len(), 2);
+        assert_eq!(direct[0].urls, vec!["stun:stun.example.com:3478"]);
+        assert_eq!(direct[1].urls, vec!["STUN:backup.example.com:3478"]);
+
+        let relay = servers_for_policy(&mixed, true);
+        assert_eq!(relay.len(), 1);
+        assert_eq!(relay[0].urls.len(), 2);
+        assert_eq!(relay[0].username, "user");
+        assert_eq!(relay[0].credential, "secret");
+    }
+
+    #[test]
+    fn malformed_remote_sdp_emits_failed_for_current_generation() {
+        let (tx, rx) = channel::<LocalSignal>();
+        let engine = RtcEngine::new(tx);
+        engine.add_peer("bad-sdp".to_string(), false, false, 41);
+
+        engine.set_remote_sdp("bad-sdp", "offer", "this is not valid SDP");
+
+        let saw_failure = std::iter::from_fn(|| rx.try_recv().ok()).any(|signal| {
+            matches!(
+                signal,
+                LocalSignal::PeerState {
+                    peer_id,
+                    generation: 41,
+                    state,
+                } if peer_id == "bad-sdp" && state == "failed"
+            )
+        });
+        assert!(saw_failure, "malformed SDP failure was not surfaced");
+    }
+
+    #[test]
+    fn recv_drops_media_from_replaced_generation() {
+        let (tx, _rx) = channel::<LocalSignal>();
+        let engine = RtcEngine::new(tx);
+        engine.peer_configs.lock().unwrap().insert(
+            "peer".to_string(),
+            PeerConfig {
+                relay_only: true,
+                generation: 42,
+            },
+        );
+        engine
+            .recv_tx
+            .send(("peer".to_string(), 41, 1, vec![1]))
+            .unwrap();
+        engine
+            .recv_tx
+            .send(("peer".to_string(), 42, 2, vec![2]))
+            .unwrap();
+
+        assert_eq!(engine.recv(), Some(("peer".to_string(), 42, 2, vec![2])));
+        assert_eq!(engine.recv(), None);
     }
 
     #[test]
@@ -434,9 +659,9 @@ mod tests {
         let a = RtcEngine::new(a_tx);
         let b = RtcEngine::new(b_tx);
 
-        a.add_peer("B".to_string(), true);
+        a.add_peer("B".to_string(), true, false, 41);
 
-        b.add_peer("A".to_string(), false);
+        b.add_peer("A".to_string(), false, false, 42);
 
         let payload: Vec<u8> = (0..80u8).map(|i| i ^ 0x5a).collect();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -472,7 +697,7 @@ mod tests {
                 }
             }
             a.send_opus(&payload);
-            while let Some((_pid, _seq, pkt)) = b.recv() {
+            while let Some((_pid, _generation, _seq, pkt)) = b.recv() {
                 count += 1;
                 if received.is_none() {
                     received = Some(pkt);

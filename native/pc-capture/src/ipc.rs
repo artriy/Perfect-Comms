@@ -4,12 +4,16 @@ use crate::audio::{
 };
 use crate::codec::OpusCodec;
 use crate::gamestate::{GameState, LocalState, PeerState};
+use crate::input::{
+    InputConfig, LevelCadence, PeerLevelCadence, TelemetryMailbox, TELEMETRY_INTERVAL,
+};
 use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
     devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
-    parse_inbound, peer_state_json, pong_json, ready_json, AudioFrame, AudioOutFrame, AudioRing,
-    DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
+    parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json, AudioFrame,
+    AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION,
+    RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, RtcEngine};
 use std::collections::HashMap;
@@ -21,8 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_FRAME_LEN: usize = 1 << 20;
-
-const SPEAKING_PEAK: f32 = 0.02;
 
 pub struct ServerConfig {
     pub handshake_path: PathBuf,
@@ -163,7 +165,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 fn synthetic_devices() -> Vec<DeviceInfo> {
     vec![DeviceInfo {
         id: "synthetic-tone".to_string(),
-        name: "Synthetic Tone (440 Hz)".to_string(),
+        name: "Synthetic Tone (220 Hz)".to_string(),
         default: true,
     }]
 }
@@ -175,9 +177,215 @@ fn spawn_synthetic_producer(
     std::thread::spawn(move || {
         let mut src = ToneSource::new();
         while !stop.load(Ordering::Relaxed) {
-            let frame = src.fill_frame();
+            let frame = src.fill_frame(now_ns());
             ring.lock().unwrap().push(frame);
             std::thread::sleep(Duration::from_millis(20));
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProducerAction {
+    None,
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Debug)]
+struct ProducerLifecycle {
+    running: bool,
+    synthetic: bool,
+    selected: Option<String>,
+}
+
+impl ProducerLifecycle {
+    fn new(synthetic: bool) -> Self {
+        Self {
+            running: false,
+            synthetic,
+            selected: None,
+        }
+    }
+
+    fn start(&mut self) -> ProducerAction {
+        if self.running {
+            ProducerAction::None
+        } else {
+            self.running = true;
+            ProducerAction::Start
+        }
+    }
+
+    fn stop(&mut self) -> ProducerAction {
+        if self.running {
+            self.running = false;
+            ProducerAction::Stop
+        } else {
+            ProducerAction::None
+        }
+    }
+
+    fn select(&mut self, selected: Option<String>) -> ProducerAction {
+        if self.selected == selected {
+            return ProducerAction::None;
+        }
+        self.selected = selected;
+        if self.running {
+            ProducerAction::Restart
+        } else {
+            ProducerAction::None
+        }
+    }
+
+    fn set_synthetic(&mut self, enabled: bool) -> ProducerAction {
+        if self.synthetic == enabled {
+            return ProducerAction::None;
+        }
+        self.synthetic = enabled;
+        if self.running {
+            ProducerAction::Restart
+        } else {
+            ProducerAction::None
+        }
+    }
+}
+
+struct CaptureProducer {
+    lifecycle: ProducerLifecycle,
+    ring: Arc<Mutex<AudioRing>>,
+    conn: Arc<Mutex<TcpStream>>,
+    stop: Option<Arc<AtomicBool>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CaptureProducer {
+    fn new(synthetic: bool, ring: Arc<Mutex<AudioRing>>, conn: Arc<Mutex<TcpStream>>) -> Self {
+        Self {
+            lifecycle: ProducerLifecycle::new(synthetic),
+            ring,
+            conn,
+            stop: None,
+            handle: None,
+        }
+    }
+
+    fn apply(&mut self, action: ProducerAction) {
+        match action {
+            ProducerAction::None => self.reap_finished(),
+            ProducerAction::Start => self.spawn(),
+            ProducerAction::Stop => self.stop_join_clear(),
+            ProducerAction::Restart => {
+                self.stop_join_clear();
+                self.spawn();
+            }
+        }
+    }
+
+    fn start(&mut self) {
+        let action = self.lifecycle.start();
+        self.apply(action);
+        if self.lifecycle.running && self.handle.is_none() {
+            self.spawn();
+        }
+    }
+
+    fn stop(&mut self) {
+        let action = self.lifecycle.stop();
+        self.apply(action);
+        // A producer may have exited just before Stop; always clear any stale queued PCM.
+        if !self.lifecycle.running {
+            self.stop_join_clear();
+        }
+    }
+
+    fn select_device(&mut self, id: String) {
+        let selected = if id.is_empty() { None } else { Some(id) };
+        let action = self.lifecycle.select(selected);
+        self.apply(action);
+    }
+
+    fn set_synthetic(&mut self, enabled: bool) {
+        let action = self.lifecycle.set_synthetic(enabled);
+        self.apply(action);
+    }
+
+    fn is_synthetic(&self) -> bool {
+        self.lifecycle.synthetic
+    }
+
+    fn reap_finished(&mut self) {
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            if let Some(handle) = self.handle.take() {
+                handle.join().ok();
+            }
+            self.stop = None;
+        }
+    }
+
+    fn spawn(&mut self) {
+        self.reap_finished();
+        if self.handle.is_some() || !self.lifecycle.running {
+            return;
+        }
+        self.ring.lock().unwrap().clear();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.handle = Some(if self.lifecycle.synthetic {
+            spawn_synthetic_producer(self.ring.clone(), stop.clone())
+        } else {
+            spawn_real_producer(
+                self.lifecycle.selected.clone(),
+                self.ring.clone(),
+                stop.clone(),
+                self.conn.clone(),
+            )
+        });
+        self.stop = Some(stop);
+    }
+
+    fn stop_join_clear(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.join().ok();
+        }
+        if let Ok(mut ring) = self.ring.lock() {
+            ring.clear();
+        }
+    }
+}
+
+impl Drop for CaptureProducer {
+    fn drop(&mut self) {
+        self.stop_join_clear();
+    }
+}
+
+fn spawn_telemetry_writer(
+    mailbox: Arc<TelemetryMailbox>,
+    stop: Arc<AtomicBool>,
+    conn: Arc<Mutex<TcpStream>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            if let Some((peak, speaking)) = mailbox.take_local() {
+                let bytes = encode_control(&level_json(peak, speaking));
+                if write_frame(&conn, &bytes).is_err() {
+                    break;
+                }
+            }
+            if let Some(levels) = mailbox.take_peers() {
+                let bytes = encode_control(&peer_levels_json(&levels));
+                if write_frame(&conn, &bytes).is_err() {
+                    break;
+                }
+            }
+            std::thread::sleep(TELEMETRY_INTERVAL / 5);
         }
     })
 }
@@ -273,6 +481,8 @@ enum RtcOp {
     AddPeer {
         peer_id: String,
         offerer: bool,
+        relay_only: bool,
+        generation: u32,
     },
     RemovePeer {
         peer_id: String,
@@ -294,6 +504,9 @@ enum RtcOp {
 #[allow(clippy::while_let_loop)]
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
     stream.set_nodelay(true).ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .ok();
 
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -339,9 +552,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
-    let selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let producer_stop = Arc::new(AtomicBool::new(false));
-    let producer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let mut producer = CaptureProducer::new(cfg.synthetic, ring.clone(), conn.clone());
+    let input = Arc::new(Mutex::new(InputConfig::default()));
+    let telemetry = Arc::new(TelemetryMailbox::default());
+    let telemetry_stop = Arc::new(AtomicBool::new(false));
+    let telemetry_handle =
+        spawn_telemetry_writer(telemetry.clone(), telemetry_stop.clone(), conn.clone());
 
     let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
 
@@ -353,7 +569,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let ctrl_handle = std::thread::spawn(move || {
         while let Ok(op) = rtc_op_rx.recv() {
             match op {
-                RtcOp::AddPeer { peer_id, offerer } => ctrl_rtc.add_peer(peer_id, offerer),
+                RtcOp::AddPeer {
+                    peer_id,
+                    offerer,
+                    relay_only,
+                    generation,
+                } => ctrl_rtc.add_peer(peer_id, offerer, relay_only, generation),
                 RtcOp::RemovePeer { peer_id } => ctrl_rtc.remove_peer(&peer_id),
                 RtcOp::SetRemoteSdp {
                     peer_id,
@@ -370,12 +591,13 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
     let writer_ring = ring.clone();
     let writer_stop = stop.clone();
-    let writer_conn = conn.clone();
     let writer_dsp = dsp.clone();
     let writer_rtc = rtc.clone();
+    let writer_input = input.clone();
+    let writer_telemetry = telemetry.clone();
     let writer_handle = std::thread::spawn(move || {
         let mut encoder = OpusCodec::new().ok();
-        let mut since_level = 0u32;
+        let mut level_cadence = LevelCadence::new(Instant::now());
         let mut last_dropped = 0u64;
         while !writer_stop.load(Ordering::Relaxed) {
             let (frame, dropped) = {
@@ -385,6 +607,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             match frame {
                 Some(mut f) => {
                     writer_dsp.lock().unwrap().capture(&mut f.samples);
+                    let input = *writer_input.lock().unwrap();
+                    input.apply_gain(&mut f.samples);
                     let pk = peak(&f.samples);
                     if let Some(enc) = encoder.as_mut() {
                         let pkt = enc.encode(&f.samples);
@@ -392,15 +616,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             writer_rtc.send_opus(&pkt);
                         }
                     }
-                    since_level += 1;
-                    if since_level >= 50 {
-                        since_level = 0;
-                        let speaking = pk >= SPEAKING_PEAK;
-                        if write_frame(&writer_conn, &encode_control(&level_json(pk, speaking)))
-                            .is_err()
-                        {
-                            break;
-                        }
+                    if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
+                        writer_telemetry
+                            .publish_local(window_peak, window_peak >= input.vad_threshold);
                         if dropped != last_dropped {
                             eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
                             last_dropped = dropped;
@@ -413,7 +631,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     });
 
     let game_state = Arc::new(GameState::new());
-    let (dec_remove_tx, dec_remove_rx) = std::sync::mpsc::channel::<String>();
+    enum DecoderOp {
+        Reset { peer_id: String, generation: u32 },
+        Remove { peer_id: String },
+    }
+    let (dec_op_tx, dec_op_rx) = std::sync::mpsc::channel::<DecoderOp>();
 
     let drain_rtc = rtc.clone();
     let drain_stop = rtc_stop.clone();
@@ -424,10 +646,13 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_out_selected = out_selected.clone();
     let drain_out_stop = out_stop.clone();
     let drain_out_spawn = out_spawn_ns.clone();
+    let drain_telemetry = telemetry.clone();
     let drain_handle = std::thread::spawn(move || {
         let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
         let mut last_seq: HashMap<String, u16> = HashMap::new();
+        let mut generations: HashMap<String, u32> = HashMap::new();
         let mut mixer = Mixer::new();
+        let mut peer_levels = PeerLevelCadence::new(Instant::now());
 
         let mut jitter = PeerJitter::new();
         let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
@@ -435,14 +660,34 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         let frame_dur = Duration::from_millis(20);
         let mut next_tick = Instant::now();
         while !drain_stop.load(Ordering::Relaxed) {
-            while let Ok(id) = dec_remove_rx.try_recv() {
+            while let Ok(op) = dec_op_rx.try_recv() {
+                let (id, generation) = match op {
+                    DecoderOp::Reset {
+                        peer_id,
+                        generation,
+                    } => (peer_id, Some(generation)),
+                    DecoderOp::Remove { peer_id } => (peer_id, None),
+                };
                 decoders.remove(&id);
                 jitter.remove(&id);
                 last_seq.remove(&id);
+                peer_levels.remove(&id);
+                if let Some(generation) = generation {
+                    generations.insert(id, generation);
+                } else {
+                    generations.remove(&id);
+                }
             }
 
             let mut drained = 0;
-            while let Some((peer, seq, data)) = drain_rtc.recv() {
+            while let Some((peer, generation, seq, data)) = drain_rtc.recv() {
+                if generations.get(&peer).copied() != Some(generation) {
+                    decoders.remove(&peer);
+                    jitter.remove(&peer);
+                    last_seq.remove(&peer);
+                    peer_levels.remove(&peer);
+                    generations.insert(peer.clone(), generation);
+                }
                 if !decoders.contains_key(&peer) {
                     match OpusCodec::new() {
                         Ok(c) => {
@@ -457,6 +702,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     crate::codec::decode_with_concealment(codec, last, seq, &data)
                 };
                 for f in frames {
+                    peer_levels.observe(&peer, peak(&f));
                     jitter.push(&peer, f);
                 }
                 if advance {
@@ -466,6 +712,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 if drained >= 256 {
                     break;
                 }
+            }
+            if let Some(levels) = peer_levels.take_due(Instant::now()) {
+                drain_telemetry.publish_peers(levels);
             }
             if jitter.is_idle() {
                 std::thread::sleep(Duration::from_millis(5));
@@ -508,13 +757,20 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             let json = match sig {
                 LocalSignal::Sdp {
                     peer_id,
+                    generation,
                     sdp_type,
                     sdp,
-                } => local_sdp_json(&peer_id, &sdp_type, &sdp),
-                LocalSignal::Candidate { peer_id, candidate } => {
-                    local_candidate_json(&peer_id, &candidate)
-                }
-                LocalSignal::PeerState { peer_id, state } => peer_state_json(&peer_id, &state),
+                } => local_sdp_json(&peer_id, generation, &sdp_type, &sdp),
+                LocalSignal::Candidate {
+                    peer_id,
+                    generation,
+                    candidate,
+                } => local_candidate_json(&peer_id, generation, &candidate),
+                LocalSignal::PeerState {
+                    peer_id,
+                    generation,
+                    state,
+                } => peer_state_json(&peer_id, generation, &state),
             };
             if write_frame(&signal_conn, &encode_control(&json)).is_err() {
                 break;
@@ -544,8 +800,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 };
                 match op {
                     InboundOp::SelectDevice { id } => {
-                        *selected.lock().unwrap() = Some(id);
-                        let devs = if cfg.synthetic {
+                        producer.select_device(id);
+                        let devs = if producer.is_synthetic() {
                             synthetic_devices()
                         } else {
                             enumerate_devices()
@@ -575,46 +831,55 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         );
                     }
                     InboundOp::Start => {
-                        producer_stop.store(false, Ordering::Relaxed);
-                        let mut guard = producer.lock().unwrap();
-                        if guard.as_ref().is_some_and(|h| h.is_finished()) {
-                            if let Some(h) = guard.take() {
-                                h.join().ok();
-                            }
-                        }
-                        if guard.is_none() {
-                            if cfg.synthetic {
-                                *guard = Some(spawn_synthetic_producer(
-                                    ring.clone(),
-                                    producer_stop.clone(),
-                                ));
-                            } else {
-                                let dev = selected.lock().unwrap().clone();
-                                *guard = Some(spawn_real_producer(
-                                    dev,
-                                    ring.clone(),
-                                    producer_stop.clone(),
-                                    conn.clone(),
-                                ));
-                            }
-                        }
+                        producer.start();
                     }
                     InboundOp::Stop => {
-                        producer_stop.store(true, Ordering::Relaxed);
-                        if let Some(h) = producer.lock().unwrap().take() {
-                            h.join().ok();
-                        }
+                        producer.stop();
                     }
                     InboundOp::SetDsp { aec, agc, ns, hpf } => {
                         dsp.lock()
                             .unwrap()
                             .set(crate::dsp::DspConfig { aec, agc, ns, hpf });
                     }
+                    InboundOp::SetInput {
+                        gain,
+                        vad_threshold,
+                    } => {
+                        *input.lock().unwrap() = InputConfig::sanitized(gain, vad_threshold);
+                    }
+                    InboundOp::SetSynthetic { enabled } => {
+                        producer.set_synthetic(enabled);
+                        let devs = if producer.is_synthetic() {
+                            synthetic_devices()
+                        } else {
+                            enumerate_devices()
+                        };
+                        let outs = if cfg.synthetic {
+                            synthetic_devices()
+                        } else {
+                            enumerate_output_devices()
+                        };
+                        let _ = write_frame(&conn, &encode_control(&devices_json(&devs, &outs)));
+                    }
                     InboundOp::Ping => {
                         let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
                     }
-                    InboundOp::PeerAdd { peer_id, offerer } => {
-                        let _ = rtc_op_tx.send(RtcOp::AddPeer { peer_id, offerer });
+                    InboundOp::PeerAdd {
+                        peer_id,
+                        offerer,
+                        relay_only,
+                        generation,
+                    } => {
+                        let _ = dec_op_tx.send(DecoderOp::Reset {
+                            peer_id: peer_id.clone(),
+                            generation,
+                        });
+                        let _ = rtc_op_tx.send(RtcOp::AddPeer {
+                            peer_id,
+                            offerer,
+                            relay_only,
+                            generation,
+                        });
                         ensure_playback(
                             &out_thread,
                             &out_selected,
@@ -628,7 +893,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             peer_id: peer_id.clone(),
                         });
                         game_state.remove_peer(&peer_id);
-                        let _ = dec_remove_tx.send(peer_id);
+                        let _ = dec_op_tx.send(DecoderOp::Remove { peer_id });
                     }
                     InboundOp::SetRemoteSdp {
                         peer_id,
@@ -675,18 +940,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     }
 
-    producer_stop.store(true, Ordering::Relaxed);
+    producer.stop();
     stop.store(true, Ordering::Relaxed);
     out_stop.store(true, Ordering::Relaxed);
     rtc_stop.store(true, Ordering::Relaxed);
-    if let Some(h) = producer.lock().unwrap().take() {
-        h.join().ok();
-    }
+    telemetry_stop.store(true, Ordering::Release);
     if let Some(h) = out_thread.lock().unwrap().take() {
         h.join().ok();
     }
     writer_handle.join().ok();
     drain_handle.join().ok();
+    telemetry_handle.join().ok();
     drop(rtc_op_tx);
     ctrl_handle.join().ok();
     drop(rtc);
@@ -800,13 +1064,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":5,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":7,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":5,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":7,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -832,6 +1096,57 @@ mod tests {
     }
 
     #[test]
+    fn producer_lifecycle_restarts_only_for_live_changes() {
+        let mut lifecycle = ProducerLifecycle::new(false);
+        assert_eq!(lifecycle.select(Some("mic-a".into())), ProducerAction::None);
+        assert_eq!(lifecycle.start(), ProducerAction::Start);
+        assert_eq!(lifecycle.start(), ProducerAction::None);
+        assert_eq!(
+            lifecycle.select(Some("mic-b".into())),
+            ProducerAction::Restart
+        );
+        assert_eq!(lifecycle.select(Some("mic-b".into())), ProducerAction::None);
+        assert_eq!(lifecycle.set_synthetic(true), ProducerAction::Restart);
+        assert_eq!(lifecycle.set_synthetic(true), ProducerAction::None);
+        assert_eq!(lifecycle.stop(), ProducerAction::Stop);
+        assert_eq!(lifecycle.stop(), ProducerAction::None);
+        assert_eq!(lifecycle.set_synthetic(false), ProducerAction::None);
+        assert_eq!(lifecycle.start(), ProducerAction::Start);
+    }
+
+    #[test]
+    fn capture_producer_stop_clears_stale_frames_and_can_restart() {
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
+        let mut producer = CaptureProducer::new(true, ring.clone(), Arc::new(Mutex::new(server)));
+
+        producer.start();
+        for _ in 0..100 {
+            if ring.lock().unwrap().len() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ring.lock().unwrap().len() > 0);
+        producer.stop();
+        assert_eq!(ring.lock().unwrap().len(), 0);
+
+        producer.start();
+        for _ in 0..100 {
+            if ring.lock().unwrap().len() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ring.lock().unwrap().len() > 0);
+        producer.stop();
+        drop(client);
+    }
+
+    #[test]
     fn synthetic_session_handshakes_pings_emits_level_and_replies_devices() {
         let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -850,7 +1165,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":5,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":7,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -859,7 +1174,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 5);
+                assert_eq!(v["proto"], 7);
                 assert_eq!(v["format"]["rate"], 48_000);
             }
             other => panic!("expected ready, got {other:?}"),
@@ -933,7 +1248,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":5,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":7,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -1003,7 +1318,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":5,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":7,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

@@ -4,6 +4,7 @@ pub mod dsp;
 pub mod engine;
 #[allow(dead_code)]
 pub mod gamestate;
+pub mod input;
 #[allow(dead_code)]
 pub mod mix;
 pub mod proto;

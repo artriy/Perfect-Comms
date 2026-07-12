@@ -13,26 +13,39 @@ internal enum SignalMsgType : byte
     Answer = 2,
     Candidate = 3,
     Bye = 4,
+    IceMode = 5,
+    Restart = 6,
 }
 
 internal static class AmongUsRpcSignaling
 {
     public const byte SignalingRpcId = 209;
+    internal const int MaxDecompressedPayloadBytes = 256 * 1024;
 
     public static event Action<int, SignalMsgType, byte[]>? OnMessage;
 
     public static void Send(int targetClientId, SignalMsgType type, byte[] payload)
     {
-        if (AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return;
-
-        var frame = Frame(type, payload);
-        var writer = AmongUsClient.Instance.StartRpcImmediately(
-            PlayerControl.LocalPlayer.NetId,
-            SignalingRpcId,
-            SendOption.Reliable,
-            targetClientId);
-        writer.WriteBytesAndSize(frame);
-        AmongUsClient.Instance.FinishRpcImmediately(writer);
+        if (targetClientId < 0 || AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return;
+        try
+        {
+            var frame = Frame(type, payload);
+            var writer = AmongUsClient.Instance.StartRpcImmediately(
+                PlayerControl.LocalPlayer.NetId,
+                SignalingRpcId,
+                SendOption.Reliable,
+                targetClientId);
+            writer.WriteBytesAndSize(frame);
+            AmongUsClient.Instance.FinishRpcImmediately(writer);
+        }
+        catch (Exception ex)
+        {
+            // A peer can disappear between roster polling and this reliable send. Never let a
+            // signaling race escape into the game's main loop.
+            VoiceDiagnostics.Log(
+                "signaling.rpc.send-error",
+                $"target={targetClientId} type={type} error=\"{ex.Message}\"");
+        }
     }
 
     public static byte[] Frame(SignalMsgType type, byte[] payload)
@@ -56,7 +69,7 @@ internal static class AmongUsRpcSignaling
         if (frame == null || frame.Length < 3) return false;
 
         var rawType = frame[0];
-        if (rawType > (byte)SignalMsgType.Bye) return false;
+        if (rawType > (byte)SignalMsgType.Restart) return false;
 
         var length = (frame[1] << 8) | frame[2];
         if (frame.Length != 3 + length) return false;
@@ -93,7 +106,15 @@ internal static class AmongUsRpcSignaling
         using var input = new MemoryStream(data);
         using var gzip = new GZipStream(input, CompressionMode.Decompress);
         using var output = new MemoryStream();
-        gzip.CopyTo(output);
+        var buffer = new byte[8192];
+        while (true)
+        {
+            var read = gzip.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            if (output.Length + read > MaxDecompressedPayloadBytes)
+                throw new InvalidDataException("signaling payload exceeds decompression limit");
+            output.Write(buffer, 0, read);
+        }
         return output.ToArray();
     }
 

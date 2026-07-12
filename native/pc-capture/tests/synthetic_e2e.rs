@@ -104,7 +104,7 @@ fn synthetic_helper_emits_level_end_to_end() {
     client.set_nodelay(true).ok();
     client
         .write_all(&encode_control(
-            r#"{"op":"hello","proto":5,"token":"e2e-token"}"#,
+            r#"{"op":"hello","proto":7,"token":"e2e-token"}"#,
         ))
         .unwrap();
 

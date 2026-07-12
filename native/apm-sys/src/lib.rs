@@ -34,7 +34,8 @@ type FnProcess = unsafe extern "C" fn(
     *const ApmStreamConfig,
     *const *mut f32,
 ) -> c_int;
-type FnAnalyze = unsafe extern "C" fn(*const ApmHandle, *const *const f32, *const ApmStreamConfig) -> c_int;
+type FnAnalyze =
+    unsafe extern "C" fn(*const ApmHandle, *const *const f32, *const ApmStreamConfig) -> c_int;
 type FnSetDelay = unsafe extern "C" fn(*const ApmHandle, c_int);
 type FnFrameSize = unsafe extern "C" fn(c_int) -> usize;
 
@@ -188,7 +189,11 @@ impl Apm {
                 let ipp = &ip as *const *const f32;
                 let opp = &op as *const *mut f32;
                 (self.api.process)(self.a, ipp, self.sc, self.sc, opp);
-                std::ptr::copy_nonoverlapping(self.out.as_ptr(), frame.as_mut_ptr().add(off), self.chunk);
+                std::ptr::copy_nonoverlapping(
+                    self.out.as_ptr(),
+                    frame.as_mut_ptr().add(off),
+                    self.chunk,
+                );
                 off += self.chunk;
             }
         }
@@ -221,7 +226,8 @@ mod tests {
     #[test]
     #[ignore]
     fn loads_and_processes_a_frame() {
-        let path = std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
+        let path =
+            std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
         let mut apm = Apm::load(&path, true, true, true).expect("load");
         let mut frame = vec![0.0f32; 960];
         apm.analyze_reverse(&frame);
