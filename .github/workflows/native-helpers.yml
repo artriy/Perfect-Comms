@@ -262,7 +262,25 @@ jobs:
             -- --ignored loads_and_processes_a_frame
 
   apm-mac:
-    runs-on: macos-latest
+    name: apm-mac-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x86_64
+            target: mac-x64
+            artifact: apm-mac-x64
+            file: libwebrtc-apm.x64.dylib
+          - os: macos-latest
+            arch: arm64
+            target: mac-arm64
+            artifact: apm-mac-arm64
+            file: libwebrtc-apm.arm64.dylib
+    runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -270,13 +288,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: meson + ninja
         run: brew install meson ninja
-      - name: Build mac (.dylib)
-        run: bash scripts/build-apm.sh mac
-      - name: Smoke mac (apm-sys load + process a frame)
+      - name: Build native macOS slice
+        run: bash scripts/build-apm.sh ${{ matrix.target }}
+      - name: Smoke native macOS slice (apm-sys load + process a frame)
         run: |
-          APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.dylib" \
+          APM_LIB="$PWD/artifacts/apm/${{ matrix.file }}" \
             cargo test --manifest-path native/apm-sys/Cargo.toml --release \
             -- --ignored loads_and_processes_a_frame
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/apm/${{ matrix.file }}
+          if-no-files-found: error
+
+  apm-mac-universal:
+    needs: apm-mac
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac-x64
+          path: dl/x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac-arm64
+          path: dl/arm64
+      - name: Combine and verify universal macOS APM
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/apm
+          lipo -create -output artifacts/apm/libwebrtc-apm.dylib \
+            dl/x64/libwebrtc-apm.x64.dylib \
+            dl/arm64/libwebrtc-apm.arm64.dylib
+          lipo -verify_arch x86_64 arm64 artifacts/apm/libwebrtc-apm.dylib
+          lipo -info artifacts/apm/libwebrtc-apm.dylib
       - uses: actions/upload-artifact@v4
         with:
           name: apm-mac
@@ -416,7 +461,7 @@ jobs:
   # final ad-hoc signature. Copying dylibs into an already-signed .app changes
   # the signed bundle and can make macOS reject libloading.
   mac-bundle:
-    needs: [macos, apm-mac, df-mac]
+    needs: [macos, apm-mac-universal, df-mac]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

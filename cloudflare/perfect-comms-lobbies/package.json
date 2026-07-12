@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-isolation=none test/index.test.js",
+    "test": "node --test --experimental-test-isolation=none test/index.test.js",
     "deploy:dry-run": "wrangler deploy --dry-run"
   },
   "devDependencies": {

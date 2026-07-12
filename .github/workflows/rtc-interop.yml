@@ -55,10 +55,14 @@ jobs:
     name: Mobile wrapper uses the shared RTC core
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Linux audio build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
       - name: Lint host build of pc-mobile
         run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings

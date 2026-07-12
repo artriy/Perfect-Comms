@@ -9,7 +9,11 @@ set -euo pipefail
 #   win-x64    -> webrtc-apm.x64.dll   (mingw cross: x86_64-w64-mingw32)
 #   win-x86    -> webrtc-apm.x86.dll   (mingw cross: i686-w64-mingw32)
 #   linux-x64  -> libwebrtc-apm.so     (native gcc)
-#   mac        -> libwebrtc-apm.dylib  (native clang, universal x86_64 + arm64)
+#   mac-x64    -> libwebrtc-apm.x64.dylib  (native Intel macOS clang)
+#   mac-arm64  -> libwebrtc-apm.arm64.dylib (native Apple-Silicon clang)
+#
+# CI builds the two macOS slices on matching native runners and combines them
+# with lipo. Meson's compiler probes cannot safely use two -arch flags at once.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src="$root/native/third_party/webrtc-audio-processing"
@@ -20,8 +24,9 @@ case "$target" in
   win-x64)   crossfile="$cross/windows-x64.crossfile"; ext="dll";   out="webrtc-apm.x64.dll" ;;
   win-x86)   crossfile="$cross/windows-x86.crossfile"; ext="dll";   out="webrtc-apm.x86.dll" ;;
   linux-x64) crossfile="";                             ext="so";    out="libwebrtc-apm.so" ;;
-  mac)       crossfile="";                             ext="dylib"; out="libwebrtc-apm.dylib" ;;
-  *) echo "usage: build-apm.sh {win-x64|win-x86|linux-x64|mac}" >&2; exit 2 ;;
+  mac-x64)   crossfile="";                             ext="dylib"; out="libwebrtc-apm.x64.dylib" ;;
+  mac-arm64) crossfile="";                             ext="dylib"; out="libwebrtc-apm.arm64.dylib" ;;
+  *) echo "usage: build-apm.sh {win-x64|win-x86|linux-x64|mac-x64|mac-arm64}" >&2; exit 2 ;;
 esac
 
 if [[ ! -f "$src/meson.build" ]]; then
@@ -34,19 +39,22 @@ distdir="$root/artifacts/apm"
 mkdir -p "$distdir"
 rm -rf "$build"
 
+# Do not silently produce a mislabeled macOS slice. Each architecture is built
+# on its matching GitHub runner so Meson detects the correct host CPU family.
+if [[ "$target" == mac-* ]]; then
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+  host_arch="$(uname -m)"
+  case "$target:$host_arch" in
+    mac-x64:x86_64|mac-arm64:arm64|mac-arm64:aarch64) ;;
+    *)
+      echo "ERROR: $target requires its matching native runner; host is $host_arch" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 setup_args=( "$build" "$src" --buildtype=release -Ddefault_library=shared )
 [[ -n "$crossfile" ]] && setup_args+=( --cross-file "$crossfile" )
-
-# macOS: emit a universal (x86_64 + arm64) dylib in a single clang pass so the
-# APM loads in both Apple-Silicon and Intel/Rosetta host processes. clang
-# compiles each translation unit once per arch and links a fat binary; meson's
-# run-time compiler checks still execute via the native host slice, so no
-# cross-file is needed.
-if [[ "$target" == "mac" ]]; then
-  arches="-arch x86_64 -arch arm64"
-  setup_args+=( -Dc_args="$arches" -Dcpp_args="$arches" \
-                -Dc_link_args="$arches" -Dcpp_link_args="$arches" )
-fi
 
 echo "==> meson setup ($target)"
 meson setup "${setup_args[@]}"
@@ -67,5 +75,10 @@ fi
 
 dest="$distdir/$out"
 cp "$lib" "$dest"
+if [[ "$target" == "mac-x64" ]]; then
+  lipo -verify_arch x86_64 "$dest"
+elif [[ "$target" == "mac-arm64" ]]; then
+  lipo -verify_arch arm64 "$dest"
+fi
 echo "built: $lib"
 echo "APM_LIB=$dest"
