@@ -57,6 +57,7 @@ def recv_frame():
     t, ln = hdr[0], struct.unpack("<I", hdr[1:5])[0]
     return t, recv_exact(ln)
 
+failure = None
 try:
     send_control({"op": "hello", "proto": 7, "token": "ci-token"})
     t, body = recv_frame()
@@ -82,6 +83,8 @@ try:
             continue
         assert "speaking" in msg, msg
         levels += 1
+except Exception as exc:
+    failure = exc
 finally:
     proc.kill()
     _, stderr = proc.communicate(timeout=5)
@@ -89,8 +92,10 @@ finally:
         os.remove(hs)
     except OSError:
         pass
+log = stderr.decode("utf-8", errors="replace")
+if failure is not None:
+    raise RuntimeError(f"{failure}\nhelper stderr:\n{log}") from failure
 if require_dsp == "--require-dsp":
-    log = stderr.decode("utf-8", errors="replace")
     assert "dsp set aec/agc/hpf=true ns=true" in log, \
         "final helper bundle could not load both DSP libraries:\n" + log
 print(f"SMOKE_OK {name}")

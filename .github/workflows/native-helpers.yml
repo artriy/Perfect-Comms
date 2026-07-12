@@ -150,7 +150,10 @@ jobs:
             os: ubuntu-latest
             bin: pc-capture-linux-x64
           - artifact: helper-mac
-            os: macos-latest
+            # GitHub's arm64 VM does not expose Apple AMX, while the shipped
+            # DeepFilter arm64 slice correctly uses AMX on real Apple Silicon.
+            # Smoke the universal app's x86_64 slice on a native Intel runner.
+            os: macos-15-intel
             bin: pc-capture-mac.zip
     runs-on: ${{ matrix.os }}
     steps:
@@ -462,7 +465,9 @@ jobs:
   # the signed bundle and can make macOS reject libloading.
   mac-bundle:
     needs: [macos, apm-mac-universal, df-mac]
-    runs-on: macos-latest
+    # Sign and smoke the universal bundle on Intel. GitHub's arm64 virtual
+    # runner lacks AMX and would SIGILL in DeepFilter despite valid binaries.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
