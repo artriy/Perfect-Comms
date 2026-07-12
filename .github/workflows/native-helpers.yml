@@ -320,7 +320,7 @@ jobs:
           lipo -create -output artifacts/apm/libwebrtc-apm.dylib \
             dl/x64/libwebrtc-apm.x64.dylib \
             dl/arm64/libwebrtc-apm.arm64.dylib
-          lipo -verify_arch x86_64 arm64 artifacts/apm/libwebrtc-apm.dylib
+          lipo artifacts/apm/libwebrtc-apm.dylib -verify_arch x86_64 arm64
           lipo -info artifacts/apm/libwebrtc-apm.dylib
       - uses: actions/upload-artifact@v4
         with:

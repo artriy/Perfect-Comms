@@ -76,9 +76,9 @@ fi
 dest="$distdir/$out"
 cp "$lib" "$dest"
 if [[ "$target" == "mac-x64" ]]; then
-  lipo -verify_arch x86_64 "$dest"
+  lipo "$dest" -verify_arch x86_64
 elif [[ "$target" == "mac-arm64" ]]; then
-  lipo -verify_arch arm64 "$dest"
+  lipo "$dest" -verify_arch arm64
 fi
 echo "built: $lib"
 echo "APM_LIB=$dest"
