@@ -1,13 +1,17 @@
+# Release example: .\scripts\package-release.ps1 -Version 1.2.3 -SidecarProtocolVersion 7
+# Keep the protocol unchanged for compatible releases; increment it only when the
+# managed DLL <-> native sidecar contract changes.
 param(
     [string]$Configuration = "All",
-    [string]$Version
+    [string]$Version,
+    [int]$SidecarProtocolVersion = 0
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($Configuration -eq "All") {
-    & $PSCommandPath -Configuration Release -Version $Version
-    & $PSCommandPath -Configuration Android -Version $Version
+    & $PSCommandPath -Configuration Release -Version $Version -SidecarProtocolVersion $SidecarProtocolVersion
+    & $PSCommandPath -Configuration Android -Version $Version -SidecarProtocolVersion $SidecarProtocolVersion
     return
 }
 
@@ -40,7 +44,49 @@ function Assert-ReleaseAsset([string]$RelativePath) {
     }
 }
 
+function Assert-HelperProtocol([string]$RelativePath, [string]$ExpectedProtocol) {
+    $path = Join-Path $root $RelativePath
+    $output = @(& $path --protocol-version 2>&1)
+    $exitCode = $LASTEXITCODE
+    $actual = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+    if ($exitCode -ne 0 -or $actual -ne $ExpectedProtocol) {
+        throw "stale or incompatible release helper: $RelativePath (expected protocol $ExpectedProtocol, got '$actual', exit $exitCode). Rebuild and restage native helpers before packaging."
+    }
+    Write-Host "release.package.helper_protocol path=$RelativePath protocol=$actual"
+}
+
+function Assert-NativeAssetLayouts([string]$BuildConfiguration) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $python) {
+        throw "Python 3 is required to verify native release asset formats and architectures."
+    }
+    & $python.Source (Join-Path $root "scripts\verify-release-assets.py") --root $root --configuration $BuildConfiguration
+    if ($LASTEXITCODE -ne 0) {
+        throw "native release asset format/architecture validation failed for $BuildConfiguration"
+    }
+}
+
 Write-Host "release.package.start configuration=$Configuration"
+$networkProtocolText = Get-Content (Join-Path $root "Comms\VoiceProtocol.cs") -Raw
+$networkProtocol = ([regex]::Match($networkProtocolText, "ProtocolVersion\s*=\s*([0-9]+)")).Groups[1].Value
+if (-not $networkProtocol) { throw "could not read player-to-player voice protocol version" }
+$managedSidecarText = Get-Content (Join-Path $root "Comms\SidecarVoiceClient.cs") -Raw
+$managedSidecarProtocol = ([regex]::Match($managedSidecarText, "public\s+const\s+int\s+Proto\s*=\s*([0-9]+)")).Groups[1].Value
+if (-not $managedSidecarProtocol) { throw "could not read managed sidecar protocol version" }
+$nativeProtocolText = Get-Content (Join-Path $root "native\pc-capture\src\proto.rs") -Raw
+$nativeProtocol = ([regex]::Match($nativeProtocolText, "PROTO_VERSION\s*:\s*u32\s*=\s*([0-9]+)")).Groups[1].Value
+if (-not $nativeProtocol) { throw "could not read native voice protocol version" }
+if ($nativeProtocol -ne $managedSidecarProtocol) {
+    throw "sidecar source protocol mismatch: managed=$managedSidecarProtocol native=$nativeProtocol. Update both sidecar protocol constants together."
+}
+if ($Version -and $SidecarProtocolVersion -le 0) {
+    throw "-Version requires -SidecarProtocolVersion. Pass the current value ($managedSidecarProtocol) for a compatible release, or update both sidecar protocol constants first when the contract changes."
+}
+if ($SidecarProtocolVersion -gt 0 -and $SidecarProtocolVersion.ToString() -ne $managedSidecarProtocol) {
+    throw "requested sidecar protocol $SidecarProtocolVersion does not match source protocol $managedSidecarProtocol. Update Comms\SidecarVoiceClient.cs and native\pc-capture\src\proto.rs together before packaging."
+}
+Write-Host "release.package.protocol network=$networkProtocol sidecar=$managedSidecarProtocol requested_sidecar=$SidecarProtocolVersion"
 
 if ($Configuration -eq "Android") {
     Assert-ReleaseAsset "Libs\pc-mobile\libpc_mobile.so"
@@ -59,7 +105,10 @@ if ($Configuration -eq "Android") {
         "Libs\dsp\libdf.so",
         "Libs\dsp\libdf.dylib"
     ) | ForEach-Object { Assert-ReleaseAsset $_ }
+    Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
+    Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol
 }
+Assert-NativeAssetLayouts $Configuration
 
 if ($Version) {
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z (got '$Version')" }
@@ -113,9 +162,8 @@ Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") (Join-Path $output "THIRD_P
 Copy-Item (Join-Path $root "PRIVACY.md") (Join-Path $output "PRIVACY.md")
 
 $projectText = Get-Content $project -Raw
-$protocolText = Get-Content (Join-Path $root "Comms\VoiceProtocol.cs") -Raw
 $version = ([regex]::Match($projectText, "<Version>([^<]+)</Version>")).Groups[1].Value
-$protocol = ([regex]::Match($protocolText, "ProtocolVersion\s*=\s*([0-9]+)")).Groups[1].Value
+$protocol = $networkProtocol
 @(
     "Perfect Comms $version",
     "Configuration: $Configuration",

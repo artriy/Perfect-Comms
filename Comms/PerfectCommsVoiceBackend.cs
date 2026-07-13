@@ -131,6 +131,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private int _micNoOpenChannelDrops;
 #if WINDOWS
     private int _sidecarCaptureActivitySinceStats;
+    private long _sidecarLevelEventsTotal;
+    private long _sidecarPeerLevelBatchesTotal;
+    private long _sidecarPeerLevelsTotal;
+    private int _sidecarPeerLevelsMappedSinceStats;
+    private int _sidecarPeerLevelsUnmappedSinceStats;
+    private long _lastSidecarLevelUtcTicks;
+    private long _lastSidecarPeerLevelsUtcTicks;
 #endif
     private long _lastUpdateTicks;
     private uint _sendTimestamp;
@@ -201,7 +208,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private CaptureSlot _activeCaptureSlot = CaptureSlot.Bass;
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
-    private SidecarVoiceClient? _voice;
+    private SidecarVoiceLease? _voice;
     private volatile bool _voiceReady;
     private volatile List<IceServer>? _pendingIceServers;
     private Task _voiceStartTask = Task.CompletedTask;
@@ -312,7 +319,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _iceServers = servers;
 #if WINDOWS
         _pendingIceServers = servers;
-        SidecarVoiceClient? voice;
+        SidecarVoiceLease? voice;
         lock (_voiceSync) voice = _voice;
         voice?.SetIceServers(servers);
 #elif ANDROID
@@ -987,13 +994,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         QueueMicrophoneTransition(true, "capture-switch", restartSidecar: from == to && to == CaptureSlot.Sidecar);
     }
 
-    private void OnSidecarHeartbeatLost(SidecarVoiceClient voice, string reason)
+    private void OnSidecarHeartbeatLost(string reason)
     {
+        var voice = _voice;
+        if (voice == null) return;
         _mainThreadActions.Enqueue(() =>
         {
             if (_disposed || !ReferenceEquals(_voice, voice))
-                return;
-            if (CaptureTransitionInFlight())
                 return;
 
             // A session that stayed up past the stable threshold earned a fresh restart budget; a
@@ -1040,14 +1047,20 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         lock (_voiceSync)
         {
             if (_voice != null) return;
-            var voice = new SidecarVoiceClient(LaunchSidecarHelper);
-            voice.OnFrame += ProcessBassMicFrame;
-            voice.OnDead += r => OnSidecarHeartbeatLost(voice, r);
-            voice.OnLocalSdp += OnHelperLocalSdp;
-            voice.OnLocalCandidate += OnHelperLocalCandidate;
-            voice.OnPeerState += OnHelperPeerState;
-            voice.OnLevel += OnSidecarLevel;
-            voice.OnPeerLevels += OnSidecarPeerLevels;
+            var callbacks = new SidecarVoiceCallbacks(
+                ProcessBassMicFrame,
+                OnSidecarHeartbeatLost,
+                OnHelperLocalSdp,
+                OnHelperLocalCandidate,
+                OnHelperPeerState,
+                OnSidecarLevel,
+                OnSidecarPeerLevels);
+            var voice = SidecarVoiceHost.TryAcquire(callbacks, out var failure);
+            if (voice == null)
+            {
+                VoiceDiagnostics.Log("bcl.voice", $"ready=false reason={reason} error=\"sidecar host lease rejected: {failure}\"");
+                return;
+            }
             _voiceReady = false;
             _voice = voice;
             _voiceStartTask = Task.Run(() => RunVoiceStart(voice, reason));
@@ -1056,41 +1069,87 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void OnHelperLocalSdp(string peerId, int generation, string sdpType, string sdp)
     {
-        if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
-            _mainThreadActions.Enqueue(() => _peerSession?.OnLocalSdp(clientId, generation, sdpType, sdp));
+        if (_disposed) return;
+        if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
+        {
+            VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=local-sdp reason=peer-id-invalid peerIdChars={peerId?.Length ?? 0} generation={generation} sdpType={sdpType} sdpChars={sdp?.Length ?? 0}");
+            return;
+        }
+        _mainThreadActions.Enqueue(() =>
+        {
+            if (_disposed) return;
+            var manager = _peerSession;
+            if (manager == null)
+            {
+                VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=local-sdp reason=session-manager-null client={clientId} generation={generation} sdpType={sdpType} sdpChars={sdp?.Length ?? 0}");
+                return;
+            }
+            manager.OnLocalSdp(clientId, generation, sdpType, sdp);
+        });
     }
 
     private void OnHelperLocalCandidate(string peerId, int generation, string candidate)
     {
-        if (SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
-            _mainThreadActions.Enqueue(() => _peerSession?.OnLocalCandidate(clientId, generation, candidate));
+        if (_disposed) return;
+        if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
+        {
+            VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=local-candidate reason=peer-id-invalid peerIdChars={peerId?.Length ?? 0} generation={generation} candidateChars={candidate?.Length ?? 0}");
+            return;
+        }
+        _mainThreadActions.Enqueue(() =>
+        {
+            if (_disposed) return;
+            var manager = _peerSession;
+            if (manager == null)
+            {
+                VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=local-candidate reason=session-manager-null client={clientId} generation={generation} candidateChars={candidate?.Length ?? 0}");
+                return;
+            }
+            manager.OnLocalCandidate(clientId, generation, candidate);
+        });
     }
 
     private void OnHelperPeerState(string peerId, int generation, string state)
     {
-        if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId)) return;
+        if (_disposed) return;
+        if (!SidecarVoiceTransport.TryParseClientId(peerId, out var clientId))
+        {
+            VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=peer-state reason=peer-id-invalid peerIdChars={peerId?.Length ?? 0} generation={generation} state={state}");
+            return;
+        }
         var nowMs = Environment.TickCount64;
         _mainThreadActions.Enqueue(() =>
         {
-            if (_peerSession == null) return;
-            var relayOnly = _peerSession.TryGetPeerRelayOnly(clientId, out var relay) && relay;
+            if (_disposed) return;
+            var manager = _peerSession;
+            if (manager == null)
+            {
+                VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=peer-state reason=session-manager-null client={clientId} generation={generation} state={state}");
+                return;
+            }
+            var relayOnly = manager.TryGetPeerRelayOnly(clientId, out var relay) && relay;
             VoiceDiagnostics.Log(
                 "bcl.ice.peer-state",
                 $"client={clientId} generation={generation} state={state} relayOnly={relayOnly.ToString().ToLowerInvariant()}");
             if (state == "connected")
-                _peerSession.OnPeerConnected(clientId, generation);
+                manager.OnPeerConnected(clientId, generation);
             else if (state is "failed" or "closed")
-                _peerSession.OnPeerConnectionLost(clientId, generation, nowMs);
+                manager.OnPeerConnectionLost(clientId, generation, nowMs);
             else if (state == "disconnected")
-                _peerSession.OnPeerConnectionDegraded(clientId, generation, nowMs);
+                manager.OnPeerConnectionDegraded(clientId, generation, nowMs);
+            else
+                VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=peer-state reason=state-unhandled client={clientId} generation={generation} state={state}");
         });
     }
 
     private void OnSidecarLevel(float peak, bool speaking)
     {
+        if (_disposed) return;
         // Desktop capture PCM is encoded inside the helper and never crosses TypeAudio anymore.
         // Frequent native level events are therefore the authoritative capture-liveness signal.
         Interlocked.Increment(ref _sidecarCaptureActivitySinceStats);
+        Interlocked.Increment(ref _sidecarLevelEventsTotal);
+        Interlocked.Exchange(ref _lastSidecarLevelUtcTicks, DateTime.UtcNow.Ticks);
         if (Mute) { _localLevel = 0f; _localSpeaking = false; return; }
         _localLevel = peak;
         _localSpeaking = speaking;
@@ -1099,15 +1158,18 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void OnSidecarPeerLevels(IReadOnlyList<SidecarProtocol.PeerLevel> levels)
     {
         if (levels.Count == 0 || _disposed) return;
+        Interlocked.Increment(ref _sidecarPeerLevelBatchesTotal);
+        Interlocked.Add(ref _sidecarPeerLevelsTotal, levels.Count);
+        Interlocked.Exchange(ref _lastSidecarPeerLevelsUtcTicks, DateTime.UtcNow.Ticks);
         _mainThreadActions.Enqueue(() => ApplyRemotePeerLevels(levels));
     }
 
-    private void RunVoiceStart(SidecarVoiceClient voice, string reason)
+    private void RunVoiceStart(SidecarVoiceLease voice, string reason)
     {
         bool started;
         try
         {
-            started = voice.Start(_lastMicDeviceName, _lastSpeakerDeviceName);
+            started = voice.EnsureStarted(_lastMicDeviceName, _lastSpeakerDeviceName);
         }
         catch (Exception ex)
         {
@@ -1117,7 +1179,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         if (!started || _disposed || !ReferenceEquals(_voice, voice))
         {
-            try { voice.OnFrame -= ProcessBassMicFrame; } catch { }
             try { voice.Dispose(); } catch { }
             lock (_voiceSync)
             {
@@ -1158,7 +1219,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             _speakerReady = false;
             VoiceDiagnostics.Log("bcl.voice", $"ready=false reason={reason} error=\"initial sidecar configuration failed\"");
-            try { voice.OnFrame -= ProcessBassMicFrame; } catch { }
             try { voice.Dispose(); } catch { }
             lock (_voiceSync)
             {
@@ -1193,11 +1253,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         VoiceDiagnostics.Log("bcl.voice", $"ready=true reason={reason} mic=\"{currentMic}\" spk=\"{currentSpk}\" outputs={voice.OutputDevices.Count}");
     }
 
-    private void StopVoiceSession(string reason)
+    private void StopVoiceSession(string reason, bool waitForStop = false)
     {
         _voiceReady = false;
         StopVoicePump();
-        SidecarVoiceClient? voice;
+        SidecarVoiceLease? voice;
         Task startTask;
         lock (_voiceSync)
         {
@@ -1205,13 +1265,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _voice = null;
             startTask = _voiceStartTask;
         }
-        if (voice != null)
-            try { voice.OnFrame -= ProcessBassMicFrame; } catch { }
-        Task.Run(() =>
-        {
-            try { voice?.Dispose(); } catch { }
-            try { startTask?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
-        });
+        // Releasing a lease only clears the lobby/session state. The process-lifetime host keeps
+        // a healthy helper connected and idle for the next lobby/backend. Lease release is
+        // serialized with Start/configuration, so an old async start cannot configure a new owner.
+        try { voice?.Dispose(); } catch { }
+        if (waitForStop)
+            try { startTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
         _speakerReady = false;
         VoiceDiagnostics.Log("bcl.voice", $"stopped reason={reason}");
     }
@@ -1260,20 +1319,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
     }
 
-    private void FeedCaptureSupervisor(int micWindowSamples)
+    private int FeedCaptureSupervisor(int micWindowSamples)
     {
         EnsureCaptureSupervisor();
         var supervisor = _captureSupervisor!;
         var sidecarActivity = Interlocked.Exchange(ref _sidecarCaptureActivitySinceStats, 0);
 
         if (Mute || !_microphoneReady || CaptureTransitionInFlight())
-            return;
+            return sidecarActivity;
 
         var activity = SelectCaptureActivity(
             nativeSidecarOwnsCapture: _activeCaptureSlot == CaptureSlot.Sidecar,
             sidecarLevelEvents: sidecarActivity,
             managedPcmSamples: micWindowSamples);
         supervisor.OnStatsWindow(activity, unmutedAndCapturing: true);
+        return sidecarActivity;
     }
 
     internal static int SelectCaptureActivity(bool nativeSidecarOwnsCapture, int sidecarLevelEvents, int managedPcmSamples)
@@ -1334,10 +1394,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void StopMicrophoneWorkerForDispose()
     {
         if (_voice != null)
-        {
-            StopVoiceSession("dispose");
             return;
-        }
         if (_activeCaptureSlot == CaptureSlot.Unity || _androidMicrophone != null)
         {
             StopAndroidMicrophone("dispose");
@@ -1466,23 +1523,28 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("bcl.mic", $"ready=false reason={reason} device=\"{_lastMicDeviceName}\" callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)} samples={Volatile.Read(ref _micSamples)}");
     }
 
-    private static SidecarLaunchResult LaunchSidecarHelper(string token, string deviceId)
-    {
-        var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-        var helperPath = SidecarLauncher.EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
-        return SidecarLauncher.Launch(helperPath, token, handshakeTimeoutMs: 4000, wine: WineEnvironment.IsWine, resolveWineHostPath: WineEnvironment.ResolveHostPath);
-    }
 #endif
 
 #if WINDOWS || ANDROID
     private void OnRpcSignal(int senderClientId, SignalMsgType type, byte[] payload)
     {
+        if (_disposed) return;
 #if WINDOWS
         var voice = _voice;
-        if (!CanPumpDesktopRpc(_voiceReady, voice?.Health ?? CaptureHealth.Dead))
+        var voiceHealth = voice?.Health ?? CaptureHealth.Dead;
+        if (!CanPumpDesktopRpc(_voiceReady, voiceHealth))
+        {
+            VoiceDiagnostics.Log("signaling.session.drop", $"stage=backend-dispatch sender={senderClientId} type={type} payloadBytes={payload.Length} reason=voice-not-ready voiceReady={_voiceReady} voiceHealth={voiceHealth}");
             return;
+        }
 #endif
-        _peerSession?.OnSignal(senderClientId, type, payload, Environment.TickCount64);
+        var manager = _peerSession;
+        if (manager == null)
+        {
+            VoiceDiagnostics.Log("signaling.session.drop", $"stage=backend-dispatch sender={senderClientId} type={type} payloadBytes={payload.Length} reason=session-manager-null");
+            return;
+        }
+        manager.OnSignal(senderClientId, type, payload, Environment.TickCount64);
     }
 
     private void PumpRpcSignaling(VoiceGameStateSnapshot? snapshot)
@@ -2181,8 +2243,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     public void Dispose()
     {
+        if (_disposed) return;
         _disposed = true;
         ResetTurnCredentialState();
+        var socket = _socket;
+        _socket = null;
+        if (socket != null)
+        {
+            DetachSocketHandlers(socket);
+            _ = DisconnectAndDisposeSocketAsync(socket);
+        }
 #if WINDOWS || ANDROID
         if (_rpcOnMessageHooked)
         {
@@ -2191,11 +2261,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         _peerSession?.Reset();
         _peerSession = null;
+        _rpcTransport = null;
         _rpcKnownClients.Clear();
 #endif
 #if WINDOWS
         StopMicrophoneWorkerForDispose();
-        StopVoiceSession("dispose");
+        StopVoiceSession("dispose", waitForStop: true);
 #elif ANDROID
         StopAndroidMicrophone("dispose");
         try { _mobileSpeaker?.Dispose(); } catch { }
@@ -2205,12 +2276,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
         lock (_captureFrameSync)
             _micPreprocessor.Dispose();
-        var socket = _socket;
-        _socket = null;
-        if (socket != null)
-            _ = DisconnectAndDisposeSocketAsync(socket);
         ClearPeers();
         _lastCenteredLoudLogUtc.Clear();
+        while (_mainThreadActions.TryDequeue(out _)) { }
+    }
+
+    private void DetachSocketHandlers(SocketIOClient.SocketIO socket)
+    {
+        try { socket.OnConnected -= OnSocketConnected; } catch { }
+        try { socket.OnDisconnected -= OnSocketDisconnected; } catch { }
+        foreach (var eventName in new[] { "setClient", "setClients", "join", "leave", "signal", "clientPeerConfig", "VAD" })
+            try { socket.Off(eventName); } catch { }
     }
 
     private static async Task DisconnectAndDisposeSocketAsync(SocketIOClient.SocketIO socket)
@@ -2224,22 +2300,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         _socket = new SocketIOClient.SocketIO(new Uri(ServerUrl), BetterCrewLinkSocketOptions.Create());
 
-        _socket.OnConnected += async (_, _) =>
-        {
-            var socketId = _socket?.Id ?? string.Empty;
-            lock (_peerSync)
-                _localSocketId = socketId;
-            VoiceDiagnostics.Log("bcl.socket", $"connected=True socketId={socketId}");
-            await Task.CompletedTask;
-        };
-        _socket.OnDisconnected += (_, _) => _mainThreadActions.Enqueue(() =>
-        {
-            ResetJoinState();
-            VoiceDiagnostics.Log("bcl.socket", "connected=False peersKept=true");
-        });
+        _socket.OnConnected += OnSocketConnected;
+        _socket.OnDisconnected += OnSocketDisconnected;
 
         _socket.On("setClient", async ctx =>
         {
+            if (_disposed) return;
             try
             {
                 var socketId = ctx.GetValue<string>(0);
@@ -2254,6 +2320,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         });
         _socket.On("setClients", async ctx =>
         {
+            if (_disposed) return;
             try
             {
                 var clients = ctx.GetValue<Dictionary<string, VoiceBackendClient>>(0);
@@ -2277,6 +2344,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         });
         _socket.On("join", async ctx =>
         {
+            if (_disposed) return;
             try
             {
                 var socketId = ctx.GetValue<string>(0);
@@ -2295,6 +2363,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         });
         _socket.On("leave", async ctx =>
         {
+            if (_disposed) return;
             try
             {
                 var socketId = ctx.GetValue<string>(0);
@@ -2312,6 +2381,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _socket.On("signal", async _ => await Task.CompletedTask);
         _socket.On("clientPeerConfig", async ctx =>
         {
+            if (_disposed) return;
             try
             {
                 var config = ctx.GetValue<ClientPeerConfig>(0);
@@ -2327,6 +2397,26 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         });
         _socket.On("VAD", async _ => await Task.CompletedTask);
         _ = _socket.ConnectAsync();
+    }
+
+    private void OnSocketConnected(object? sender, EventArgs args)
+    {
+        if (_disposed) return;
+        var socketId = _socket?.Id ?? string.Empty;
+        lock (_peerSync)
+            _localSocketId = socketId;
+        VoiceDiagnostics.Log("bcl.socket", $"connected=True socketId={socketId}");
+    }
+
+    private void OnSocketDisconnected(object? sender, string reason)
+    {
+        if (_disposed) return;
+        _mainThreadActions.Enqueue(() =>
+        {
+            if (_disposed) return;
+            ResetJoinState();
+            VoiceDiagnostics.Log("bcl.socket", "connected=False peersKept=true");
+        });
     }
 
     private async Task JoinAsync(VoiceGameStateSnapshot? snapshot = null)
@@ -2579,7 +2669,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             var peer = new PeerConnection(socketId, clientId, playbackGroupId);
             _peersBySocket[socketId] = peer;
             VoiceDiagnostics.Log("bcl.peer.created", $"socket={socketId} client={clientId} playbackGroup={playbackGroupId} provisional={(clientId < 0).ToString().ToLowerInvariant()}");
-            VoiceDiagnostics.Log("bcl.peer-connected", $"socket={socketId} client={clientId}");
+            VoiceDiagnostics.Log("voice.route.created", $"socket={socketId} client={clientId} playbackGroup={playbackGroupId} source=bettercrewlink-roster transportEstablished=false");
             return peer;
         }
     }
@@ -3249,6 +3339,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         if (_disposed || levels.Count == 0) return;
         var nowTicks = DateTime.UtcNow.Ticks;
+        var mapped = 0;
+        var unmapped = 0;
         lock (_peerSync)
         {
             BuildCanonicalRouteMapLocked(_canonicalRouteScratch);
@@ -3258,10 +3350,28 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 if (!int.TryParse(level.PeerId, NumberStyles.None, CultureInfo.InvariantCulture, out var clientId) ||
                     clientId < 0 ||
                     !_canonicalRouteScratch.TryGetValue(clientId, out var peer))
+                {
+                    unmapped++;
                     continue;
+                }
                 peer.RecordVoiceLevel(level.Peak, nowTicks);
+                mapped++;
             }
         }
+#if WINDOWS
+        if (mapped > 0) Interlocked.Add(ref _sidecarPeerLevelsMappedSinceStats, mapped);
+        if (unmapped > 0) Interlocked.Add(ref _sidecarPeerLevelsUnmappedSinceStats, unmapped);
+#endif
+    }
+
+    internal string DescribeRpcPeerDiagnostics()
+    {
+#if WINDOWS || ANDROID
+        var snapshot = _peerSession?.GetDiagnosticsSnapshot() ?? PeerSessionDiagnosticsSnapshot.Empty;
+        return $"known={snapshot.KnownPeers}/compatible={snapshot.CompatiblePeers}/negotiating={snapshot.NegotiatingPeers}/established={snapshot.EstablishedPeers}/states={snapshot.PeerStates}";
+#else
+        return "unsupported";
+#endif
     }
 
     private void EnsureSnapshotRoutePeers(VoiceGameStateSnapshot snapshot)
@@ -3353,7 +3463,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         if (peer == null) return;
         peer.Dispose();
-        VoiceDiagnostics.Log("bcl.peer-disconnected", $"socket={socketId} client={peer.ClientId}");
+        VoiceDiagnostics.Log("voice.route.removed", $"socket={socketId} client={peer.ClientId} transportState=route-only");
     }
 
     private void ClearPeers()
@@ -3372,7 +3482,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         foreach (var peer in peers)
         {
             peer.Dispose();
-            VoiceDiagnostics.Log("bcl.peer-disconnected", $"socket={peer.SocketId} client={peer.ClientId}");
+            VoiceDiagnostics.Log("voice.route.removed", $"socket={peer.SocketId} client={peer.ClientId} transportState=route-only reason=clear-all");
         }
     }
 
@@ -3391,11 +3501,27 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var peerWindows = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.ToCompactString()));
         var peerJitter = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.Jitter.ToCompactString()));
         var peerBuffers = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => $"{item.ClientId}:{item.BufferStats}"));
-        // WebRTC transport state lives in the sidecar/pc-mobile engine, not C#. Report the mapped roster.
-        var openChannels = peers.Length;
-        var peerTransport = peers.Length == 0
+        var routeRecords = peers.Length;
+        var engineRouteTargets = peers.Length == 0
             ? "none"
             : string.Join("|", peers.Select(peer => $"{peer.ClientId}:engine"));
+        var effectiveRoutes = peers.Length == 0
+            ? "none"
+            : string.Join("|", peers.Select(peer =>
+            {
+                var route = peer.CurrentRoute;
+                var gain = route.Audible
+                    ? Math.Clamp(route.NormalVolume + route.GhostVolume + route.RadioVolume, 0f, 1f) * peer.ClientVolume
+                    : 0f;
+                return $"{peer.ClientId}:gain={gain:0.000},pan={route.Pan:0.000},mode={(int)route.FilterMode},clientVol={peer.ClientVolume:0.000},reason={route.Reason}";
+            }));
+        var rpcDiagnosticsText = "rpcState=unsupported";
+#if WINDOWS || ANDROID
+        var rpcDiagnostics = _peerSession?.GetDiagnosticsSnapshot() ?? PeerSessionDiagnosticsSnapshot.Empty;
+        rpcDiagnosticsText =
+            $"rpcKnown={rpcDiagnostics.KnownPeers} rpcCompatible={rpcDiagnostics.CompatiblePeers} rpcNegotiating={rpcDiagnostics.NegotiatingPeers} establishedPeers={rpcDiagnostics.EstablishedPeers} " +
+            $"localCandidatesAttempted={rpcDiagnostics.LocalCandidatesAttempted} remoteCandidatesReceived={rpcDiagnostics.RemoteCandidatesReceived} remoteCandidatesForwarded={rpcDiagnostics.RemoteCandidatesForwarded} rejectedCandidates={rpcDiagnostics.RejectedCandidates} peerStates=\"{rpcDiagnostics.PeerStates}\"";
+#endif
         float micPeak;
         double micRms;
         int micWindowSamples;
@@ -3443,27 +3569,60 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _txSquareSumSinceStats = 0.0;
             _txSamplesSinceStats = 0;
         }
+        var sidecarLevelEventsWindow = 0;
+        var sidecarPeerLevelsMappedWindow = 0;
+        var sidecarPeerLevelsUnmappedWindow = 0;
+        long sidecarLevelEventsTotal = 0;
+        long sidecarPeerLevelBatchesTotal = 0;
+        long sidecarPeerLevelsTotal = 0;
+        long sidecarLevelAgeMs = -1;
+        long sidecarPeerLevelsAgeMs = -1;
 #if WINDOWS
-        FeedCaptureSupervisor(micWindowSamples);
+        sidecarLevelEventsWindow = FeedCaptureSupervisor(micWindowSamples);
+        sidecarPeerLevelsMappedWindow = Interlocked.Exchange(ref _sidecarPeerLevelsMappedSinceStats, 0);
+        sidecarPeerLevelsUnmappedWindow = Interlocked.Exchange(ref _sidecarPeerLevelsUnmappedSinceStats, 0);
+        sidecarLevelEventsTotal = Interlocked.Read(ref _sidecarLevelEventsTotal);
+        sidecarPeerLevelBatchesTotal = Interlocked.Read(ref _sidecarPeerLevelBatchesTotal);
+        sidecarPeerLevelsTotal = Interlocked.Read(ref _sidecarPeerLevelsTotal);
+        sidecarLevelAgeMs = DiagnosticAgeMs(Interlocked.Read(ref _lastSidecarLevelUtcTicks), now.Ticks);
+        sidecarPeerLevelsAgeMs = DiagnosticAgeMs(Interlocked.Read(ref _lastSidecarPeerLevelsUtcTicks), now.Ticks);
 #endif
         var micClipPct = micWindowSamples == 0 ? 0f : micNearClipSamples * 100f / micWindowSamples;
         var micZeroCrossRate = micWindowSamples <= 1 ? 0f : micZeroCrossings / (float)(micWindowSamples - 1);
         var micCrest = micRms <= 0.0 ? 0.0 : micPeak / micRms;
         var opusAvgBytes = opusFrames == 0 ? 0.0 : opusBytes / (double)opusFrames;
-        VoiceDiagnostics.Log("bcl.stats",
+        VoiceDiagnostics.Log("voice.stats",
             $"reason={reason} room={RoomCode} region={Region} endpoint={ServerUrl} phase={snapshot?.Phase.ToString() ?? "none"} socketConnected={_socket?.Connected == true} socketId={_socket?.Id ?? "none"} " +
-            $"peers={peers.Length} openChannels={openChannels} peerTransport={peerTransport} localSocket={GetEffectiveLocalSocketId()} joinedClient={_joinedClientId} joinInFlight={Volatile.Read(ref _joinInFlight)} joinRetryAgeMs={(DateTime.UtcNow - _lastJoinAttemptUtc).TotalMilliseconds:0} audible={peers.Count(peer => peer.CurrentRoute.Audible)} speaking={peers.Count(peer => peer.IsSpeaking)} " +
+            $"routeRecords={routeRecords} engineRouteTargets={engineRouteTargets} localSocket={GetEffectiveLocalSocketId()} joinedClient={_joinedClientId} joinInFlight={Volatile.Read(ref _joinInFlight)} joinRetryAgeMs={(DateTime.UtcNow - _lastJoinAttemptUtc).TotalMilliseconds:0} audibleRoutes={peers.Count(peer => peer.CurrentRoute.Audible)} speakingRoutes={peers.Count(peer => peer.IsSpeaking)} {rpcDiagnosticsText} " +
             $"localLevel={LocalLevel:0.000} localSpeaking={LocalSpeaking} mute={Mute} remoteLevelMax={remoteMax:0.000} " +
-            $"audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} peerWindows={peerWindows} peerJitter={peerJitter} peerBuffers={peerBuffers} " +
-            $"encodedTx={Volatile.Read(ref _encodedTx)} encodedRx={Volatile.Read(ref _encodedRx)} customTx={Volatile.Read(ref _customTx)} customRx={Volatile.Read(ref _customRx)} " +
-            $"micCallbacks={Volatile.Read(ref _micCallbacks)} micBytes={Volatile.Read(ref _micBytes)} micSamples={Volatile.Read(ref _micSamples)} micWindowSamples={micWindowSamples} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micCrest={micCrest:0.00} micNonZeroSamples={micNonZeroSamples} micSilentCallbacks={micSilentCallbacks} micNearClipSamples={micNearClipSamples} micClipPct={micClipPct:0.000} micZeroCrossRate={micZeroCrossRate:0.0000} " +
-            $"micMutedDrops={Volatile.Read(ref _micMutedDrops)} micEncodeFailures={Volatile.Read(ref _micEncodeFailures)} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} micNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} audioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
+            $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} nativeJitter=not-exposed nativeBuffers=not-exposed legacyPeerJitter={peerJitter} legacyPeerBuffers={peerBuffers} " +
+            $"sidecarLevelEventsWindow={sidecarLevelEventsWindow} sidecarLevelEventsTotal={sidecarLevelEventsTotal} sidecarLevelAgeMs={sidecarLevelAgeMs} sidecarPeerLevelBatchesTotal={sidecarPeerLevelBatchesTotal} sidecarPeerLevelsTotal={sidecarPeerLevelsTotal} sidecarPeerLevelsAgeMs={sidecarPeerLevelsAgeMs} sidecarPeerLevelsMappedWindow={sidecarPeerLevelsMappedWindow} sidecarPeerLevelsUnmappedWindow={sidecarPeerLevelsUnmappedWindow} " +
+            $"managedLegacyEncodedTx={Volatile.Read(ref _encodedTx)} managedLegacyEncodedRx={Volatile.Read(ref _encodedRx)} managedLegacyCustomTx={Volatile.Read(ref _customTx)} managedLegacyCustomRx={Volatile.Read(ref _customRx)} " +
+            $"managedMicCallbacks={Volatile.Read(ref _micCallbacks)} managedMicBytes={Volatile.Read(ref _micBytes)} managedMicSamples={Volatile.Read(ref _micSamples)} managedMicWindowSamples={micWindowSamples} managedMicPeak={micPeak:0.000000} managedMicRms={micRms:0.000000} managedMicCrest={micCrest:0.00} managedMicNonZeroSamples={micNonZeroSamples} managedMicSilentCallbacks={micSilentCallbacks} managedMicNearClipSamples={micNearClipSamples} managedMicClipPct={micClipPct:0.000} managedMicZeroCrossRate={micZeroCrossRate:0.0000} " +
+            $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicEncodeFailures={Volatile.Read(ref _micEncodeFailures)} managedMicEncodedFrames={Volatile.Read(ref _micEncodedFrames)} managedMicNoOpenChannelDrops={Volatile.Read(ref _micNoOpenChannelDrops)} managedAudioDecodeFailures={Volatile.Read(ref _audioDecodeFailures)} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} txPeakMax={txPeakMax:0.000000} txRms={txRms:0.000000} txSamples={txSamples} opusBytesAvg={opusAvgBytes:0.0} opusBytesMin={opusMinBytes} opusBytesMax={opusMaxBytes} " +
-            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerReady={_speakerReady} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
+            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerConfigured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} plp={_adaptedPacketLossPercent} bitrate={_adaptedBitrate} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDeadInput={Volatile.Read(ref _deadInputDetected)}");
         if (CaptureUsesUnity)
             VoiceDiagnostics.Log("bcl.unity",
                 $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micEncodedFrames={Volatile.Read(ref _micEncodedFrames)} encodedTx={Volatile.Read(ref _encodedTx)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady}");
-        VoiceDiagnostics.Log("bcl.playout", "engine");
+        VoiceDiagnostics.Log("voice.playout.state",
+            $"backend=engine configured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} requestedDevice=\"{DescribeRequestedSpeakerDevice()}\" confirmed=unknown confirmationSource=native.media.stats-and-stderr");
+    }
+
+    private static long DiagnosticAgeMs(long eventUtcTicks, long nowUtcTicks)
+    {
+        if (eventUtcTicks <= 0) return -1;
+        if (nowUtcTicks < eventUtcTicks) return 0;
+        return (nowUtcTicks - eventUtcTicks) / TimeSpan.TicksPerMillisecond;
+    }
+
+    private string DescribeRequestedSpeakerDevice()
+    {
+#if WINDOWS
+        return _lastSpeakerDeviceName;
+#else
+        return "platform-default";
+#endif
     }
 
     private string DescribeCaptureMode()

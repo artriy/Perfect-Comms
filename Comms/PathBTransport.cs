@@ -12,9 +12,9 @@ internal sealed class RpcSignalingSender : ISignalingSender
 #if WINDOWS
 internal sealed class SidecarVoiceTransport : IVoiceTransport
 {
-    private readonly Func<SidecarVoiceClient?> _voice;
+    private readonly Func<SidecarVoiceLease?> _voice;
 
-    public SidecarVoiceTransport(Func<SidecarVoiceClient?> voice)
+    public SidecarVoiceTransport(Func<SidecarVoiceLease?> voice)
     {
         _voice = voice ?? throw new ArgumentNullException(nameof(voice));
     }

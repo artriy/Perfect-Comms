@@ -8,6 +8,8 @@ pub struct Args {
     pub token_file: Option<PathBuf>,
     pub synthetic: bool,
     pub enumerate: bool,
+    pub protocol_version: bool,
+    pub owner_pid: Option<u32>,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -15,6 +17,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut token_file = None;
     let mut synthetic = false;
     let mut enumerate = false;
+    let mut protocol_version = false;
+    let mut owner_pid = None;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -30,11 +34,23 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--synthetic-tone" => synthetic = true,
             "--enumerate" => enumerate = true,
+            "--protocol-version" => protocol_version = true,
+            "--owner-pid" => {
+                i += 1;
+                let value = argv.get(i).ok_or("--owner-pid requires a PID")?;
+                let pid = value
+                    .parse::<u32>()
+                    .map_err(|_| "--owner-pid requires a positive integer PID")?;
+                if pid == 0 {
+                    return Err("--owner-pid requires a positive integer PID".to_string());
+                }
+                owner_pid = Some(pid);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
     }
-    if handshake_path.is_none() {
+    if handshake_path.is_none() && !protocol_version {
         return Err("--handshake <path> is required".to_string());
     }
     Ok(Args {
@@ -42,6 +58,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         token_file,
         synthetic,
         enumerate,
+        protocol_version,
+        owner_pid,
     })
 }
 
@@ -54,6 +72,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if args.protocol_version {
+        println!("{}", proto::PROTO_VERSION);
+        return;
+    }
 
     if args.enumerate {
         let devices = audio::enumerate_devices();
@@ -90,6 +113,8 @@ fn main() {
         handshake_path: args.handshake_path.unwrap(),
         token,
         synthetic: args.synthetic,
+        owner_pid: args.owner_pid,
+        hard_exit_on_disconnect: true,
     };
 
     if let Err(e) = ipc::serve(cfg) {
@@ -122,6 +147,42 @@ mod tests {
             "/tmp/hs.json"
         );
         assert!(args.synthetic);
+    }
+
+    #[test]
+    fn protocol_version_does_not_require_handshake() {
+        let args =
+            parse_args(&["pc-capture".to_string(), "--protocol-version".to_string()]).unwrap();
+        assert!(args.protocol_version);
+        assert!(args.handshake_path.is_none());
+    }
+
+    #[test]
+    fn parse_args_reads_owner_pid() {
+        let args = parse_args(&[
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/hs.json".to_string(),
+            "--owner-pid".to_string(),
+            "4242".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(args.owner_pid, Some(4242));
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_owner_pid() {
+        for value in ["0", "not-a-pid"] {
+            let error = parse_args(&[
+                "pc-capture".to_string(),
+                "--handshake".to_string(),
+                "/tmp/hs.json".to_string(),
+                "--owner-pid".to_string(),
+                value.to_string(),
+            ])
+            .unwrap_err();
+            assert!(error.contains("positive integer PID"), "got: {error}");
+        }
     }
 
     #[test]

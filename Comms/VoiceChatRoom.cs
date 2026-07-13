@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -40,7 +41,9 @@ public class VoiceChatRoom
     private const float LocalVoiceRefreshCooldownSeconds = 10f;
 
     // ── Singleton ─────────────────────────────────────────────────────────────
-    public static VoiceChatRoom? Current { get; private set; }
+    private static readonly object CurrentLifecycleLock = new();
+    private static VoiceChatRoom? _current;
+    public static VoiceChatRoom? Current => Volatile.Read(ref _current);
 
     // ── Virtual components ─────────────────────────────────────────────────────
     private readonly List<IVoiceComponent> _virtualMics     = new();
@@ -145,6 +148,7 @@ public class VoiceChatRoom
     private DateTime _lastDebugStateLogUtc = DateTime.MinValue;
     private readonly ConcurrentQueue<VoiceBackendCustomMessage> _pendingBackendCustomMessages = new();
     private readonly Dictionary<string, DateTime> _lastHostSettingsResponseBySender = new();
+    private int _closed;
 
     // ======================================================================
     // Factory
@@ -152,15 +156,34 @@ public class VoiceChatRoom
 
     public static VoiceChatRoom Start()
     {
-        Current?.Close();
-        Current = new VoiceChatRoom();
-        return Current;
+        lock (CurrentLifecycleLock)
+        {
+            var previous = Interlocked.Exchange(ref _current, null);
+            previous?.Close("room replaced", clearUi: true);
+            var room = new VoiceChatRoom();
+            Volatile.Write(ref _current, room);
+            return room;
+        }
     }
 
     public static void CloseCurrentRoom()
+        => CloseCurrentRoom("room close");
+
+    internal static void CloseCurrentRoom(string reason)
+        => CloseCurrentRoomCore(reason, clearUi: true);
+
+    // Process/domain shutdown may run after Unity objects have begun tearing down. Release the
+    // active session without touching HUD GameObjects; the process host is shut down separately.
+    internal static void ShutdownCurrentRoom(string reason)
+        => CloseCurrentRoomCore(reason, clearUi: false);
+
+    private static void CloseCurrentRoomCore(string reason, bool clearUi)
     {
-        Current?.Close();
-        Current = null;
+        lock (CurrentLifecycleLock)
+        {
+            var room = Interlocked.Exchange(ref _current, null);
+            room?.Close(reason, clearUi);
+        }
     }
 
     internal static void ClearVoiceUiForLifecycleReset(string reason)
@@ -657,6 +680,8 @@ public class VoiceChatRoom
 
     private void EnsureVoiceBackend(VoiceGameStateSnapshot? snapshot, VoiceChatLocalSettings? settings, VoiceEndpoint endpoint)
     {
+        if (Volatile.Read(ref _closed) != 0)
+            return;
         if (snapshot == null || !TryGetVoiceRoomIdentity(snapshot, endpoint.Backend, out var roomCode, out var region))
             return;
 
@@ -677,13 +702,21 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("transport.switch", $"backend={endpoint.Backend} room={roomCode} region={region} endpoint={endpointLabel}");
         ClearVoiceUiForLifecycleReset("transport switch");
         DisposeVoiceBackend();
+        if (Volatile.Read(ref _closed) != 0)
+            return;
         if (IsLocalHost())
             VoiceRoomSettingsState.ClearRemote();
         _lastSentHostSettings = null;
         _lastHostSettingsRequestUtc = DateTime.MinValue;
         ResetRadioStateSync();
-        _voiceBackend = new PerfectCommsVoiceBackend(roomCode, region, endpoint.ServerUrl);
-        _perfectCommsVoice = _voiceBackend as PerfectCommsVoiceBackend;
+        var backend = new PerfectCommsVoiceBackend(roomCode, region, endpoint.ServerUrl);
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            backend.Dispose();
+            return;
+        }
+        _voiceBackend = backend;
+        _perfectCommsVoice = backend;
         // P1.2: pre-warm the one-time HUD init (sprite PNG decode + button/tooltip GameObjects) here, off the
         // game-entry frame — the same room-construction lifecycle slot as the backend's WarmOpusCodec. Runs on
         // the Unity main thread (this method already touches VoiceChatHudState below) and is idempotent, so the
@@ -829,11 +862,12 @@ public class VoiceChatRoom
 
         _lastMissingPeerRecoveryTime = Time.time;
         string remoteSignatureText = DescribeExpectedRemotePlayers(snapshot);
+        string rpcPeerDiagnostics = _perfectCommsVoice?.DescribeRpcPeerDiagnostics() ?? "backend-unavailable";
         VoiceDiagnostics.Log("transport.peer-recovery",
             $"backend={_activeBackend} reason=missing-peer remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} rawPeers={_voiceBackend.PeerCount} " +
             $"mode={(finalCollapseAttempt ? "global" : collapsed ? "collapse-targeted" : "targeted")} attempt={(collapsed ? _globalRebuildAttempts + 1 : _missingPeerRecoveryAttempts + 1)}/{MissingPeerRecoveryMaxAttempts} healthyPeak={_lastHealthyMappedPeers} backoffSec={backoff:0.0} " +
             $"room={_activeRoomCode ?? "unknown"} region={_activeRegion ?? "unknown"} " +
-            $"liveClients=[{remoteSignatureText}]");
+            $"liveClients=[{remoteSignatureText}] rpcPeers=[{rpcPeerDiagnostics}]");
 
         bool didGlobal = false;
         if (finalCollapseAttempt)
@@ -1175,11 +1209,11 @@ public class VoiceChatRoom
 
     private void DisposeVoiceBackend()
     {
-        if (_voiceBackend != null)
-            _voiceBackend.CustomMessageReceived -= HandleBackendCustomMessage;
-        _voiceBackend?.Dispose();
-        _voiceBackend = null;
+        var backend = Interlocked.Exchange(ref _voiceBackend, null);
         _perfectCommsVoice = null;
+        if (backend == null) return;
+        backend.CustomMessageReceived -= HandleBackendCustomMessage;
+        backend.Dispose();
     }
 
     private void DrainBackendCustomMessages()
@@ -1297,8 +1331,14 @@ public class VoiceChatRoom
     }
 
     public void Close()
+        => Close("room close", clearUi: true);
+
+    private void Close(string reason, bool clearUi)
     {
-        ClearVoiceUiForLifecycleReset("room close");
+        if (Interlocked.Exchange(ref _closed, 1) != 0)
+            return;
+        if (clearUi)
+            ClearVoiceUiForLifecycleReset(reason);
         DisposeVoiceBackend();
         _lastCompatibilityRefreshTime = -999f;
         CurrentSnapshot = null;
@@ -1307,7 +1347,7 @@ public class VoiceChatRoom
         _bootstrapRefreshTimer = 0f;
         ResetSettingsSyncState();
         ResetTransitionTraceState();
-        VoiceDiagnostics.Log("room.close", "state cleared");
+        VoiceDiagnostics.Log("room.close", $"reason={LogSafe(reason)} state=cleared");
         VoiceClientRegistry.Reset();
         VoiceRoleMuteState.Reset();
     }
@@ -1428,9 +1468,11 @@ public class VoiceChatRoom
         if (_transitionTraceStateTimer > 0f) return;
 
         _transitionTraceStateTimer = TransitionTraceStateInterval;
+        var rpcPeers = _perfectCommsVoice?.DescribeRpcPeerDiagnostics() ?? "backend-unavailable";
         VoiceDiagnostics.Log("transition.state",
             $"remaining={(_transitionTraceUntilUtc - DateTime.UtcNow).TotalSeconds:0.000}s " +
-            $"liveClients=[{DescribeLiveClients()}] registry=[{DescribeRegistryState()}] " +            $"micLevel={LocalMicLevel:0.000} micSpeaking={LocalMicSpeaking} mute={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} " +
+            $"liveClients=[{DescribeLiveClients()}] rpcPeers=[{rpcPeers}] legacyRegistry=[{DescribeRegistryState()}] " +
+            $"micLevel={LocalMicLevel:0.000} micSpeaking={LocalMicSpeaking} mute={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} " +
             $"snapshot=\"{LogSafe(DescribeTransitionSnapshot(snapshot))}\"");
         LogDetailedGameState(snapshot);
     }

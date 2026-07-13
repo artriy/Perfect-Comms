@@ -1,4 +1,5 @@
 use crate::proto::{AudioFrame, AudioRing, DeviceInfo, PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::rtc::NativeCounters;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -337,6 +338,7 @@ pub fn spawn_cpal_playback(
     device_id: Option<String>,
     playback: Arc<Mutex<PlaybackRing>>,
     stop: Arc<AtomicBool>,
+    counters: Arc<NativeCounters>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_output_device(&host, &device_id)?;
@@ -352,23 +354,46 @@ pub fn spawn_cpal_playback(
     let mut s0 = (0.0f32, 0.0f32);
     let mut s1 = (0.0f32, 0.0f32);
     let mut pos = 1.0f64;
+    let fill_counters = counters.clone();
     let mut fill = move |out: &mut [f32]| {
         let frames = out.len() / out_channels.max(1);
+        fill_counters
+            .playback_callbacks
+            .fetch_add(1, Ordering::Relaxed);
         let mut ring = match cb_ring.try_lock() {
             Ok(g) => g,
             Err(_) => {
                 for s in out.iter_mut() {
                     *s = 0.0;
                 }
+                fill_counters
+                    .playback_lock_contention_callbacks
+                    .fetch_add(1, Ordering::Relaxed);
+                fill_counters
+                    .playback_lock_contention_silence_pairs
+                    .fetch_add(frames as u64, Ordering::Relaxed);
                 return;
             }
         };
         let err = (ring.len() as f64 - target_pairs) / target_pairs;
         let eff_ratio = ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004));
+        let mut requested_pairs = 0u64;
+        let mut consumed_pairs = 0u64;
+        let mut underrun_pairs = 0u64;
         for f in 0..frames {
             while pos >= 1.0 {
                 s0 = s1;
-                s1 = ring.pop_stereo().unwrap_or((0.0, 0.0));
+                requested_pairs += 1;
+                match ring.pop_stereo() {
+                    Some(pair) => {
+                        s1 = pair;
+                        consumed_pairs += 1;
+                    }
+                    None => {
+                        s1 = (0.0, 0.0);
+                        underrun_pairs += 1;
+                    }
+                }
                 pos -= 1.0;
             }
             let t = pos as f32;
@@ -377,23 +402,41 @@ pub fn spawn_cpal_playback(
             write_out_frame(out, f, out_channels, l, r);
             pos += eff_ratio;
         }
+        fill_counters
+            .playback_requested_pairs
+            .fetch_add(requested_pairs, Ordering::Relaxed);
+        fill_counters
+            .playback_consumed_pairs
+            .fetch_add(consumed_pairs, Ordering::Relaxed);
+        fill_counters
+            .playback_underrun_pairs
+            .fetch_add(underrun_pairs, Ordering::Relaxed);
+        fill_counters.record_playback_output(out);
+    };
+
+    let make_err = || {
+        let es = stop.clone();
+        let error_counters = counters.clone();
+        move |e| {
+            error_counters
+                .playback_errors
+                .fetch_add(1, Ordering::Relaxed);
+            error_counters
+                .playback_callback_errors
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!("cpal output stream error: {e}");
+            es.store(true, Ordering::Relaxed);
+        }
     };
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => {
-            let es = stop.clone();
-            device.build_output_stream(
-                &stream_config,
-                move |data: &mut [f32], _| fill(data),
-                move |e| {
-                    eprintln!("cpal output stream error: {e}");
-                    es.store(true, Ordering::Relaxed);
-                },
-                None,
-            )
-        }
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            &stream_config,
+            move |data: &mut [f32], _| fill(data),
+            make_err(),
+            None,
+        ),
         cpal::SampleFormat::I16 => {
-            let es = stop.clone();
             let mut scratch: Vec<f32> = Vec::new();
             device.build_output_stream(
                 &stream_config,
@@ -404,15 +447,11 @@ pub fn spawn_cpal_playback(
                         *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                     }
                 },
-                move |e| {
-                    eprintln!("cpal output stream error: {e}");
-                    es.store(true, Ordering::Relaxed);
-                },
+                make_err(),
                 None,
             )
         }
         cpal::SampleFormat::U16 => {
-            let es = stop.clone();
             let mut scratch: Vec<f32> = Vec::new();
             device.build_output_stream(
                 &stream_config,
@@ -423,10 +462,7 @@ pub fn spawn_cpal_playback(
                         *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
                     }
                 },
-                move |e| {
-                    eprintln!("cpal output stream error: {e}");
-                    es.store(true, Ordering::Relaxed);
-                },
+                make_err(),
                 None,
             )
         }
@@ -437,10 +473,12 @@ pub fn spawn_cpal_playback(
     stream
         .play()
         .map_err(|e| format!("output stream play: {e}"))?;
+    counters.playback_starts.fetch_add(1, Ordering::Relaxed);
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     drop(stream);
+    counters.playback_stops.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 

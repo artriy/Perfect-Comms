@@ -49,7 +49,7 @@ internal class VCManager : MonoBehaviour
             case "MatchMaking":
                 VoiceJoinGuard.Reset();
                 VoiceLobbyRegistryPublisher.ClearLocalListing();
-                VoiceChatRoom.CloseCurrentRoom();
+                VoiceChatRoom.CloseCurrentRoom($"scene-loaded:{scene.name}");
                 VoiceLobbyBrowserUi.Clear();
                 break;
         }
@@ -66,6 +66,14 @@ internal class VCManager : MonoBehaviour
     }
 
     private static float _lastUpdateErrorLogTime = -999f;
+
+    // Unity calls this on its main thread before native/managed teardown. Release the active
+    // session and synchronously terminate the process-lifetime helper here; AppDomain hooks are
+    // the last-resort fallback.
+    void OnApplicationQuit()
+    {
+        VoiceChatPluginMain.ShutdownVoiceRuntime("application-quit");
+    }
 
     void Update()
     {

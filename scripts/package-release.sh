@@ -14,8 +14,15 @@ fi
 
 source_version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
 plugin_version="$(grep -m1 'public const string Version =' "$root/VoiceChatPluginMain.cs" | sed -E 's/.*Version = "([^"]+)".*/\1/')"
+network_protocol="$(grep -m1 'ProtocolVersion =' "$root/Comms/VoiceProtocol.cs" | sed -E 's/.*ProtocolVersion = ([0-9]+).*/\1/')"
+sidecar_protocol="$(grep -m1 'public const int Proto =' "$root/Comms/SidecarVoiceClient.cs" | sed -E 's/.*Proto = ([0-9]+).*/\1/')"
+native_sidecar_protocol="$(grep -m1 'PROTO_VERSION:' "$root/native/pc-capture/src/proto.rs" | sed -E 's/.*= ([0-9]+).*/\1/')"
 if [[ -z "$source_version" || "$plugin_version" != "$source_version" ]]; then
 	echo "source version mismatch: project=$source_version plugin=$plugin_version" >&2
+	exit 1
+fi
+if [[ -z "$sidecar_protocol" || "$native_sidecar_protocol" != "$sidecar_protocol" ]]; then
+	echo "sidecar source protocol mismatch: managed=$sidecar_protocol native=$native_sidecar_protocol" >&2
 	exit 1
 fi
 release_dll="$root/artifacts/$release_dll_name"
@@ -48,7 +55,30 @@ else
 	for asset in "${required_desktop_assets[@]}"; do
 		require_nonempty "$root/$asset"
 	done
+	linux_helper="$root/Libs/pc-capture/pc-capture-linux-x64"
+	# actions/download-artifact does not preserve executable permission bits.
+	chmod +x "$linux_helper"
+	if ! helper_protocol="$("$linux_helper" --protocol-version)"; then
+		echo "stale or incompatible release helper: Libs/pc-capture/pc-capture-linux-x64 (expected protocol $sidecar_protocol)" >&2
+		exit 1
+	fi
+	if [[ "$helper_protocol" != "$sidecar_protocol" ]]; then
+		echo "stale or incompatible release helper: Libs/pc-capture/pc-capture-linux-x64 (expected protocol $sidecar_protocol, got '$helper_protocol')" >&2
+		exit 1
+	fi
+	echo "release.package.helper_protocol path=Libs/pc-capture/pc-capture-linux-x64 protocol=$helper_protocol"
 fi
+
+if command -v python3 >/dev/null 2>&1; then
+	asset_python=python3
+elif command -v python >/dev/null 2>&1; then
+	asset_python=python
+else
+	echo "Python 3 is required to verify native release asset formats and architectures." >&2
+	exit 1
+fi
+"$asset_python" "$root/scripts/verify-release-assets.py" \
+	--root "$root" --configuration "$config"
 
 if command -v cygpath >/dev/null 2>&1; then
 	dotnet_project="$(cygpath -w "$project")"
@@ -75,7 +105,7 @@ cp "$root/THIRD_PARTY_NOTICES.md" "$output/THIRD_PARTY_NOTICES.md"
 cp "$root/PRIVACY.md" "$output/PRIVACY.md"
 
 version="$source_version"
-protocol="$(grep -m1 'ProtocolVersion =' "$root/Comms/VoiceProtocol.cs" | sed -E 's/.*ProtocolVersion = ([0-9]+).*/\1/')"
+protocol="$network_protocol"
 {
 	echo "Perfect Comms $version"
 	echo "Configuration: $config"

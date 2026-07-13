@@ -4,6 +4,14 @@ set -euo pipefail
 helper="${1:?usage: ci-smoke-helper.sh <helper-binary> [--require-dsp]}"
 require_dsp="${2:-}"
 name="$(basename "$helper")"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+managed_proto="$(sed -nE 's/.*public const int Proto = ([0-9]+).*/\1/p' "$root/Comms/SidecarVoiceClient.cs" | head -n1)"
+[[ -n "$managed_proto" ]] || { echo "Could not read managed sidecar protocol" >&2; exit 1; }
+helper_proto="$("$helper" --protocol-version)"
+[[ "$helper_proto" == "$managed_proto" ]] || {
+  echo "Sidecar protocol mismatch: managed=$managed_proto helper=$helper_proto helper=$helper" >&2
+  exit 1
+}
 hs="$(mktemp -u)-pc-smoke.json"
 rm -f "$hs"
 
@@ -16,10 +24,10 @@ else
   exit 1
 fi
 
-"$python_cmd" - "$helper" "$hs" "$name" "$require_dsp" <<'PY'
+"$python_cmd" - "$helper" "$hs" "$name" "$require_dsp" "$managed_proto" <<'PY'
 import json, socket, struct, subprocess, sys, time, os
 
-helper, hs, name, require_dsp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+helper, hs, name, require_dsp, managed_proto = sys.argv[1:6]
 proc = subprocess.Popen([helper, "--synthetic-tone", "--handshake", hs],
                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                         text=False)
@@ -58,8 +66,9 @@ def recv_frame():
     return t, recv_exact(ln)
 
 failure = None
+disconnected_elapsed = None
 try:
-    send_control({"op": "hello", "proto": 7, "token": "ci-token"})
+    send_control({"op": "hello", "proto": int(managed_proto), "token": "ci-token"})
     t, body = recv_frame()
     assert t == 0x01, "first reply not CONTROL"
     ready = json.loads(body)
@@ -83,10 +92,33 @@ try:
             continue
         assert "speaking" in msg, msg
         levels += 1
+
+    # A lobby/session stop must leave the process reusable. Only control EOF (or owner exit)
+    # owns process lifetime, including the Wine/CrossOver path where guest PIDs are unusable.
+    send_control({"op": "stop"})
+    time.sleep(0.2)
+    assert proc.poll() is None, "helper exited on stop instead of remaining idle"
+
+    disconnected_at = time.monotonic()
+    s.shutdown(socket.SHUT_RDWR)
+    s.close()
+    s = None
+    try:
+        return_code = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("helper stayed alive more than 5s after control EOF") from exc
+    disconnected_elapsed = time.monotonic() - disconnected_at
+    assert return_code == 0, f"helper exited unsuccessfully after EOF: {return_code}"
 except Exception as exc:
     failure = exc
 finally:
-    proc.kill()
+    if s is not None:
+        try:
+            s.close()
+        except OSError:
+            pass
+    if proc.poll() is None:
+        proc.kill()
     _, stderr = proc.communicate(timeout=5)
     try:
         os.remove(hs)
@@ -98,5 +130,5 @@ if failure is not None:
 if require_dsp == "--require-dsp":
     assert "dsp set aec/agc/hpf=true ns=true" in log, \
         "final helper bundle could not load both DSP libraries:\n" + log
-print(f"SMOKE_OK {name}")
+print(f"SMOKE_OK {name} stop_reusable=true eof_exit_seconds={disconnected_elapsed:.3f}")
 PY

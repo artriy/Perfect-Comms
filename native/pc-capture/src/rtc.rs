@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,6 +27,229 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use webrtc::track::track_local::TrackLocal;
 
 type ReceivedPacket = (String, u32, u16, Vec<u8>);
+
+#[derive(Default)]
+pub struct NativeCounters {
+    pub capture_frames: AtomicU64,
+    pub opus_encoded: AtomicU64,
+    pub opus_empty: AtomicU64,
+    pub opus_errors: AtomicU64,
+    pub rtp_tx_attempts: AtomicU64,
+    pub rtp_tx_ok: AtomicU64,
+    pub rtp_tx_errors: AtomicU64,
+    pub rtp_rx_packets: AtomicU64,
+    pub rtp_rx_bytes: AtomicU64,
+    pub stale_rtp_rx_dropped: AtomicU64,
+    pub decode_packets: AtomicU64,
+    pub decode_frames: AtomicU64,
+    pub decode_empty: AtomicU64,
+    pub decode_errors: AtomicU64,
+    pub peer_level_batches: AtomicU64,
+    pub mix_rounds: AtomicU64,
+    pub mixed_peer_frames: AtomicU64,
+    pub mix_nonzero_rounds: AtomicU64,
+    pub mix_silent_rounds: AtomicU64,
+    pub mix_samples: AtomicU64,
+    pub mix_nonzero_samples: AtomicU64,
+    mix_peak_bits: AtomicU32,
+    mix_square_sum_bits: AtomicU64,
+    pub jitter_idle_ticks: AtomicU64,
+    pub game_state_updates: AtomicU64,
+    pub applied_deaf: AtomicU64,
+    applied_master_bits: AtomicU32,
+    pub applied_peer_count: AtomicU64,
+    pub applied_nonzero_gain_peers: AtomicU64,
+    pub playback_queued_pairs: AtomicU64,
+    pub playback_spawn_attempts: AtomicU64,
+    pub playback_starts: AtomicU64,
+    pub playback_stops: AtomicU64,
+    pub playback_errors: AtomicU64,
+    pub playback_callback_errors: AtomicU64,
+    pub playback_callbacks: AtomicU64,
+    pub playback_requested_pairs: AtomicU64,
+    pub playback_consumed_pairs: AtomicU64,
+    pub playback_underrun_pairs: AtomicU64,
+    pub playback_lock_contention_callbacks: AtomicU64,
+    pub playback_lock_contention_silence_pairs: AtomicU64,
+    pub playback_output_nonzero_samples: AtomicU64,
+    playback_output_peak_bits: AtomicU32,
+}
+
+impl NativeCounters {
+    pub fn record_game_state(
+        &self,
+        deaf: bool,
+        master: f32,
+        peer_count: usize,
+        nonzero_gain_peers: usize,
+    ) {
+        let effective_master = if master.is_finite() {
+            master.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
+        self.applied_deaf.store(deaf as u64, Ordering::Relaxed);
+        self.applied_master_bits
+            .store(effective_master.to_bits(), Ordering::Relaxed);
+        self.applied_peer_count
+            .store(peer_count as u64, Ordering::Relaxed);
+        self.applied_nonzero_gain_peers
+            .store(nonzero_gain_peers as u64, Ordering::Relaxed);
+        self.game_state_updates.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mix(&self, samples: &[f32]) {
+        let mut peak = 0.0f32;
+        let mut square_sum = 0.0f64;
+        let mut nonzero = 0u64;
+        for &sample in samples {
+            let sample = if sample.is_finite() { sample } else { 0.0 };
+            let abs = sample.abs();
+            peak = peak.max(abs);
+            square_sum += (sample as f64) * (sample as f64);
+            if abs > 0.000_001 {
+                nonzero += 1;
+            }
+        }
+        self.mix_samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.mix_nonzero_samples
+            .fetch_add(nonzero, Ordering::Relaxed);
+        if nonzero == 0 {
+            self.mix_silent_rounds.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.mix_nonzero_rounds.fetch_add(1, Ordering::Relaxed);
+        }
+        Self::observe_peak(&self.mix_peak_bits, peak);
+        Self::add_f64(&self.mix_square_sum_bits, square_sum);
+    }
+
+    pub fn record_playback_output(&self, samples: &[f32]) {
+        let mut peak = 0.0f32;
+        let mut nonzero = 0u64;
+        for &sample in samples {
+            let abs = if sample.is_finite() {
+                sample.abs()
+            } else {
+                0.0
+            };
+            peak = peak.max(abs);
+            if abs > 0.000_001 {
+                nonzero += 1;
+            }
+        }
+        self.playback_output_nonzero_samples
+            .fetch_add(nonzero, Ordering::Relaxed);
+        Self::observe_peak(&self.playback_output_peak_bits, peak);
+    }
+
+    fn observe_peak(target: &AtomicU32, peak: f32) {
+        if !peak.is_finite() || peak <= 0.0 {
+            return;
+        }
+        let mut current = target.load(Ordering::Relaxed);
+        loop {
+            if f32::from_bits(current) >= peak {
+                return;
+            }
+            match target.compare_exchange_weak(
+                current,
+                peak.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn add_f64(target: &AtomicU64, value: f64) {
+        if !value.is_finite() || value <= 0.0 {
+            return;
+        }
+        let mut current = target.load(Ordering::Relaxed);
+        loop {
+            let next = (f64::from_bits(current) + value).to_bits();
+            match target.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn snapshot(
+        &self,
+        capture_ring_dropped: u64,
+        playback_ring_len: u64,
+        playback_ring_dropped: u64,
+    ) -> crate::proto::NativeStatsSnapshot {
+        let mix_samples = self.mix_samples.load(Ordering::Relaxed);
+        let mix_square_sum = f64::from_bits(self.mix_square_sum_bits.load(Ordering::Relaxed));
+        let mix_rms = if mix_samples == 0 {
+            0.0
+        } else {
+            (mix_square_sum / mix_samples as f64).sqrt()
+        };
+        crate::proto::NativeStatsSnapshot {
+            capture_frames: self.capture_frames.load(Ordering::Relaxed),
+            opus_encoded: self.opus_encoded.load(Ordering::Relaxed),
+            opus_empty: self.opus_empty.load(Ordering::Relaxed),
+            opus_errors: self.opus_errors.load(Ordering::Relaxed),
+            rtp_tx_attempts: self.rtp_tx_attempts.load(Ordering::Relaxed),
+            rtp_tx_ok: self.rtp_tx_ok.load(Ordering::Relaxed),
+            rtp_tx_errors: self.rtp_tx_errors.load(Ordering::Relaxed),
+            rtp_rx_packets: self.rtp_rx_packets.load(Ordering::Relaxed),
+            rtp_rx_bytes: self.rtp_rx_bytes.load(Ordering::Relaxed),
+            stale_rtp_rx_dropped: self.stale_rtp_rx_dropped.load(Ordering::Relaxed),
+            decode_packets: self.decode_packets.load(Ordering::Relaxed),
+            decode_frames: self.decode_frames.load(Ordering::Relaxed),
+            decode_empty: self.decode_empty.load(Ordering::Relaxed),
+            decode_errors: self.decode_errors.load(Ordering::Relaxed),
+            peer_level_batches: self.peer_level_batches.load(Ordering::Relaxed),
+            mix_rounds: self.mix_rounds.load(Ordering::Relaxed),
+            mixed_peer_frames: self.mixed_peer_frames.load(Ordering::Relaxed),
+            mix_nonzero_rounds: self.mix_nonzero_rounds.load(Ordering::Relaxed),
+            mix_silent_rounds: self.mix_silent_rounds.load(Ordering::Relaxed),
+            mix_samples,
+            mix_nonzero_samples: self.mix_nonzero_samples.load(Ordering::Relaxed),
+            mix_peak: f32::from_bits(self.mix_peak_bits.load(Ordering::Relaxed)),
+            mix_rms,
+            jitter_idle_ticks: self.jitter_idle_ticks.load(Ordering::Relaxed),
+            game_state_updates: self.game_state_updates.load(Ordering::Relaxed),
+            applied_deaf: self.applied_deaf.load(Ordering::Relaxed) != 0,
+            applied_master: f32::from_bits(self.applied_master_bits.load(Ordering::Relaxed)),
+            applied_peer_count: self.applied_peer_count.load(Ordering::Relaxed),
+            applied_nonzero_gain_peers: self.applied_nonzero_gain_peers.load(Ordering::Relaxed),
+            playback_queued_pairs: self.playback_queued_pairs.load(Ordering::Relaxed),
+            playback_spawn_attempts: self.playback_spawn_attempts.load(Ordering::Relaxed),
+            playback_starts: self.playback_starts.load(Ordering::Relaxed),
+            playback_stops: self.playback_stops.load(Ordering::Relaxed),
+            playback_errors: self.playback_errors.load(Ordering::Relaxed),
+            playback_callback_errors: self.playback_callback_errors.load(Ordering::Relaxed),
+            playback_callbacks: self.playback_callbacks.load(Ordering::Relaxed),
+            playback_requested_pairs: self.playback_requested_pairs.load(Ordering::Relaxed),
+            playback_consumed_pairs: self.playback_consumed_pairs.load(Ordering::Relaxed),
+            playback_underrun_pairs: self.playback_underrun_pairs.load(Ordering::Relaxed),
+            playback_lock_contention_callbacks: self
+                .playback_lock_contention_callbacks
+                .load(Ordering::Relaxed),
+            playback_lock_contention_silence_pairs: self
+                .playback_lock_contention_silence_pairs
+                .load(Ordering::Relaxed),
+            playback_output_nonzero_samples: self
+                .playback_output_nonzero_samples
+                .load(Ordering::Relaxed),
+            playback_output_peak: f32::from_bits(
+                self.playback_output_peak_bits.load(Ordering::Relaxed),
+            ),
+            capture_ring_dropped,
+            playback_ring_len,
+            playback_ring_dropped,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum LocalSignal {
@@ -67,6 +291,7 @@ pub struct RtcEngine {
     out_local_signal: Sender<LocalSignal>,
     recv_tx: Sender<ReceivedPacket>,
     recv_rx: Mutex<Receiver<ReceivedPacket>>,
+    counters: Arc<NativeCounters>,
 
     pending_ice: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -99,7 +324,7 @@ fn build_api() -> Result<API, webrtc::Error> {
         .build())
 }
 
-async fn create_peer(
+struct CreatePeerArgs {
     peer_id: String,
     offerer: bool,
     ice_servers: Vec<RTCIceServer>,
@@ -107,7 +332,20 @@ async fn create_peer(
     generation: u32,
     out_local_signal: Sender<LocalSignal>,
     recv_tx: Sender<ReceivedPacket>,
-) -> Result<PeerHandle, webrtc::Error> {
+    counters: Arc<NativeCounters>,
+}
+
+async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> {
+    let CreatePeerArgs {
+        peer_id,
+        offerer,
+        ice_servers,
+        relay_only,
+        generation,
+        out_local_signal,
+        recv_tx,
+        counters,
+    } = args;
     let api = build_api()?;
     let config = RTCConfiguration {
         ice_servers: servers_for_policy(&ice_servers, relay_only),
@@ -168,13 +406,19 @@ async fn create_peer(
     }));
 
     let track_peer = peer_id.clone();
+    let track_counters = counters.clone();
     pc.on_track(Box::new(move |track, _receiver, _transceiver| {
         let tx = recv_tx.clone();
         let pid = track_peer.clone();
+        let counters = track_counters.clone();
         Box::pin(async move {
             tokio::spawn(async move {
                 while let Ok((pkt, _attr)) = track.read_rtp().await {
                     if !pkt.payload.is_empty() {
+                        counters.rtp_rx_packets.fetch_add(1, Ordering::Relaxed);
+                        counters
+                            .rtp_rx_bytes
+                            .fetch_add(pkt.payload.len() as u64, Ordering::Relaxed);
                         let _ = tx.send((
                             pid.clone(),
                             generation,
@@ -244,6 +488,13 @@ fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceS
 #[allow(dead_code)]
 impl RtcEngine {
     pub fn new(out_local_signal: Sender<LocalSignal>) -> RtcEngine {
+        Self::new_with_counters(out_local_signal, Arc::new(NativeCounters::default()))
+    }
+
+    pub fn new_with_counters(
+        out_local_signal: Sender<LocalSignal>,
+        counters: Arc<NativeCounters>,
+    ) -> RtcEngine {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -266,6 +517,7 @@ impl RtcEngine {
             out_local_signal,
             recv_tx,
             recv_rx: Mutex::new(recv_rx),
+            counters,
             pending_ice: Mutex::new(HashMap::new()),
         }
     }
@@ -295,6 +547,9 @@ impl RtcEngine {
     }
 
     pub fn add_peer(&self, peer_id: String, offerer: bool, relay_only: bool, generation: u32) {
+        eprintln!(
+            "pc-capture: rtc peer-add begin peer={peer_id} generation={generation} offerer={offerer} relay_only={relay_only}"
+        );
         let config = PeerConfig {
             relay_only,
             generation,
@@ -308,6 +563,7 @@ impl RtcEngine {
         if let Some(handle) = existing {
             if handle.generation == generation {
                 self.peers.lock().unwrap().insert(peer_id, handle);
+                eprintln!("pc-capture: rtc peer-add reused generation={generation}");
                 return;
             }
             let _ = self.rt.block_on(async move { handle.pc.close().await });
@@ -316,11 +572,19 @@ impl RtcEngine {
         let recv_tx = self.recv_tx.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
-        match self.rt.block_on(create_peer(
-            pid, offerer, servers, relay_only, generation, signal, recv_tx,
-        )) {
+        match self.rt.block_on(create_peer(CreatePeerArgs {
+            peer_id: pid,
+            offerer,
+            ice_servers: servers,
+            relay_only,
+            generation,
+            out_local_signal: signal,
+            recv_tx,
+            counters: self.counters.clone(),
+        })) {
             Ok(handle) => {
                 self.peers.lock().unwrap().insert(peer_id, handle);
+                eprintln!("pc-capture: rtc peer-add created generation={generation}");
             }
             Err(error) => {
                 eprintln!(
@@ -338,9 +602,14 @@ impl RtcEngine {
         if let Some(h) = handle {
             let _ = self.rt.block_on(async move { h.pc.close().await });
         }
+        eprintln!("pc-capture: rtc peer-remove peer={peer_id}");
     }
 
     pub fn set_remote_sdp(&self, peer_id: &str, sdp_type: &str, sdp: &str) {
+        eprintln!(
+            "pc-capture: rtc remote-sdp begin peer={peer_id} type={sdp_type} sdp_bytes={} ",
+            sdp.len()
+        );
         let existing = self
             .peers
             .lock()
@@ -352,21 +621,27 @@ impl RtcEngine {
             None => {
                 let config = match self.peer_configs.lock().unwrap().get(peer_id).copied() {
                     Some(config) => config,
-                    None => return,
+                    None => {
+                        eprintln!(
+                            "pc-capture: rtc remote-sdp rejected peer={peer_id} type={sdp_type} reason=missing-peer-config"
+                        );
+                        return;
+                    }
                 };
                 let signal = self.out_local_signal.clone();
                 let recv_tx = self.recv_tx.clone();
                 let servers = self.ice_servers.lock().unwrap().clone();
                 let pid = peer_id.to_string();
-                match self.rt.block_on(create_peer(
-                    pid,
-                    false,
-                    servers,
-                    config.relay_only,
-                    config.generation,
-                    signal,
+                match self.rt.block_on(create_peer(CreatePeerArgs {
+                    peer_id: pid,
+                    offerer: false,
+                    ice_servers: servers,
+                    relay_only: config.relay_only,
+                    generation: config.generation,
+                    out_local_signal: signal,
                     recv_tx,
-                )) {
+                    counters: self.counters.clone(),
+                })) {
                     Ok(h) => {
                         let pc = Arc::clone(&h.pc);
                         self.peers.lock().unwrap().insert(peer_id.to_string(), h);
@@ -393,13 +668,19 @@ impl RtcEngine {
             "answer" => RTCSessionDescription::answer(sdp.to_string()),
             "pranswer" => RTCSessionDescription::pranswer(sdp.to_string()),
             _ => {
+                eprintln!(
+                    "pc-capture: rtc remote-sdp rejected peer={peer_id} generation={generation} type={sdp_type} reason=unsupported-type"
+                );
                 self.emit_failed(peer_id, generation);
                 return;
             }
         };
         let desc = match desc {
             Ok(d) => d,
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "pc-capture: rtc remote-sdp rejected peer={peer_id} generation={generation} type={sdp_type} reason=invalid-description error={error}"
+                );
                 self.emit_failed(peer_id, generation);
                 return;
             }
@@ -416,6 +697,7 @@ impl RtcEngine {
             .unwrap()
             .remove(peer_id)
             .unwrap_or_default();
+        let pending_count = pending.len();
         if let Err(error) = self.rt.block_on(async move {
             pc.set_remote_description(desc).await?;
             for cand in pending {
@@ -449,6 +731,10 @@ impl RtcEngine {
                 generation,
                 state: "failed".to_string(),
             });
+        } else {
+            eprintln!(
+                "pc-capture: rtc remote-sdp applied peer={peer_id} generation={generation} type={sdp_type} pending_ice={pending_count}"
+            );
         }
     }
 
@@ -463,6 +749,10 @@ impl RtcEngine {
             Some(p) => p,
             None => {
                 self.buffer_ice(peer_id, candidate);
+                eprintln!(
+                    "pc-capture: rtc candidate buffered peer={peer_id} candidate_bytes={} reason=missing-peer",
+                    candidate.len()
+                );
                 return;
             }
         };
@@ -472,6 +762,10 @@ impl RtcEngine {
             .block_on(async { pc.remote_description().await.is_some() });
         if !has_remote {
             self.buffer_ice(peer_id, candidate);
+            eprintln!(
+                "pc-capture: rtc candidate buffered peer={peer_id} candidate_bytes={} reason=no-remote-description",
+                candidate.len()
+            );
             return;
         }
         let init =
@@ -479,9 +773,19 @@ impl RtcEngine {
                 candidate: candidate.to_string(),
                 ..Default::default()
             });
-        let _ = self
+        match self
             .rt
-            .block_on(async move { pc.add_ice_candidate(init).await });
+            .block_on(async move { pc.add_ice_candidate(init).await })
+        {
+            Ok(()) => eprintln!(
+                "pc-capture: rtc candidate applied peer={peer_id} candidate_bytes={}",
+                candidate.len()
+            ),
+            Err(error) => eprintln!(
+                "pc-capture: rtc candidate failed peer={peer_id} candidate_bytes={} error={error}",
+                candidate.len()
+            ),
+        }
     }
 
     fn buffer_ice(&self, peer_id: &str, candidate: &str) {
@@ -505,17 +809,31 @@ impl RtcEngine {
         if tracks.is_empty() {
             return;
         }
+        self.counters
+            .rtp_tx_attempts
+            .fetch_add(tracks.len() as u64, Ordering::Relaxed);
         let data = Bytes::copy_from_slice(pkt);
-        self.rt.block_on(async move {
+        let (ok, errors) = self.rt.block_on(async move {
+            let mut ok = 0u64;
+            let mut errors = 0u64;
             for t in tracks {
                 let sample = Sample {
                     data: data.clone(),
                     duration: Duration::from_millis(20),
                     ..Default::default()
                 };
-                let _ = t.write_sample(&sample).await;
+                if t.write_sample(&sample).await.is_ok() {
+                    ok += 1;
+                } else {
+                    errors += 1;
+                }
             }
+            (ok, errors)
         });
+        self.counters.rtp_tx_ok.fetch_add(ok, Ordering::Relaxed);
+        self.counters
+            .rtp_tx_errors
+            .fetch_add(errors, Ordering::Relaxed);
     }
 
     pub fn recv(&self) -> Option<(String, u32, u16, Vec<u8>)> {
@@ -530,6 +848,9 @@ impl RtcEngine {
             if is_current {
                 return Some((peer_id, generation, sequence, payload));
             }
+            self.counters
+                .stale_rtp_rx_dropped
+                .fetch_add(1, Ordering::Relaxed);
         }
         None
     }
@@ -545,6 +866,39 @@ mod tests {
     use super::*;
     use std::sync::mpsc::channel;
     use std::time::Instant;
+
+    #[test]
+    fn native_counter_snapshot_distinguishes_routed_audio_from_silence() {
+        let counters = NativeCounters::default();
+        counters.record_game_state(false, 0.75, 2, 1);
+        counters.record_mix(&[0.0, 0.5, -0.5, 0.0]);
+        counters.record_mix(&[0.0; 4]);
+        counters.record_playback_output(&[0.0, 0.25, -0.25, 0.0]);
+        counters.playback_callbacks.fetch_add(1, Ordering::Relaxed);
+        counters
+            .playback_consumed_pairs
+            .fetch_add(2, Ordering::Relaxed);
+
+        let snapshot = counters.snapshot(3, 4, 5);
+        assert_eq!(snapshot.game_state_updates, 1);
+        assert!(!snapshot.applied_deaf);
+        assert_eq!(snapshot.applied_master, 0.75);
+        assert_eq!(snapshot.applied_peer_count, 2);
+        assert_eq!(snapshot.applied_nonzero_gain_peers, 1);
+        assert_eq!(snapshot.mix_nonzero_rounds, 1);
+        assert_eq!(snapshot.mix_silent_rounds, 1);
+        assert_eq!(snapshot.mix_samples, 8);
+        assert_eq!(snapshot.mix_nonzero_samples, 2);
+        assert_eq!(snapshot.mix_peak, 0.5);
+        assert!((snapshot.mix_rms - 0.25).abs() < 0.000_001);
+        assert_eq!(snapshot.playback_callbacks, 1);
+        assert_eq!(snapshot.playback_consumed_pairs, 2);
+        assert_eq!(snapshot.playback_output_nonzero_samples, 2);
+        assert_eq!(snapshot.playback_output_peak, 0.25);
+        assert_eq!(snapshot.capture_ring_dropped, 3);
+        assert_eq!(snapshot.playback_ring_len, 4);
+        assert_eq!(snapshot.playback_ring_dropped, 5);
+    }
 
     #[test]
     fn set_ice_servers_stores_mapped_servers() {

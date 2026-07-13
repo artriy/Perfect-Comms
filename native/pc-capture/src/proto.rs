@@ -203,7 +203,6 @@ impl PlaybackRing {
         self.queue.len()
     }
 
-    #[cfg(test)]
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -345,6 +344,63 @@ struct PeerLevelsMsg<'a> {
     levels: &'a [PeerLevel],
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct NativeStatsSnapshot {
+    pub capture_frames: u64,
+    pub opus_encoded: u64,
+    pub opus_empty: u64,
+    pub opus_errors: u64,
+    pub rtp_tx_attempts: u64,
+    pub rtp_tx_ok: u64,
+    pub rtp_tx_errors: u64,
+    pub rtp_rx_packets: u64,
+    pub rtp_rx_bytes: u64,
+    pub stale_rtp_rx_dropped: u64,
+    pub decode_packets: u64,
+    pub decode_frames: u64,
+    pub decode_empty: u64,
+    pub decode_errors: u64,
+    pub peer_level_batches: u64,
+    pub mix_rounds: u64,
+    pub mixed_peer_frames: u64,
+    pub mix_nonzero_rounds: u64,
+    pub mix_silent_rounds: u64,
+    pub mix_samples: u64,
+    pub mix_nonzero_samples: u64,
+    pub mix_peak: f32,
+    pub mix_rms: f64,
+    pub jitter_idle_ticks: u64,
+    pub game_state_updates: u64,
+    pub applied_deaf: bool,
+    pub applied_master: f32,
+    pub applied_peer_count: u64,
+    pub applied_nonzero_gain_peers: u64,
+    pub playback_queued_pairs: u64,
+    pub playback_spawn_attempts: u64,
+    pub playback_starts: u64,
+    pub playback_stops: u64,
+    pub playback_errors: u64,
+    pub playback_callback_errors: u64,
+    pub playback_callbacks: u64,
+    pub playback_requested_pairs: u64,
+    pub playback_consumed_pairs: u64,
+    pub playback_underrun_pairs: u64,
+    pub playback_lock_contention_callbacks: u64,
+    pub playback_lock_contention_silence_pairs: u64,
+    pub playback_output_nonzero_samples: u64,
+    pub playback_output_peak: f32,
+    pub capture_ring_dropped: u64,
+    pub playback_ring_len: u64,
+    pub playback_ring_dropped: u64,
+}
+
+#[derive(Serialize)]
+struct StatsMsg<'a> {
+    op: &'static str,
+    #[serde(flatten)]
+    stats: &'a NativeStatsSnapshot,
+}
+
 #[derive(Serialize)]
 struct ErrorMsg<'a> {
     op: &'static str,
@@ -398,6 +454,10 @@ pub fn peer_levels_json(levels: &[PeerLevel]) -> String {
         levels,
     })
     .expect("peer-levels serialize")
+}
+
+pub fn stats_json(stats: &NativeStatsSnapshot) -> String {
+    serde_json::to_string(&StatsMsg { op: "stats", stats }).expect("stats serialize")
 }
 
 pub fn error_json(code: &str, msg: &str) -> String {
@@ -666,6 +726,61 @@ mod tests {
         assert_eq!(pv["peer_id"], "p1");
         assert_eq!(pv["generation"], 41);
         assert_eq!(pv["state"], "connected");
+    }
+
+    #[test]
+    fn native_stats_json_is_flat_and_contains_no_media_payloads() {
+        let stats = NativeStatsSnapshot {
+            capture_frames: 10,
+            opus_encoded: 9,
+            rtp_tx_ok: 18,
+            rtp_rx_packets: 7,
+            decode_frames: 6,
+            mix_rounds: 5,
+            mix_nonzero_rounds: 4,
+            mix_silent_rounds: 1,
+            mix_samples: 9_600,
+            mix_nonzero_samples: 8_000,
+            mix_peak: 0.5,
+            mix_rms: 0.125,
+            game_state_updates: 20,
+            applied_deaf: false,
+            applied_master: 0.75,
+            applied_peer_count: 2,
+            applied_nonzero_gain_peers: 1,
+            playback_queued_pairs: 4_800,
+            playback_callbacks: 10,
+            playback_consumed_pairs: 4_700,
+            playback_underrun_pairs: 100,
+            playback_output_nonzero_samples: 8_000,
+            playback_output_peak: 0.4,
+            ..Default::default()
+        };
+        let value: serde_json::Value = serde_json::from_str(&stats_json(&stats)).unwrap();
+        assert_eq!(value["op"], "stats");
+        assert_eq!(value["capture_frames"], 10);
+        assert_eq!(value["opus_encoded"], 9);
+        assert_eq!(value["rtp_tx_ok"], 18);
+        assert_eq!(value["rtp_rx_packets"], 7);
+        assert_eq!(value["decode_frames"], 6);
+        assert_eq!(value["mix_rounds"], 5);
+        assert_eq!(value["mix_nonzero_rounds"], 4);
+        assert_eq!(value["mix_silent_rounds"], 1);
+        assert_eq!(value["mix_peak"], 0.5);
+        assert_eq!(value["mix_rms"], 0.125);
+        assert_eq!(value["game_state_updates"], 20);
+        assert_eq!(value["applied_deaf"], false);
+        assert_eq!(value["applied_master"], 0.75);
+        assert_eq!(value["applied_peer_count"], 2);
+        assert_eq!(value["applied_nonzero_gain_peers"], 1);
+        assert_eq!(value["playback_queued_pairs"], 4_800);
+        assert_eq!(value["playback_callbacks"], 10);
+        assert_eq!(value["playback_consumed_pairs"], 4_700);
+        assert_eq!(value["playback_underrun_pairs"], 100);
+        assert_eq!(value["playback_output_nonzero_samples"], 8_000);
+        assert_eq!(value["playback_output_peak"], 0.4);
+        assert!(value.get("sdp").is_none());
+        assert!(value.get("candidate").is_none());
     }
 
     #[test]

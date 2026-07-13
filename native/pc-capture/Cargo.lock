@@ -1440,6 +1440,7 @@ dependencies = [
  "bytes",
  "cpal",
  "df-sys",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

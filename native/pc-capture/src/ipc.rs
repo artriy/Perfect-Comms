@@ -11,25 +11,75 @@ use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
     devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
-    parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json, AudioFrame,
-    AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION,
-    RING_CAPACITY,
+    parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json, stats_json,
+    AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
+    PROTO_VERSION, RING_CAPACITY,
 };
-use crate::rtc::{LocalSignal, RtcEngine};
+use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_FRAME_LEN: usize = 1 << 20;
+const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Arms a fail-safe for teardown work that can block inside platform audio/RTC code.
+/// Completion wakes and joins the watchdog immediately; a healthy shutdown never waits
+/// for the deadline to elapse.
+struct CleanupDeadline {
+    state: Arc<(Mutex<bool>, Condvar)>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl CleanupDeadline {
+    fn arm<F>(timeout: Duration, on_timeout: F) -> std::io::Result<Self>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let state = Arc::new((Mutex::new(false), Condvar::new()));
+        let thread_state = state.clone();
+        let handle = std::thread::Builder::new()
+            .name("pc-capture-cleanup-deadline".to_string())
+            .spawn(move || {
+                let (complete, wake) = &*thread_state;
+                let should_fire = match complete.lock() {
+                    Ok(complete) => match wake.wait_timeout_while(complete, timeout, |done| !*done)
+                    {
+                        Ok((complete, wait)) => wait.timed_out() && !*complete,
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                };
+                if should_fire {
+                    on_timeout();
+                }
+            })?;
+        Ok(Self { state, handle })
+    }
+
+    fn complete(self) {
+        let Self { state, handle } = self;
+        let (complete, wake) = &*state;
+        let mut complete = complete.lock().unwrap_or_else(|poison| poison.into_inner());
+        *complete = true;
+        wake.notify_all();
+        drop(complete);
+        let _ = handle.join();
+    }
+}
 
 pub struct ServerConfig {
     pub handshake_path: PathBuf,
     pub token: String,
     pub synthetic: bool,
+    pub owner_pid: Option<u32>,
+    /// Production helpers use a hard deadline so device/RTC teardown cannot leave an orphan.
+    /// Tests disable it to keep a failed cleanup assertion inside the test process.
+    pub hard_exit_on_disconnect: bool,
 }
 
 pub fn bind_loopback() -> std::io::Result<TcpListener> {
@@ -370,8 +420,13 @@ fn spawn_telemetry_writer(
     mailbox: Arc<TelemetryMailbox>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
+    counters: Arc<NativeCounters>,
+    capture_ring: Arc<Mutex<AudioRing>>,
+    playback_ring: Arc<Mutex<PlaybackRing>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        const STATS_INTERVAL: Duration = Duration::from_secs(2);
+        let mut last_stats = Instant::now() - STATS_INTERVAL;
         while !stop.load(Ordering::Acquire) {
             if let Some((peak, speaking)) = mailbox.take_local() {
                 let bytes = encode_control(&level_json(peak, speaking));
@@ -380,10 +435,24 @@ fn spawn_telemetry_writer(
                 }
             }
             if let Some(levels) = mailbox.take_peers() {
+                counters.peer_level_batches.fetch_add(1, Ordering::Relaxed);
                 let bytes = encode_control(&peer_levels_json(&levels));
                 if write_frame(&conn, &bytes).is_err() {
                     break;
                 }
+            }
+            if last_stats.elapsed() >= STATS_INTERVAL {
+                let capture_dropped = capture_ring.lock().unwrap().dropped();
+                let (playback_len, playback_dropped) = {
+                    let playback = playback_ring.lock().unwrap();
+                    (playback.len() as u64, playback.dropped())
+                };
+                let snapshot = counters.snapshot(capture_dropped, playback_len, playback_dropped);
+                let bytes = encode_control(&stats_json(&snapshot));
+                if write_frame(&conn, &bytes).is_err() {
+                    break;
+                }
+                last_stats = Instant::now();
             }
             std::thread::sleep(TELEMETRY_INTERVAL / 5);
         }
@@ -451,6 +520,7 @@ fn ensure_playback(
     out_stop: &Arc<AtomicBool>,
     playback: &Arc<Mutex<PlaybackRing>>,
     last_spawn_ns: &AtomicU64,
+    counters: &Arc<NativeCounters>,
 ) {
     let mut guard = out_thread.lock().unwrap();
     if guard.as_ref().is_some_and(|h| h.is_finished()) {
@@ -468,9 +538,14 @@ fn ensure_playback(
         let dev = out_selected.lock().unwrap().clone();
         let pb = playback.clone();
         let st = out_stop.clone();
+        let stats = counters.clone();
         st.store(false, Ordering::Relaxed);
+        counters
+            .playback_spawn_attempts
+            .fetch_add(1, Ordering::Relaxed);
         *guard = Some(std::thread::spawn(move || {
-            if let Err(e) = spawn_cpal_playback(dev, pb, st) {
+            if let Err(e) = spawn_cpal_playback(dev, pb, st, stats.clone()) {
+                stats.playback_errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!("pc-capture: playback error: {e}");
             }
         }));
@@ -556,12 +631,22 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let input = Arc::new(Mutex::new(InputConfig::default()));
     let telemetry = Arc::new(TelemetryMailbox::default());
     let telemetry_stop = Arc::new(AtomicBool::new(false));
-    let telemetry_handle =
-        spawn_telemetry_writer(telemetry.clone(), telemetry_stop.clone(), conn.clone());
+    let counters = Arc::new(NativeCounters::default());
+    let telemetry_handle = spawn_telemetry_writer(
+        telemetry.clone(),
+        telemetry_stop.clone(),
+        conn.clone(),
+        counters.clone(),
+        ring.clone(),
+        playback.clone(),
+    );
 
     let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
 
-    let rtc = Arc::new(RtcEngine::new(local_signal_tx));
+    let rtc = Arc::new(RtcEngine::new_with_counters(
+        local_signal_tx,
+        counters.clone(),
+    ));
     let rtc_stop = Arc::new(AtomicBool::new(false));
 
     let (rtc_op_tx, rtc_op_rx) = std::sync::mpsc::channel::<RtcOp>();
@@ -595,8 +680,16 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_rtc = rtc.clone();
     let writer_input = input.clone();
     let writer_telemetry = telemetry.clone();
+    let writer_counters = counters.clone();
     let writer_handle = std::thread::spawn(move || {
-        let mut encoder = OpusCodec::new().ok();
+        let mut encoder = match OpusCodec::new() {
+            Ok(encoder) => Some(encoder),
+            Err(error) => {
+                writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                eprintln!("pc-capture: opus encoder init failed: {error}");
+                None
+            }
+        };
         let mut level_cadence = LevelCadence::new(Instant::now());
         let mut last_dropped = 0u64;
         while !writer_stop.load(Ordering::Relaxed) {
@@ -606,6 +699,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             };
             match frame {
                 Some(mut f) => {
+                    writer_counters
+                        .capture_frames
+                        .fetch_add(1, Ordering::Relaxed);
                     writer_dsp.lock().unwrap().capture(&mut f.samples);
                     let input = *writer_input.lock().unwrap();
                     input.apply_gain(&mut f.samples);
@@ -613,7 +709,10 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     if let Some(enc) = encoder.as_mut() {
                         let pkt = enc.encode(&f.samples);
                         if !pkt.is_empty() {
+                            writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
                             writer_rtc.send_opus(&pkt);
+                        } else {
+                            writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
@@ -647,6 +746,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_out_stop = out_stop.clone();
     let drain_out_spawn = out_spawn_ns.clone();
     let drain_telemetry = telemetry.clone();
+    let drain_counters = counters.clone();
     let drain_handle = std::thread::spawn(move || {
         let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
         let mut last_seq: HashMap<String, u16> = HashMap::new();
@@ -681,6 +781,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
             let mut drained = 0;
             while let Some((peer, generation, seq, data)) = drain_rtc.recv() {
+                drain_counters
+                    .decode_packets
+                    .fetch_add(1, Ordering::Relaxed);
                 if generations.get(&peer).copied() != Some(generation) {
                     decoders.remove(&peer);
                     jitter.remove(&peer);
@@ -693,7 +796,11 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         Ok(c) => {
                             decoders.insert(peer.clone(), c);
                         }
-                        Err(_) => continue,
+                        Err(error) => {
+                            drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("pc-capture: opus decoder init failed peer={peer}: {error}");
+                            continue;
+                        }
                     }
                 }
                 let last = last_seq.get(&peer).copied();
@@ -701,6 +808,13 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     let codec = decoders.get_mut(&peer).unwrap();
                     crate::codec::decode_with_concealment(codec, last, seq, &data)
                 };
+                if frames.is_empty() {
+                    drain_counters.decode_empty.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    drain_counters
+                        .decode_frames
+                        .fetch_add(frames.len() as u64, Ordering::Relaxed);
+                }
                 for f in frames {
                     peer_levels.observe(&peer, peak(&f));
                     jitter.push(&peer, f);
@@ -717,6 +831,9 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 drain_telemetry.publish_peers(levels);
             }
             if jitter.is_idle() {
+                drain_counters
+                    .jitter_idle_ticks
+                    .fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(5));
                 next_tick = Instant::now();
                 continue;
@@ -724,11 +841,16 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
             let round = jitter.playout_round();
             if !round.is_empty() {
+                drain_counters.mix_rounds.fetch_add(1, Ordering::Relaxed);
+                drain_counters
+                    .mixed_peer_frames
+                    .fetch_add(round.len() as u64, Ordering::Relaxed);
                 let per_peer: Vec<(String, &[f32])> = round
                     .iter()
                     .map(|(k, v)| (k.clone(), v.as_slice()))
                     .collect();
                 mixer.mix(&per_peer, &drain_gs, &mut stereo);
+                drain_counters.record_mix(&stereo);
 
                 ensure_playback(
                     &drain_out_thread,
@@ -736,8 +858,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     &drain_out_stop,
                     &drain_playback,
                     &drain_out_spawn,
+                    &drain_counters,
                 );
                 drain_playback.lock().unwrap().push(&stereo);
+                drain_counters
+                    .playback_queued_pairs
+                    .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
                 drain_dsp.lock().unwrap().far_end(&stereo);
             }
 
@@ -781,7 +907,10 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     loop {
         let frame = match read_frame_checked(&mut reader) {
             Ok(f) => f,
-            Err(_) => break,
+            Err(error) => {
+                eprintln!("pc-capture: control channel ended: {error}");
+                break;
+            }
         };
         match frame {
             Frame::AudioOut(_) => {
@@ -791,6 +920,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     &out_stop,
                     &playback,
                     &out_spawn_ns,
+                    &counters,
                 );
             }
             Frame::Control(text) => {
@@ -828,6 +958,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             &out_stop,
                             &playback,
                             &out_spawn_ns,
+                            &counters,
                         );
                     }
                     InboundOp::Start => {
@@ -886,6 +1017,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             &out_stop,
                             &playback,
                             &out_spawn_ns,
+                            &counters,
                         );
                     }
                     InboundOp::PeerRemove { peer_id } => {
@@ -931,7 +1063,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                                 )
                             })
                             .collect();
+                        let nonzero_gain_peers = peer_states
+                            .iter()
+                            .filter(|(_, peer)| {
+                                peer.gain.is_finite() && peer.gain.abs() > 0.000_001
+                            })
+                            .count();
+                        let peer_count = peer_states.len();
                         game_state.apply(local, master, peer_states);
+                        counters.record_game_state(deaf, master, peer_count, nonzero_gain_peers);
                     }
                     InboundOp::Hello { .. } => {}
                 }
@@ -939,6 +1079,30 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             Frame::Audio(_) => {}
         }
     }
+
+    // The control connection is the Wine-safe lifetime signal. Arm this only after its
+    // terminal read/EOF so lobby/game transitions on the still-open connection do not
+    // restart the helper. If audio or RTC teardown wedges, force the process down before
+    // its cloned listener can remain as an orphaned LISTEN socket.
+    let cleanup_deadline = if cfg.hard_exit_on_disconnect {
+        Some(
+            CleanupDeadline::arm(CONTROL_EOF_CLEANUP_DEADLINE, || {
+                eprintln!(
+                    "pc-capture: cleanup exceeded {}ms after control EOF; terminating fail-safe",
+                    CONTROL_EOF_CLEANUP_DEADLINE.as_millis()
+                );
+                std::process::exit(0);
+            })
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "pc-capture: cannot arm control EOF cleanup fail-safe: {error}; terminating"
+                );
+                std::process::exit(1);
+            }),
+        )
+    } else {
+        None
+    };
 
     producer.stop();
     stop.store(true, Ordering::Relaxed);
@@ -955,10 +1119,19 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     ctrl_handle.join().ok();
     drop(rtc);
     signal_handle.join().ok();
+    if let Some(deadline) = cleanup_deadline {
+        deadline.complete();
+    }
     Ok(())
 }
 
 pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
+    if let Some(owner_pid) = cfg.owner_pid {
+        crate::owner::spawn_owner_guard(owner_pid)?;
+        eprintln!("pc-capture: owner guard active pid={owner_pid}");
+    } else {
+        eprintln!("pc-capture: owner guard omitted; control EOF fail-safe active");
+    }
     let listener = bind_loopback()?;
     let port = listener.local_addr()?.port();
     write_handshake_file(&cfg.handshake_path, port, std::process::id())?;
@@ -1022,6 +1195,41 @@ mod tests {
         let mut r = BufReader::new(&b"my-secret-token\r\n"[..]);
         let tok = read_token_line(&mut r).unwrap();
         assert_eq!(tok, "my-secret-token");
+    }
+
+    #[test]
+    fn cleanup_deadline_fires_when_teardown_stalls() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_on_timeout = fired.clone();
+        let deadline = CleanupDeadline::arm(Duration::from_millis(30), move || {
+            fired_on_timeout.store(true, Ordering::Release);
+        })
+        .unwrap();
+
+        let wait_until = Instant::now() + Duration::from_secs(1);
+        while !fired.load(Ordering::Acquire) && Instant::now() < wait_until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(fired.load(Ordering::Acquire));
+        deadline.complete();
+    }
+
+    #[test]
+    fn completed_cleanup_cancels_deadline_without_waiting_for_it() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_on_timeout = fired.clone();
+        let deadline = CleanupDeadline::arm(Duration::from_secs(2), move || {
+            fired_on_timeout.store(true, Ordering::Release);
+        })
+        .unwrap();
+
+        let started = Instant::now();
+        deadline.complete();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "clean completion waited for the hard deadline"
+        );
+        assert!(!fired.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1154,6 +1362,8 @@ mod tests {
             handshake_path: std::env::temp_dir().join("unused-hs.json"),
             token: "tok123".to_string(),
             synthetic: true,
+            owner_pid: None,
+            hard_exit_on_disconnect: false,
         };
         let server = std::thread::spawn(move || {
             let stream = accept_single(&listener).unwrap();
@@ -1240,6 +1450,8 @@ mod tests {
             handshake_path: std::env::temp_dir().join("unused-hs2.json"),
             token: "right".to_string(),
             synthetic: true,
+            owner_pid: None,
+            hard_exit_on_disconnect: false,
         };
         let server = std::thread::spawn(move || {
             let stream = accept_single(&listener).unwrap();
@@ -1267,6 +1479,8 @@ mod tests {
             handshake_path: std::env::temp_dir().join("unused-hs3.json"),
             token: "tok".to_string(),
             synthetic: true,
+            owner_pid: None,
+            hard_exit_on_disconnect: false,
         };
         let server = std::thread::spawn(move || {
             let stream = accept_single(&listener).unwrap();
@@ -1296,6 +1510,8 @@ mod tests {
             handshake_path: hs.clone(),
             token: "servetok".to_string(),
             synthetic: true,
+            owner_pid: None,
+            hard_exit_on_disconnect: false,
         };
         let server = std::thread::spawn(move || {
             serve(cfg).ok();

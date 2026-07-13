@@ -611,6 +611,27 @@ public sealed class PeerSessionManagerTests
     }
 
     [Fact]
+    public void ReusedHelperHandoffCannotCollideWithPreviousManagerGeneration()
+    {
+        var oldTransport = new MockTransport();
+        var oldManager = new PeerSessionManager(3, oldTransport, new MockSender());
+        oldManager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+        var delayedOldGeneration = oldTransport.LatestGeneration(7);
+
+        var newTransport = new MockTransport();
+        var newManager = new PeerSessionManager(3, newTransport, new MockSender());
+        newManager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 2000);
+        var newGeneration = newTransport.LatestGeneration(7);
+
+        Xunit.Assert.NotEqual(delayedOldGeneration, newGeneration);
+        newManager.OnPeerConnectionLost(7, delayedOldGeneration, 3000);
+        Xunit.Assert.Equal(PeerState.Offering, StateOf(newManager, 7));
+
+        newManager.OnPeerConnected(7, newGeneration);
+        Xunit.Assert.Equal(PeerState.Established, StateOf(newManager, 7));
+    }
+
+    [Fact]
     public void RelayPeerWaitsForFreshCredentialsWithoutDirectDowngrade()
     {
         var relayAvailable = true;
@@ -806,5 +827,37 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(addsBefore + 1, transport.Added.Count);
         Xunit.Assert.Contains(7, transport.Removed);
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
+    }
+
+    [Fact]
+    public void DiagnosticsSnapshotTracksPeerStateAndCandidateFlow()
+    {
+        var transport = new MockTransport();
+        var manager = new PeerSessionManager(3, transport, new MockSender());
+
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+        var generation = transport.LatestGeneration(7);
+        manager.OnLocalCandidate(7, generation, "LOCAL_CANDIDATE");
+        manager.OnSignal(7, SignalMsgType.Candidate, SignalPayload.Candidate(1, "REMOTE_CANDIDATE"), 2000);
+        manager.OnSignal(7, SignalMsgType.Candidate, SignalPayload.Candidate(99, "STALE_CANDIDATE"), 2000);
+
+        var negotiating = manager.GetDiagnosticsSnapshot();
+        Xunit.Assert.Equal(1, negotiating.KnownPeers);
+        Xunit.Assert.Equal(1, negotiating.CompatiblePeers);
+        Xunit.Assert.Equal(1, negotiating.NegotiatingPeers);
+        Xunit.Assert.Equal(0, negotiating.EstablishedPeers);
+        Xunit.Assert.Equal(1, negotiating.LocalCandidatesAttempted);
+        Xunit.Assert.Equal(2, negotiating.RemoteCandidatesReceived);
+        Xunit.Assert.Equal(1, negotiating.RemoteCandidatesForwarded);
+        Xunit.Assert.Equal(1, negotiating.RejectedCandidates);
+        Xunit.Assert.Contains("7:Offering/", negotiating.PeerStates);
+        Xunit.Assert.Contains("candAttempts1-rx2-forwarded1-rejected1", negotiating.PeerStates);
+
+        manager.OnPeerConnected(7, generation);
+
+        var established = manager.GetDiagnosticsSnapshot();
+        Xunit.Assert.Equal(0, established.NegotiatingPeers);
+        Xunit.Assert.Equal(1, established.EstablishedPeers);
+        Xunit.Assert.Contains("7:Established/", established.PeerStates);
     }
 }

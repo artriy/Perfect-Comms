@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -27,6 +28,46 @@ internal enum PeerState
     Answering,
     Connected,
     Established,
+}
+
+internal readonly struct PeerSessionDiagnosticsSnapshot
+{
+    public static readonly PeerSessionDiagnosticsSnapshot Empty = new(
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        "none");
+
+    public PeerSessionDiagnosticsSnapshot(
+        int knownPeers,
+        int compatiblePeers,
+        int negotiatingPeers,
+        int establishedPeers,
+        long localCandidatesAttempted,
+        long remoteCandidatesReceived,
+        long remoteCandidatesForwarded,
+        long rejectedCandidates,
+        string peerStates)
+    {
+        KnownPeers = knownPeers;
+        CompatiblePeers = compatiblePeers;
+        NegotiatingPeers = negotiatingPeers;
+        EstablishedPeers = establishedPeers;
+        LocalCandidatesAttempted = localCandidatesAttempted;
+        RemoteCandidatesReceived = remoteCandidatesReceived;
+        RemoteCandidatesForwarded = remoteCandidatesForwarded;
+        RejectedCandidates = rejectedCandidates;
+        PeerStates = peerStates;
+    }
+
+    public int KnownPeers { get; }
+    public int CompatiblePeers { get; }
+    public int NegotiatingPeers { get; }
+    public int EstablishedPeers { get; }
+    public long LocalCandidatesAttempted { get; }
+    public long RemoteCandidatesReceived { get; }
+    public long RemoteCandidatesForwarded { get; }
+    public long RejectedCandidates { get; }
+    public string PeerStates { get; }
 }
 
 internal static class SignalPayload
@@ -172,6 +213,10 @@ internal sealed class PeerSessionManager
         public int Generation;
         public long NegotiationId;
         public bool RestartRequested;
+        public long LocalCandidatesAttempted;
+        public long RemoteCandidatesReceived;
+        public long RemoteCandidatesForwarded;
+        public long RejectedCandidates;
     }
 
     private readonly int _localClientId;
@@ -181,8 +226,15 @@ internal sealed class PeerSessionManager
     private readonly Func<bool> _forceRelay;
     private readonly Action<int> _requestRelay;
     private readonly Dictionary<int, PeerEntry> _peers = new();
-    private int _nextGeneration;
+    // Native callbacks can arrive after a reusable helper has handed off to a new backend. Keep
+    // generations process-wide so a delayed close/state event from the previous lobby can never
+    // collide with a new manager's first generation and disturb its fresh peer.
+    private static int _nextProcessGeneration;
     private long _nextNegotiationId;
+    private long _localCandidatesAttempted;
+    private long _remoteCandidatesReceived;
+    private long _remoteCandidatesForwarded;
+    private long _rejectedCandidates;
 
     public PeerSessionManager(
         int localClientId,
@@ -237,31 +289,82 @@ internal sealed class PeerSessionManager
 
     internal int EstablishedPeerCount => _peers.Values.Count(peer => peer.State == PeerState.Established);
 
+    internal PeerSessionDiagnosticsSnapshot GetDiagnosticsSnapshot()
+    {
+        var peerStates = _peers.Count == 0
+            ? "none"
+            : string.Join(
+                ",",
+                _peers.OrderBy(pair => pair.Key).Select(pair =>
+                {
+                    var peer = pair.Value;
+                    return $"{pair.Key}:{peer.State}/g{peer.Generation}/n{peer.NegotiationId}/relay{Bool(peer.RelayOnly)}/added{Bool(peer.Added)}/candAttempts{peer.LocalCandidatesAttempted}-rx{peer.RemoteCandidatesReceived}-forwarded{peer.RemoteCandidatesForwarded}-rejected{peer.RejectedCandidates}";
+                }));
+
+        return new PeerSessionDiagnosticsSnapshot(
+            _peers.Count,
+            CompatiblePeerCount,
+            _peers.Values.Count(peer => peer.State is PeerState.Offering or PeerState.Answering or PeerState.Connected),
+            EstablishedPeerCount,
+            _localCandidatesAttempted,
+            _remoteCandidatesReceived,
+            _remoteCandidatesForwarded,
+            _rejectedCandidates,
+            peerStates);
+    }
+
     internal bool TryRecoverPeer(int clientId, long nowMs)
     {
-        if (!_peers.TryGetValue(clientId, out var peer) || peer.State == PeerState.Established)
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("recover", clientId, null, "peer-unknown");
             return false;
+        }
+        if (peer.State == PeerState.Established)
+        {
+            LogReject("recover", clientId, peer, "already-established");
+            return false;
+        }
         if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        {
+            LogReject("recover", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
             return false;
+        }
 
         if (peer.State is PeerState.Idle or PeerState.Greeted)
         {
             peer.HelloSent = true;
             peer.LastHelloSentMs = nowMs;
             peer.LastReinitMs = nowMs;
-            _sender.Send(clientId, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+            LogEvent("recover", clientId, peer, "action=resend-hello");
+            SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "targeted-recovery");
             return true;
         }
 
-        if (!peer.HelloReceived) return false;
+        if (!peer.HelloReceived)
+        {
+            LogReject("recover", clientId, peer, "hello-not-received");
+            return false;
+        }
+        LogEvent("recover", clientId, peer, "action=reinitiate");
         RecoverPeer(clientId, peer, nowMs);
         return true;
     }
 
     public void OnPlayerJoined(int clientId, long nowMs = 0)
     {
-        if (clientId == _localClientId || clientId < 0) return;
+        if (clientId == _localClientId)
+        {
+            LogReject("player-joined", clientId, null, "local-client");
+            return;
+        }
+        if (clientId < 0)
+        {
+            LogReject("player-joined", clientId, null, "invalid-client");
+            return;
+        }
         var peer = GetOrCreate(clientId);
+        LogEvent("player-joined", clientId, peer, $"nowMs={nowMs}");
         SendHelloIfNeeded(clientId, peer);
         peer.LastHelloSentMs = nowMs;
         TryStartSession(clientId, peer, nowMs);
@@ -277,15 +380,16 @@ internal sealed class PeerSessionManager
                 if (!peer.HelloSent) continue;
                 if (nowMs - peer.LastHelloSentMs < HelloResendIntervalMs) continue;
                 peer.LastHelloSentMs = nowMs;
-                _sender.Send(pair.Key, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+                SendSignal(pair.Key, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "hello-resend-timeout");
                 if (peer.RestartRequested)
-                    _sender.Send(pair.Key, SignalMsgType.Restart, Array.Empty<byte>());
+                    SendSignal(pair.Key, peer, SignalMsgType.Restart, Array.Empty<byte>(), "restart-resend-with-hello");
             }
             else if (peer.State is PeerState.Offering or PeerState.Answering or PeerState.Connected)
             {
                 if (peer.LastProgressMs == 0) continue;
                 if (nowMs - peer.LastProgressMs < HandshakeTimeoutMs) continue;
                 if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                LogEvent("timeout", pair.Key, peer, $"kind=handshake nowMs={nowMs} lastProgressMs={peer.LastProgressMs}");
                 RecoverPeer(pair.Key, peer, nowMs);
             }
             else if (peer.State == PeerState.Established && peer.DegradedSinceMs != 0)
@@ -295,6 +399,7 @@ internal sealed class PeerSessionManager
                 // transient blips self-heal. The reinit throttle below prevents re-offer storms.
                 if (nowMs - peer.DegradedSinceMs < DisconnectedGraceMs) continue;
                 if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                LogEvent("timeout", pair.Key, peer, $"kind=degraded nowMs={nowMs} degradedSinceMs={peer.DegradedSinceMs}");
                 RecoverPeer(pair.Key, peer, nowMs);
             }
         }
@@ -302,18 +407,32 @@ internal sealed class PeerSessionManager
 
     public void OnPeerConnected(int clientId, int generation)
     {
-        if (!TryGetCurrentPeer(clientId, generation, out var peer)) return;
-        peer.State = PeerState.Established;
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("peer-connected", clientId, generation);
+            return;
+        }
+        SetState(clientId, peer, PeerState.Established, "native-peer-connected");
         peer.LastProgressMs = 0;
         peer.LastReinitMs = 0;
         peer.DegradedSinceMs = 0;
         peer.RelayRequested = false;
+        LogEvent("peer-connected", clientId, peer, "accepted=true");
     }
 
     public void OnPeerConnectionLost(int clientId, int generation, long nowMs = 0)
     {
-        if (!TryGetCurrentPeer(clientId, generation, out var peer)) return;
-        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) return;
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("peer-lost", clientId, generation);
+            return;
+        }
+        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        {
+            LogReject("peer-lost", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
+            return;
+        }
+        LogEvent("peer-lost", clientId, peer, $"nowMs={nowMs} action=recover");
         RecoverPeer(clientId, peer, nowMs);
     }
 
@@ -321,18 +440,45 @@ internal sealed class PeerSessionManager
     // Tick can re-initiate if it does not recover within the grace period.
     public void OnPeerConnectionDegraded(int clientId, int generation, long nowMs = 0)
     {
-        if (!TryGetCurrentPeer(clientId, generation, out var peer)) return;
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("peer-degraded", clientId, generation);
+            return;
+        }
         if (peer.State == PeerState.Established && peer.DegradedSinceMs == 0)
+        {
             peer.DegradedSinceMs = nowMs;
+            LogEvent("peer-degraded", clientId, peer, $"accepted=true nowMs={nowMs}");
+        }
+        else
+        {
+            LogReject(
+                "peer-degraded",
+                clientId,
+                peer,
+                peer.State != PeerState.Established ? "not-established" : "already-degraded",
+                $"nowMs={nowMs} degradedSinceMs={peer.DegradedSinceMs}");
+        }
     }
 
     /// Marks one failed direct peer for relay. If credentials are already available the peer is
     /// recreated immediately; otherwise the backend fetches them and calls EscalatePeer when ready.
     public void RequestRelayForPeer(int clientId, long nowMs = 0)
     {
-        if (!_peers.TryGetValue(clientId, out var peer) || peer.RelayOnly) return;
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("relay-request", clientId, null, "peer-unknown");
+            return;
+        }
+        if (peer.RelayOnly)
+        {
+            LogReject("relay-request", clientId, peer, "already-relay-only");
+            return;
+        }
         peer.RelayRequested = true;
-        if (RelayAvailable())
+        var relayAvailable = RelayAvailable();
+        LogEvent("relay-request", clientId, peer, $"nowMs={nowMs} credentialsAvailable={Bool(relayAvailable)}");
+        if (relayAvailable)
             SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
         else
             _requestRelay(clientId);
@@ -340,19 +486,30 @@ internal sealed class PeerSessionManager
 
     public void EscalatePeer(int clientId, long nowMs = 0)
     {
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.RelayRequested)
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("relay-escalate", clientId, null, "peer-unknown");
             return;
+        }
+        if (!peer.RelayRequested)
+        {
+            LogReject("relay-escalate", clientId, peer, "relay-not-requested");
+            return;
+        }
         if (!RelayAvailable())
         {
+            LogEvent("relay-escalate", clientId, peer, "action=request-credentials");
             _requestRelay(clientId);
             return;
         }
         if (peer.RelayOnly)
         {
             peer.RelayRequested = false;
+            LogEvent("relay-escalate", clientId, peer, "action=reinitiate-existing-relay-policy");
             Reinitiate(clientId, peer, nowMs);
             return;
         }
+        LogEvent("relay-escalate", clientId, peer, "action=set-relay-policy");
         SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
     }
 
@@ -365,7 +522,9 @@ internal sealed class PeerSessionManager
             if (peer.RelayOnly) continue;
             peer.RelayRequested = true;
             requested++;
-            if (RelayAvailable())
+            var relayAvailable = RelayAvailable();
+            LogEvent("relay-escalate-all", pair.Key, peer, $"nowMs={nowMs} credentialsAvailable={Bool(relayAvailable)}");
+            if (relayAvailable)
                 SetPeerRelayPolicy(pair.Key, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
             else
                 _requestRelay(pair.Key);
@@ -385,8 +544,9 @@ internal sealed class PeerSessionManager
             if (peer.RelayOnly != relayOnly)
             {
                 peer.RelayOnly = relayOnly;
-                _sender.Send(pair.Key, SignalMsgType.IceMode, SignalPayload.IceMode(relayOnly));
+                SendSignal(pair.Key, peer, SignalMsgType.IceMode, SignalPayload.IceMode(relayOnly), "rebuild-all-policy-change");
             }
+            LogEvent("rebuild", pair.Key, peer, $"forceRelay={Bool(forceRelay)} effectiveRelayOnly={Bool(relayOnly)} nowMs={nowMs}");
             Reinitiate(pair.Key, peer, nowMs);
         }
     }
@@ -401,7 +561,8 @@ internal sealed class PeerSessionManager
             var peer = pair.Value;
             if (!peer.RelayOnly) continue;
             refreshed++;
-            _sender.Send(pair.Key, SignalMsgType.IceMode, SignalPayload.IceMode(true));
+            SendSignal(pair.Key, peer, SignalMsgType.IceMode, SignalPayload.IceMode(true), "relay-credentials-refreshed");
+            LogEvent("relay-refresh", pair.Key, peer, $"nowMs={nowMs}");
             Reinitiate(pair.Key, peer, nowMs);
         }
         return refreshed;
@@ -409,14 +570,17 @@ internal sealed class PeerSessionManager
 
     private void RecoverPeer(int clientId, PeerEntry peer, long nowMs)
     {
+        LogEvent("recover", clientId, peer, $"begin=true nowMs={nowMs}");
         if (!peer.RelayOnly)
         {
             peer.RelayRequested = true;
             if (RelayAvailable())
             {
+                LogEvent("recover", clientId, peer, "action=escalate-to-relay");
                 SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
                 return;
             }
+            LogEvent("recover", clientId, peer, "action=request-relay-credentials");
             _requestRelay(clientId);
         }
         else if (!RelayAvailable())
@@ -425,9 +589,11 @@ internal sealed class PeerSessionManager
             // direct generation here can both leak a TURN-only user's topology and desynchronize
             // the two endpoints' ICE policies.
             peer.RelayRequested = true;
+            LogEvent("recover", clientId, peer, "action=refresh-relay-credentials");
             _requestRelay(clientId);
             return;
         }
+        LogEvent("recover", clientId, peer, "action=reinitiate");
         Reinitiate(clientId, peer, nowMs);
     }
 
@@ -440,56 +606,88 @@ internal sealed class PeerSessionManager
     {
         peer.RelayOnly = relayOnly;
         peer.RelayRequested = false;
+        LogEvent(
+            "relay-policy",
+            clientId,
+            peer,
+            $"relayOnly={Bool(relayOnly)} notifyRemote={Bool(notifyRemote)} nowMs={nowMs}");
         if (notifyRemote)
-            _sender.Send(clientId, SignalMsgType.IceMode, SignalPayload.IceMode(relayOnly));
+            SendSignal(clientId, peer, SignalMsgType.IceMode, SignalPayload.IceMode(relayOnly), "relay-policy-change");
         Reinitiate(clientId, peer, nowMs);
     }
 
     private void Reinitiate(int clientId, PeerEntry peer, long nowMs)
     {
+        var previousGeneration = peer.Generation;
+        var previousNegotiationId = peer.NegotiationId;
         peer.Generation = NextGeneration();
         peer.LastReinitMs = nowMs;
         peer.DegradedSinceMs = 0;
+        LogEvent(
+            "reinitiate",
+            clientId,
+            peer,
+            $"previousGeneration={previousGeneration} previousNegotiation={previousNegotiationId} nowMs={nowMs}");
         if (peer.Added)
         {
-            _transport.RemovePeer(clientId);
+            TransportRemovePeer(clientId, peer, "reinitiate");
             peer.Added = false;
         }
         if (LocalIsOfferer(clientId))
         {
             peer.NegotiationId = NextNegotiationId();
             peer.Added = true;
-            peer.State = PeerState.Offering;
+            SetState(clientId, peer, PeerState.Offering, "reinitiate-local-offerer");
             peer.LastProgressMs = nowMs;
-            _transport.AddPeer(clientId, isOfferer: true, relayOnly: peer.RelayOnly, generation: peer.Generation);
+            TransportAddPeer(clientId, peer, isOfferer: true, "reinitiate-local-offerer");
         }
         else
         {
             peer.RestartRequested = true;
-            peer.State = PeerState.Greeted;
+            SetState(clientId, peer, PeerState.Greeted, "reinitiate-request-remote-offer");
             peer.LastProgressMs = 0;
             peer.LastHelloSentMs = nowMs;
-            _sender.Send(clientId, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
-            _sender.Send(clientId, SignalMsgType.Restart, Array.Empty<byte>());
+            SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "reinitiate-answerer-hello");
+            SendSignal(clientId, peer, SignalMsgType.Restart, Array.Empty<byte>(), "reinitiate-answerer-restart");
         }
     }
 
     public void OnPlayerLeft(int clientId)
     {
-        if (!_peers.ContainsKey(clientId)) return;
-        _sender.Send(clientId, SignalMsgType.Bye, Array.Empty<byte>());
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("player-left", clientId, null, "peer-unknown");
+            return;
+        }
+        LogEvent("player-left", clientId, peer, "action=send-bye-and-drop");
+        SendSignal(clientId, peer, SignalMsgType.Bye, Array.Empty<byte>(), "player-left");
         DropPeer(clientId);
     }
 
     public void Reset()
     {
+        VoiceDiagnostics.Log("signaling.session.reset", $"local={_localClientId} peers={_peers.Count}");
         foreach (var clientId in _peers.Keys.ToList())
             DropPeer(clientId);
     }
 
     public void OnSignal(int senderClientId, SignalMsgType type, byte[] payload, long nowMs = 0)
     {
-        if (senderClientId == _localClientId || senderClientId < 0) return;
+        payload ??= Array.Empty<byte>();
+        var payloadBytes = payload.Length;
+        if (senderClientId == _localClientId)
+        {
+            LogReject("signal-rx", senderClientId, null, "sender-is-local", $"type={type} payloadBytes={payloadBytes}");
+            return;
+        }
+        if (senderClientId < 0)
+        {
+            LogReject("signal-rx", senderClientId, null, "sender-unresolved", $"type={type} payloadBytes={payloadBytes}");
+            return;
+        }
+
+        _peers.TryGetValue(senderClientId, out var existingPeer);
+        LogEvent("signal-rx", senderClientId, existingPeer, $"type={type} payloadBytes={payloadBytes} nowMs={nowMs}");
 
         switch (type)
         {
@@ -497,109 +695,326 @@ internal sealed class PeerSessionManager
             case SignalMsgType.Offer: HandleOffer(senderClientId, payload, nowMs); break;
             case SignalMsgType.Answer: HandleAnswer(senderClientId, payload, nowMs); break;
             case SignalMsgType.Candidate: HandleCandidate(senderClientId, payload); break;
-            case SignalMsgType.Bye: DropPeer(senderClientId); break;
+            case SignalMsgType.Bye:
+                LogEvent("signal-accepted", senderClientId, existingPeer, $"type={type} payloadBytes={payloadBytes}");
+                DropPeer(senderClientId);
+                break;
             case SignalMsgType.IceMode: HandleIceMode(senderClientId, payload, nowMs); break;
             case SignalMsgType.Restart: HandleRestart(senderClientId, payload, nowMs); break;
+            default:
+                LogReject("signal-rx", senderClientId, existingPeer, "unknown-type", $"type={(byte)type} payloadBytes={payloadBytes}");
+                break;
         }
     }
 
     public void OnLocalSdp(int clientId, int generation, string sdpType, string sdp)
     {
-        if (!TryGetCurrentPeer(clientId, generation, out var peer)) return;
-        if (peer.NegotiationId <= 0) return;
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("local-sdp", clientId, generation, $"sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (peer.NegotiationId <= 0)
+        {
+            LogReject("local-sdp", clientId, peer, "negotiation-missing", $"sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
         var isOffer = string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase);
-        _sender.Send(
+        LogEvent(
+            "local-sdp",
             clientId,
+            peer,
+            $"accepted=true sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} signalType={(isOffer ? SignalMsgType.Offer : SignalMsgType.Answer)}");
+        SendSignal(
+            clientId,
+            peer,
             isOffer ? SignalMsgType.Offer : SignalMsgType.Answer,
-            SignalPayload.Sdp(peer.NegotiationId, sdpType, sdp));
-        if (!isOffer) peer.State = PeerState.Connected;
+            SignalPayload.Sdp(peer.NegotiationId, sdpType, sdp),
+            "local-sdp");
+        if (!isOffer) SetState(clientId, peer, PeerState.Connected, "local-answer-sent");
     }
 
     public void OnLocalCandidate(int clientId, int generation, string candidate)
     {
-        if (!TryGetCurrentPeer(clientId, generation, out var peer) || peer.NegotiationId <= 0) return;
-        _sender.Send(clientId, SignalMsgType.Candidate, SignalPayload.Candidate(peer.NegotiationId, candidate));
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("local-candidate", clientId, generation, $"candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        if (peer.NegotiationId <= 0)
+        {
+            LogReject("local-candidate", clientId, peer, "negotiation-missing", $"candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        peer.LocalCandidatesAttempted++;
+        _localCandidatesAttempted++;
+        LogEvent(
+            "local-candidate",
+            clientId,
+            peer,
+            $"accepted=true candidateBytes={Utf8Length(candidate)} peerCandidateAttempt={peer.LocalCandidatesAttempted} totalCandidateAttempts={_localCandidatesAttempted}");
+        SendSignal(
+            clientId,
+            peer,
+            SignalMsgType.Candidate,
+            SignalPayload.Candidate(peer.NegotiationId, candidate),
+            "local-candidate");
     }
 
     private void HandleHello(int clientId, byte[] payload, long nowMs)
     {
-        if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible)) return;
-        if (!IsCompatible(version, minCompatible)) return;
+        if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible))
+        {
+            LogReject("hello", clientId, FindPeer(clientId), "payload-invalid", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!IsCompatible(version, minCompatible))
+        {
+            LogReject(
+                "hello",
+                clientId,
+                FindPeer(clientId),
+                "protocol-incompatible",
+                $"protocol={version} minCompatible={minCompatible} localProtocol={ProtocolVersion} localMinCompatible={MinCompatibleVersion}");
+            return;
+        }
 
         var peer = GetOrCreate(clientId);
         peer.HelloReceived = true;
+        LogEvent("signal-accepted", clientId, peer, $"type=Hello protocol={version} minCompatible={minCompatible}");
         SendHelloIfNeeded(clientId, peer);
         TryStartSession(clientId, peer, nowMs);
     }
 
     private void HandleOffer(int clientId, byte[] payload, long nowMs)
     {
-        if (LocalIsOfferer(clientId)) return;
-        if (!SignalPayload.TryReadSdp(payload, out var negotiationId, out var sdpType, out var sdp)) return;
-        if (negotiationId <= 0) return;
-        if (!string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase)) return;
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.HelloReceived) return;
+        var knownPeer = FindPeer(clientId);
+        if (LocalIsOfferer(clientId))
+        {
+            LogReject("offer", clientId, knownPeer, "local-role-is-offerer", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!SignalPayload.TryReadSdp(payload, out var negotiationId, out var sdpType, out var sdp))
+        {
+            LogReject("offer", clientId, knownPeer, "payload-invalid", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (negotiationId <= 0)
+        {
+            LogReject("offer", clientId, knownPeer, "negotiation-invalid", $"negotiation={negotiationId} sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (!string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase))
+        {
+            LogReject("offer", clientId, knownPeer, "sdp-type-mismatch", $"negotiation={negotiationId} sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("offer", clientId, null, "peer-unknown", $"negotiation={negotiationId} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (!peer.HelloReceived)
+        {
+            LogReject("offer", clientId, peer, "hello-not-received", $"negotiation={negotiationId} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
 
         // The offerer's id is monotonically increasing for this process. A duplicate offer must
         // not recreate the native peer, and a delayed offer from an older negotiation must never
         // replace the current one.
-        if (negotiationId <= peer.NegotiationId) return;
+        if (negotiationId <= peer.NegotiationId)
+        {
+            LogReject("offer", clientId, peer, "duplicate-or-stale-negotiation", $"receivedNegotiation={negotiationId}");
+            return;
+        }
 
         if (peer.Added)
         {
             peer.Generation = NextGeneration();
-            _transport.RemovePeer(clientId);
+            TransportRemovePeer(clientId, peer, "newer-remote-offer");
             peer.Added = false;
         }
         peer.NegotiationId = negotiationId;
         peer.RestartRequested = false;
         peer.Added = true;
-        _transport.AddPeer(clientId, isOfferer: false, relayOnly: peer.RelayOnly, generation: peer.Generation);
-        peer.State = PeerState.Answering;
+        TransportAddPeer(clientId, peer, isOfferer: false, "remote-offer");
+        SetState(clientId, peer, PeerState.Answering, "remote-offer-accepted");
         peer.LastProgressMs = nowMs;
-        _transport.SetRemoteSdp(clientId, sdpType, sdp);
+        TransportSetRemoteSdp(clientId, peer, sdpType, sdp, "remote-offer");
+        LogEvent("signal-accepted", clientId, peer, $"type=Offer sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
     }
 
     private void HandleAnswer(int clientId, byte[] payload, long nowMs)
     {
-        if (!LocalIsOfferer(clientId)) return;
-        if (!SignalPayload.TryReadSdp(payload, out var negotiationId, out var sdpType, out var sdp)) return;
-        if (!string.Equals(sdpType, "answer", StringComparison.OrdinalIgnoreCase)) return;
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.HelloReceived) return;
-        if (negotiationId <= 0 || negotiationId != peer.NegotiationId) return;
-        if (!peer.Added || peer.State != PeerState.Offering) return;
-        _transport.SetRemoteSdp(clientId, sdpType, sdp);
-        peer.State = PeerState.Connected;
+        var knownPeer = FindPeer(clientId);
+        if (!LocalIsOfferer(clientId))
+        {
+            LogReject("answer", clientId, knownPeer, "local-role-is-answerer", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!SignalPayload.TryReadSdp(payload, out var negotiationId, out var sdpType, out var sdp))
+        {
+            LogReject("answer", clientId, knownPeer, "payload-invalid", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!string.Equals(sdpType, "answer", StringComparison.OrdinalIgnoreCase))
+        {
+            LogReject("answer", clientId, knownPeer, "sdp-type-mismatch", $"negotiation={negotiationId} sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("answer", clientId, null, "peer-unknown", $"negotiation={negotiationId} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (!peer.HelloReceived)
+        {
+            LogReject("answer", clientId, peer, "hello-not-received", $"negotiation={negotiationId} sdpBytes={Utf8Length(sdp)}");
+            return;
+        }
+        if (negotiationId <= 0 || negotiationId != peer.NegotiationId)
+        {
+            LogReject("answer", clientId, peer, "negotiation-mismatch", $"receivedNegotiation={negotiationId}");
+            return;
+        }
+        if (!peer.Added)
+        {
+            LogReject("answer", clientId, peer, "native-peer-not-added", $"receivedNegotiation={negotiationId}");
+            return;
+        }
+        if (peer.State != PeerState.Offering)
+        {
+            LogReject("answer", clientId, peer, "state-not-offering", $"receivedNegotiation={negotiationId}");
+            return;
+        }
+        TransportSetRemoteSdp(clientId, peer, sdpType, sdp, "remote-answer");
+        SetState(clientId, peer, PeerState.Connected, "remote-answer-accepted");
         peer.LastProgressMs = nowMs;
+        LogEvent("signal-accepted", clientId, peer, $"type=Answer sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
     }
 
     private void HandleCandidate(int clientId, byte[] payload)
     {
-        if (!SignalPayload.TryReadCandidate(payload, out var negotiationId, out var candidate)) return;
+        _remoteCandidatesReceived++;
+        var knownPeer = FindPeer(clientId);
+        if (knownPeer != null)
+        {
+            knownPeer.RemoteCandidatesReceived++;
+        }
+        if (!SignalPayload.TryReadCandidate(payload, out var negotiationId, out var candidate))
+        {
+            CountRejectedCandidate(knownPeer);
+            LogReject(
+                "candidate",
+                clientId,
+                knownPeer,
+                "payload-invalid",
+                $"payloadBytes={payload.Length} peerCandidateRx={knownPeer?.RemoteCandidatesReceived ?? 0} totalCandidateRx={_remoteCandidatesReceived}");
+            return;
+        }
 
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.HelloReceived) return;
-        if (negotiationId <= 0 || negotiationId != peer.NegotiationId || !peer.Added) return;
-        _transport.AddIceCandidate(clientId, candidate);
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            CountRejectedCandidate(null);
+            LogReject("candidate", clientId, null, "peer-unknown", $"negotiation={negotiationId} candidateBytes={Utf8Length(candidate)} totalCandidateRx={_remoteCandidatesReceived}");
+            return;
+        }
+        if (!peer.HelloReceived)
+        {
+            CountRejectedCandidate(peer);
+            LogReject("candidate", clientId, peer, "hello-not-received", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        if (negotiationId <= 0)
+        {
+            CountRejectedCandidate(peer);
+            LogReject("candidate", clientId, peer, "negotiation-invalid", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        if (negotiationId != peer.NegotiationId)
+        {
+            CountRejectedCandidate(peer);
+            LogReject("candidate", clientId, peer, "negotiation-mismatch", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        if (!peer.Added)
+        {
+            CountRejectedCandidate(peer);
+            LogReject("candidate", clientId, peer, "native-peer-not-added", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
+            return;
+        }
+        TransportAddIceCandidate(clientId, peer, candidate);
+        peer.RemoteCandidatesForwarded++;
+        _remoteCandidatesForwarded++;
+        LogEvent(
+            "signal-accepted",
+            clientId,
+            peer,
+            $"type=Candidate candidateBytes={Utf8Length(candidate)} peerCandidateRx={peer.RemoteCandidatesReceived} peerCandidateForwarded={peer.RemoteCandidatesForwarded} totalCandidateRx={_remoteCandidatesReceived} totalCandidateForwarded={_remoteCandidatesForwarded}");
     }
 
     private void HandleRestart(int clientId, byte[] payload, long nowMs)
     {
-        if (payload == null || payload.Length != 0 || !LocalIsOfferer(clientId)) return;
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.HelloReceived) return;
-        if (peer.State == PeerState.Offering) return;
-        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) return;
+        var knownPeer = FindPeer(clientId);
+        if (payload == null || payload.Length != 0)
+        {
+            LogReject("restart", clientId, knownPeer, "payload-invalid", $"payloadBytes={(payload == null ? 0 : payload.Length)}");
+            return;
+        }
+        if (!LocalIsOfferer(clientId))
+        {
+            LogReject("restart", clientId, knownPeer, "local-role-is-answerer");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("restart", clientId, null, "peer-unknown");
+            return;
+        }
+        if (!peer.HelloReceived)
+        {
+            LogReject("restart", clientId, peer, "hello-not-received");
+            return;
+        }
+        if (peer.State == PeerState.Offering)
+        {
+            LogReject("restart", clientId, peer, "already-offering");
+            return;
+        }
+        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        {
+            LogReject("restart", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
+            return;
+        }
+        LogEvent("signal-accepted", clientId, peer, $"type=Restart nowMs={nowMs}");
         Reinitiate(clientId, peer, nowMs);
     }
 
     private void HandleIceMode(int clientId, byte[] payload, long nowMs)
     {
-        if (!SignalPayload.TryReadIceMode(payload, out var requestedRelay)) return;
-        if (!_peers.TryGetValue(clientId, out var peer) || !peer.HelloReceived) return;
+        var knownPeer = FindPeer(clientId);
+        if (!SignalPayload.TryReadIceMode(payload, out var requestedRelay))
+        {
+            LogReject("ice-mode", clientId, knownPeer, "payload-invalid", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("ice-mode", clientId, null, "peer-unknown", $"requestedRelay={Bool(requestedRelay)}");
+            return;
+        }
+        if (!peer.HelloReceived)
+        {
+            LogReject("ice-mode", clientId, peer, "hello-not-received", $"requestedRelay={Bool(requestedRelay)}");
+            return;
+        }
         if (requestedRelay && !RelayAvailable())
         {
             // The other endpoint has identified this pair as needing TURN. Fetch credentials for
             // this peer, but keep any currently healthy direct generation alive until they arrive.
             peer.RelayRequested = true;
+            LogEvent("signal-accepted", clientId, peer, "type=IceMode requestedRelay=true action=request-credentials");
             _requestRelay(clientId);
             return;
         }
@@ -614,47 +1029,87 @@ internal sealed class PeerSessionManager
         // A duplicate request is useful only for an already connected generation. During an
         // active offer/answer it is most likely the other side seeing the same failure, so let the
         // in-flight recreation finish instead of starting an offer storm.
-        if (!changed && peer.State is not (PeerState.Connected or PeerState.Established)) return;
-        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) return;
+        LogEvent(
+            "signal-accepted",
+            clientId,
+            peer,
+            $"type=IceMode requestedRelay={Bool(requestedRelay)} effectiveRelayOnly={Bool(relayOnly)} changed={Bool(changed)} nowMs={nowMs}");
+        if (!changed && peer.State is not (PeerState.Connected or PeerState.Established))
+        {
+            LogReject("ice-mode", clientId, peer, "duplicate-during-negotiation", $"requestedRelay={Bool(requestedRelay)}");
+            return;
+        }
+        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        {
+            LogReject("ice-mode", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
+            return;
+        }
         Reinitiate(clientId, peer, nowMs);
     }
 
     private void TryStartSession(int clientId, PeerEntry peer, long nowMs)
     {
-        if (!peer.HelloReceived || peer.State is PeerState.Connected or PeerState.Established) return;
+        if (!peer.HelloReceived)
+        {
+            LogReject("start-session", clientId, peer, "hello-not-received");
+            return;
+        }
+        if (peer.State is PeerState.Connected or PeerState.Established)
+        {
+            LogReject("start-session", clientId, peer, "already-connected");
+            return;
+        }
 
         if (LocalIsOfferer(clientId))
         {
-            if (peer.Added) return;
+            if (peer.Added)
+            {
+                LogReject("start-session", clientId, peer, "native-peer-already-added");
+                return;
+            }
             peer.NegotiationId = NextNegotiationId();
             peer.Added = true;
-            peer.State = PeerState.Offering;
+            SetState(clientId, peer, PeerState.Offering, "compatible-hello-local-offerer");
             peer.LastProgressMs = nowMs;
-            _transport.AddPeer(clientId, isOfferer: true, relayOnly: peer.RelayOnly, generation: peer.Generation);
+            TransportAddPeer(clientId, peer, isOfferer: true, "start-session");
         }
         else if (peer.State is PeerState.Idle or PeerState.Greeted)
         {
-            peer.State = PeerState.Answering;
+            SetState(clientId, peer, PeerState.Answering, "compatible-hello-wait-for-offer");
             peer.LastProgressMs = nowMs;
+        }
+        else
+        {
+            LogReject("start-session", clientId, peer, "state-not-startable");
         }
     }
 
     private void SendHelloIfNeeded(int clientId, PeerEntry peer)
     {
-        if (peer.HelloSent) return;
+        if (peer.HelloSent)
+        {
+            LogEvent("hello-skip", clientId, peer, "reason=already-sent");
+            return;
+        }
         peer.HelloSent = true;
-        if (peer.State == PeerState.Idle) peer.State = PeerState.Greeted;
-        _sender.Send(clientId, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion));
+        if (peer.State == PeerState.Idle) SetState(clientId, peer, PeerState.Greeted, "send-initial-hello");
+        SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "initial-hello");
         if (peer.RelayOnly)
-            _sender.Send(clientId, SignalMsgType.IceMode, SignalPayload.IceMode(true));
+            SendSignal(clientId, peer, SignalMsgType.IceMode, SignalPayload.IceMode(true), "initial-relay-policy");
     }
 
     private void DropPeer(int clientId)
     {
-        if (!_peers.ContainsKey(clientId)) return;
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("drop-peer", clientId, null, "peer-unknown");
+            return;
+        }
 
-        _transport.RemovePeer(clientId);
+        LogEvent("drop-peer", clientId, peer, "begin=true");
+        TransportRemovePeer(clientId, peer, "drop-peer");
         _peers.Remove(clientId);
+        VoiceDiagnostics.Log("signaling.session.peer-removed", $"local={_localClientId} peer={clientId} remainingPeers={_peers.Count}");
     }
 
     private bool LocalIsOfferer(int clientId) => _localClientId < clientId;
@@ -675,6 +1130,7 @@ internal sealed class PeerSessionManager
                 Generation = NextGeneration(),
             };
             _peers[clientId] = peer;
+            LogEvent("peer-created", clientId, peer, $"localOfferer={Bool(LocalIsOfferer(clientId))}");
         }
         return peer;
     }
@@ -682,20 +1138,210 @@ internal sealed class PeerSessionManager
     private bool RelayAvailable()
     {
         try { return _relayAvailable(); }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "signaling.session.error",
+                $"local={_localClientId} operation=relay-available errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
+            return false;
+        }
     }
 
     private bool ForceRelay()
     {
         try { return _forceRelay(); }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "signaling.session.error",
+                $"local={_localClientId} operation=force-relay errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
+            return false;
+        }
     }
 
-    private int NextGeneration()
+    private static int NextGeneration()
     {
-        _nextGeneration = _nextGeneration == int.MaxValue ? 1 : _nextGeneration + 1;
-        return _nextGeneration;
+        while (true)
+        {
+            var current = Volatile.Read(ref _nextProcessGeneration);
+            var next = current == int.MaxValue ? 1 : current + 1;
+            if (Interlocked.CompareExchange(ref _nextProcessGeneration, next, current) == current)
+                return next;
+        }
     }
+
+    private PeerEntry? FindPeer(int clientId)
+        => _peers.TryGetValue(clientId, out var peer) ? peer : null;
+
+    private void SendSignal(
+        int clientId,
+        PeerEntry peer,
+        SignalMsgType type,
+        byte[] payload,
+        string reason)
+    {
+        LogEvent(
+            "signal-tx",
+            clientId,
+            peer,
+            $"type={type} payloadBytes={payload.Length} reason={reason}");
+        try
+        {
+            _sender.Send(clientId, type, payload);
+        }
+        catch (Exception ex)
+        {
+            LogError("signal-tx", clientId, peer, ex, $"type={type} reason={reason}");
+            throw;
+        }
+    }
+
+    private void SetState(int clientId, PeerEntry peer, PeerState state, string reason)
+    {
+        var previous = peer.State;
+        peer.State = state;
+        VoiceDiagnostics.Log(
+            "signaling.session.state",
+            $"{PeerFields(clientId, peer)} previous={previous} current={state} changed={Bool(previous != state)} reason={reason}");
+    }
+
+    private void TransportAddPeer(int clientId, PeerEntry peer, bool isOfferer, string reason)
+    {
+        LogEvent(
+            "transport-command",
+            clientId,
+            peer,
+            $"command=add-peer isOfferer={Bool(isOfferer)} relayOnly={Bool(peer.RelayOnly)} reason={reason}");
+        try
+        {
+            _transport.AddPeer(clientId, isOfferer, peer.RelayOnly, peer.Generation);
+            LogEvent("transport-command-returned", clientId, peer, $"command=add-peer reason={reason} nativeAck=false");
+        }
+        catch (Exception ex)
+        {
+            LogError("transport-command", clientId, peer, ex, $"command=add-peer reason={reason}");
+            throw;
+        }
+    }
+
+    private void TransportRemovePeer(int clientId, PeerEntry peer, string reason)
+    {
+        LogEvent("transport-command", clientId, peer, $"command=remove-peer reason={reason}");
+        try
+        {
+            _transport.RemovePeer(clientId);
+            LogEvent("transport-command-returned", clientId, peer, $"command=remove-peer reason={reason} nativeAck=false");
+        }
+        catch (Exception ex)
+        {
+            LogError("transport-command", clientId, peer, ex, $"command=remove-peer reason={reason}");
+            throw;
+        }
+    }
+
+    private void TransportSetRemoteSdp(int clientId, PeerEntry peer, string sdpType, string sdp, string reason)
+    {
+        LogEvent(
+            "transport-command",
+            clientId,
+            peer,
+            $"command=set-remote-sdp sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} reason={reason}");
+        try
+        {
+            _transport.SetRemoteSdp(clientId, sdpType, sdp);
+            LogEvent(
+                "transport-command-returned",
+                clientId,
+                peer,
+                $"command=set-remote-sdp sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} reason={reason} nativeAck=false");
+        }
+        catch (Exception ex)
+        {
+            LogError("transport-command", clientId, peer, ex, $"command=set-remote-sdp sdpType={LogSafe(sdpType)} reason={reason}");
+            throw;
+        }
+    }
+
+    private void TransportAddIceCandidate(int clientId, PeerEntry peer, string candidate)
+    {
+        LogEvent(
+            "transport-command",
+            clientId,
+            peer,
+            $"command=add-ice-candidate candidateBytes={Utf8Length(candidate)} peerCandidateRx={peer.RemoteCandidatesReceived}");
+        try
+        {
+            _transport.AddIceCandidate(clientId, candidate);
+            LogEvent(
+                "transport-command-returned",
+                clientId,
+                peer,
+                $"command=add-ice-candidate candidateBytes={Utf8Length(candidate)} nativeAck=false");
+        }
+        catch (Exception ex)
+        {
+            LogError("transport-command", clientId, peer, ex, "command=add-ice-candidate");
+            throw;
+        }
+    }
+
+    private void CountRejectedCandidate(PeerEntry? peer)
+    {
+        _rejectedCandidates++;
+        if (peer != null) peer.RejectedCandidates++;
+    }
+
+    private void LogGenerationReject(string operation, int clientId, int receivedGeneration, string detail = "")
+    {
+        var peer = FindPeer(clientId);
+        var reason = peer == null ? "peer-unknown" : "generation-mismatch";
+        LogReject(
+            operation,
+            clientId,
+            peer,
+            reason,
+            $"receivedGeneration={receivedGeneration} currentGeneration={peer?.Generation ?? -1} {detail}".TrimEnd());
+    }
+
+    private void LogEvent(string operation, int clientId, PeerEntry? peer, string detail)
+    {
+        VoiceDiagnostics.Log(
+            $"signaling.session.{operation}",
+            $"{PeerFields(clientId, peer)} {detail}".TrimEnd());
+    }
+
+    private void LogReject(string operation, int clientId, PeerEntry? peer, string reason, string detail = "")
+    {
+        VoiceDiagnostics.Log(
+            "signaling.session.reject",
+            $"{PeerFields(clientId, peer)} operation={operation} reason={reason} {detail}".TrimEnd());
+    }
+
+    private void LogError(string operation, int clientId, PeerEntry? peer, Exception ex, string detail)
+    {
+        VoiceDiagnostics.Log(
+            "signaling.session.error",
+            $"{PeerFields(clientId, peer)} operation={operation} {detail} errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
+    }
+
+    private string PeerFields(int clientId, PeerEntry? peer)
+    {
+        if (peer == null)
+            return $"local={_localClientId} peer={clientId} state=none generation=-1 negotiation=0 relayOnly=false added=false";
+        return $"local={_localClientId} peer={clientId} state={peer.State} generation={peer.Generation} negotiation={peer.NegotiationId} relayOnly={Bool(peer.RelayOnly)} added={Bool(peer.Added)} helloSent={Bool(peer.HelloSent)} helloReceived={Bool(peer.HelloReceived)} restartRequested={Bool(peer.RestartRequested)}";
+    }
+
+    private static int Utf8Length(string? value)
+        => Encoding.UTF8.GetByteCount(value ?? string.Empty);
+
+    private static string LogSafe(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return "none";
+        var sanitized = value.Replace('\\', '/').Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
+        return sanitized.Length <= 96 ? sanitized : sanitized.Substring(0, 96);
+    }
+
+    private static string Bool(bool value) => value ? "true" : "false";
 
     private bool TryGetCurrentPeer(int clientId, int generation, out PeerEntry peer)
     {

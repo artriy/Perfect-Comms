@@ -5,6 +5,7 @@ on:
     branches: [main, feat/crossplatform-capture-sidecar]
   pull_request:
     paths:
+      - "Comms/SidecarVoiceClient.cs"
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
       - "native/apm-sys/**"
@@ -13,6 +14,9 @@ on:
       - "native/third_party/deep-filter/**"
       - "scripts/build-apm.sh"
       - "scripts/build-df.sh"
+      - "scripts/build-helpers.sh"
+      - "scripts/build-mac.sh"
+      - "scripts/ci-smoke-helper.sh"
       - ".github/workflows/native-helpers.yml"
   workflow_dispatch:
   workflow_call:

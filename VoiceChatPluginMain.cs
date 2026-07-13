@@ -31,6 +31,20 @@ public class VoiceChatPluginMain : BasePlugin
     static VoiceChatPluginMain()
     {
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutdownVoiceRuntime("process-exit");
+        AppDomain.CurrentDomain.DomainUnload += (_, _) => ShutdownVoiceRuntime("domain-unload");
+    }
+
+    internal static void ShutdownVoiceRuntime(string reason)
+    {
+        try { VoiceChatRoom.ShutdownCurrentRoom(reason); }
+        catch { /* process/domain shutdown must continue even if the room is already gone */ }
+#if WINDOWS
+        // A room release deliberately leaves the reusable helper idle. Process/domain shutdown is
+        // the one boundary that must synchronously terminate it, even when no room is active.
+        try { SidecarVoiceHost.Shutdown(reason); }
+        catch { /* the OS will finish teardown; never block the remaining shutdown hooks */ }
+#endif
     }
 
     private static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)

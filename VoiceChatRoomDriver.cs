@@ -26,6 +26,10 @@ internal static class VoiceChatRoomDriver
         if (AmongUsClient.Instance == null) return true;
         if (IsLocalServer()) return true;
 
+        // DisconnectInternal is authoritative even while EndGame/LobbyBehaviour objects linger.
+        // The latch is cleared only by AmongUsClient.OnGameJoined for a later network session.
+        if (VoiceRoomLifetimeGate.IsExplicitDisconnectLatched) return true;
+
         if (ShipStatus.Instance != null) return false;
         if (LobbyBehaviour.Instance != null) return false;
         if (IntroCutscene.Instance != null) return false;
@@ -38,6 +42,7 @@ internal static class VoiceChatRoomDriver
     {
         if (AmongUsClient.Instance == null) return false;
         if (IsLocalServer()) return false;
+        if (VoiceRoomLifetimeGate.IsExplicitDisconnectLatched) return false;
 
         if (ShipStatus.Instance != null) return true;
         if (LobbyBehaviour.Instance != null) return true;
@@ -76,7 +81,7 @@ internal static class VoiceChatRoomDriver
             }
 
             if (VoiceChatRoom.Current != null)
-                VoiceChatRoom.CloseCurrentRoom();
+                VoiceChatRoom.CloseCurrentRoom("driver-no-active-session");
             _wasInGame = _wasInIntro = _wasInEndGame = false;
             _roomRetryTimer = 0f;
             _closeGraceTimer = 0f;

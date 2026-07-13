@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release and helper scripts
+        run: |
+          python3 -m py_compile scripts/verify-release-assets.py
+          bash -n scripts/package-release.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/ci-smoke-helper.sh
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "9.0.x"
