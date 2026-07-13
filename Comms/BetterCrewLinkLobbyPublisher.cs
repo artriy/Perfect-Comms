@@ -7,15 +7,15 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class BetterCrewLinkLobbyPublisher
 {
     private static readonly TimeSpan FailureRetryDelay = TimeSpan.FromSeconds(5);
+    private static readonly object Gate = new();
     private static SocketIOClient.SocketIO? _socket;
+    private static int _socketGeneration;
     private static string _serverUrl = "";
     private static bool _connected;
     private static string? _joinedCode;
     private static int _joinedClientId = -1;
     private static string? _lastStandaloneSignature;
-    private static string? _lastBackendSignature;
-    private static string? _backendPublishedCode;
-    private static int _lastBackendJoinEpoch = -1;
+    private static string? _pendingCode;
     private static DateTime _nextStandaloneRetryUtc = DateTime.MinValue;
     private static bool _publishDirty = true;
     private static Task? _pending;
@@ -23,191 +23,288 @@ internal static class BetterCrewLinkLobbyPublisher
     internal static void Update(string serverUrl, VoiceLobbyPublishRequest request)
     {
         var signature = BetterCrewLinkLobbyMetadata.BuildSignature(request);
-        var room = VoiceChatRoom.Current;
-        if (room?.IsVoiceBackendActive == true)
-        {
-            ClearStandalone();
-            PublishThroughBackendSocket(room, request, signature);
-            return;
-        }
-
-        _backendPublishedCode = null;
-        _lastBackendSignature = null;
-        _lastBackendJoinEpoch = -1;
-        if (_pending is { IsCompleted: false }) return;
-
         EnsureStandaloneSocket(serverUrl);
-        if (_socket?.Connected != true || !_connected)
-            return;
+        lock (Gate)
+        {
+            if (_pending is { IsCompleted: false }) return;
+            _pending = null;
 
-        var signatureChanged = !string.Equals(_lastStandaloneSignature, signature, StringComparison.Ordinal);
-        var codeChanged = !string.Equals(_joinedCode, request.Code, StringComparison.Ordinal);
-        if (signatureChanged || codeChanged)
-            _publishDirty = true;
+            var socket = _socket;
+            if (socket?.Connected != true || !_connected)
+                return;
 
-        if (!_publishDirty)
-            return;
+            var signatureChanged = !string.Equals(_lastStandaloneSignature, signature, StringComparison.Ordinal);
+            var codeChanged = !string.Equals(_joinedCode, request.Code, StringComparison.Ordinal);
+            if (signatureChanged || codeChanged)
+                _publishDirty = true;
 
-        if (DateTime.UtcNow < _nextStandaloneRetryUtc)
-            return;
+            if (!_publishDirty || DateTime.UtcNow < _nextStandaloneRetryUtc)
+                return;
 
-        _pending = PublishStandaloneAsync(request, signature);
+            var generation = _socketGeneration;
+            _pendingCode = request.Code;
+            _pending = PublishStandaloneAsync(socket, generation, request, signature);
+        }
     }
 
     internal static void Clear()
     {
-        if (!string.IsNullOrEmpty(_backendPublishedCode))
-        {
-            VoiceChatRoom.Current?.TryRemoveBetterCrewLinkLobby(_backendPublishedCode);
-            _backendPublishedCode = null;
-            _lastBackendSignature = null;
-            _lastBackendJoinEpoch = -1;
-        }
-
         ClearStandalone();
-    }
-
-    private static void PublishThroughBackendSocket(VoiceChatRoom room, VoiceLobbyPublishRequest request, string signature)
-    {
-        var joinEpoch = room.BetterCrewLinkPublicLobbyJoinEpoch;
-        var signatureChanged = !string.Equals(_lastBackendSignature, signature, StringComparison.Ordinal);
-        var codeChanged = !string.Equals(_backendPublishedCode, request.Code, StringComparison.Ordinal);
-        var rejoined = _lastBackendJoinEpoch != joinEpoch;
-
-        if (!string.IsNullOrEmpty(_backendPublishedCode) && codeChanged)
-        {
-            room.TryRemoveBetterCrewLinkLobby(_backendPublishedCode);
-            _backendPublishedCode = null;
-        }
-
-        if (!signatureChanged && !codeChanged && !rejoined)
-            return;
-
-        if (room.TryPublishBetterCrewLinkLobby(request))
-        {
-            _backendPublishedCode = request.Code;
-            _lastBackendSignature = signature;
-            _lastBackendJoinEpoch = joinEpoch;
-        }
     }
 
     private static void EnsureStandaloneSocket(string serverUrl)
     {
-        serverUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
-        if (_socket != null && string.Equals(_serverUrl, serverUrl, StringComparison.Ordinal))
-            return;
+        serverUrl = BetterCrewLinkLobbyEndpoint.NormalizeServerUrl(serverUrl);
+        lock (Gate)
+            if (_socket != null && string.Equals(_serverUrl, serverUrl, StringComparison.Ordinal))
+                return;
 
         ClearStandalone();
         var socket = new SocketIOClient.SocketIO(new Uri(serverUrl), BetterCrewLinkSocketOptions.Create());
+        int generation;
 
-        socket.OnConnected += async (_, _) =>
+        lock (Gate)
         {
-            _connected = true;
-            _publishDirty = true;
-            _nextStandaloneRetryUtc = DateTime.MinValue;
-            await Task.CompletedTask;
-        };
-        socket.OnDisconnected += (_, _) =>
-        {
+            generation = ++_socketGeneration;
+            socket.OnConnected += async (_, _) =>
+            {
+                lock (Gate)
+                {
+                    if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return;
+                    _connected = true;
+                    _publishDirty = true;
+                    _nextStandaloneRetryUtc = DateTime.MinValue;
+                }
+                await Task.CompletedTask;
+            };
+            socket.OnDisconnected += (_, _) =>
+            {
+                lock (Gate)
+                {
+                    if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return;
+                    _connected = false;
+                    _joinedCode = null;
+                    _joinedClientId = -1;
+                    _lastStandaloneSignature = null;
+                    _publishDirty = true;
+                    _nextStandaloneRetryUtc = DateTime.MinValue;
+                }
+            };
+            socket.On("clientPeerConfig", _ => { });
+
+            _socket = socket;
+            _serverUrl = serverUrl;
             _connected = false;
             _joinedCode = null;
             _joinedClientId = -1;
             _lastStandaloneSignature = null;
+            _pendingCode = null;
             _publishDirty = true;
             _nextStandaloneRetryUtc = DateTime.MinValue;
-        };
-        socket.On("clientPeerConfig", _ => { });
-
-        _socket = socket;
-        _serverUrl = serverUrl;
-        _connected = false;
-        _joinedCode = null;
-        _joinedClientId = -1;
-        _lastStandaloneSignature = null;
-        _nextStandaloneRetryUtc = DateTime.MinValue;
-        _publishDirty = true;
+        }
         _ = socket.ConnectAsync();
     }
 
-    private static async Task PublishStandaloneAsync(VoiceLobbyPublishRequest request, string signature)
+    private static async Task PublishStandaloneAsync(
+        SocketIOClient.SocketIO socket,
+        int generation,
+        VoiceLobbyPublishRequest request,
+        string signature)
     {
-        var socket = _socket;
-        if (socket == null)
-        {
-            _publishDirty = true;
-            _nextStandaloneRetryUtc = DateTime.UtcNow.Add(FailureRetryDelay);
-            return;
-        }
-
         try
         {
+            if (!IsCurrentSocket(socket, generation)) return;
             var playerId = ResolveLocalPlayerId();
             var clientId = AmongUsClient.Instance?.ClientId ?? -1;
             if (clientId < 0)
             {
-                _publishDirty = true;
-                _nextStandaloneRetryUtc = DateTime.UtcNow.Add(FailureRetryDelay);
+                MarkPublishFailed(socket, generation);
                 return;
             }
 
-            if (!string.IsNullOrEmpty(_joinedCode)
-                && !string.Equals(_joinedCode, request.Code, StringComparison.Ordinal))
+            string? joinedCode;
+            int joinedClientId;
+            if (!TryReadJoinState(socket, generation, out joinedCode, out joinedClientId)) return;
+            if (!string.IsNullOrEmpty(joinedCode)
+                && !string.Equals(joinedCode, request.Code, StringComparison.Ordinal))
             {
-                try { await socket.EmitAsync("remove_lobby", _joinedCode).ConfigureAwait(false); } catch { }
-                _joinedCode = null;
-                _joinedClientId = -1;
+                try { await socket.EmitAsync("remove_lobby", joinedCode).ConfigureAwait(false); } catch { }
+                if (!TryClearJoinedCode(socket, generation, joinedCode)) return;
+                joinedCode = null;
+                joinedClientId = -1;
             }
 
-            if (!string.Equals(_joinedCode, request.Code, StringComparison.Ordinal) || _joinedClientId != clientId)
+            if (!string.Equals(joinedCode, request.Code, StringComparison.Ordinal) || joinedClientId != clientId)
             {
+                if (!IsCurrentSocket(socket, generation)) return;
                 await socket.EmitAsync("id", new object[] { playerId, clientId }).ConfigureAwait(false);
+                if (!IsCurrentSocket(socket, generation)) return;
                 await socket.EmitAsync("join", new object[] { request.Code, playerId, clientId, true }).ConfigureAwait(false);
-                _joinedCode = request.Code;
-                _joinedClientId = clientId;
+                if (!TryMarkJoined(socket, generation, request.Code, clientId)) return;
             }
 
+            if (!IsCurrentSocket(socket, generation)) return;
             await socket.EmitAsync("lobby", new object[] { request.Code, BetterCrewLinkLobbyMetadata.ToBclLobby(request) }).ConfigureAwait(false);
-            _lastStandaloneSignature = signature;
-            _publishDirty = false;
-            _nextStandaloneRetryUtc = DateTime.MinValue;
+            TryMarkPublishComplete(socket, generation, signature);
         }
         catch (Exception ex)
         {
             VoiceDiagnostics.DebugWarning($"[VC] BCL lobby publish failed: {ex.Message}");
-            _publishDirty = true;
-            _nextStandaloneRetryUtc = DateTime.UtcNow.Add(FailureRetryDelay);
+            MarkPublishFailed(socket, generation);
         }
     }
 
     private static void ClearStandalone()
     {
-        var socket = _socket;
-        var code = _joinedCode;
-        _socket = null;
-        _connected = false;
-        _joinedCode = null;
-        _joinedClientId = -1;
-        _lastStandaloneSignature = null;
-        _nextStandaloneRetryUtc = DateTime.MinValue;
-        _publishDirty = true;
+        SocketIOClient.SocketIO? socket;
+        string? joinedCode;
+        string? pendingCode;
+        Task? pending;
+        lock (Gate)
+        {
+            ++_socketGeneration;
+            socket = _socket;
+            joinedCode = _joinedCode;
+            pendingCode = _pendingCode;
+            pending = _pending;
+            _socket = null;
+            _serverUrl = "";
+            _connected = false;
+            _joinedCode = null;
+            _joinedClientId = -1;
+            _lastStandaloneSignature = null;
+            _pendingCode = null;
+            _pending = null;
+            _nextStandaloneRetryUtc = DateTime.MinValue;
+            _publishDirty = true;
+        }
 
         if (socket == null) return;
-        _ = ClearStandaloneAsync(socket, code);
+        _ = ClearStandaloneAsync(socket, joinedCode, pendingCode, pending);
     }
 
-    private static async Task ClearStandaloneAsync(SocketIOClient.SocketIO socket, string? code)
-    {
-        try
+    private static Task ClearStandaloneAsync(
+        SocketIOClient.SocketIO socket,
+        string? joinedCode,
+        string? pendingCode,
+        Task? pending)
+        => RunAfterPendingAsync(pending, async () =>
         {
-            if (!string.IsNullOrEmpty(code))
-                await socket.EmitAsync("remove_lobby", code).ConfigureAwait(false);
-        }
-        catch { }
+            try
+            {
+                if (!string.IsNullOrEmpty(joinedCode))
+                    await socket.EmitAsync("remove_lobby", joinedCode).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(pendingCode)
+                    && !string.Equals(pendingCode, joinedCode, StringComparison.Ordinal))
+                    await socket.EmitAsync("remove_lobby", pendingCode).ConfigureAwait(false);
+            }
+            catch { }
 
-        try { await socket.EmitAsync("leave").ConfigureAwait(false); } catch { }
-        try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
-        // Dispose tears down the websocket and the unbounded reconnect loop's CTS.
-        try { socket.Dispose(); } catch { }
+            try { await socket.EmitAsync("leave").ConfigureAwait(false); } catch { }
+            try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
+            // Dispose tears down the websocket and the unbounded reconnect loop's CTS.
+            try { socket.Dispose(); } catch { }
+        });
+
+    internal static async Task RunAfterPendingAsync(Task? pending, Func<Task> completion)
+    {
+        if (pending != null)
+        {
+            try { await pending.ConfigureAwait(false); }
+            catch { /* cleanup must still run after a failed publish */ }
+        }
+        await completion().ConfigureAwait(false);
+    }
+
+    internal static bool MatchesSocketGeneration(
+        object? currentSocket,
+        int currentGeneration,
+        object candidateSocket,
+        int candidateGeneration)
+        => ReferenceEquals(currentSocket, candidateSocket) && currentGeneration == candidateGeneration;
+
+    private static bool IsCurrentSocket(SocketIOClient.SocketIO socket, int generation)
+    {
+        lock (Gate)
+            return MatchesSocketGeneration(_socket, _socketGeneration, socket, generation);
+    }
+
+    private static bool TryReadJoinState(
+        SocketIOClient.SocketIO socket,
+        int generation,
+        out string? joinedCode,
+        out int joinedClientId)
+    {
+        lock (Gate)
+        {
+            if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation))
+            {
+                joinedCode = null;
+                joinedClientId = -1;
+                return false;
+            }
+            joinedCode = _joinedCode;
+            joinedClientId = _joinedClientId;
+            return true;
+        }
+    }
+
+    private static bool TryClearJoinedCode(
+        SocketIOClient.SocketIO socket,
+        int generation,
+        string joinedCode)
+    {
+        lock (Gate)
+        {
+            if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return false;
+            if (string.Equals(_joinedCode, joinedCode, StringComparison.Ordinal))
+            {
+                _joinedCode = null;
+                _joinedClientId = -1;
+            }
+            return true;
+        }
+    }
+
+    private static bool TryMarkJoined(
+        SocketIOClient.SocketIO socket,
+        int generation,
+        string code,
+        int clientId)
+    {
+        lock (Gate)
+        {
+            if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return false;
+            _joinedCode = code;
+            _joinedClientId = clientId;
+            return true;
+        }
+    }
+
+    private static void TryMarkPublishComplete(
+        SocketIOClient.SocketIO socket,
+        int generation,
+        string signature)
+    {
+        lock (Gate)
+        {
+            if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return;
+            _lastStandaloneSignature = signature;
+            _pendingCode = null;
+            _publishDirty = false;
+            _nextStandaloneRetryUtc = DateTime.MinValue;
+        }
+    }
+
+    private static void MarkPublishFailed(SocketIOClient.SocketIO socket, int generation)
+    {
+        lock (Gate)
+        {
+            if (!MatchesSocketGeneration(_socket, _socketGeneration, socket, generation)) return;
+            _pendingCode = null;
+            _publishDirty = true;
+            _nextStandaloneRetryUtc = DateTime.UtcNow.Add(FailureRetryDelay);
+        }
     }
 
     private static int ResolveLocalPlayerId()

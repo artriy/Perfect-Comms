@@ -21,10 +21,11 @@ internal static class VoiceLobbyRegistryPublisher
 
     private static string? _listingId;
     private static string? _ownerToken;
+    private static string? _listingRegistryUrl;
     private static string? _lastCode;
     private static string? _lastSignature;
     private static DateTime _nextPublishUtc = DateTime.MinValue;
-    private static Task? _pending;
+    private static readonly VoiceLobbyRegistryOperationQueue Operations = new();
 
     internal static void Update()
     {
@@ -48,8 +49,19 @@ internal static class VoiceLobbyRegistryPublisher
         }
 
         BetterCrewLinkLobbyPublisher.Clear();
-        if (_pending is { IsCompleted: false }) return;
-        PrepareCloudflareRequest(request);
+        if (Operations.IsBusy) return;
+
+        var registryUrl = settings.LobbyRegistryUrl.Value;
+        if (!string.IsNullOrEmpty(_listingId)
+            && !string.Equals(_listingRegistryUrl, registryUrl, StringComparison.Ordinal))
+        {
+            // A listing belongs to the endpoint where it was created. Delete it there before a
+            // replacement generation is allowed to publish against the new endpoint.
+            ClearCloudflareListing();
+            return;
+        }
+
+        PrepareCloudflareRequest(registryUrl, request);
         var signature = BuildSignature(request);
         if (DateTime.UtcNow < _nextPublishUtc
             && string.Equals(_lastCode, request.Code, StringComparison.Ordinal)
@@ -59,7 +71,7 @@ internal static class VoiceLobbyRegistryPublisher
         _lastCode = request.Code;
         _lastSignature = signature;
         _nextPublishUtc = DateTime.UtcNow.AddSeconds(PublishIntervalSeconds);
-        _pending = PublishAsync(settings.LobbyRegistryUrl.Value, request);
+        Operations.TryStart(() => PublishAsync(_listingRegistryUrl ?? registryUrl, request));
     }
 
     private static VoiceLobbyBrowserSource ResolvePublishSource(VoiceChatGameOptions options)
@@ -80,16 +92,20 @@ internal static class VoiceLobbyRegistryPublisher
     {
         if (string.IsNullOrEmpty(_listingId) || string.IsNullOrEmpty(_ownerToken)) return;
 
-        var settings = VoiceSettings.Instance;
-        var registryUrl = settings?.LobbyRegistryUrl.Value ?? "";
+        var registryUrl = _listingRegistryUrl ?? VoiceSettings.Instance?.LobbyRegistryUrl.Value ?? "";
         var id = _listingId;
         var token = _ownerToken;
         _listingId = null;
         _ownerToken = null;
+        _listingRegistryUrl = null;
         _lastCode = null;
         _lastSignature = null;
         _nextPublishUtc = DateTime.MinValue;
-        _pending = DeleteAsync(registryUrl, id, token);
+
+        // The POST may still be in flight. Queueing the DELETE behind it guarantees that a late
+        // successful publish cannot resurrect a listing after host loss, privacy changes or exit.
+        // The queue also blocks a replacement listing generation until this final delete ends.
+        Operations.QueueAfterCurrent(() => DeleteAsync(registryUrl, id, token));
     }
 
     private static async Task PublishAsync(string registryUrl, VoiceLobbyPublishRequest request)
@@ -141,7 +157,7 @@ internal static class VoiceLobbyRegistryPublisher
         return true;
     }
 
-    private static void PrepareCloudflareRequest(VoiceLobbyPublishRequest request)
+    private static void PrepareCloudflareRequest(string registryUrl, VoiceLobbyPublishRequest request)
     {
         if (string.IsNullOrEmpty(_listingId)
             || string.IsNullOrEmpty(_ownerToken)
@@ -149,6 +165,7 @@ internal static class VoiceLobbyRegistryPublisher
         {
             _listingId = Guid.NewGuid().ToString("N");
             _ownerToken = CreateToken();
+            _listingRegistryUrl = registryUrl;
             _lastCode = null;
             _lastSignature = null;
             _nextPublishUtc = DateTime.MinValue;
@@ -235,4 +252,42 @@ internal static class VoiceLobbyRegistryPublisher
             request.Language,
             request.Region,
             request.ProtocolVersion);
+}
+
+/// <summary>
+/// Serializes Cloudflare registry operations for one publisher. In particular, teardown is queued
+/// after an in-flight publish and remains the current operation until its final delete completes.
+/// </summary>
+internal sealed class VoiceLobbyRegistryOperationQueue
+{
+    private Task? _current;
+
+    internal bool IsBusy => _current is { IsCompleted: false };
+
+    internal bool TryStart(Func<Task> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        if (IsBusy) return false;
+        _current = operation();
+        return true;
+    }
+
+    internal Task QueueAfterCurrent(Func<Task> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var queued = RunAfterCurrentAsync(_current, operation);
+        _current = queued;
+        return queued;
+    }
+
+    internal static async Task RunAfterCurrentAsync(Task? current, Func<Task> operation)
+    {
+        if (current != null)
+        {
+            try { await current.ConfigureAwait(false); }
+            catch { /* Final cleanup must still run after a failed publish. */ }
+        }
+
+        await operation().ConfigureAwait(false);
+    }
 }

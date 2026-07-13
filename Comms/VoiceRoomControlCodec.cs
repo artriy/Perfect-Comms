@@ -16,9 +16,9 @@ public readonly record struct VoiceRoomControlMessage(
 // NOTE: This codec is NOT the live wire path. Host voice settings + requests flow over the
 // authenticated InnerNet RPC (VoiceRoomSettingsRpc); the voice-transport side-channel that previously
 // used this codec was de-authorized for security (a self-asserted sender could forge host settings).
-// It is retained as the versioned byte-layout reference/spec that the test suite cross-checks the live
-// serializer against (V10 legacy-decode compatibility, fail-closed on unknown versions). Do NOT add new
-// runtime callers — to change the wire format, edit the WriteSettings/ReadSettings serializer in VoiceRoomSettingsRpc.
+// It is retained only for legacy side-channel fixtures and their versioned decode tests. It is not the
+// schema for the live RPC: current host snapshots use the exact kind-3/schema-1 payload implemented by
+// VoiceRoomSettingsRpc.EncodeSnapshotPayload/TryDecodeSnapshotPayload. Do not add new runtime callers.
 public static class VoiceRoomControlCodec
 {
     private const byte Magic0 = (byte)'P';

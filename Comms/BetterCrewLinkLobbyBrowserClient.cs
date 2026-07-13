@@ -24,7 +24,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
 
     internal static void EnsureConnected(string serverUrl)
     {
-        serverUrl = VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
+        serverUrl = BetterCrewLinkLobbyEndpoint.NormalizeServerUrl(serverUrl);
         lock (Gate)
         {
             if (_socket != null && string.Equals(_serverUrl, serverUrl, StringComparison.Ordinal))

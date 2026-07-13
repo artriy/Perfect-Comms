@@ -366,7 +366,7 @@ public static class VoiceVolumeMenu
 
         var seen = new HashSet<byte>();
         if (VoiceChatRoom.Current != null)
-            foreach (var c in VoiceChatRoom.Current.InterstellarRemoteOverlayStates)
+            foreach (var c in VoiceChatRoom.Current.RemoteOverlayStates)
             {
                 if (c.PlayerId == byte.MaxValue) continue;
                 if (!seen.Add(c.PlayerId)) continue;

@@ -1,6 +1,40 @@
 use pc_capture::ipc::ServerConfig;
 use pc_capture::{audio, ipc, proto};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
+
+// Device APIs have been observed to block indefinitely in Wine/CrossOver host processes. Keep
+// this below the managed launcher's three-second enumeration deadline so even an unkillable
+// start.exe proxy cannot leave the host-native helper behind.
+const ENUMERATION_HARD_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+#[derive(Debug, Eq, PartialEq)]
+enum EnumerationError {
+    Deadline,
+    WorkerUnavailable,
+}
+
+fn run_with_hard_deadline<T, F>(timeout: Duration, worker: F) -> Result<T, EnumerationError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("pc-capture-enumerate".to_string())
+        .spawn(move || {
+            let value = worker();
+            let _ = sender.send(value);
+        })
+        .map_err(|_| EnumerationError::WorkerUnavailable)?;
+
+    match receiver.recv_timeout(timeout) {
+        Ok(value) => Ok(value),
+        Err(RecvTimeoutError::Timeout) => Err(EnumerationError::Deadline),
+        Err(RecvTimeoutError::Disconnected) => Err(EnumerationError::WorkerUnavailable),
+    }
+}
 
 #[derive(Debug)]
 pub struct Args {
@@ -79,9 +113,26 @@ fn main() {
     }
 
     if args.enumerate {
-        let devices = audio::enumerate_devices();
-        let output_devices = audio::enumerate_output_devices();
-        let json = proto::devices_json(&devices, &output_devices);
+        let json = match run_with_hard_deadline(ENUMERATION_HARD_TIMEOUT, || {
+            let devices = audio::enumerate_devices();
+            let output_devices = audio::enumerate_output_devices();
+            proto::devices_json(&devices, &output_devices)
+        }) {
+            Ok(json) => json,
+            Err(EnumerationError::Deadline) => {
+                eprintln!(
+                    "pc-capture: device enumeration exceeded hard deadline ({} ms); terminating",
+                    ENUMERATION_HARD_TIMEOUT.as_millis()
+                );
+                // Do not unwind or wait for the blocked enumeration thread. process::exit ends all
+                // threads immediately, which is the lifetime boundary required by Wine/CrossOver.
+                std::process::exit(124);
+            }
+            Err(EnumerationError::WorkerUnavailable) => {
+                eprintln!("pc-capture: device enumeration worker unavailable");
+                std::process::exit(1);
+            }
+        };
         let path = args.handshake_path.as_ref().unwrap();
         if let Err(e) = ipc::write_devices_file(path, &json) {
             eprintln!("pc-capture: cannot write devices file: {e}");
@@ -220,5 +271,25 @@ mod tests {
         ];
         let args = parse_args(&argv).unwrap();
         assert!(!args.synthetic);
+    }
+
+    #[test]
+    fn hard_deadline_returns_completed_enumeration() {
+        let value = run_with_hard_deadline(Duration::from_millis(100), || 42).unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn hard_deadline_does_not_wait_for_blocked_enumeration() {
+        let started = std::time::Instant::now();
+        let result = run_with_hard_deadline(Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_millis(200));
+            42
+        });
+        assert_eq!(result, Err(EnumerationError::Deadline));
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "deadline should return without joining the blocked worker"
+        );
     }
 }

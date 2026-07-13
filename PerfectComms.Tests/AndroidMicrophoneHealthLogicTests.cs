@@ -32,4 +32,46 @@ public sealed class AndroidMicrophoneHealthLogicTests
         var health = AndroidMicrophone.ClassifyPosition(recording: true, now: 100 * Second, lastAdvanceTicks: 90 * Second, deadAfterTicks: 15 * Second);
         Xunit.Assert.Equal(CaptureHealth.Healthy, health);
     }
+
+    [Theory]
+    [InlineData(false, false, 1_000, 0, false)]
+    [InlineData(true, true, 1_000, 0, false)]
+    [InlineData(true, false, 999, 1_000, false)]
+    [InlineData(true, false, 1_000, 1_000, true)]
+    [InlineData(true, false, 1_001, 1_000, true)]
+    public void RecoveryRequiresAnOutstandingRequestAndDueDeadline(
+        bool requested,
+        bool recording,
+        long nowMs,
+        long nextRecoveryMs,
+        bool expected)
+    {
+        Xunit.Assert.Equal(expected,
+            AndroidMicrophone.ShouldAttemptRecovery(requested, recording, nowMs, nextRecoveryMs));
+    }
+
+    [Theory]
+    [InlineData(1, 250)]
+    [InlineData(2, 500)]
+    [InlineData(3, 1_000)]
+    [InlineData(8, 30_000)]
+    [InlineData(30, 30_000)]
+    public void RecoveryBackoffContinuesAndCapsInsteadOfGivingUp(int attempt, int expectedMs)
+    {
+        Xunit.Assert.Equal(expectedMs,
+            AndroidMicrophone.RecoveryDelayMilliseconds(attempt, 250, 30_000));
+    }
+
+    [Theory]
+    [InlineData(1, 3_000)]
+    [InlineData(4, 3_000)]
+    [InlineData(5, 4_000)]
+    [InlineData(6, 8_000)]
+    [InlineData(30, 10_000)]
+    public void PlaybackRetryBackoffHonorsCallbackGraceAndCaps(int attempt, int expectedMs)
+    {
+        Xunit.Assert.Equal(expectedMs,
+            AndroidMicrophone.RecoveryDelayMilliseconds(
+                attempt, 250, 10_000, minimumDelayMs: 3_000));
+    }
 }

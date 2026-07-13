@@ -9,7 +9,6 @@ public class VoiceChatGameOptions
     private const string Section = "Host.VoiceChat";
 
     public ToggleHolder PublicVoiceLobby { get; }
-    public EnumHolder VoiceBackend { get; }
     public EnumHolder LobbyBrowserBackend { get; }
     public NumberHolder MaxChatDistance { get; }
     public EnumHolder FalloffMode { get; }
@@ -37,17 +36,9 @@ public class VoiceChatGameOptions
     private VoiceChatGameOptions(ConfigFile cfg)
     {
         PublicVoiceLobby = new ToggleHolder(cfg, Section, "PublicVoiceLobby", "Public Voice Lobby", false);
-        VoiceBackend = new EnumHolder(cfg, Section, "VoiceBackend", "Voice Backend",
-            (int)VoiceTransportBackend.BetterCrewLink, typeof(VoiceTransportBackend),
-            new[] { "BetterCrewLink", "Interstellar" })
-        {
-            Visible = () => VoiceEndpointSettings.InterstellarEnabled,
-        };
-        if (!VoiceEndpointSettings.InterstellarEnabled)
-            VoiceBackend.Value = (int)VoiceTransportBackend.BetterCrewLink;
-        LobbyBrowserBackend = new EnumHolder(cfg, Section, "LobbyBrowserBackend", "Lobby Browser Backend",
+        LobbyBrowserBackend = new EnumHolder(cfg, Section, "LobbyBrowserBackend", "Public Lobby Directory",
             (int)VoiceLobbyBrowserSource.BetterCrewLink, typeof(VoiceLobbyBrowserSource),
-            new[] { "BCL Live", "Cloudflare (Limited)" });
+            new[] { "BetterCrewLink Live", "Perfect Comms Registry" });
         MaxChatDistance = new NumberHolder(cfg, Section, "MaxChatDistance", "Max Distance", 6f, 1.5f, 20f, 0.5f, "0.0");
         FalloffMode = new EnumHolder(cfg, Section, "FalloffMode", "Voice Falloff",
             (int)VoiceFalloffMode.Smooth, typeof(VoiceFalloffMode),

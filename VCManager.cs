@@ -26,6 +26,8 @@ internal class VCManager : MonoBehaviour
         _sceneHookRegistered = true;
 
         _activeSceneName = SceneManager.GetActiveScene().name;
+        VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
+        VoiceChatRoom.NotifyScenePhaseBoundary();
         SceneManager.sceneLoaded +=
             (UnityEngine.Events.UnityAction<Scene, LoadSceneMode>)OnSceneLoaded;
         SceneManager.activeSceneChanged +=
@@ -35,6 +37,8 @@ internal class VCManager : MonoBehaviour
     private static void OnActiveSceneChanged(Scene previous, Scene next)
     {
         _activeSceneName = next.name;
+        VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
+        VoiceChatRoom.NotifyScenePhaseBoundary();
     }
 
     private static void OnSceneLoaded(Scene scene, LoadSceneMode _)
@@ -42,6 +46,8 @@ internal class VCManager : MonoBehaviour
         // Among Us transitions are single-mode loads, so the loaded scene becomes the active one.
         // Refresh the cache here too in case activeSceneChanged ordering differs across the boundary.
         _activeSceneName = scene.name;
+        VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
+        VoiceChatRoom.NotifyScenePhaseBoundary();
         EnsureManagerObject();
         switch (scene.name)
         {
@@ -66,6 +72,7 @@ internal class VCManager : MonoBehaviour
     }
 
     private static float _lastUpdateErrorLogTime = -999f;
+    private static string _lastUpdateErrorStep = "";
 
     // Unity calls this on its main thread before native/managed teardown. Release the active
     // session and synchronously terminate the process-lifetime helper here; AppDomain hooks are
@@ -112,9 +119,15 @@ internal class VCManager : MonoBehaviour
         }
         catch (System.Exception ex)
         {
-            if (Time.time - _lastUpdateErrorLogTime < 5f) return;
+            string step = VoiceChatHudState.LastUpdateStep;
+            // Keep repeated failures quiet, but do not hide a second failure in a different
+            // initialization step (for example mic clone then speaker clone) behind the timer.
+            if (step == _lastUpdateErrorStep && Time.time - _lastUpdateErrorLogTime < 5f) return;
             _lastUpdateErrorLogTime = Time.time;
-            VoiceDiagnostics.DebugError("[VC] HUD update failed: " + ex.Message);
+            _lastUpdateErrorStep = step;
+            VoiceDiagnostics.DebugError(
+                $"[VC] HUD update failed scene={_activeSceneName} frame={Time.frameCount} " +
+                $"{VoiceChatHudState.DescribeUpdateContext()}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

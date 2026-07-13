@@ -36,9 +36,6 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<Reference Include="Interstellar">
-			<HintPath>..\Libs\Interstellar.dll</HintPath>
-		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
 			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\UnityEngine.CoreModule.dll</HintPath>
 		</Reference>

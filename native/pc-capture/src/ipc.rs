@@ -1,6 +1,6 @@
 use crate::audio::{
-    enumerate_devices, enumerate_output_devices, now_ns, peak, spawn_cpal_capture,
-    spawn_cpal_playback, ToneSource,
+    monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, PlaybackProgress,
+    ToneSource,
 };
 use crate::codec::OpusCodec;
 use crate::gamestate::{GameState, LocalState, PeerState};
@@ -10,22 +10,190 @@ use crate::input::{
 use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
-    devices_json, encode_control, error_json, level_json, local_candidate_json, local_sdp_json,
-    parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json, stats_json,
-    AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
-    PROTO_VERSION, RING_CAPACITY,
+    encode_control, error_json, level_json, local_candidate_json, local_sdp_json, parse_inbound,
+    peer_levels_json, peer_state_json, pong_json, ready_json, stats_json, AudioFrame,
+    AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION,
+    RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_FRAME_LEN: usize = 1 << 20;
 const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
+const PLAYBACK_SPAWN_THROTTLE: Duration = Duration::from_secs(1);
+const PLAYBACK_START_TIMEOUT: Duration = Duration::from_secs(5);
+const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_millis(750);
+const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_millis(750);
+const PLAYBACK_WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
+const CRITICAL_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+#[derive(Clone)]
+struct SessionSupervisor {
+    stopping: Arc<AtomicBool>,
+    failures: Sender<String>,
+}
+
+impl SessionSupervisor {
+    fn report(&self, worker: &str, detail: &str) {
+        if !self.stopping.load(Ordering::Acquire) {
+            let _ = self.failures.send(format!("{worker}: {detail}"));
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PlaybackSupervision {
+    progress: Arc<PlaybackProgress>,
+    session: SessionSupervisor,
+}
+
+fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "unknown panic payload"
+    }
+}
+
+fn spawn_critical_worker<F>(
+    worker: &'static str,
+    supervisor: SessionSupervisor,
+    run: F,
+) -> std::thread::JoinHandle<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(format!("pc-capture-{worker}"))
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+            if supervisor.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            let detail = match &outcome {
+                Ok(()) => "exited unexpectedly".to_string(),
+                Err(payload) => format!("panicked: {}", panic_detail(payload.as_ref())),
+            };
+            supervisor.report(worker, &detail);
+        })
+        .unwrap_or_else(|error| panic!("cannot spawn critical worker {worker}: {error}"))
+}
+
+fn spawn_critical_failure_monitor(
+    shutdown_stream: TcpStream,
+    session_stopping: Arc<AtomicBool>,
+    failures: Receiver<String>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("pc-capture-critical-monitor".to_string())
+        .spawn(move || loop {
+            match failures.recv_timeout(CRITICAL_FAILURE_POLL_INTERVAL) {
+                Ok(reason) => {
+                    if session_stopping.swap(true, Ordering::AcqRel) {
+                        break;
+                    }
+                    eprintln!("pc-capture: critical media failure: {reason}; closing session");
+                    let _ = shutdown_stream.shutdown(Shutdown::Both);
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if session_stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        })
+        .unwrap_or_else(|error| panic!("cannot spawn critical failure monitor: {error}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackWatchdogFailure {
+    StartupTimedOut,
+    CallbackStalled,
+}
+
+impl PlaybackWatchdogFailure {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::StartupTimedOut => "output stream startup timed out",
+            Self::CallbackStalled => "output callback stalled with queued audio",
+        }
+    }
+}
+
+#[derive(Default)]
+struct PlaybackWatchdog {
+    observed_callback_ns: u64,
+    stalled_since_ns: Option<u64>,
+}
+
+impl PlaybackWatchdog {
+    fn observe(
+        &mut self,
+        now_ns: u64,
+        worker_running: bool,
+        spawned_ns: u64,
+        started_ns: u64,
+        callback_ns: u64,
+        queued_pairs: usize,
+    ) -> Option<PlaybackWatchdogFailure> {
+        if !worker_running {
+            self.observed_callback_ns = 0;
+            self.stalled_since_ns = None;
+            return None;
+        }
+
+        if started_ns == 0 {
+            self.observed_callback_ns = 0;
+            self.stalled_since_ns = None;
+            if spawned_ns != 0
+                && now_ns.saturating_sub(spawned_ns) >= duration_ns(PLAYBACK_START_TIMEOUT)
+            {
+                return Some(PlaybackWatchdogFailure::StartupTimedOut);
+            }
+            return None;
+        }
+
+        if queued_pairs == 0 {
+            self.observed_callback_ns = callback_ns;
+            self.stalled_since_ns = None;
+            return None;
+        }
+
+        if callback_ns != self.observed_callback_ns {
+            self.observed_callback_ns = callback_ns;
+            self.stalled_since_ns = None;
+            return None;
+        }
+
+        match self.stalled_since_ns {
+            None => self.stalled_since_ns = Some(now_ns),
+            Some(stalled_since)
+                if now_ns.saturating_sub(stalled_since)
+                    >= duration_ns(PLAYBACK_CALLBACK_STALL_TIMEOUT) =>
+            {
+                return Some(PlaybackWatchdogFailure::CallbackStalled);
+            }
+            Some(_) => {}
+        }
+        None
+    }
+}
 
 /// Arms a fail-safe for teardown work that can block inside platform audio/RTC code.
 /// Completion wakes and joins the watchdog immediately; a healthy shutdown never waits
@@ -220,6 +388,40 @@ fn synthetic_devices() -> Vec<DeviceInfo> {
     }]
 }
 
+// Session readiness and control must never depend on a host device API returning. Real device
+// discovery is performed by the short-lived `--enumerate` helper, which has a process-level hard
+// deadline. Keeping it out of the long-lived media session means a missing mic, denied permission,
+// or a Wine/CoreAudio enumeration hang cannot block signaling or receive-only playback.
+fn session_devices(synthetic: bool) -> Vec<DeviceInfo> {
+    if synthetic {
+        synthetic_devices()
+    } else {
+        Vec::new()
+    }
+}
+
+fn join_thread_bounded(
+    handle: std::thread::JoinHandle<()>,
+    worker: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        // Dropping a JoinHandle detaches the wedged worker. The caller must terminate the
+        // isolated helper session; production run_session has a process-level cleanup deadline.
+        return Err(format!(
+            "{worker} did not stop within {}ms",
+            timeout.as_millis()
+        ));
+    }
+    handle
+        .join()
+        .map_err(|_| format!("{worker} panicked while stopping"))
+}
+
 fn spawn_synthetic_producer(
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
@@ -320,67 +522,70 @@ impl CaptureProducer {
         }
     }
 
-    fn apply(&mut self, action: ProducerAction) {
+    fn apply(&mut self, action: ProducerAction) -> Result<(), String> {
         match action {
             ProducerAction::None => self.reap_finished(),
             ProducerAction::Start => self.spawn(),
             ProducerAction::Stop => self.stop_join_clear(),
             ProducerAction::Restart => {
-                self.stop_join_clear();
-                self.spawn();
+                self.stop_join_clear()?;
+                self.spawn()
             }
         }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self) -> Result<(), String> {
         let action = self.lifecycle.start();
-        self.apply(action);
+        self.apply(action)?;
         if self.lifecycle.running && self.handle.is_none() {
-            self.spawn();
+            self.spawn()?;
         }
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> Result<(), String> {
         let action = self.lifecycle.stop();
-        self.apply(action);
+        self.apply(action)?;
         // A producer may have exited just before Stop; always clear any stale queued PCM.
         if !self.lifecycle.running {
-            self.stop_join_clear();
+            self.stop_join_clear()?;
         }
+        Ok(())
     }
 
-    fn select_device(&mut self, id: String) {
+    fn select_device(&mut self, id: String) -> Result<(), String> {
         let selected = if id.is_empty() { None } else { Some(id) };
         let action = self.lifecycle.select(selected);
-        self.apply(action);
+        self.apply(action)
     }
 
-    fn set_synthetic(&mut self, enabled: bool) {
+    fn set_synthetic(&mut self, enabled: bool) -> Result<(), String> {
         let action = self.lifecycle.set_synthetic(enabled);
-        self.apply(action);
+        self.apply(action)
     }
 
-    fn is_synthetic(&self) -> bool {
-        self.lifecycle.synthetic
-    }
-
-    fn reap_finished(&mut self) {
+    fn reap_finished(&mut self) -> Result<(), String> {
         if self
             .handle
             .as_ref()
             .is_some_and(|handle| handle.is_finished())
         {
             if let Some(handle) = self.handle.take() {
-                handle.join().ok();
+                let result = handle
+                    .join()
+                    .map_err(|_| "capture worker panicked unexpectedly".to_string());
+                self.stop = None;
+                return result;
             }
             self.stop = None;
         }
+        Ok(())
     }
 
-    fn spawn(&mut self) {
-        self.reap_finished();
+    fn spawn(&mut self) -> Result<(), String> {
+        self.reap_finished()?;
         if self.handle.is_some() || !self.lifecycle.running {
-            return;
+            return Ok(());
         }
         self.ring.lock().unwrap().clear();
         let stop = Arc::new(AtomicBool::new(false));
@@ -395,24 +600,28 @@ impl CaptureProducer {
             )
         });
         self.stop = Some(stop);
+        Ok(())
     }
 
-    fn stop_join_clear(&mut self) {
+    fn stop_join_clear(&mut self) -> Result<(), String> {
         if let Some(stop) = self.stop.take() {
             stop.store(true, Ordering::Release);
         }
-        if let Some(handle) = self.handle.take() {
-            handle.join().ok();
-        }
+        let result = self.handle.take().map_or(Ok(()), |handle| {
+            join_thread_bounded(handle, "capture worker", CAPTURE_STOP_TIMEOUT)
+        });
         if let Ok(mut ring) = self.ring.lock() {
             ring.clear();
         }
+        result
     }
 }
 
 impl Drop for CaptureProducer {
     fn drop(&mut self) {
-        self.stop_join_clear();
+        if let Err(error) = self.stop_join_clear() {
+            eprintln!("pc-capture: critical media failure during capture teardown: {error}");
+        }
     }
 }
 
@@ -423,8 +632,9 @@ fn spawn_telemetry_writer(
     counters: Arc<NativeCounters>,
     capture_ring: Arc<Mutex<AudioRing>>,
     playback_ring: Arc<Mutex<PlaybackRing>>,
+    supervisor: SessionSupervisor,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+    spawn_critical_worker("telemetry", supervisor, move || {
         const STATS_INTERVAL: Duration = Duration::from_secs(2);
         let mut last_stats = Instant::now() - STATS_INTERVAL;
         while !stop.load(Ordering::Acquire) {
@@ -467,11 +677,11 @@ fn spawn_real_producer(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         const ESCALATE_AFTER: Duration = Duration::from_secs(10);
-        const RETRY_DELAY: Duration = Duration::from_millis(500);
         let healthy = Arc::new(AtomicBool::new(false));
         let mut ever_healthy = false;
         let mut outage_start: Option<Instant> = None;
         let mut escalated = false;
+        let mut retry_attempt = 0u32;
         while !stop.load(Ordering::Relaxed) {
             healthy.store(false, Ordering::Relaxed);
             match spawn_cpal_capture(
@@ -482,11 +692,22 @@ fn spawn_real_producer(
             ) {
                 Ok(()) => break,
                 Err(e) => {
-                    eprintln!("capture error: {e}");
                     if healthy.load(Ordering::Relaxed) {
                         ever_healthy = true;
                         outage_start = None;
                         escalated = false;
+                        retry_attempt = 0;
+                    }
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    let retry_delay = capture_retry_delay(retry_attempt);
+                    // A permanently absent/denied microphone is a supported listen-only state.
+                    // Log the first failure and then only exponentially-sparse attempts so stderr
+                    // diagnostics remain bounded while the speaker/signaling engine stays alive.
+                    if retry_attempt == 1 || retry_attempt.is_power_of_two() {
+                        eprintln!(
+                            "capture unavailable: {e}; retry attempt={retry_attempt} delay_ms={}",
+                            retry_delay.as_millis()
+                        );
                     }
                     let grace = if ever_healthy {
                         ESCALATE_AFTER
@@ -501,17 +722,99 @@ fn spawn_real_producer(
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    std::thread::sleep(RETRY_DELAY);
+                    sleep_until_stopped(&stop, retry_delay);
                 }
             }
         }
     })
 }
 
+fn capture_retry_delay(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(6);
+    Duration::from_millis((500u64 << shift).min(30_000))
+}
+
+fn sleep_until_stopped(stop: &AtomicBool, duration: Duration) {
+    const POLL: Duration = Duration::from_millis(50);
+    let deadline = Instant::now() + duration;
+    while !stop.load(Ordering::Relaxed) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(POLL));
+    }
+}
+
 fn write_frame(conn: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> std::io::Result<()> {
     let mut s = conn.lock().unwrap();
     s.write_all(bytes)?;
     s.flush()
+}
+
+fn spawn_playback_watchdog(
+    out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    playback: Arc<Mutex<PlaybackRing>>,
+    spawned_ns: Arc<AtomicU64>,
+    supervision: PlaybackSupervision,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("pc-capture-playback-watchdog".to_string())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut watchdog = PlaybackWatchdog::default();
+                while !supervision.session.stopping.load(Ordering::Acquire) {
+                    let worker_running = out_thread
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|handle| !handle.is_finished());
+                    let queued_pairs = if worker_running {
+                        playback.lock().unwrap().len()
+                    } else {
+                        0
+                    };
+                    let (started_ns, callback_ns) = supervision.progress.snapshot();
+                    let failure = watchdog.observe(
+                        monotonic_ns(),
+                        worker_running,
+                        spawned_ns.load(Ordering::Acquire),
+                        started_ns,
+                        callback_ns,
+                        queued_pairs,
+                    );
+                    if let Some(failure) = failure {
+                        supervision
+                            .session
+                            .report("playback watchdog", failure.detail());
+                        return;
+                    }
+                    sleep_until_stopped(&supervision.session.stopping, PLAYBACK_WATCHDOG_INTERVAL);
+                }
+            }));
+            if let Err(payload) = outcome {
+                supervision.session.report(
+                    "playback watchdog",
+                    &format!("panicked: {}", panic_detail(payload.as_ref())),
+                );
+            }
+        })
+        .unwrap_or_else(|error| panic!("cannot spawn playback watchdog: {error}"))
+}
+
+fn stop_playback_bounded(
+    out_thread: &Mutex<Option<std::thread::JoinHandle<()>>>,
+    out_stop: &AtomicBool,
+    progress: &PlaybackProgress,
+    timeout: Duration,
+) -> Result<(), String> {
+    out_stop.store(true, Ordering::Release);
+    let handle = out_thread.lock().unwrap().take();
+    if let Some(handle) = handle {
+        join_thread_bounded(handle, "output worker", timeout)?;
+    }
+    progress.reset();
+    Ok(())
 }
 
 fn ensure_playback(
@@ -521,32 +824,47 @@ fn ensure_playback(
     playback: &Arc<Mutex<PlaybackRing>>,
     last_spawn_ns: &AtomicU64,
     counters: &Arc<NativeCounters>,
+    supervision: &PlaybackSupervision,
 ) {
     let mut guard = out_thread.lock().unwrap();
     if guard.as_ref().is_some_and(|h| h.is_finished()) {
         if let Some(h) = guard.take() {
             h.join().ok();
         }
+        supervision.progress.reset();
     }
     if guard.is_none() {
-        let now = now_ns();
+        let now = monotonic_ns();
         let last = last_spawn_ns.load(Ordering::Relaxed);
-        if last != 0 && now.saturating_sub(last) < 1_000_000_000 {
+        if last != 0 && now.saturating_sub(last) < duration_ns(PLAYBACK_SPAWN_THROTTLE) {
             return;
         }
-        last_spawn_ns.store(now, Ordering::Relaxed);
+        last_spawn_ns.store(now, Ordering::Release);
         let dev = out_selected.lock().unwrap().clone();
         let pb = playback.clone();
         let st = out_stop.clone();
         let stats = counters.clone();
-        st.store(false, Ordering::Relaxed);
+        let playback_progress = supervision.progress.clone();
+        let worker_supervisor = supervision.session.clone();
+        supervision.progress.reset();
+        st.store(false, Ordering::Release);
         counters
             .playback_spawn_attempts
             .fetch_add(1, Ordering::Relaxed);
         *guard = Some(std::thread::spawn(move || {
-            if let Err(e) = spawn_cpal_playback(dev, pb, st, stats.clone()) {
-                stats.playback_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("pc-capture: playback error: {e}");
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                spawn_cpal_playback(dev, pb, st, stats.clone(), playback_progress)
+            }));
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    stats.playback_errors.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("pc-capture: playback error: {error}");
+                }
+                Err(payload) => worker_supervisor.report(
+                    "playback worker",
+                    &format!("panicked: {}", panic_detail(payload.as_ref())),
+                ),
             }
         }));
     }
@@ -600,16 +918,16 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     }
     stream.set_read_timeout(None).ok();
 
-    let devices = if cfg.synthetic {
-        synthetic_devices()
-    } else {
-        enumerate_devices()
-    };
-    let output_devices = if cfg.synthetic {
-        synthetic_devices()
-    } else {
-        enumerate_output_devices()
-    };
+    // Codec initialization is a session prerequisite even when microphone capture is absent:
+    // receive-only users still need decoding, and a helper that can report levels but never
+    // encode RTP must not advertise itself as ready.
+    let encoder = OpusCodec::new().map_err(|error| {
+        eprintln!("pc-capture: opus encoder init failed before ready: {error}");
+        std::io::Error::other(format!("opus encoder init failed: {error}"))
+    })?;
+
+    let devices = session_devices(cfg.synthetic);
+    let output_devices = session_devices(cfg.synthetic);
     write_frame(
         &conn,
         &encode_control(&ready_json(&devices, &output_devices)),
@@ -624,6 +942,26 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     let out_spawn_ns = Arc::new(AtomicU64::new(0));
+    let out_progress = Arc::new(PlaybackProgress::default());
+
+    let session_stopping = Arc::new(AtomicBool::new(false));
+    let (critical_tx, critical_rx) = std::sync::mpsc::channel::<String>();
+    let session_supervisor = SessionSupervisor {
+        stopping: session_stopping.clone(),
+        failures: critical_tx.clone(),
+    };
+    let playback_supervision = PlaybackSupervision {
+        progress: out_progress.clone(),
+        session: session_supervisor.clone(),
+    };
+    let critical_monitor_handle =
+        spawn_critical_failure_monitor(stream.try_clone()?, session_stopping.clone(), critical_rx);
+    let playback_watchdog_handle = spawn_playback_watchdog(
+        out_thread.clone(),
+        playback.clone(),
+        out_spawn_ns.clone(),
+        playback_supervision.clone(),
+    );
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
@@ -639,6 +977,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         counters.clone(),
         ring.clone(),
         playback.clone(),
+        session_supervisor.clone(),
     );
 
     let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
@@ -651,7 +990,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
     let (rtc_op_tx, rtc_op_rx) = std::sync::mpsc::channel::<RtcOp>();
     let ctrl_rtc = rtc.clone();
-    let ctrl_handle = std::thread::spawn(move || {
+    let ctrl_handle = spawn_critical_worker("rtc-control", session_supervisor.clone(), move || {
         while let Ok(op) = rtc_op_rx.recv() {
             match op {
                 RtcOp::AddPeer {
@@ -681,15 +1020,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_input = input.clone();
     let writer_telemetry = telemetry.clone();
     let writer_counters = counters.clone();
-    let writer_handle = std::thread::spawn(move || {
-        let mut encoder = match OpusCodec::new() {
-            Ok(encoder) => Some(encoder),
-            Err(error) => {
-                writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("pc-capture: opus encoder init failed: {error}");
-                None
-            }
-        };
+    let writer_handle = spawn_critical_worker("encoder", session_supervisor.clone(), move || {
+        let mut encoder = encoder;
         let mut level_cadence = LevelCadence::new(Instant::now());
         let mut last_dropped = 0u64;
         while !writer_stop.load(Ordering::Relaxed) {
@@ -706,14 +1038,14 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     let input = *writer_input.lock().unwrap();
                     input.apply_gain(&mut f.samples);
                     let pk = peak(&f.samples);
-                    if let Some(enc) = encoder.as_mut() {
-                        let pkt = enc.encode(&f.samples);
-                        if !pkt.is_empty() {
-                            writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
-                            writer_rtc.send_opus(&pkt);
-                        } else {
-                            writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
-                        }
+                    let pkt = encoder.encode(&f.samples);
+                    if !pkt.is_empty() {
+                        writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
+                        writer_rtc.send_opus(&pkt);
+                    } else {
+                        writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("pc-capture: Opus encoder produced no packet for a valid frame");
+                        return;
                     }
                     if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
                         writer_telemetry
@@ -745,166 +1077,172 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_out_selected = out_selected.clone();
     let drain_out_stop = out_stop.clone();
     let drain_out_spawn = out_spawn_ns.clone();
+    let drain_playback_supervision = playback_supervision.clone();
     let drain_telemetry = telemetry.clone();
     let drain_counters = counters.clone();
-    let drain_handle = std::thread::spawn(move || {
-        let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
-        let mut last_seq: HashMap<String, u16> = HashMap::new();
-        let mut generations: HashMap<String, u32> = HashMap::new();
-        let mut mixer = Mixer::new();
-        let mut peer_levels = PeerLevelCadence::new(Instant::now());
+    let drain_handle =
+        spawn_critical_worker("decoder-mixer", session_supervisor.clone(), move || {
+            let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
+            let mut last_seq: HashMap<String, u16> = HashMap::new();
+            let mut generations: HashMap<String, u32> = HashMap::new();
+            let mut mixer = Mixer::new();
+            let mut peer_levels = PeerLevelCadence::new(Instant::now());
 
-        let mut jitter = PeerJitter::new();
-        let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
+            let mut jitter = PeerJitter::new();
+            let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
 
-        let frame_dur = Duration::from_millis(20);
-        let mut next_tick = Instant::now();
-        while !drain_stop.load(Ordering::Relaxed) {
-            while let Ok(op) = dec_op_rx.try_recv() {
-                let (id, generation) = match op {
-                    DecoderOp::Reset {
-                        peer_id,
-                        generation,
-                    } => (peer_id, Some(generation)),
-                    DecoderOp::Remove { peer_id } => (peer_id, None),
-                };
-                decoders.remove(&id);
-                jitter.remove(&id);
-                last_seq.remove(&id);
-                peer_levels.remove(&id);
-                if let Some(generation) = generation {
-                    generations.insert(id, generation);
-                } else {
-                    generations.remove(&id);
-                }
-            }
-
-            let mut drained = 0;
-            while let Some((peer, generation, seq, data)) = drain_rtc.recv() {
-                drain_counters
-                    .decode_packets
-                    .fetch_add(1, Ordering::Relaxed);
-                if generations.get(&peer).copied() != Some(generation) {
-                    decoders.remove(&peer);
-                    jitter.remove(&peer);
-                    last_seq.remove(&peer);
-                    peer_levels.remove(&peer);
-                    generations.insert(peer.clone(), generation);
-                }
-                if !decoders.contains_key(&peer) {
-                    match OpusCodec::new() {
-                        Ok(c) => {
-                            decoders.insert(peer.clone(), c);
-                        }
-                        Err(error) => {
-                            drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
-                            eprintln!("pc-capture: opus decoder init failed peer={peer}: {error}");
-                            continue;
-                        }
+            let frame_dur = Duration::from_millis(20);
+            let mut next_tick = Instant::now();
+            while !drain_stop.load(Ordering::Relaxed) {
+                while let Ok(op) = dec_op_rx.try_recv() {
+                    let (id, generation) = match op {
+                        DecoderOp::Reset {
+                            peer_id,
+                            generation,
+                        } => (peer_id, Some(generation)),
+                        DecoderOp::Remove { peer_id } => (peer_id, None),
+                    };
+                    decoders.remove(&id);
+                    jitter.remove(&id);
+                    last_seq.remove(&id);
+                    peer_levels.remove(&id);
+                    if let Some(generation) = generation {
+                        generations.insert(id, generation);
+                    } else {
+                        generations.remove(&id);
                     }
                 }
-                let last = last_seq.get(&peer).copied();
-                let (frames, advance) = {
-                    let codec = decoders.get_mut(&peer).unwrap();
-                    crate::codec::decode_with_concealment(codec, last, seq, &data)
-                };
-                if frames.is_empty() {
-                    drain_counters.decode_empty.fetch_add(1, Ordering::Relaxed);
-                } else {
+
+                let mut drained = 0;
+                while let Some((peer, generation, seq, data)) = drain_rtc.recv() {
                     drain_counters
-                        .decode_frames
-                        .fetch_add(frames.len() as u64, Ordering::Relaxed);
+                        .decode_packets
+                        .fetch_add(1, Ordering::Relaxed);
+                    if generations.get(&peer).copied() != Some(generation) {
+                        decoders.remove(&peer);
+                        jitter.remove(&peer);
+                        last_seq.remove(&peer);
+                        peer_levels.remove(&peer);
+                        generations.insert(peer.clone(), generation);
+                    }
+                    if !decoders.contains_key(&peer) {
+                        match OpusCodec::new() {
+                            Ok(c) => {
+                                decoders.insert(peer.clone(), c);
+                            }
+                            Err(error) => {
+                                drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
+                                eprintln!(
+                                    "pc-capture: opus decoder init failed peer={peer}: {error}"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    let last = last_seq.get(&peer).copied();
+                    let (frames, advance) = {
+                        let codec = decoders.get_mut(&peer).unwrap();
+                        crate::codec::decode_with_concealment(codec, last, seq, &data)
+                    };
+                    if frames.is_empty() {
+                        drain_counters.decode_empty.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        drain_counters
+                            .decode_frames
+                            .fetch_add(frames.len() as u64, Ordering::Relaxed);
+                    }
+                    for f in frames {
+                        peer_levels.observe(&peer, peak(&f));
+                        jitter.push(&peer, f);
+                    }
+                    if advance {
+                        last_seq.insert(peer.clone(), seq);
+                    }
+                    drained += 1;
+                    if drained >= 256 {
+                        break;
+                    }
                 }
-                for f in frames {
-                    peer_levels.observe(&peer, peak(&f));
-                    jitter.push(&peer, f);
+                if let Some(levels) = peer_levels.take_due(Instant::now()) {
+                    drain_telemetry.publish_peers(levels);
                 }
-                if advance {
-                    last_seq.insert(peer.clone(), seq);
+                if jitter.is_idle() {
+                    drain_counters
+                        .jitter_idle_ticks
+                        .fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(5));
+                    next_tick = Instant::now();
+                    continue;
                 }
-                drained += 1;
-                if drained >= 256 {
+
+                let round = jitter.playout_round();
+                if !round.is_empty() {
+                    drain_counters.mix_rounds.fetch_add(1, Ordering::Relaxed);
+                    drain_counters
+                        .mixed_peer_frames
+                        .fetch_add(round.len() as u64, Ordering::Relaxed);
+                    let per_peer: Vec<(String, &[f32])> = round
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_slice()))
+                        .collect();
+                    mixer.mix(&per_peer, &drain_gs, &mut stereo);
+                    drain_counters.record_mix(&stereo);
+
+                    ensure_playback(
+                        &drain_out_thread,
+                        &drain_out_selected,
+                        &drain_out_stop,
+                        &drain_playback,
+                        &drain_out_spawn,
+                        &drain_counters,
+                        &drain_playback_supervision,
+                    );
+                    drain_playback.lock().unwrap().push(&stereo);
+                    drain_counters
+                        .playback_queued_pairs
+                        .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
+                    drain_dsp.lock().unwrap().far_end(&stereo);
+                }
+
+                next_tick += frame_dur;
+                let now = Instant::now();
+                if next_tick > now {
+                    std::thread::sleep(next_tick - now);
+                } else {
+                    next_tick = now;
+                }
+            }
+        });
+
+    let signal_conn = conn.clone();
+    let signal_handle =
+        spawn_critical_worker("signaling-writer", session_supervisor.clone(), move || {
+            while let Ok(sig) = local_signal_rx.recv() {
+                let json = match sig {
+                    LocalSignal::Sdp {
+                        peer_id,
+                        generation,
+                        sdp_type,
+                        sdp,
+                    } => local_sdp_json(&peer_id, generation, &sdp_type, &sdp),
+                    LocalSignal::Candidate {
+                        peer_id,
+                        generation,
+                        candidate,
+                    } => local_candidate_json(&peer_id, generation, &candidate),
+                    LocalSignal::PeerState {
+                        peer_id,
+                        generation,
+                        state,
+                    } => peer_state_json(&peer_id, generation, &state),
+                };
+                if write_frame(&signal_conn, &encode_control(&json)).is_err() {
                     break;
                 }
             }
-            if let Some(levels) = peer_levels.take_due(Instant::now()) {
-                drain_telemetry.publish_peers(levels);
-            }
-            if jitter.is_idle() {
-                drain_counters
-                    .jitter_idle_ticks
-                    .fetch_add(1, Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(5));
-                next_tick = Instant::now();
-                continue;
-            }
+        });
 
-            let round = jitter.playout_round();
-            if !round.is_empty() {
-                drain_counters.mix_rounds.fetch_add(1, Ordering::Relaxed);
-                drain_counters
-                    .mixed_peer_frames
-                    .fetch_add(round.len() as u64, Ordering::Relaxed);
-                let per_peer: Vec<(String, &[f32])> = round
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_slice()))
-                    .collect();
-                mixer.mix(&per_peer, &drain_gs, &mut stereo);
-                drain_counters.record_mix(&stereo);
-
-                ensure_playback(
-                    &drain_out_thread,
-                    &drain_out_selected,
-                    &drain_out_stop,
-                    &drain_playback,
-                    &drain_out_spawn,
-                    &drain_counters,
-                );
-                drain_playback.lock().unwrap().push(&stereo);
-                drain_counters
-                    .playback_queued_pairs
-                    .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
-                drain_dsp.lock().unwrap().far_end(&stereo);
-            }
-
-            next_tick += frame_dur;
-            let now = Instant::now();
-            if next_tick > now {
-                std::thread::sleep(next_tick - now);
-            } else {
-                next_tick = now;
-            }
-        }
-    });
-
-    let signal_conn = conn.clone();
-    let signal_handle = std::thread::spawn(move || {
-        while let Ok(sig) = local_signal_rx.recv() {
-            let json = match sig {
-                LocalSignal::Sdp {
-                    peer_id,
-                    generation,
-                    sdp_type,
-                    sdp,
-                } => local_sdp_json(&peer_id, generation, &sdp_type, &sdp),
-                LocalSignal::Candidate {
-                    peer_id,
-                    generation,
-                    candidate,
-                } => local_candidate_json(&peer_id, generation, &candidate),
-                LocalSignal::PeerState {
-                    peer_id,
-                    generation,
-                    state,
-                } => peer_state_json(&peer_id, generation, &state),
-            };
-            if write_frame(&signal_conn, &encode_control(&json)).is_err() {
-                break;
-            }
-        }
-    });
-
-    loop {
+    'control: loop {
         let frame = match read_frame_checked(&mut reader) {
             Ok(f) => f,
             Err(error) => {
@@ -921,6 +1259,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     &playback,
                     &out_spawn_ns,
                     &counters,
+                    &playback_supervision,
                 );
             }
             Frame::Control(text) => {
@@ -930,28 +1269,29 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 };
                 match op {
                     InboundOp::SelectDevice { id } => {
-                        producer.select_device(id);
-                        let devs = if producer.is_synthetic() {
-                            synthetic_devices()
-                        } else {
-                            enumerate_devices()
-                        };
-                        let outs = if cfg.synthetic {
-                            synthetic_devices()
-                        } else {
-                            enumerate_output_devices()
-                        };
-                        let _ = write_frame(&conn, &encode_control(&devices_json(&devs, &outs)));
+                        if let Err(error) = producer.select_device(id) {
+                            eprintln!(
+                                "pc-capture: critical media failure: capture device switch: {error}"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::SelectOutputDevice { id } => {
                         *out_selected.lock().unwrap() = Some(id);
 
-                        out_stop.store(true, Ordering::Relaxed);
-                        if let Some(h) = out_thread.lock().unwrap().take() {
-                            h.join().ok();
+                        if let Err(error) = stop_playback_bounded(
+                            &out_thread,
+                            &out_stop,
+                            &out_progress,
+                            PLAYBACK_STOP_TIMEOUT,
+                        ) {
+                            eprintln!(
+                                "pc-capture: critical media failure: playback device switch: {error}"
+                            );
+                            break 'control;
                         }
-                        out_stop.store(false, Ordering::Relaxed);
-                        out_spawn_ns.store(0, Ordering::Relaxed);
+                        out_stop.store(false, Ordering::Release);
+                        out_spawn_ns.store(0, Ordering::Release);
                         ensure_playback(
                             &out_thread,
                             &out_selected,
@@ -959,13 +1299,20 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             &playback,
                             &out_spawn_ns,
                             &counters,
+                            &playback_supervision,
                         );
                     }
                     InboundOp::Start => {
-                        producer.start();
+                        if let Err(error) = producer.start() {
+                            eprintln!("pc-capture: critical media failure: capture start: {error}");
+                            break 'control;
+                        }
                     }
                     InboundOp::Stop => {
-                        producer.stop();
+                        if let Err(error) = producer.stop() {
+                            eprintln!("pc-capture: critical media failure: capture stop: {error}");
+                            break 'control;
+                        }
                     }
                     InboundOp::SetDsp { aec, agc, ns, hpf } => {
                         dsp.lock()
@@ -979,21 +1326,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         *input.lock().unwrap() = InputConfig::sanitized(gain, vad_threshold);
                     }
                     InboundOp::SetSynthetic { enabled } => {
-                        producer.set_synthetic(enabled);
-                        let devs = if producer.is_synthetic() {
-                            synthetic_devices()
-                        } else {
-                            enumerate_devices()
-                        };
-                        let outs = if cfg.synthetic {
-                            synthetic_devices()
-                        } else {
-                            enumerate_output_devices()
-                        };
-                        let _ = write_frame(&conn, &encode_control(&devices_json(&devs, &outs)));
+                        if let Err(error) = producer.set_synthetic(enabled) {
+                            eprintln!(
+                                "pc-capture: critical media failure: capture mode switch: {error}"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::Ping => {
-                        let _ = write_frame(&conn, &encode_control(&pong_json(now_ns())));
+                        if write_frame(&conn, &encode_control(&pong_json(now_ns()))).is_err() {
+                            break 'control;
+                        }
                     }
                     InboundOp::PeerAdd {
                         peer_id,
@@ -1001,16 +1344,32 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         relay_only,
                         generation,
                     } => {
-                        let _ = dec_op_tx.send(DecoderOp::Reset {
-                            peer_id: peer_id.clone(),
-                            generation,
-                        });
-                        let _ = rtc_op_tx.send(RtcOp::AddPeer {
-                            peer_id,
-                            offerer,
-                            relay_only,
-                            generation,
-                        });
+                        if dec_op_tx
+                            .send(DecoderOp::Reset {
+                                peer_id: peer_id.clone(),
+                                generation,
+                            })
+                            .is_err()
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: decoder command channel closed"
+                            );
+                            break 'control;
+                        }
+                        if rtc_op_tx
+                            .send(RtcOp::AddPeer {
+                                peer_id,
+                                offerer,
+                                relay_only,
+                                generation,
+                            })
+                            .is_err()
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: RTC command channel closed"
+                            );
+                            break 'control;
+                        }
                         ensure_playback(
                             &out_thread,
                             &out_selected,
@@ -1018,31 +1377,66 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             &playback,
                             &out_spawn_ns,
                             &counters,
+                            &playback_supervision,
                         );
                     }
                     InboundOp::PeerRemove { peer_id } => {
-                        let _ = rtc_op_tx.send(RtcOp::RemovePeer {
-                            peer_id: peer_id.clone(),
-                        });
+                        if rtc_op_tx
+                            .send(RtcOp::RemovePeer {
+                                peer_id: peer_id.clone(),
+                            })
+                            .is_err()
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: RTC command channel closed"
+                            );
+                            break 'control;
+                        }
                         game_state.remove_peer(&peer_id);
-                        let _ = dec_op_tx.send(DecoderOp::Remove { peer_id });
+                        if dec_op_tx.send(DecoderOp::Remove { peer_id }).is_err() {
+                            eprintln!(
+                                "pc-capture: critical media failure: decoder command channel closed"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::SetRemoteSdp {
                         peer_id,
                         sdp_type,
                         sdp,
                     } => {
-                        let _ = rtc_op_tx.send(RtcOp::SetRemoteSdp {
-                            peer_id,
-                            sdp_type,
-                            sdp,
-                        });
+                        if rtc_op_tx
+                            .send(RtcOp::SetRemoteSdp {
+                                peer_id,
+                                sdp_type,
+                                sdp,
+                            })
+                            .is_err()
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: RTC command channel closed"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::AddIceCandidate { peer_id, candidate } => {
-                        let _ = rtc_op_tx.send(RtcOp::AddIce { peer_id, candidate });
+                        if rtc_op_tx
+                            .send(RtcOp::AddIce { peer_id, candidate })
+                            .is_err()
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: RTC command channel closed"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::SetIceServers { servers } => {
-                        let _ = rtc_op_tx.send(RtcOp::SetIceServers { servers });
+                        if rtc_op_tx.send(RtcOp::SetIceServers { servers }).is_err() {
+                            eprintln!(
+                                "pc-capture: critical media failure: RTC command channel closed"
+                            );
+                            break 'control;
+                        }
                     }
                     InboundOp::GameState {
                         deaf,
@@ -1104,11 +1498,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         None
     };
 
-    producer.stop();
+    session_stopping.store(true, Ordering::Release);
+    if let Err(error) = producer.stop() {
+        eprintln!("pc-capture: capture teardown exceeded its bound: {error}");
+    }
     stop.store(true, Ordering::Relaxed);
     out_stop.store(true, Ordering::Relaxed);
     rtc_stop.store(true, Ordering::Relaxed);
     telemetry_stop.store(true, Ordering::Release);
+    playback_watchdog_handle.join().ok();
     if let Some(h) = out_thread.lock().unwrap().take() {
         h.join().ok();
     }
@@ -1119,6 +1517,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     ctrl_handle.join().ok();
     drop(rtc);
     signal_handle.join().ok();
+    drop(critical_tx);
+    critical_monitor_handle.join().ok();
     if let Some(deadline) = cleanup_deadline {
         deadline.complete();
     }
@@ -1188,6 +1588,149 @@ mod tests {
         assert_eq!(v["port"], 54321);
         assert_eq!(v["pid"], 9999);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn real_session_readiness_never_enumerates_host_devices() {
+        assert!(session_devices(false).is_empty());
+        assert_eq!(session_devices(true)[0].id, "synthetic-tone");
+    }
+
+    #[test]
+    fn absent_microphone_retry_is_capped() {
+        assert_eq!(capture_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(capture_retry_delay(2), Duration::from_millis(1_000));
+        assert_eq!(capture_retry_delay(7), Duration::from_millis(30_000));
+        assert_eq!(capture_retry_delay(100), Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn bounded_join_detaches_a_stalled_platform_worker() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            worker_finished.store(true, Ordering::Release);
+        });
+
+        let error = join_thread_bounded(handle, "test worker", Duration::from_millis(5))
+            .expect_err("stalled worker unexpectedly joined inside the bound");
+        assert!(error.contains("did not stop within 5ms"));
+
+        let wait_until = Instant::now() + Duration::from_secs(1);
+        while !finished.load(Ordering::Acquire) && Instant::now() < wait_until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn bounded_join_accepts_a_finished_worker() {
+        let handle = std::thread::spawn(|| {});
+        join_thread_bounded(handle, "test worker", Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn playback_watchdog_bounds_stream_startup() {
+        let mut watchdog = PlaybackWatchdog::default();
+        let spawned_ns = 100;
+        let timeout_ns = duration_ns(PLAYBACK_START_TIMEOUT);
+
+        assert_eq!(
+            watchdog.observe(spawned_ns + timeout_ns - 1, true, spawned_ns, 0, 0, 0,),
+            None
+        );
+        assert_eq!(
+            watchdog.observe(spawned_ns + timeout_ns, true, spawned_ns, 0, 0, 0,),
+            Some(PlaybackWatchdogFailure::StartupTimedOut)
+        );
+    }
+
+    #[test]
+    fn playback_watchdog_requires_queued_audio_before_policing_callbacks() {
+        let mut watchdog = PlaybackWatchdog::default();
+        let long_after_start = duration_ns(PLAYBACK_CALLBACK_STALL_TIMEOUT) * 10;
+
+        assert_eq!(watchdog.observe(long_after_start, true, 1, 2, 3, 0), None);
+        assert_eq!(
+            watchdog.observe(long_after_start + 1, true, 1, 2, 3, 128),
+            None,
+            "the first queued observation starts a fresh callback grace period"
+        );
+    }
+
+    #[test]
+    fn playback_watchdog_detects_callback_stall_and_accepts_recovery() {
+        let mut watchdog = PlaybackWatchdog::default();
+        let first_observation = 1_000;
+        let stall_timeout = duration_ns(PLAYBACK_CALLBACK_STALL_TIMEOUT);
+
+        // First observe the callback advancing, then begin a stall window when it stops.
+        assert_eq!(
+            watchdog.observe(first_observation, true, 1, 2, 10, 128),
+            None
+        );
+        let stalled_since = first_observation + 1;
+        assert_eq!(watchdog.observe(stalled_since, true, 1, 2, 10, 128), None);
+        assert_eq!(
+            watchdog.observe(stalled_since + stall_timeout - 1, true, 1, 2, 10, 128,),
+            None
+        );
+        assert_eq!(
+            watchdog.observe(stalled_since + stall_timeout, true, 1, 2, 10, 128,),
+            Some(PlaybackWatchdogFailure::CallbackStalled)
+        );
+
+        assert_eq!(
+            watchdog.observe(stalled_since + stall_timeout + 1, true, 1, 2, 11, 128,),
+            None,
+            "a newly observed callback clears the stall"
+        );
+    }
+
+    #[test]
+    fn playback_watchdog_detects_stream_that_never_callbacks() {
+        let mut watchdog = PlaybackWatchdog::default();
+        let first_queued_observation = 500;
+        let stall_timeout = duration_ns(PLAYBACK_CALLBACK_STALL_TIMEOUT);
+
+        assert_eq!(
+            watchdog.observe(first_queued_observation, true, 1, 2, 0, 64),
+            None
+        );
+        assert_eq!(
+            watchdog.observe(first_queued_observation + stall_timeout, true, 1, 2, 0, 64,),
+            Some(PlaybackWatchdogFailure::CallbackStalled)
+        );
+    }
+
+    #[test]
+    fn unexpected_critical_worker_exit_is_reported() {
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let supervisor = SessionSupervisor {
+            stopping,
+            failures: tx,
+        };
+        let handle = spawn_critical_worker("test-worker", supervisor, || {});
+        handle.join().unwrap();
+
+        let failure = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(failure.contains("test-worker: exited unexpectedly"));
+    }
+
+    #[test]
+    fn critical_worker_exit_during_normal_teardown_is_suppressed() {
+        let stopping = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let supervisor = SessionSupervisor {
+            stopping,
+            failures: tx,
+        };
+        let handle = spawn_critical_worker("test-worker", supervisor, || {});
+        handle.join().unwrap();
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -1331,7 +1874,7 @@ mod tests {
         let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
         let mut producer = CaptureProducer::new(true, ring.clone(), Arc::new(Mutex::new(server)));
 
-        producer.start();
+        producer.start().unwrap();
         for _ in 0..100 {
             if ring.lock().unwrap().len() > 0 {
                 break;
@@ -1339,10 +1882,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ring.lock().unwrap().len() > 0);
-        producer.stop();
+        producer.stop().unwrap();
         assert_eq!(ring.lock().unwrap().len(), 0);
 
-        producer.start();
+        producer.start().unwrap();
         for _ in 0..100 {
             if ring.lock().unwrap().len() > 0 {
                 break;
@@ -1350,12 +1893,69 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ring.lock().unwrap().len() > 0);
-        producer.stop();
+        producer.stop().unwrap();
         drop(client);
     }
 
     #[test]
-    fn synthetic_session_handshakes_pings_emits_level_and_replies_devices() {
+    fn receive_only_session_is_ready_without_starting_or_enumerating_capture() {
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cfg = ServerConfig {
+            handshake_path: std::env::temp_dir().join("unused-receive-only-hs.json"),
+            token: "listen-only".to_string(),
+            synthetic: false,
+            owner_pid: None,
+            hard_exit_on_disconnect: false,
+        };
+        let server = std::thread::spawn(move || {
+            let stream = accept_single(&listener).unwrap();
+            run_session(stream, &cfg).unwrap();
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client
+            .write_all(&encode_control(
+                r#"{"op":"hello","proto":7,"token":"listen-only"}"#,
+            ))
+            .unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        match read_frame(&mut reader).unwrap() {
+            Frame::Control(json) => {
+                let ready: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(ready["op"], "ready");
+                assert_eq!(ready["devices"].as_array().unwrap().len(), 0);
+            }
+            other => panic!("expected ready, got {other:?}"),
+        }
+
+        // Never send select-device or start. Control/RTC readiness and heartbeat must remain
+        // independent of microphone presence, permission, and platform capture APIs.
+        client
+            .write_all(&encode_control(r#"{"op":"ping"}"#))
+            .unwrap();
+        let mut got_pong = false;
+        for _ in 0..10 {
+            if let Frame::Control(json) = read_frame(&mut reader).unwrap() {
+                let message: serde_json::Value = serde_json::from_str(&json).unwrap();
+                if message["op"] == "pong" {
+                    got_pong = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_pong, "receive-only session never answered ping");
+
+        drop(reader);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn synthetic_session_handshakes_pings_and_emits_level() {
         let listener = bind_loopback().unwrap();
         let port = listener.local_addr().unwrap().port();
         let cfg = ServerConfig {
@@ -1386,6 +1986,7 @@ mod tests {
                 assert_eq!(v["op"], "ready");
                 assert_eq!(v["proto"], 7);
                 assert_eq!(v["format"]["rate"], 48_000);
+                assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
             other => panic!("expected ready, got {other:?}"),
         }
@@ -1395,7 +1996,6 @@ mod tests {
                 r#"{"op":"select-device","id":"synthetic-tone"}"#,
             ))
             .unwrap();
-        let mut got_devices = false;
         client
             .write_all(&encode_control(r#"{"op":"ping"}"#))
             .unwrap();
@@ -1409,10 +2009,6 @@ mod tests {
             match read_frame(&mut reader).unwrap() {
                 Frame::Control(s) => {
                     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-                    if v["op"] == "devices" {
-                        got_devices = true;
-                        assert_eq!(v["devices"][0]["id"], "synthetic-tone");
-                    }
                     if v["op"] == "pong" {
                         got_pong = true;
                         assert!(v["capTs"].as_u64().unwrap() > 0);
@@ -1426,11 +2022,10 @@ mod tests {
                 Frame::Audio(_) => {}
                 Frame::AudioOut(_) => {}
             }
-            if got_pong && got_level && got_devices {
+            if got_pong && got_level {
                 break;
             }
         }
-        assert!(got_devices, "never got devices reply");
         assert!(got_pong, "never got pong");
         assert!(got_level, "never got level");
 

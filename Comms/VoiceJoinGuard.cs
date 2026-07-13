@@ -271,10 +271,12 @@ internal static class VoiceJoinGuard
         public static void Prefix(InnerNetClient __instance, ref DisconnectReasons reason)
         {
             // DisconnectInternal is the earliest deterministic local-lobby exit boundary. Release
-            // the voice session here (capture, peers and routing); the reusable helper process stays
-            // idle until the next lobby or the Among Us process exits.
+            // the voice session here (capture, peers, routing, and the helper process). EndGame ->
+            // lobby transitions do not disconnect and therefore retain the same uninterrupted lease.
             var lifetimeReason = $"innernet-disconnect:{reason}";
             VoiceRoomLifetimeGate.MarkExplicitDisconnect(lifetimeReason);
+            try { VoiceLobbyRegistryPublisher.ClearLocalListing(); }
+            catch { /* registry cleanup must never interfere with vanilla disconnect */ }
             try { VoiceChatRoom.CloseCurrentRoom(lifetimeReason); }
             catch (Exception ex)
             {

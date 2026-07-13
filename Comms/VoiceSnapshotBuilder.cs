@@ -18,6 +18,7 @@ internal static class VoiceSnapshotBuilder
         var local = PlayerControl.LocalPlayer;
         byte localPlayerId = local != null ? local.PlayerId : byte.MaxValue;
         int localClientId = AmongUsClient.Instance != null ? AmongUsClient.Instance.ClientId : -1;
+        bool liveLocalPlayerResolved = IsLiveLocalPlayerResolved(local, localClientId);
         Vector2? localPosition = local != null ? (Vector2)local.transform.position : null;
         int mapId = ResolveMapId();
         var cameraView = ResolveCameraView(local, mapId);
@@ -64,6 +65,7 @@ internal static class VoiceSnapshotBuilder
         }
 
         var players = new List<VoicePlayerSnapshot>(16);
+        bool playerEnumerationCompleted = true;
         try
         {
         foreach (var player in PlayerControl.AllPlayerControls)
@@ -85,7 +87,7 @@ internal static class VoiceSnapshotBuilder
                 out byte loverPartnerId,
                 out bool isBlackmailedNextRound,
                 out bool isSwooped,
-                out _);
+                out bool isGlitchHacked);
             VoiceRoleMuteState.GetPlayerMediumVoiceState(
                 player,
                 out bool isMedium,
@@ -129,12 +131,14 @@ internal static class VoiceSnapshotBuilder
                 player.PlayerId == localPlayerId ? localControlledVictimLight : -1f,
                 player.PlayerId == localPlayerId
                     ? localExternal
-                    : VoiceModRegistry.ResolvePlayer(player, apiPhase, isLocal: false, isDead: dataDead || roleOnlyDead)));
+                    : VoiceModRegistry.ResolvePlayer(player, apiPhase, isLocal: false, isDead: dataDead || roleOnlyDead),
+                IsGlitchHacked: isGlitchHacked));
         }
         }
         catch
         {
             // Scene transitions can invalidate AllPlayerControls mid-loop; keep what was collected.
+            playerEnumerationCompleted = false;
         }
 
         ApplyLoverPairingFallback(players);
@@ -154,7 +158,29 @@ internal static class VoiceSnapshotBuilder
             commsSabotageActive,
             MeetingHud.Instance != null,
             ResolveCameraCount(),
-            ResolveClosedDoorCount());
+            ResolveClosedDoorCount(),
+            liveLocalPlayerResolved,
+            RoutingRosterRetained: false,
+            PlayerEnumerationCompleted: playerEnumerationCompleted);
+    }
+
+    private static bool IsLiveLocalPlayerResolved(PlayerControl? local, int localClientId)
+    {
+        if (local == null || localClientId < 0)
+            return false;
+
+        try
+        {
+            var data = local.Data;
+            return data != null
+                   && !data.Disconnected
+                   && local.PlayerId != byte.MaxValue
+                   && ResolveClientId(local, data) == localClientId;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // If partner-id reflection failed (byte.MaxValue) a genuine pair would be false-muted on the lovers

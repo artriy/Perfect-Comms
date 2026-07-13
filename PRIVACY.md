@@ -5,20 +5,25 @@ carry. It is informational, not legal advice.
 
 ## Voice and signaling
 
-When you are in a voice room, audio and connection-setup (signaling) traffic flows to the voice server your
-client is configured for (a BetterCrewLink-compatible server, or the Interstellar backend) and, for audio,
-peer-to-peer over WebRTC to the other players in the room. This carries your microphone audio and the
-network metadata (IP address, ICE candidates) inherent to a real-time voice connection. Audio is not stored
-by the mod.
+When you are in a voice room, connection setup (signaling) travels through authenticated Among Us RPCs.
+Microphone audio flows peer-to-peer over WebRTC to the other players in the room, or through a TURN relay
+when a direct connection cannot be established. This carries the network metadata (IP addresses and ICE
+candidates) inherent to a real-time voice connection. Audio is not stored by the mod. BetterCrewLink and
+Perfect Comms registry endpoints are used only for optional public-lobby discovery/publishing; the configured
+registry may also provide short-lived managed TURN credentials.
 
-## Lobby browser (outbound HTTP)
+## Public lobby discovery and publishing
 
-Opening the in-game Voice Lobby browser issues a `GET` to the public lobby list:
+Opening the in-game Voice Lobby browser connects to the selected public directory. The available sources
+use either a BetterCrewLink-compatible Socket.IO endpoint, the configured Perfect Comms registry `/lobbies`
+endpoint, or the vanilla public-list API at `https://au-eu.duikbo.at/public_api/games`. Discovery requests
+send nothing user-identifying beyond the connection itself (your IP, as with any network request).
 
-- `https://au-eu.duikbo.at/public_api/games`
-
-The request sends nothing user-identifying beyond the connection itself (your IP, as with any HTTP request)
-and receives a list of public lobbies. If you do not open the lobby browser, this request is not made.
+If a host enables **Public Voice Lobby**, Perfect Comms publishes the room code, region, language, title,
+host display name, player counts, game state, mod version, and protocol version to the selected directory.
+The BetterCrewLink publisher also sends the local Among Us client/player ids required by that directory's
+join protocol. Publishing stops and the listing is removed when the room is no longer public or the lobby
+session ends. These directory connections are not used to carry private-room voice or voice signaling.
 
 ## Update check (outbound HTTP)
 

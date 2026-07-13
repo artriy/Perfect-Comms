@@ -13,6 +13,7 @@ internal interface ISidecarVoiceClient : IDisposable
 {
     event Action<float[], int>? OnFrame;
     event Action<string>? OnDead;
+    event Action<string, string>? OnRecoverableError;
     event Action<string, int, string, string>? OnLocalSdp;
     event Action<string, int, string>? OnLocalCandidate;
     event Action<string, int, string>? OnPeerState;
@@ -54,6 +55,7 @@ internal sealed class SidecarVoiceCallbacks
     public SidecarVoiceCallbacks(
         Action<float[], int> onFrame,
         Action<string> onDead,
+        Action<string, string> onRecoverableError,
         Action<string, int, string, string> onLocalSdp,
         Action<string, int, string> onLocalCandidate,
         Action<string, int, string> onPeerState,
@@ -62,6 +64,7 @@ internal sealed class SidecarVoiceCallbacks
     {
         OnFrame = onFrame ?? throw new ArgumentNullException(nameof(onFrame));
         OnDead = onDead ?? throw new ArgumentNullException(nameof(onDead));
+        OnRecoverableError = onRecoverableError ?? throw new ArgumentNullException(nameof(onRecoverableError));
         OnLocalSdp = onLocalSdp ?? throw new ArgumentNullException(nameof(onLocalSdp));
         OnLocalCandidate = onLocalCandidate ?? throw new ArgumentNullException(nameof(onLocalCandidate));
         OnPeerState = onPeerState ?? throw new ArgumentNullException(nameof(onPeerState));
@@ -71,6 +74,7 @@ internal sealed class SidecarVoiceCallbacks
 
     internal Action<float[], int> OnFrame { get; }
     internal Action<string> OnDead { get; }
+    internal Action<string, string> OnRecoverableError { get; }
     internal Action<string, int, string, string> OnLocalSdp { get; }
     internal Action<string, int, string> OnLocalCandidate { get; }
     internal Action<string, int, string> OnPeerState { get; }
@@ -79,8 +83,9 @@ internal sealed class SidecarVoiceCallbacks
 }
 
 /// <summary>
-/// Exclusive ownership of the helper's current voice session. Disposing a lease clears all
-/// session state but deliberately does not terminate a healthy helper process.
+/// Exclusive ownership of the helper's current voice session. Disposing the final lease clears
+/// the session and terminates the helper process. Only the host coordinator remains reusable; a
+/// later lobby launches a fresh helper without carrying audio-device or permission state across rooms.
 /// </summary>
 internal sealed class SidecarVoiceLease : IDisposable
 {
@@ -91,6 +96,7 @@ internal sealed class SidecarVoiceLease : IDisposable
 
     private readonly Action<float[], int> _frameForwarder;
     private readonly Action<string> _deadForwarder;
+    private readonly Action<string, string> _recoverableErrorForwarder;
     private readonly Action<string, int, string, string> _sdpForwarder;
     private readonly Action<string, int, string> _candidateForwarder;
     private readonly Action<string, int, string> _peerStateForwarder;
@@ -104,6 +110,7 @@ internal sealed class SidecarVoiceLease : IDisposable
         _callbacks = callbacks;
         _frameForwarder = (frame, samples) => { if (IsActive) _callbacks.OnFrame(frame, samples); };
         _deadForwarder = reason => { if (IsActive) _callbacks.OnDead(reason); };
+        _recoverableErrorForwarder = (code, message) => { if (IsActive) _callbacks.OnRecoverableError(code, message); };
         _sdpForwarder = (peer, generation, type, sdp) => { if (IsActive) _callbacks.OnLocalSdp(peer, generation, type, sdp); };
         _candidateForwarder = (peer, generation, candidate) => { if (IsActive) _callbacks.OnLocalCandidate(peer, generation, candidate); };
         _peerStateForwarder = (peer, generation, state) => { if (IsActive) _callbacks.OnPeerState(peer, generation, state); };
@@ -120,6 +127,7 @@ internal sealed class SidecarVoiceLease : IDisposable
     {
         client.OnFrame += _frameForwarder;
         client.OnDead += _deadForwarder;
+        client.OnRecoverableError += _recoverableErrorForwarder;
         client.OnLocalSdp += _sdpForwarder;
         client.OnLocalCandidate += _candidateForwarder;
         client.OnPeerState += _peerStateForwarder;
@@ -131,6 +139,7 @@ internal sealed class SidecarVoiceLease : IDisposable
     {
         client.OnFrame -= _frameForwarder;
         client.OnDead -= _deadForwarder;
+        client.OnRecoverableError -= _recoverableErrorForwarder;
         client.OnLocalSdp -= _sdpForwarder;
         client.OnLocalCandidate -= _candidateForwarder;
         client.OnPeerState -= _peerStateForwarder;
@@ -212,7 +221,7 @@ internal sealed class SidecarVoiceLease : IDisposable
 /// <summary>
 /// Serializes helper start, lease handoff and process shutdown. The gate is intentionally held
 /// across Start/config commands: those are rare lifecycle operations, and serialization prevents
-/// a disposed backend's async start from racing the next lobby's configuration.
+/// a disposed backend's async start from racing room teardown or the next lobby's configuration.
 /// </summary>
 internal sealed class SidecarVoiceHostCore
 {
@@ -352,8 +361,13 @@ internal sealed class SidecarVoiceHostCore
             }
             _owner = null;
 
-            if (client != null && client.Health == CaptureHealth.Dead)
-                DropClientLocked(null, "dead-on-release");
+            // A room lease is the helper's process-lifetime boundary. EndGame -> lobby transitions
+            // retain the same room and therefore never release this lease; an actual lobby exit
+            // does release it and must not leave pc-capture idle in the background. DropClientLocked
+            // disposes the IPC client/process but does not set _shutdown, so a later lobby can acquire
+            // the host and launch a fresh helper.
+            if (client != null)
+                DropClientLocked(null, $"lease-release:{reason}");
 
             VoiceDiagnostics.Log(
                 "sidecar.host",
@@ -397,7 +411,7 @@ internal sealed class SidecarVoiceHostCore
         catch { }
         foreach (var peerId in peerIds)
             try { client.RemovePeer(peerId); } catch { }
-        VoiceDiagnostics.Log("sidecar.host", $"event=session-idle reason={reason} peersRemoved={peerIds.Count}");
+        VoiceDiagnostics.Log("sidecar.host", $"event=session-quiesced reason={reason} peersRemoved={peerIds.Count}");
     }
 
     private void DropClientLocked(SidecarVoiceLease? attachedLease, string reason)

@@ -1,4 +1,7 @@
 using System;
+using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Text;
 using HarmonyLib;
 using Hazel;
 
@@ -7,176 +10,376 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class VoiceRoomSettingsRpc
 {
     private const byte RpcId = 203;
-    private const byte SnapshotKind = 1;
+    internal const byte LegacySnapshotKind = 1;
     private const byte RequestKind = 2;
+    internal const byte SnapshotKind = 3;
+    internal const byte SnapshotSchema = 1;
+    private const int MaxSyncedModOptions = 256;
 
-    // Cap untrusted host backend URL (mirrors VoiceRoomControlCodec.MaxServerUrlBytes).
-    private const int MaxBackendServerUrlChars = 512;
+    // Schema 1 is a self-contained, exact binary layout. The old kind-1 envelope had no
+    // schema marker and was extended in-place repeatedly; its remaining-byte heuristics can
+    // misread later fields at earlier offsets, so it must never enter the current decoder.
+    private const int SnapshotHeaderBytes = 3; // schema:byte + bodyLength:ushort
+    private const int FixedSettingsBytes = 56;
+    private const int ModOptionBytes = 9; // keyHash:int + isEnum:byte + value:int
+    private const int MaxBackendServerUrlBytes = 512;
+    internal const int MaxSnapshotPayloadBytes = SnapshotHeaderBytes + FixedSettingsBytes + 2
+        + MaxBackendServerUrlBytes + 2 + MaxSyncedModOptions * ModOptionBytes;
 
-    public static void SendSnapshot(VoiceRoomSettingsSnapshot settings)
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    internal readonly record struct SyncedModOptionValue(int Hash, bool IsEnum, int Value);
+
+    public static bool TrySendSnapshot(VoiceRoomSettingsSnapshot settings, int targetClientId = -1)
     {
-        var writer = StartWriter();
-        if (writer == null) return;
-
-        writer.Write(SnapshotKind);
-        WriteSettings(writer, settings.Clamp());
-        FinishWriter(writer);
-    }
-
-    public static void SendRequest()
-    {
-        var writer = StartWriter();
-        if (writer == null) return;
-
-        writer.Write(RequestKind);
-        FinishWriter(writer);
-    }
-
-    private static MessageWriter? StartWriter()
-    {
-        if (AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return null;
-        return AmongUsClient.Instance.StartRpcImmediately(
-            PlayerControl.LocalPlayer.NetId,
-            RpcId,
-            SendOption.Reliable,
-            -1);
-    }
-
-    private static void FinishWriter(MessageWriter writer)
-    {
-        AmongUsClient.Instance.FinishRpcImmediately(writer);
-    }
-
-    private static void WriteSettings(MessageWriter writer, VoiceRoomSettingsSnapshot settings)
-    {
-        writer.Write(settings.Backend);
-        writer.Write(settings.BackendServerUrl ?? string.Empty);
-        writer.Write(settings.MaxChatDistance);
-        writer.Write(settings.FalloffMode);
-        writer.Write(settings.OcclusionMode);
-        writer.Write(settings.WallsBlockSound);
-        writer.Write(settings.OnlyHearInSight);
-        writer.Write(settings.ImpostorHearGhosts);
-        writer.Write(settings.HearInVent);
-        writer.Write(settings.VentPrivateChat);
-        writer.Write(settings.CommsSabDisables);
-        writer.Write(settings.CameraCanHear);
-        writer.Write(settings.TeamRadio);
-        writer.Write(settings.TeamRadioImpostors);
-        writer.Write(settings.TeamRadioVampires);
-        writer.Write(settings.TeamRadioLovers);
-        writer.Write(settings.OnlyGhostsCanTalk);
-        writer.Write(settings.OnlyMeetingOrLobby);
-        writer.Write(settings.MuteBlackmailedInMeetings);
-        writer.Write(settings.MuteBlackmailedNextRound);
-        writer.Write(settings.MuteJailedInMeetings);
-        writer.Write(settings.JailorCanUnmuteJailed);
-        writer.Write(settings.MuteParasiteControlled);
-        writer.Write(settings.MutePuppeteerControlled);
-        writer.Write(settings.CrewpostorUsesImpostorVoice);
-        writer.Write(settings.MuteSwooperWhileSwooped);
-        writer.Write(settings.MediumGhostVoice);
-        writer.Write(settings.MuteGlitchHacked);
-        writer.Write(settings.MuffleBlindedOrFlashedHearing);
-        writer.Write(settings.MuffleHypnotizedDuringHysteria);
-        writer.Write(settings.OnlyMeetingOrLobbyAffectsGhosts);
-        writer.Write(settings.TeamRadioInMeetings);
-        writer.Write(settings.PuppeteerHearFromVictim);
-        writer.Write(settings.ParasiteHearFromVictim);
-        writer.Write(settings.TeamRadioInTasks);
-        writer.Write(settings.GhostsHearEachOtherUnlimited);
-        writer.Write(settings.JailPersistsAfterJailorDeath);
-        writer.Write(settings.GracePeriodEnabled);
-        writer.Write(settings.GracePeriodSeconds);
-        WriteModOptions(writer);
-    }
-
-    // Trailing variable-length block of third-party mod host-option values (PerfectComms.Api
-    // Primitive 4). Hash-keyed so adding mod options never shifts the fixed offsets above; legacy
-    // readers that stop before this block simply keep their defaults. count, then per entry:
-    // (keyHash:int, isEnum:bool, value:int).
-    private static void WriteModOptions(MessageWriter writer)
-    {
-        var entries = new System.Collections.Generic.List<(int Hash, bool IsEnum, int Value)>(
-            VoiceModRegistry.SyncedValues());
-        writer.Write(entries.Count);
-        foreach (var e in entries)
+        if (!TryStartWriter(targetClientId, "snapshot", out var writer)) return false;
+        try
         {
-            writer.Write(e.Hash);
-            writer.Write(e.IsEnum);
-            writer.Write(e.Value);
+            writer.Write(SnapshotKind);
+            writer.Write(EncodeSnapshotPayload(settings, CollectModOptions()));
+            return TryFinishWriter(writer, targetClientId, "snapshot");
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "settings.rpc.send_failed",
+                $"op=snapshot target={targetClientId} errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+            return false;
         }
     }
 
-    private static void ReadModOptions(MessageReader reader)
+    public static bool TrySendRequest(int targetClientId = -1)
     {
-        if (reader.BytesRemaining < 4) return; // legacy snapshot ended before this block
-        int count = reader.ReadInt32();
-        for (int i = 0; i < count; i++)
+        if (!TryStartWriter(targetClientId, "request", out var writer)) return false;
+        try
         {
-            if (reader.BytesRemaining < 9) break; // int + bool + int
-            int hash = reader.ReadInt32();
-            bool isEnum = reader.ReadBoolean();
-            int value = reader.ReadInt32();
-            VoiceModRegistry.ApplySyncedValue(hash, isEnum, value);
+            writer.Write(RequestKind);
+            return TryFinishWriter(writer, targetClientId, "request");
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "settings.rpc.send_failed",
+                $"op=request target={targetClientId} errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+            return false;
         }
     }
 
-    private static VoiceRoomSettingsSnapshot ReadSettings(MessageReader reader)
+    private static bool TryStartWriter(int targetClientId, string operation, out MessageWriter writer)
     {
-        int backend = reader.ReadInt32();
-        string backendServerUrl = reader.ReadString();
-        if (backendServerUrl.Length > MaxBackendServerUrlChars)
-            backendServerUrl = backendServerUrl.Substring(0, MaxBackendServerUrlChars);
-        float maxChatDistance = reader.ReadSingle();
-        int falloffMode = reader.ReadInt32();
-        int occlusionMode = reader.ReadInt32();
-        bool wallsBlockSound = reader.ReadBoolean();
-        bool onlyHearInSight = reader.ReadBoolean();
-        bool impostorHearGhosts = reader.ReadBoolean();
-        bool hearInVent = reader.ReadBoolean();
-        bool ventPrivateChat = reader.ReadBoolean();
-        bool commsSabDisables = reader.ReadBoolean();
-        bool cameraCanHear = reader.ReadBoolean();
-        bool teamRadio = reader.ReadBoolean();
-        bool hasTeamRadioSubSettings = reader.BytesRemaining >= 13;
-        var defaults = VoiceRoomSettingsSnapshot.Defaults;
-        bool teamRadioImpostors = defaults.TeamRadioImpostors;
-        bool teamRadioVampires = defaults.TeamRadioVampires;
-        bool teamRadioLovers = defaults.TeamRadioLovers;
-        if (hasTeamRadioSubSettings)
+        writer = null!;
+        if (targetClientId < -1)
         {
-            teamRadioImpostors = reader.ReadBoolean();
-            teamRadioVampires = reader.ReadBoolean();
-            teamRadioLovers = reader.ReadBoolean();
+            VoiceDiagnostics.Log("settings.rpc.send_deferred", $"op={operation} target={targetClientId} reason=invalid-target");
+            return false;
         }
 
-        bool onlyGhostsCanTalk = reader.ReadBoolean();
-        bool onlyMeetingOrLobby = reader.ReadBoolean();
-        bool muteBlackmailedInMeetings = reader.ReadBoolean();
-        bool muteBlackmailedNextRound = reader.ReadBoolean();
-        bool muteJailedInMeetings = reader.ReadBoolean();
-        bool jailorCanUnmuteJailed = reader.ReadBoolean();
-        bool muteParasiteControlled = reader.ReadBoolean();
-        bool mutePuppeteerControlled = reader.ReadBoolean();
-        bool crewpostorUsesImpostorVoice = reader.ReadBoolean();
-        bool muteSwooperWhileSwooped = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.MuteSwooperWhileSwooped;
-        VoiceRoomSettingsSnapshot clamped;
-        int mediumGhostVoice = reader.BytesRemaining >= 4 ? reader.ReadInt32() : defaults.MediumGhostVoice;
-        bool muteGlitchHacked = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.MuteGlitchHacked;
-        bool muffleBlindedOrFlashedHearing = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.MuffleBlindedOrFlashedHearing;
-        bool muffleHypnotizedDuringHysteria = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.MuffleHypnotizedDuringHysteria;
-        bool onlyMeetingOrLobbyAffectsGhosts = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.OnlyMeetingOrLobbyAffectsGhosts;
-        bool teamRadioInMeetings = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.TeamRadioInMeetings;
-        bool puppeteerHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.PuppeteerHearFromVictim;
-        bool parasiteHearFromVictim = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.ParasiteHearFromVictim;
-        bool teamRadioInTasks = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.TeamRadioInTasks;
-        bool ghostsHearEachOtherUnlimited = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.GhostsHearEachOtherUnlimited;
-        bool jailPersistsAfterJailorDeath = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.JailPersistsAfterJailorDeath;
-        bool gracePeriodEnabled = reader.BytesRemaining > 0 ? reader.ReadBoolean() : defaults.GracePeriodEnabled;
-        float gracePeriodSeconds = reader.BytesRemaining >= 4 ? reader.ReadSingle() : defaults.GracePeriodSeconds;
+        var client = AmongUsClient.Instance;
+        if (client == null)
+        {
+            VoiceDiagnostics.Log("settings.rpc.send_deferred", $"op={operation} target={targetClientId} reason=client-unavailable");
+            return false;
+        }
 
-        clamped = new VoiceRoomSettingsSnapshot(
+        var localPlayer = PlayerControl.LocalPlayer;
+        if (localPlayer == null)
+        {
+            VoiceDiagnostics.Log("settings.rpc.send_deferred", $"op={operation} target={targetClientId} reason=local-player-unavailable");
+            return false;
+        }
+
+        try
+        {
+            writer = client.StartRpcImmediately(
+                localPlayer.NetId,
+                RpcId,
+                SendOption.Reliable,
+                targetClientId);
+            return writer != null;
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "settings.rpc.send_failed",
+                $"op={operation} target={targetClientId} stage=start errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+            return false;
+        }
+    }
+
+    private static bool TryFinishWriter(MessageWriter writer, int targetClientId, string operation)
+    {
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null)
+            {
+                VoiceDiagnostics.Log("settings.rpc.send_deferred", $"op={operation} target={targetClientId} reason=client-lost-before-finish");
+                return false;
+            }
+            client.FinishRpcImmediately(writer);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "settings.rpc.send_failed",
+                $"op={operation} target={targetClientId} stage=finish errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+            return false;
+        }
+    }
+
+    private static string Safe(string? value)
+        => (value ?? string.Empty).Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
+
+    private static List<SyncedModOptionValue> CollectModOptions()
+    {
+        var result = new List<SyncedModOptionValue>();
+        foreach (var entry in VoiceModRegistry.SyncedValues())
+        {
+            if (result.Count >= MaxSyncedModOptions)
+                throw new InvalidOperationException($"too many synced mod options (max={MaxSyncedModOptions})");
+            result.Add(new SyncedModOptionValue(entry.Hash, entry.IsEnum, entry.Value));
+        }
+        return result;
+    }
+
+    internal static byte[] EncodeSnapshotPayload(
+        VoiceRoomSettingsSnapshot settings,
+        IReadOnlyList<SyncedModOptionValue> modOptions)
+    {
+        if (modOptions == null) throw new ArgumentNullException(nameof(modOptions));
+        if (modOptions.Count > MaxSyncedModOptions)
+            throw new ArgumentOutOfRangeException(nameof(modOptions), $"at most {MaxSyncedModOptions} values are allowed");
+
+        settings = NormalizeForWire(settings);
+        var serverUrlBytes = StrictUtf8.GetBytes(settings.BackendServerUrl ?? string.Empty);
+        if (serverUrlBytes.Length > MaxBackendServerUrlBytes)
+            throw new ArgumentOutOfRangeException(nameof(settings), $"backend URL exceeds {MaxBackendServerUrlBytes} UTF-8 bytes");
+
+        int payloadLength = SnapshotHeaderBytes + FixedSettingsBytes + 2 + serverUrlBytes.Length
+            + 2 + modOptions.Count * ModOptionBytes;
+        var payload = new byte[payloadLength];
+        payload[0] = SnapshotSchema;
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(1), checked((ushort)(payloadLength - SnapshotHeaderBytes)));
+
+        int offset = SnapshotHeaderBytes;
+        WriteInt32(payload, ref offset, settings.Backend);
+        WriteSingle(payload, ref offset, settings.MaxChatDistance);
+        WriteInt32(payload, ref offset, settings.FalloffMode);
+        WriteInt32(payload, ref offset, settings.OcclusionMode);
+        WriteBoolean(payload, ref offset, settings.WallsBlockSound);
+        WriteBoolean(payload, ref offset, settings.OnlyHearInSight);
+        WriteBoolean(payload, ref offset, settings.ImpostorHearGhosts);
+        WriteBoolean(payload, ref offset, settings.HearInVent);
+        WriteBoolean(payload, ref offset, settings.VentPrivateChat);
+        WriteBoolean(payload, ref offset, settings.CommsSabDisables);
+        WriteBoolean(payload, ref offset, settings.CameraCanHear);
+        WriteBoolean(payload, ref offset, settings.TeamRadio);
+        WriteBoolean(payload, ref offset, settings.TeamRadioImpostors);
+        WriteBoolean(payload, ref offset, settings.TeamRadioVampires);
+        WriteBoolean(payload, ref offset, settings.TeamRadioLovers);
+        WriteBoolean(payload, ref offset, settings.OnlyGhostsCanTalk);
+        WriteBoolean(payload, ref offset, settings.OnlyMeetingOrLobby);
+        WriteBoolean(payload, ref offset, settings.OnlyMeetingOrLobbyAffectsGhosts);
+        WriteBoolean(payload, ref offset, settings.MuteBlackmailedInMeetings);
+        WriteBoolean(payload, ref offset, settings.MuteBlackmailedNextRound);
+        WriteBoolean(payload, ref offset, settings.MuteJailedInMeetings);
+        WriteBoolean(payload, ref offset, settings.JailorCanUnmuteJailed);
+        WriteBoolean(payload, ref offset, settings.MuteParasiteControlled);
+        WriteBoolean(payload, ref offset, settings.MutePuppeteerControlled);
+        WriteBoolean(payload, ref offset, settings.CrewpostorUsesImpostorVoice);
+        WriteBoolean(payload, ref offset, settings.MuteSwooperWhileSwooped);
+        WriteInt32(payload, ref offset, settings.MediumGhostVoice);
+        WriteBoolean(payload, ref offset, settings.MuteGlitchHacked);
+        WriteBoolean(payload, ref offset, settings.MuffleBlindedOrFlashedHearing);
+        WriteBoolean(payload, ref offset, settings.MuffleHypnotizedDuringHysteria);
+        WriteBoolean(payload, ref offset, settings.TeamRadioInMeetings);
+        WriteBoolean(payload, ref offset, settings.PuppeteerHearFromVictim);
+        WriteBoolean(payload, ref offset, settings.ParasiteHearFromVictim);
+        WriteBoolean(payload, ref offset, settings.TeamRadioInTasks);
+        WriteBoolean(payload, ref offset, settings.GhostsHearEachOtherUnlimited);
+        WriteBoolean(payload, ref offset, settings.JailPersistsAfterJailorDeath);
+        WriteBoolean(payload, ref offset, settings.GracePeriodEnabled);
+        WriteSingle(payload, ref offset, settings.GracePeriodSeconds);
+
+        if (offset != SnapshotHeaderBytes + FixedSettingsBytes)
+            throw new InvalidOperationException("settings schema size invariant failed");
+
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset), checked((ushort)serverUrlBytes.Length));
+        offset += 2;
+        serverUrlBytes.CopyTo(payload.AsSpan(offset));
+        offset += serverUrlBytes.Length;
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset), checked((ushort)modOptions.Count));
+        offset += 2;
+
+        for (int i = 0; i < modOptions.Count; i++)
+        {
+            var value = modOptions[i];
+            WriteInt32(payload, ref offset, value.Hash);
+            WriteBoolean(payload, ref offset, value.IsEnum);
+            WriteInt32(payload, ref offset, value.Value);
+        }
+
+        if (offset != payload.Length)
+            throw new InvalidOperationException("snapshot payload size invariant failed");
+        return payload;
+    }
+
+    internal static bool TryDecodeSnapshotPayload(
+        byte kind,
+        ReadOnlySpan<byte> payload,
+        out VoiceRoomSettingsSnapshot settings,
+        out List<SyncedModOptionValue> modOptions,
+        out string reason)
+    {
+        settings = default;
+        modOptions = new List<SyncedModOptionValue>();
+        reason = string.Empty;
+
+        if (kind == LegacySnapshotKind)
+        {
+            reason = "legacy-unversioned";
+            return false;
+        }
+        if (kind != SnapshotKind)
+        {
+            reason = "unknown-kind";
+            return false;
+        }
+        if (payload.Length > MaxSnapshotPayloadBytes)
+        {
+            reason = "payload-oversized";
+            return false;
+        }
+        if (payload.Length < SnapshotHeaderBytes)
+        {
+            reason = "header-truncated";
+            return false;
+        }
+        if (payload[0] != SnapshotSchema)
+        {
+            reason = "unsupported-schema";
+            return false;
+        }
+        int declaredBodyLength = BinaryPrimitives.ReadUInt16LittleEndian(payload[1..]);
+        if (declaredBodyLength != payload.Length - SnapshotHeaderBytes)
+        {
+            reason = "body-length-mismatch";
+            return false;
+        }
+        if (payload.Length < SnapshotHeaderBytes + FixedSettingsBytes + 4)
+        {
+            reason = "settings-truncated";
+            return false;
+        }
+
+        int offset = SnapshotHeaderBytes;
+        int backend = ReadInt32(payload, ref offset);
+        float maxChatDistance = ReadSingle(payload, ref offset);
+        int falloffMode = ReadInt32(payload, ref offset);
+        int occlusionMode = ReadInt32(payload, ref offset);
+        if (!TryReadBoolean(payload, ref offset, out bool wallsBlockSound)
+            || !TryReadBoolean(payload, ref offset, out bool onlyHearInSight)
+            || !TryReadBoolean(payload, ref offset, out bool impostorHearGhosts)
+            || !TryReadBoolean(payload, ref offset, out bool hearInVent)
+            || !TryReadBoolean(payload, ref offset, out bool ventPrivateChat)
+            || !TryReadBoolean(payload, ref offset, out bool commsSabDisables)
+            || !TryReadBoolean(payload, ref offset, out bool cameraCanHear)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadio)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadioImpostors)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadioVampires)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadioLovers)
+            || !TryReadBoolean(payload, ref offset, out bool onlyGhostsCanTalk)
+            || !TryReadBoolean(payload, ref offset, out bool onlyMeetingOrLobby)
+            || !TryReadBoolean(payload, ref offset, out bool onlyMeetingOrLobbyAffectsGhosts)
+            || !TryReadBoolean(payload, ref offset, out bool muteBlackmailedInMeetings)
+            || !TryReadBoolean(payload, ref offset, out bool muteBlackmailedNextRound)
+            || !TryReadBoolean(payload, ref offset, out bool muteJailedInMeetings)
+            || !TryReadBoolean(payload, ref offset, out bool jailorCanUnmuteJailed)
+            || !TryReadBoolean(payload, ref offset, out bool muteParasiteControlled)
+            || !TryReadBoolean(payload, ref offset, out bool mutePuppeteerControlled)
+            || !TryReadBoolean(payload, ref offset, out bool crewpostorUsesImpostorVoice)
+            || !TryReadBoolean(payload, ref offset, out bool muteSwooperWhileSwooped))
+        {
+            reason = "invalid-boolean";
+            return false;
+        }
+
+        int mediumGhostVoice = ReadInt32(payload, ref offset);
+        if (!TryReadBoolean(payload, ref offset, out bool muteGlitchHacked)
+            || !TryReadBoolean(payload, ref offset, out bool muffleBlindedOrFlashedHearing)
+            || !TryReadBoolean(payload, ref offset, out bool muffleHypnotizedDuringHysteria)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadioInMeetings)
+            || !TryReadBoolean(payload, ref offset, out bool puppeteerHearFromVictim)
+            || !TryReadBoolean(payload, ref offset, out bool parasiteHearFromVictim)
+            || !TryReadBoolean(payload, ref offset, out bool teamRadioInTasks)
+            || !TryReadBoolean(payload, ref offset, out bool ghostsHearEachOtherUnlimited)
+            || !TryReadBoolean(payload, ref offset, out bool jailPersistsAfterJailorDeath)
+            || !TryReadBoolean(payload, ref offset, out bool gracePeriodEnabled))
+        {
+            reason = "invalid-boolean";
+            return false;
+        }
+        float gracePeriodSeconds = ReadSingle(payload, ref offset);
+        if (!float.IsFinite(maxChatDistance) || !float.IsFinite(gracePeriodSeconds))
+        {
+            reason = "non-finite-number";
+            return false;
+        }
+        if (offset != SnapshotHeaderBytes + FixedSettingsBytes)
+        {
+            reason = "settings-size-mismatch";
+            return false;
+        }
+
+        int serverUrlLength = BinaryPrimitives.ReadUInt16LittleEndian(payload[offset..]);
+        offset += 2;
+        if (serverUrlLength > MaxBackendServerUrlBytes || payload.Length - offset < serverUrlLength + 2)
+        {
+            reason = "invalid-backend-url-length";
+            return false;
+        }
+
+        string backendServerUrl;
+        try
+        {
+            backendServerUrl = StrictUtf8.GetString(payload.Slice(offset, serverUrlLength));
+        }
+        catch (DecoderFallbackException)
+        {
+            reason = "invalid-backend-url-utf8";
+            return false;
+        }
+        offset += serverUrlLength;
+
+        int modOptionCount = BinaryPrimitives.ReadUInt16LittleEndian(payload[offset..]);
+        offset += 2;
+        if (modOptionCount > MaxSyncedModOptions
+            || payload.Length - offset != modOptionCount * ModOptionBytes)
+        {
+            reason = "invalid-mod-option-block";
+            return false;
+        }
+
+        var parsedOptions = new List<SyncedModOptionValue>(modOptionCount);
+        for (int i = 0; i < modOptionCount; i++)
+        {
+            int hash = ReadInt32(payload, ref offset);
+            if (!TryReadBoolean(payload, ref offset, out bool isEnum))
+            {
+                reason = "invalid-mod-option-kind";
+                return false;
+            }
+            int value = ReadInt32(payload, ref offset);
+            parsedOptions.Add(new SyncedModOptionValue(hash, isEnum, value));
+        }
+        if (offset != payload.Length)
+        {
+            reason = "trailing-data";
+            return false;
+        }
+
+        settings = new VoiceRoomSettingsSnapshot(
             backend,
             backendServerUrl,
             maxChatDistance,
@@ -216,8 +419,69 @@ internal static class VoiceRoomSettingsRpc
             jailPersistsAfterJailorDeath,
             gracePeriodEnabled,
             gracePeriodSeconds).Clamp();
-        ReadModOptions(reader);
-        return clamped;
+        modOptions = parsedOptions;
+        return true;
+    }
+
+    internal static bool ApplyDecodedModOptions(
+        bool trusted,
+        System.Collections.Generic.IReadOnlyList<SyncedModOptionValue> values,
+        System.Action<int, bool, int> apply)
+    {
+        if (!trusted) return false;
+        for (int i = 0; i < values.Count; i++)
+        {
+            var value = values[i];
+            apply(value.Hash, value.IsEnum, value.Value);
+        }
+        return true;
+    }
+
+    private static VoiceRoomSettingsSnapshot NormalizeForWire(VoiceRoomSettingsSnapshot settings)
+    {
+        var normalized = settings.Clamp();
+        var defaults = VoiceRoomSettingsSnapshot.Defaults;
+        if (!float.IsFinite(normalized.MaxChatDistance))
+            normalized = normalized with { MaxChatDistance = defaults.MaxChatDistance };
+        if (!float.IsFinite(normalized.GracePeriodSeconds))
+            normalized = normalized with { GracePeriodSeconds = defaults.GracePeriodSeconds };
+        return normalized;
+    }
+
+    private static void WriteInt32(byte[] buffer, ref int offset, int value)
+    {
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(offset), value);
+        offset += 4;
+    }
+
+    private static int ReadInt32(ReadOnlySpan<byte> buffer, ref int offset)
+    {
+        int value = BinaryPrimitives.ReadInt32LittleEndian(buffer[offset..]);
+        offset += 4;
+        return value;
+    }
+
+    private static void WriteSingle(byte[] buffer, ref int offset, float value)
+    {
+        BinaryPrimitives.WriteSingleLittleEndian(buffer.AsSpan(offset), value);
+        offset += 4;
+    }
+
+    private static float ReadSingle(ReadOnlySpan<byte> buffer, ref int offset)
+    {
+        float value = BinaryPrimitives.ReadSingleLittleEndian(buffer[offset..]);
+        offset += 4;
+        return value;
+    }
+
+    private static void WriteBoolean(byte[] buffer, ref int offset, bool value)
+        => buffer[offset++] = value ? (byte)1 : (byte)0;
+
+    private static bool TryReadBoolean(ReadOnlySpan<byte> buffer, ref int offset, out bool value)
+    {
+        byte raw = buffer[offset++];
+        value = raw != 0;
+        return raw <= 1;
     }
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
@@ -230,29 +494,54 @@ internal static class VoiceRoomSettingsRpc
             try
             {
                 var kind = reader.ReadByte();
-                if (kind == SnapshotKind)
+                if (kind == SnapshotKind || kind == LegacySnapshotKind)
                 {
-                    var settings = ReadSettings(reader);
                     if (AmongUsClient.Instance?.AmHost == true) return;
                     if (!VoiceHostAuthority.IsTrustedHostSender(__instance,
                             VoiceChatRoom.Current?.CurrentSnapshot,
                             "rpc",
                             out var sender,
-                            out var reason,
+                            out var authReason,
                             out var hostClientId,
                             out var hostPlayerId))
                     {
                         VoiceDiagnostics.Log("settings.snapshot.rejected",
-                            $"{sender.ToDiagnosticFields()} reason={reason} hostClient={hostClientId} hostPlayer={hostPlayerId}");
+                            $"{sender.ToDiagnosticFields()} reason={authReason} hostClient={hostClientId} hostPlayer={hostPlayerId}");
                         // Stale host id (e.g. post-migration): re-request a fresh snapshot.
                         VoiceChatRoom.NoteHostSettingsSnapshotRejected();
                         return;
                     }
 
-                    VoiceRoomSettingsState.ApplyRemote(settings);
+                    // The unversioned kind-1 payload was extended in-place across many releases.
+                    // It is impossible to distinguish all of those layouts safely, so a trusted
+                    // legacy host is asked for a compatible snapshot instead of applying shifted
+                    // settings. Current payloads are bounded before allocating their byte buffer.
+                    if (kind == LegacySnapshotKind || reader.BytesRemaining > MaxSnapshotPayloadBytes)
+                    {
+                        string wireReason = kind == LegacySnapshotKind ? "legacy-unversioned" : "payload-oversized";
+                        VoiceDiagnostics.Log("settings.snapshot.rejected",
+                            $"{sender.ToDiagnosticFields()} reason={wireReason} kind={kind} hostClient={hostClientId} hostPlayer={hostPlayerId}");
+                        VoiceChatRoom.NoteHostSettingsSnapshotRejected();
+                        return;
+                    }
+
+                    var payload = reader.ReadBytes(reader.BytesRemaining);
+                    if (!TryDecodeSnapshotPayload(kind, payload, out var settings, out var modOptions, out var decodeReason))
+                    {
+                        VoiceDiagnostics.Log("settings.snapshot.rejected",
+                            $"{sender.ToDiagnosticFields()} reason={decodeReason} kind={kind} hostClient={hostClientId} hostPlayer={hostPlayerId}");
+                        VoiceChatRoom.NoteHostSettingsSnapshotRejected();
+                        return;
+                    }
+
+                    // Everything is still inert here. Mutate host-synced state only after both
+                    // sender authorization and complete, exact schema validation have succeeded.
+                    VoiceRoomSettingsState.ApplyRemote(settings, AmongUsClient.Instance?.GameId ?? 0);
+                    VoiceModRegistry.BeginRemoteSync();
+                    ApplyDecodedModOptions(trusted: true, modOptions, VoiceModRegistry.ApplySyncedValue);
                     VoiceChatRoom.NoteHostSettingsSnapshotApplied("rpc", hostClientId, hostPlayerId);
                     VoiceDiagnostics.Log("settings.snapshot.applied",
-                        $"{sender.ToDiagnosticFields()} kind=host-snapshot hostClient={hostClientId} hostPlayer={hostPlayerId}");
+                        $"{sender.ToDiagnosticFields()} kind=host-snapshot schema={SnapshotSchema} hostClient={hostClientId} hostPlayer={hostPlayerId}");
                     return;
                 }
 

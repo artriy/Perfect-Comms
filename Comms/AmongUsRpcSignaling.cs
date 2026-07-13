@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
+using System.Threading;
 using HarmonyLib;
 using Hazel;
 
@@ -18,14 +19,161 @@ internal enum SignalMsgType : byte
     Restart = 6,
 }
 
+internal readonly record struct SignalingSubscription(long Id)
+{
+    public bool IsValid => Id > 0;
+}
+
 internal static class AmongUsRpcSignaling
 {
     public const byte SignalingRpcId = 209;
     internal const int MaxDecompressedPayloadBytes = 256 * 1024;
+    private static readonly object SubscriberSync = new();
+    private static readonly SignalingHelloMailbox DeferredHellos = new();
+    private static Action<int, SignalMsgType, byte[]>? _subscriber;
+    private static long _subscriberGeneration;
 
-    public static event Action<int, SignalMsgType, byte[]>? OnMessage;
+    internal static SignalingSubscription RegisterSubscriber(Action<int, SignalMsgType, byte[]> subscriber)
+    {
+        if (subscriber == null) throw new ArgumentNullException(nameof(subscriber));
+        lock (SubscriberSync)
+        {
+            var generation = NextSubscriberGenerationLocked();
+            var replaced = _subscriber != null;
+            _subscriber = subscriber;
+            VoiceDiagnostics.Log(
+                "signaling.rpc.subscriber",
+                $"action=register generation={generation} replaced={replaced.ToString().ToLowerInvariant()} deferredHellos={DeferredHellos.Count}");
+            return new SignalingSubscription(generation);
+        }
+    }
 
-    public static void Send(int targetClientId, SignalMsgType type, byte[] payload)
+    internal static void UnregisterSubscriber(SignalingSubscription subscription)
+    {
+        if (!subscription.IsValid) return;
+        lock (SubscriberSync)
+        {
+            if (subscription.Id != _subscriberGeneration)
+            {
+                VoiceDiagnostics.Log(
+                    "signaling.rpc.subscriber",
+                    $"action=unregister-ignored generation={subscription.Id} currentGeneration={_subscriberGeneration} reason=stale-owner");
+                return;
+            }
+
+            _subscriber = null;
+            VoiceDiagnostics.Log(
+                "signaling.rpc.subscriber",
+                $"action=unregister generation={subscription.Id} deferredHellos={DeferredHellos.Count}");
+        }
+    }
+
+    internal static void ReplayDeferredHellos(SignalingSubscription subscription)
+    {
+        if (!subscription.IsValid || !TryGetCurrentScope(out var scope)) return;
+
+        Action<int, SignalMsgType, byte[]>? subscriber;
+        lock (SubscriberSync)
+        {
+            if (subscription.Id != _subscriberGeneration) return;
+            subscriber = _subscriber;
+        }
+        if (subscriber == null) return;
+
+        var replay = DeferredHellos.Drain(
+            scope,
+            IsCurrentRosterClient,
+            Environment.TickCount64,
+            out var expired,
+            out var wrongSession,
+            out var absent);
+        if (replay.Count == 0 && expired == 0 && wrongSession == 0 && absent == 0) return;
+
+        VoiceDiagnostics.Log(
+            "signaling.rpc.deferred-drain",
+            $"generation={subscription.Id} replay={replay.Count} expired={expired} wrongSession={wrongSession} absent={absent}");
+
+        for (var index = 0; index < replay.Count; index++)
+        {
+            var hello = replay[index];
+            lock (SubscriberSync)
+            {
+                if (subscription.Id != _subscriberGeneration || _subscriber == null)
+                {
+                    // Drain removed the whole batch. If ownership changed during replay, restore
+                    // every not-yet-dispatched Hello while registration is blocked by this lock;
+                    // restoring only the current item would silently lose the rest of the lobby.
+                    var restoreNowMs = Environment.TickCount64;
+                    for (var remaining = index; remaining < replay.Count; remaining++)
+                    {
+                        var pending = replay[remaining];
+                        DeferredHellos.Store(
+                            pending.Scope,
+                            pending.SenderClientId,
+                            pending.SenderNetId,
+                            pending.Payload,
+                            restoreNowMs,
+                            out _);
+                    }
+                    return;
+                }
+                subscriber = _subscriber;
+            }
+
+            try
+            {
+                subscriber.Invoke(hello.SenderClientId, SignalMsgType.Hello, hello.Payload);
+                VoiceDiagnostics.Log(
+                    "signaling.rpc.deferred-replay",
+                    $"sender={hello.SenderClientId} target={scope.LocalClientId} type=Hello ageMs={Math.Max(0, Environment.TickCount64 - hello.ReceivedAtMs)}");
+            }
+            catch (Exception ex)
+            {
+                // A transient backend/transport failure must not consume the only bootstrap Hello.
+                // The mailbox remains bounded and session-scoped, so retrying it is safe.
+                DeferredHellos.Store(
+                    hello.Scope,
+                    hello.SenderClientId,
+                    hello.SenderNetId,
+                    hello.Payload,
+                    Environment.TickCount64,
+                    out _);
+                VoiceDiagnostics.Log(
+                    "signaling.rpc.error",
+                    $"stage=deferred-replay sender={hello.SenderClientId} action=requeued errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
+            }
+        }
+    }
+
+    internal static bool DeferHello(int senderClientId, uint senderNetId, byte[] payload, string reason)
+    {
+        if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible)
+            || !PeerSessionManager.IsCompatible(version, minCompatible)
+            || !TryGetCurrentScope(out var scope))
+            return false;
+
+        var stored = DeferredHellos.Store(
+            scope,
+            senderClientId,
+            senderNetId,
+            payload,
+            Environment.TickCount64,
+            out var result);
+        VoiceDiagnostics.Log(
+            "signaling.rpc.deferred",
+            $"sender={senderClientId} target={scope.LocalClientId} type=Hello protocol={version} minCompatible={minCompatible} reason={reason} stored={stored.ToString().ToLowerInvariant()} result={result} pending={DeferredHellos.Count}");
+        return stored;
+    }
+
+    internal static void ClearDeferredHellos(string reason)
+    {
+        var count = DeferredHellos.Count;
+        DeferredHellos.Clear();
+        if (count > 0)
+            VoiceDiagnostics.Log("signaling.rpc.deferred-clear", $"reason={LogSafe(reason)} cleared={count}");
+    }
+
+    public static bool Send(int targetClientId, SignalMsgType type, byte[] payload)
     {
         payload ??= Array.Empty<byte>();
         var client = AmongUsClient.Instance;
@@ -34,17 +182,17 @@ internal static class AmongUsRpcSignaling
         if (targetClientId < 0)
         {
             LogReject("tx", -1, targetClientId, type, payloadBytes, 0, "invalid-target");
-            return;
+            return false;
         }
         if (client == null)
         {
             LogReject("tx", -1, targetClientId, type, payloadBytes, 0, "client-unavailable");
-            return;
+            return false;
         }
         if (localPlayer == null)
         {
             LogReject("tx", client.ClientId, targetClientId, type, payloadBytes, 0, "local-player-unavailable");
-            return;
+            return false;
         }
 
         try
@@ -60,6 +208,7 @@ internal static class AmongUsRpcSignaling
             VoiceDiagnostics.Log(
                 "signaling.rpc.tx",
                 $"sender={client.ClientId} target={targetClientId} type={type} payloadBytes={payloadBytes} wireBytes={frame.Length} {DescribePayload(type, payload)}");
+            return true;
         }
         catch (Exception ex)
         {
@@ -68,6 +217,7 @@ internal static class AmongUsRpcSignaling
             VoiceDiagnostics.Log(
                 "signaling.rpc.send-error",
                 $"sender={client.ClientId} target={targetClientId} type={type} payloadBytes={payloadBytes} stage=send errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
+            return false;
         }
     }
 
@@ -228,6 +378,54 @@ internal static class AmongUsRpcSignaling
         return output.ToArray();
     }
 
+    private static long NextSubscriberGenerationLocked()
+    {
+        if (_subscriberGeneration == long.MaxValue) _subscriberGeneration = 0;
+        return ++_subscriberGeneration;
+    }
+
+    private static bool TryGetCurrentScope(out SignalingSessionScope scope)
+    {
+        scope = default;
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null) return false;
+            scope = new SignalingSessionScope(client.GameId, client.ClientId);
+            return scope.IsValid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsCurrentRosterClient(int clientId)
+    {
+        if (clientId < 0) return false;
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null) return false;
+            foreach (var remote in client.allClients)
+                if (remote != null && remote.Id == clientId)
+                    return true;
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private static void RemoveDeferredHello(int senderClientId, string reason)
+    {
+        if (!TryGetCurrentScope(out var scope)) return;
+        if (DeferredHellos.Remove(scope, senderClientId))
+            VoiceDiagnostics.Log(
+                "signaling.rpc.deferred-remove",
+                $"sender={senderClientId} target={scope.LocalClientId} reason={reason} pending={DeferredHellos.Count}");
+    }
+
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
     private static class PlayerControlHandleRpcPatch
     {
@@ -267,9 +465,18 @@ internal static class AmongUsRpcSignaling
                     "signaling.rpc.rx",
                     $"sender={senderClientId} target={targetClientId} type={type} payloadBytes={payload.Length} wireBytes={frame.Length} {DescribePayload(type, payload)}");
 
-                var handler = OnMessage;
+                if (type == SignalMsgType.Bye)
+                    RemoveDeferredHello(senderClientId, "bye-received");
+
+                Action<int, SignalMsgType, byte[]>? handler;
+                lock (SubscriberSync)
+                    handler = _subscriber;
                 if (handler == null)
                 {
+                    if (type == SignalMsgType.Hello
+                        && senderClientId >= 0
+                        && DeferHello(senderClientId, unchecked((uint)__instance.NetId), payload, "no-subscriber"))
+                        return;
                     LogReject("rx", senderClientId, targetClientId, type, payload.Length, frame.Length, "no-subscriber");
                     return;
                 }

@@ -1,9 +1,9 @@
 use crate::proto::{AudioFrame, AudioRing, DeviceInfo, PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE};
 use crate::rtc::NativeCounters;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::input::SyntheticTone as ToneSource;
 pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
@@ -120,6 +120,47 @@ pub fn now_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+/// A monotonic process-local clock for liveness decisions. Wall-clock adjustments must not
+/// extend or prematurely fire the output watchdog.
+pub fn monotonic_ns() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    (EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64)
+        // Zero is reserved as the "not observed" sentinel in PlaybackProgress.
+        .max(1)
+}
+
+#[derive(Default)]
+pub struct PlaybackProgress {
+    started_ns: AtomicU64,
+    callback_ns: AtomicU64,
+}
+
+impl PlaybackProgress {
+    pub fn reset(&self) {
+        self.started_ns.store(0, Ordering::Release);
+        self.callback_ns.store(0, Ordering::Release);
+    }
+
+    pub fn mark_started(&self) {
+        self.started_ns.store(monotonic_ns(), Ordering::Release);
+    }
+
+    pub fn mark_callback(&self) {
+        self.callback_ns.store(monotonic_ns(), Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> (u64, u64) {
+        (
+            self.started_ns.load(Ordering::Acquire),
+            self.callback_ns.load(Ordering::Acquire),
+        )
+    }
 }
 
 pub fn peak(samples: &[f32]) -> f32 {
@@ -339,6 +380,7 @@ pub fn spawn_cpal_playback(
     playback: Arc<Mutex<PlaybackRing>>,
     stop: Arc<AtomicBool>,
     counters: Arc<NativeCounters>,
+    progress: Arc<PlaybackProgress>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_output_device(&host, &device_id)?;
@@ -355,8 +397,10 @@ pub fn spawn_cpal_playback(
     let mut s1 = (0.0f32, 0.0f32);
     let mut pos = 1.0f64;
     let fill_counters = counters.clone();
+    let fill_progress = progress.clone();
     let mut fill = move |out: &mut [f32]| {
         let frames = out.len() / out_channels.max(1);
+        fill_progress.mark_callback();
         fill_counters
             .playback_callbacks
             .fetch_add(1, Ordering::Relaxed);
@@ -473,6 +517,7 @@ pub fn spawn_cpal_playback(
     stream
         .play()
         .map_err(|e| format!("output stream play: {e}"))?;
+    progress.mark_started();
     counters.playback_starts.fetch_add(1, Ordering::Relaxed);
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(20));

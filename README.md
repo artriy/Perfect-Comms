@@ -31,6 +31,7 @@ Perfect Comms makes voice chat feel like part of the match. Players talk in-game
 - **Optional Meetings & Lobby Only mode** for a simpler setup
 - **Role-specific voice behavior**
 - **Built-in voice lobby discovery**
+- **Receive-only use is supported** when a player stays muted, has no microphone, or denies mic permission
 - **Simple in-game controls**, plug and play
 
 <br>
@@ -40,6 +41,11 @@ Perfect Comms makes voice chat feel like part of the match. Players talk in-game
 **Proximity by default.** Everyone talks through their own mic and hears each player by how close they are in-game, clear up close and quiet at a distance.
 
 **The host tunes the round.** Hearing range, wall and vision occlusion, ghost and meeting rules, and a meetings-only mode are all host options, so each lobby plays how its host sets it.
+
+**Voice is standalone.** Desktop audio runs in the bundled native Perfect Comms sidecar; Android uses the
+same native media engine in-process. Connection setup travels through authenticated Among Us RPCs and audio
+travels peer-to-peer over WebRTC (or TURN when needed). BetterCrewLink is used only as an optional public-lobby
+directory, not as a private voice backend.
 
 <br>
 
@@ -101,6 +107,12 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 2. Drop `PerfectComms.dll` into `BepInEx/plugins`.
 3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
+Android APK packagers must also merge
+[`release-assets/android/AndroidManifest.xml`](release-assets/android/AndroidManifest.xml) into the
+final APK manifest before signing. This declares `android.permission.RECORD_AUDIO`; copying the DLL
+or manifest fragment beside an already-built APK cannot add that permission. Denying the runtime
+permission keeps receive-only voice available.
+
 ```text
 BepInEx/
 └─ plugins/
@@ -115,7 +127,6 @@ Perfect Comms is fully standalone. It installs in the same `BepInEx/plugins` fol
 
 - Original repo: [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
 - BetterCrewLink: [OhMyGuus/BetterCrewLink](https://github.com/OhMyGuus/BetterCrewLink)
-- Interstellar: [Dolly1016/Interstellar](https://github.com/Dolly1016/Interstellar)
 - Special thanks to [idkimneil](https://github.com/idkimneil), the reason I made this.
 
 <div align="center">
@@ -124,4 +135,4 @@ Perfect Comms is fully standalone. It installs in the same `BepInEx/plugins` fol
 
 </div>
 
-> Perfect Comms is an unofficial mod. It is not affiliated with Innersloth, Among Us, BepInEx, MiraAPI, Reactor, BetterCrewLink, Interstellar, or any supported mods.
+> Perfect Comms is an unofficial mod. It is not affiliated with Innersloth, Among Us, BepInEx, MiraAPI, Reactor, BetterCrewLink, or any supported mods.

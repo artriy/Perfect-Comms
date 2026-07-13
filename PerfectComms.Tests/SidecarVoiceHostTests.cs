@@ -8,14 +8,15 @@ using Xunit;
 public sealed class SidecarVoiceHostTests
 {
     [Fact]
-    public void ReleaseQuiescesSessionAndReusesHealthyHelper()
+    public void ReleaseQuiescesSessionStopsHelperAndKeepsHostReusable()
     {
-        var fake = new FakeSidecarVoiceClient();
+        var firstClient = new FakeSidecarVoiceClient();
+        var secondClient = new FakeSidecarVoiceClient();
         var createCount = 0;
         var host = new SidecarVoiceHostCore(() =>
         {
             createCount++;
-            return fake;
+            return createCount == 1 ? firstClient : secondClient;
         });
 
         var first = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out var failure));
@@ -31,21 +32,24 @@ public sealed class SidecarVoiceHostTests
 
         first.Dispose();
 
-        Assert.Equal(0, fake.HandlerCount);
-        Assert.False(fake.MicActiveCalls[^1]);
-        Assert.False(fake.SyntheticCalls[^1]);
-        Assert.Contains("42", fake.RemovedPeers);
-        Assert.Equal((true, 0f, 0), fake.GameStates[^1]);
-        Assert.Equal(0, fake.DisposeCount);
+        Assert.Equal(0, firstClient.HandlerCount);
+        Assert.False(firstClient.MicActiveCalls[^1]);
+        Assert.False(firstClient.SyntheticCalls[^1]);
+        Assert.Contains("42", firstClient.RemovedPeers);
+        Assert.Equal((true, 0f, 0), firstClient.GameStates[^1]);
+        Assert.Equal(1, firstClient.DisposeCount);
 
         var second = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out failure));
         Assert.Equal(string.Empty, failure);
-        Assert.Equal(7, fake.HandlerCount);
+        Assert.Equal(0, secondClient.HandlerCount);
         Assert.True(second.EnsureStarted("mic-b", "spk-b"));
-        Assert.Equal(1, fake.StartCount);
-        Assert.Equal(1, createCount);
+        Assert.Equal(8, secondClient.HandlerCount);
+        Assert.Equal(1, firstClient.StartCount);
+        Assert.Equal(1, secondClient.StartCount);
+        Assert.Equal(2, createCount);
 
         second.Dispose();
+        Assert.Equal(1, secondClient.DisposeCount);
     }
 
     [Fact]
@@ -109,8 +113,28 @@ public sealed class SidecarVoiceHostTests
         var second = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
         Assert.True(second.EnsureStarted("mic", "spk"));
         Assert.Equal(2, created);
-        Assert.Equal(7, secondClient.HandlerCount);
+        Assert.Equal(8, secondClient.HandlerCount);
         second.Dispose();
+    }
+
+    [Fact]
+    public void RecoverableDeviceErrorIsForwardedWithoutKillingLease()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        var seen = 0;
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(
+            Callbacks(onRecoverableError: (code, _) =>
+            {
+                Assert.Equal("mic-error", code);
+                seen++;
+            }), out _));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+
+        fake.RaiseRecoverableError("mic-error", "permission temporarily unavailable");
+
+        Assert.Equal(1, seen);
+        Assert.Equal(CaptureHealth.Healthy, lease.Health);
     }
 
     [Fact]
@@ -131,10 +155,13 @@ public sealed class SidecarVoiceHostTests
         Assert.Equal("host-shutdown", failure);
     }
 
-    private static SidecarVoiceCallbacks Callbacks(Action<string>? onDead = null)
+    private static SidecarVoiceCallbacks Callbacks(
+        Action<string>? onDead = null,
+        Action<string, string>? onRecoverableError = null)
         => new(
             (_, _) => { },
             onDead ?? (_ => { }),
+            onRecoverableError ?? ((_, _) => { }),
             (_, _, _, _) => { },
             (_, _, _) => { },
             (_, _, _) => { },
@@ -145,6 +172,7 @@ public sealed class SidecarVoiceHostTests
     {
         private Action<float[], int>? _onFrame;
         private Action<string>? _onDead;
+        private Action<string, string>? _onRecoverableError;
         private Action<string, int, string, string>? _onLocalSdp;
         private Action<string, int, string>? _onLocalCandidate;
         private Action<string, int, string>? _onPeerState;
@@ -153,6 +181,7 @@ public sealed class SidecarVoiceHostTests
 
         public event Action<float[], int>? OnFrame { add => _onFrame += value; remove => _onFrame -= value; }
         public event Action<string>? OnDead { add => _onDead += value; remove => _onDead -= value; }
+        public event Action<string, string>? OnRecoverableError { add => _onRecoverableError += value; remove => _onRecoverableError -= value; }
         public event Action<string, int, string, string>? OnLocalSdp { add => _onLocalSdp += value; remove => _onLocalSdp -= value; }
         public event Action<string, int, string>? OnLocalCandidate { add => _onLocalCandidate += value; remove => _onLocalCandidate -= value; }
         public event Action<string, int, string>? OnPeerState { add => _onPeerState += value; remove => _onPeerState -= value; }
@@ -171,7 +200,7 @@ public sealed class SidecarVoiceHostTests
         public List<(bool Deaf, float Master, int Peers)> GameStates { get; } = new();
 
         public int HandlerCount =>
-            Count(_onFrame) + Count(_onDead) + Count(_onLocalSdp) + Count(_onLocalCandidate) +
+            Count(_onFrame) + Count(_onDead) + Count(_onRecoverableError) + Count(_onLocalSdp) + Count(_onLocalCandidate) +
             Count(_onPeerState) + Count(_onLevel) + Count(_onPeerLevels);
 
         public bool Start(string? micDevice, string? spkDevice)
@@ -205,6 +234,9 @@ public sealed class SidecarVoiceHostTests
             Health = CaptureHealth.Dead;
             _onDead?.Invoke(reason);
         }
+
+        public void RaiseRecoverableError(string code, string message)
+            => _onRecoverableError?.Invoke(code, message);
 
         public void Dispose()
         {

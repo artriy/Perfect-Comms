@@ -37,6 +37,8 @@ require_nonempty() {
 
 if [[ "$config" == "Android" ]]; then
 	require_nonempty "$root/Libs/pc-mobile/libpc_mobile.so"
+	require_nonempty "$root/release-assets/android/AndroidManifest.xml"
+	require_nonempty "$root/release-assets/android/README.md"
 else
 	required_desktop_assets=(
 		"Libs/pc-capture/pc-capture-win-x64.exe"
@@ -89,7 +91,11 @@ dotnet build "$dotnet_project" -c "$config" --nologo -p:RestoreLockedMode=true -
 rm -rf "$output"
 mkdir -p "$output/BepInEx/plugins"
 cp "$dll" "$output/BepInEx/plugins/PerfectComms.dll"
-if [[ "$config" != "Android" ]]; then
+if [[ "$config" == "Android" ]]; then
+	mkdir -p "$output/Android"
+	cp "$root/release-assets/android/AndroidManifest.xml" "$output/Android/AndroidManifest.xml"
+	cp "$root/release-assets/android/README.md" "$output/Android/README.md"
+else
 	helper_src="$root/Libs/pc-capture"
 	helper_dst="$output/BepInEx/plugins/pc-capture"
 	mkdir -p "$helper_dst"

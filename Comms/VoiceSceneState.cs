@@ -10,11 +10,16 @@ internal static class VoiceSceneState
     private static int _lastFrame = -1;
     private static float _nextEndGameProbeTime;
     private static bool _endGameActive;
+    private static bool _endGameSceneHint;
+    private static VoiceGamePhase _lastConfirmedPhase = VoiceGamePhase.Unknown;
 
     public static bool IsEndGameActive
     {
         get
         {
+            if (_endGameSceneHint)
+                return true;
+
             int frame = Time.frameCount;
             if (_lastFrame == frame)
                 return _endGameActive;
@@ -32,6 +37,34 @@ internal static class VoiceSceneState
 
     public static VoiceGamePhase ResolvePhase()
     {
+        var observed = ResolveObservedPhase();
+        var resolved = StabilizeUnknownPhase(observed, _lastConfirmedPhase);
+        if (observed != VoiceGamePhase.Unknown)
+            _lastConfirmedPhase = observed;
+        return resolved;
+    }
+
+    internal static VoiceGamePhase StabilizeUnknownPhase(
+        VoiceGamePhase observed,
+        VoiceGamePhase lastConfirmed)
+        => observed == VoiceGamePhase.Unknown && lastConfirmed != VoiceGamePhase.Unknown
+            ? lastConfirmed
+            : observed;
+
+    internal static void SetEndGameSceneHint(bool active)
+    {
+        _endGameSceneHint = active;
+        _lastFrame = -1;
+        _nextEndGameProbeTime = 0f;
+        if (active)
+        {
+            _endGameActive = true;
+            _lastConfirmedPhase = VoiceGamePhase.EndGame;
+        }
+    }
+
+    private static VoiceGamePhase ResolveObservedPhase()
+    {
         if (IsEndGameActive) return VoiceGamePhase.EndGame;
         if (ExileController.Instance != null) return VoiceGamePhase.Exile;
         if (MeetingHud.Instance != null) return VoiceGamePhase.Meeting;
@@ -46,8 +79,7 @@ internal static class VoiceSceneState
         => phase is VoiceGamePhase.Menu
             or VoiceGamePhase.Lobby
             or VoiceGamePhase.Intro
-            or VoiceGamePhase.EndGame
-            or VoiceGamePhase.Unknown;
+            or VoiceGamePhase.EndGame;
 
     public static bool IsMeetingVoicePhase(VoiceGamePhase phase)
         => phase is VoiceGamePhase.Meeting or VoiceGamePhase.Exile;
@@ -60,5 +92,7 @@ internal static class VoiceSceneState
         _lastFrame = -1;
         _nextEndGameProbeTime = 0f;
         _endGameActive = false;
+        _endGameSceneHint = false;
+        _lastConfirmedPhase = VoiceGamePhase.Unknown;
     }
 }

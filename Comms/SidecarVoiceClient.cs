@@ -27,7 +27,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private int _health = (int)CaptureHealth.Dead;
     private volatile bool _running;
     private readonly float[] _frameScratch = new float[SidecarProtocol.AudioSamples];
-    private string[] _outputDevices = Array.Empty<string>();
+    private volatile string[] _outputDevices = Array.Empty<string>();
     private Thread? _reader;
     internal int PingIntervalMs = 1000;
     internal int MissedPongLimit = 3;
@@ -39,6 +39,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     public event Action<float[], int>? OnFrame;
     public event Action<string>? OnDead;
+    public event Action<string, string>? OnRecoverableError;
     public event Action<string, int, string, string>? OnLocalSdp;
     public event Action<string, int, string>? OnLocalCandidate;
     public event Action<string, int, string>? OnPeerState;
@@ -122,24 +123,14 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 "sidecar.lifecycle",
                 $"event=protocol-ready proto={Proto} rate=48000 sample=f32 outputDevices={outputDevices.Length}");
 
-            if (!string.IsNullOrEmpty(micDevice))
-            {
-                var sel = SidecarProtocol.SelectDeviceFrame(micDevice!);
-                WriteHandshakeCommand(stream, sel, "select-device", DescribeDeviceForDiagnostics(micDevice));
-            }
-
-            if (!string.IsNullOrEmpty(spkDevice))
-            {
-                var selOut = SidecarProtocol.SelectOutputDeviceFrame(spkDevice!);
-                WriteHandshakeCommand(stream, selOut, "select-output-device", DescribeDeviceForDiagnostics(spkDevice));
-            }
-
-            var start = SidecarProtocol.StartFrame();
-            WriteHandshakeCommand(stream, start, "start", "phase=handshake");
+            // The authenticated control/media engine is useful even when this client is muted or
+            // has no microphone. Device/output selection and capture start are applied exactly once
+            // by TryConfigureInitialCapture after current policy is known; doing any of them during
+            // the handshake could block control readiness on a wedged host audio API.
         }
         catch (Exception ex)
         {
-            VoiceDiagnostics.Log("sidecar", "handshake/start exception: " + ex.Message);
+            VoiceDiagnostics.Log("sidecar", "handshake exception: " + ex.Message);
             try { client.Close(); } catch { }
             KillLaunch();
             SetHealth(CaptureHealth.Dead);
@@ -493,11 +484,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     }
 
     internal static string DescribeDeviceForDiagnostics(string? deviceId)
-    {
-        if (string.IsNullOrEmpty(deviceId)) return "default=true";
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(deviceId));
-        return $"default=false idHash={Convert.ToHexString(bytes, 0, 6)} idChars={deviceId.Length}";
-    }
+        => VoiceDiagnostics.DescribeDevice(deviceId);
 
     private static string DescribePeer(string peerId)
         => $"peer=\"{SafeDiagnosticText(peerId, 64)}\"";
@@ -669,6 +656,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         if (launch == null) return;
         var killed = false;
         var exited = false;
+        var hostTerminationRequested = false;
         try
         {
             if (launch.Process != null && !launch.Process.HasExited)
@@ -679,6 +667,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             }
             else
                 exited = launch.Process?.HasExited ?? true;
+
+            // Under Wine/CrossOver, launch.Process is start.exe rather than the native Unix
+            // helper. The authenticated stop frame above is graceful; SIGTERM is the final
+            // process-level backstop so a broken IPC connection cannot leave pc-capture behind
+            // after the room lease ends. launch.Pid comes from the helper-owned handshake file.
+            if (WineEnvironment.IsWine && launch.Pid > 0)
+            {
+                WineEnvironment.HostExec("/bin/kill", $"-TERM {launch.Pid}");
+                hostTerminationRequested = true;
+            }
         }
         catch (Exception ex)
         {
@@ -697,7 +695,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         {
             VoiceDiagnostics.Log("sidecar.lifecycle", $"event=handshake-cleanup-failed pid={launch.Pid} error={ExceptionDiagnostic(ex)}");
         }
-        VoiceDiagnostics.Log("sidecar.lifecycle", $"event=process-release pid={launch.Pid} killed={killed} exited={exited}");
+        VoiceDiagnostics.Log(
+            "sidecar.lifecycle",
+            $"event=process-release pid={launch.Pid} launcherKilled={killed} launcherExited={exited} hostTerminationRequested={hostTerminationRequested}");
     }
 
     private void ReadLoop(object? state)
@@ -810,7 +810,29 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             VoiceDiagnostics.Log(
                 "sidecar.helper-error",
                 $"code=\"{SafeDiagnosticText(code, 64)}\" message=\"{SafeDiagnosticText(msg, 240)}\" payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
-            SetHealth(CaptureHealth.Dead);
+            // The native capture loop reports mic-error once per outage, then keeps retrying the
+            // input device while the WebRTC/control connection and speaker remain healthy. Treating
+            // that recoverable device outage as transport death poisoned Health without raising the
+            // restart callback, permanently stopping managed signaling even after capture recovered.
+            if (IsRecoverableHelperError(code))
+            {
+                VoiceDiagnostics.Log(
+                    "sidecar.helper-error.recoverable",
+                    $"code=\"{SafeDiagnosticText(code, 64)}\" action=keep-control-transport-alive nativeRetry=true");
+                try { OnRecoverableError?.Invoke(code, msg); }
+                catch (Exception ex)
+                {
+                    VoiceDiagnostics.Log(
+                        "sidecar.event",
+                        $"op=recoverable-error event=handler-failed error={ExceptionDiagnostic(ex)}");
+                }
+                return;
+            }
+
+            // Unknown streaming errors are fatal unless the protocol explicitly classifies them as
+            // recoverable. RaiseDead (rather than merely changing Health) gives the host/backend one
+            // coherent restart path and preserves the exactly-once dead notification contract.
+            RaiseDead($"helper error code={SafeDiagnosticText(code, 64)}");
         }
         else if (op == "pong")
         {
@@ -902,6 +924,27 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             else
                 VoiceDiagnostics.Log("sidecar.control.reject", $"op=peer-levels reason=invalid-fields payloadBytes={payloadBytes}");
         }
+        else if (op == "devices")
+        {
+            if (!TryReadDeviceUpdate(json, out var inputDevices, out var outputDevices))
+            {
+                VoiceDiagnostics.Log(
+                    "sidecar.control.reject",
+                    $"op=devices reason=invalid-fields payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
+                return;
+            }
+
+            _outputDevices = outputDevices;
+#if WINDOWS
+            // Device-selection and synthetic-capture changes can alter the live lists. Publish the
+            // helper's authoritative response instead of leaving the settings UI on its startup probe.
+            VoiceChatLocalSettings.SetMicDeviceNamesFromSidecar(inputDevices);
+            VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(outputDevices);
+#endif
+            VoiceDiagnostics.Log(
+                "sidecar.control.rx",
+                $"op=devices result=parsed inputs={inputDevices.Length} outputs={outputDevices.Length} payloadBytes={payloadBytes}");
+        }
         else if (op == "stats")
         {
             HandleNativeStats(json, payloadBytes);
@@ -910,6 +953,19 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             VoiceDiagnostics.Log(
                 "sidecar.control.reject",
                 $"op=\"{SafeDiagnosticText(op, 64)}\" reason=unknown-op payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
+    }
+
+    internal static bool TryReadDeviceUpdate(string json, out string[] inputDevices, out string[] outputDevices)
+    {
+        inputDevices = Array.Empty<string>();
+        outputDevices = Array.Empty<string>();
+        if (!SidecarProtocol.TryReadDevices(json, out var inputs)
+            || !SidecarProtocol.TryReadOutputDevices(json, out var outputs))
+            return false;
+
+        inputDevices = inputs.ToArray();
+        outputDevices = outputs.ToArray();
+        return true;
     }
 
     private static void HandleNativeStats(string json, int payloadBytes)
@@ -998,6 +1054,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     }
 
     private void SetHealth(CaptureHealth health) => Volatile.Write(ref _health, (int)health);
+
+    internal static bool IsRecoverableHelperError(string? code)
+        => string.Equals(code, "mic-error", StringComparison.OrdinalIgnoreCase);
 
     private void RaiseDead(string reason)
     {

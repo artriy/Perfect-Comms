@@ -30,13 +30,13 @@
 
 	<!--
     Platform configurations:
-      Windows  – default PC build; uses the Interstellar voice backend for mic/speaker.
-      Android  – Android/mobile build; uses Unity Microphone API + AudioSource for mic/speaker.
+      Desktop  – native pc-capture sidecar for media, capture, and playback.
+      Android  – in-process pc-mobile engine with Unity capture/playback surfaces.
     To build for Android, set the Configuration to "Android" in your IDE or run:
       dotnet build -c Android
   -->
 
-	<!-- Windows build (default): Interstellar voice backend -->
+	<!-- Desktop build (default): native sidecar media engine -->
 	<PropertyGroup Condition="'$(Configuration)' != 'Android'">
 		<DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
 	</PropertyGroup>
@@ -56,9 +56,6 @@
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
 		<!-- These assemblies are loaded from embedded resources at runtime. Keep them
 		     explicit so a clean restore always stages the exact files embedded below. -->
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.7" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.Text.Json" Version="8.0.6" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIOClient" Version="3.1.2" GeneratePathProperty="true" />
@@ -69,17 +66,6 @@
 
 	<ItemGroup>
 		<EmbeddedResource Include="Resources\**" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<Reference Include="Interstellar">
-			<HintPath>Libs\Interstellar.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
-		<Reference Include="Interstellar.Messages">
-			<HintPath>Libs\Interstellar.Messages.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' != 'Android'">
@@ -162,24 +148,11 @@
 		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' == 'Android'">
 		<Error Condition="!Exists('Libs\pc-mobile\libpc_mobile.so')"
 			Text="Missing Android release engine: Libs\pc-mobile\libpc_mobile.so. Build it with cargo-ndk for arm64-v8a before packaging." />
+		<Error Condition="!Exists('release-assets\android\AndroidManifest.xml')"
+			Text="Missing Android RECORD_AUDIO manifest fragment: release-assets\android\AndroidManifest.xml" />
 	</Target>
 
 	<ItemGroup>
-		<EmbeddedResource Include="Libs\Interstellar.dll">
-			<LogicalName>Lib.Interstellar.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\Interstellar.Messages.dll">
-			<LogicalName>Lib.Interstellar.Messages.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_DependencyInjection_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.DependencyInjection.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Logging_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.Logging.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Logging.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgSystem_Diagnostics_DiagnosticSource)\lib\netstandard2.0\System.Diagnostics.DiagnosticSource.dll">
-			<LogicalName>Lib.System.Diagnostics.DiagnosticSource.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="$(PkgSystem_Text_Encodings_Web)\lib\net6.0\System.Text.Encodings.Web.dll">
 			<LogicalName>Lib.System.Text.Encodings.Web.dll</LogicalName>
 		</EmbeddedResource>

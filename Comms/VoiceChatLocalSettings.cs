@@ -138,12 +138,12 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> SpeakingBarY { get; }
     public ConfigEntry<float> OverlayScale { get; }
 
-    // User-facing toggle (default on). When on, the BetterCrewLink backend offers a TURN relay alongside
+    // User-facing toggle (default on). When on, the native WebRTC engine offers a TURN relay alongside
     // STUN so peers that can't establish a direct connection (strict/symmetric NAT, firewalls) still get
-    // audio. Only the peers that actually need it relay; everyone else stays direct. BCL backend only.
+    // audio. Only the peers that actually need it relay; everyone else stays direct.
     public ConfigEntry<bool> NatFix { get; }
 
-    // Wine/Proton (Linux) only. When on, the BCL backend forces TURN-relay-only ICE and adds a TURN-over-TCP
+    // Wine/Proton (Linux) only. When on, the native engine forces TURN-relay-only ICE and adds a TURN-over-TCP
     // candidate, because Wine's local ICE candidate gathering is unreliable and direct/STUN never connect.
     // Ignored on native Windows. Default on.
     public ConfigEntry<bool> WineForceRelay { get; }
@@ -161,10 +161,9 @@ public class VoiceChatLocalSettings
     public ConfigEntry<VoiceLobbyBrowserSource> LobbyBrowserSource { get; }
     public ConfigEntry<string> LobbyRegistryUrl { get; }
     public ConfigEntry<string> BetterCrewLinkServerUrl { get; }
-    public ConfigEntry<string> InterstellarServerUrl { get; }
 
-    // Config-file only (not shown in the in-game menu): the TURN relay used by Nat Fix. Defaults to
-    // BetterCrewLink's public relay; power users can point these at their own coturn server.
+    // Config-file only (not shown in the in-game menu): optional custom TURN credentials for Nat Fix.
+    // Empty values use short-lived managed credentials from the configured Perfect Comms registry.
     public ConfigEntry<string> TurnServerUrl { get; }
     public ConfigEntry<string> TurnUsername { get; }
     public ConfigEntry<string> TurnCredential { get; }
@@ -384,9 +383,9 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Enable Perfect Comms diagnostic files and debug log output."));
 
         SyntheticMicTone = config.Bind("Debug.Advanced", "SyntheticMicTone", false,
-            new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the active voice backend instead of relying on physical microphone audio."));
+            new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the native voice engine instead of relying on physical microphone audio."));
         MicCalibrationDiagnostics = config.Bind("Debug", "MicCalibrationDiagnostics", false,
-            new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for BetterCrewLink."));
+            new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for the native voice engine."));
 
         // Debug toggles always start OFF on every game launch, even if a previous session left one on. They
         // still work when turned on mid-session; they just never persist across a restart, so diagnostic
@@ -410,11 +409,11 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Voice lobby registry endpoint"));
 
         BetterCrewLinkServerUrl = config.Bind("Voice Server", "BetterCrewLinkServerUrl",
-            VoiceEndpointSettings.DefaultBetterCrewLinkServerUrl,
-            new ConfigDescription("BetterCrewLink Socket.IO signaling server URL."));
+            BetterCrewLinkLobbyEndpoint.DefaultServerUrl,
+            new ConfigDescription("Optional BetterCrewLink public-lobby directory endpoint. Voice audio and signaling do not use this service."));
 
         NatFix = config.Bind("Voice Server", "NatFix", true,
-            new ConfigDescription("Route voice through a TURN relay when a direct peer-to-peer connection can't be established (fixes no/garbled audio behind strict or symmetric NATs and firewalls). Only peers that actually need it relay; everyone else stays direct. BetterCrewLink backend only."));
+            new ConfigDescription("Route Perfect Comms WebRTC through TURN when a direct peer-to-peer connection cannot be established. Only peers that need relay use it; everyone else stays direct."));
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
             "",
@@ -427,10 +426,6 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Credential (password) for a custom Nat Fix TURN relay (only used when TurnServerUrl is set)."));
         WineForceRelay = config.Bind("Voice Server", "WineForceRelay", false,
             new ConfigDescription("Wine/Proton (Linux) only opt-in: force TURN-relay-only voice (and add TURN-over-TCP). Off by default - Wine now uses the same automatic ICE selection as native Windows, using TURN only when direct/STUN fail. Enable only if your Wine setup still cannot connect. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
-
-        InterstellarServerUrl = config.Bind("Voice Server", "InterstellarServerUrl",
-            VoiceEndpointSettings.DefaultInterstellarServerUrl,
-            new ConfigDescription("Interstellar voice server URL. FangkuaiYa's public server is the default fallback."));
 
         UpdateNotificationsEnabled = config.Bind("Updates", "NotificationsEnabled", true,
             new ConfigDescription("Show Perfect Comms update notifications on the main menu"));
@@ -491,11 +486,14 @@ public class VoiceChatLocalSettings
             try
             {
 #if ANDROID
-                foreach (var dev in AndroidMicrophone.GetDeviceNames())
+                if (Application.HasUserAuthorization(UserAuthorization.Microphone))
                 {
-                    string n = dev?.Trim() ?? "";
-                    if (!string.IsNullOrEmpty(n))
-                        mics.Add(n);
+                    foreach (var dev in AndroidMicrophone.GetDeviceNames())
+                    {
+                        string n = dev?.Trim() ?? "";
+                        if (!string.IsNullOrEmpty(n))
+                            mics.Add(n);
+                    }
                 }
 #endif
             }
@@ -669,10 +667,6 @@ public class VoiceChatLocalSettings
         else if (configEntry == StartDeafened)
         {
             VoiceChatHudState.SetSpeakerMuted(StartDeafened.Value);
-        }
-        else if (configEntry == BetterCrewLinkServerUrl || configEntry == InterstellarServerUrl)
-        {
-            VoiceChatRoom.Current?.Rejoin();
         }
         else if (configEntry == NatFix || configEntry == TurnServerUrl ||
                  configEntry == TurnUsername || configEntry == TurnCredential ||

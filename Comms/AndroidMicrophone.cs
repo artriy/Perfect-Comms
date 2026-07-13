@@ -9,24 +9,14 @@ namespace VoiceChatPlugin.VoiceChat;
 /// <summary>
 /// Android microphone capture backend.
 ///
-/// Mirrors Nebula's ManualMicrophone + PushAudioData pattern from NoSVCRoom.cs.
-///
-/// Nebula's approach (from the commented-out section preserved in NoSVCRoom.cs):
+/// Uses Unity's looping Microphone clip as the platform capture surface:
 /// <code>
 ///   Il2CppStructArray&lt;float&gt; audioData = new((long)sampleCount);
 ///   micAudioClip.GetData(audioData, lastPosition.Value);
-///   unityMic?.PushAudioData(audioData);
 /// </code>
 ///
-/// SetMicrophone on Android calls:
-/// <code>
-///   interstellarRoom.Microphone = new ManualMicrophone();
-/// </code>
-/// which means the microphone object itself is created fresh (no device name needed).
-/// Audio is pushed into it via PushAudioData each frame.
-///
-/// In VoiceChat (which uses Hazel transport instead of Interstellar) we replicate
-/// this by reading Unity Microphone each frame and directly encoding + enqueuing.
+/// Perfect Comms reads newly captured frames and pushes them directly into the native pc-mobile
+/// engine for WebRTC encoding and transport.
 /// </summary>
 internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 {
@@ -37,15 +27,16 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     private AudioClip? _clip;
     private int        _lastPos;
     private bool       _recording;
+    private bool       _captureRequested;
     private float      _volume = 1f;
     private long _lastAdvanceTicks;
-    private static readonly long DeadAfterTicks = TimeSpan.FromSeconds(15).Ticks;
+    private static readonly long DeadAfterTicks = 15L * System.Diagnostics.Stopwatch.Frequency;
     private long       _lastProgressMs;
-    private long       _lastRestartMs;
-    private int        _restartCount;
+    private long       _nextRecoveryMs;
+    private int        _recoveryAttempt;
     private const int  StallTimeoutMs      = 1500;
-    private const int  RestartCooldownMs   = 2000;
-    private const int  MaxRestartsPerStart = 8;
+    private const int  InitialRetryDelayMs = 250;
+    private const int  MaxRetryDelayMs     = 30_000;
 
     // Fires on main thread (via Tick) with (float[] buf, int length)
     public event Action<float[], int>? DataAvailable;
@@ -56,6 +47,9 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     private float[] _pollBuf = Array.Empty<float>();
     private Il2CppStructArray<float>? _il2cppPollBuf;
 
+    public bool IsCapturing => _recording && _clip != null;
+    public bool CaptureRequested => _captureRequested;
+
     public void SetVolume(float v) => _volume = Math.Clamp(v, 0f, 4f);
 
     /// <summary>
@@ -63,33 +57,26 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     /// falls back to first available device if the given name is empty/invalid.
     /// Never passes null to Microphone.Start (IL2CPP does not accept null here).
     /// </summary>
-    public void Start(string deviceName)
+    public bool Start(string deviceName)
     {
         Stop();
 
-        // Nebula: falls back to first enumerated device
-        if (string.IsNullOrEmpty(deviceName) || !DeviceExists(deviceName))
-            deviceName = Microphone.devices.Length > 0 ? Microphone.devices[0] : "";
-
-        _device    = deviceName;
-        _clip      = Microphone.Start(_device, true, ClipSeconds, SampleRate);
-        _lastPos   = 0;
-        _recording = true;
-        Volatile.Write(ref _lastAdvanceTicks, System.Diagnostics.Stopwatch.GetTimestamp());
-        _lastProgressMs = Environment.TickCount64;
-        _restartCount   = 0;
-
-        VoiceDiagnostics.DebugInfo(
-            $"[VC] Android mic started: '{(string.IsNullOrEmpty(_device) ? "default" : _device)}'");
+        _device = ResolveDevice(deviceName);
+        _captureRequested = true;
+        _recoveryAttempt = 0;
+        _nextRecoveryMs = 0;
+        return TryStartCapture(Environment.TickCount64, "initial");
     }
 
     public void Stop()
     {
+        _captureRequested = false;
         _recording = false;
-        if (!string.IsNullOrEmpty(_device))
-            Microphone.End(_device);
+        EndCurrentCapture();
         _clip = null;
         _il2cppPollBuf = null;
+        _nextRecoveryMs = 0;
+        _recoveryAttempt = 0;
     }
 
     /// <summary>
@@ -107,85 +94,172 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     /// </summary>
     public void Tick()
     {
-        if (!_recording || _clip == null) return;
+        if (!_captureRequested) return;
+        if (!_recording || _clip == null)
+        {
+            MaybeRetryCapture();
+            return;
+        }
 
-        int pos = Microphone.GetPosition(_device);
+        int clipSamples;
+        try
+        {
+            clipSamples = _clip.samples;
+            if (clipSamples <= 0)
+                throw new InvalidOperationException("microphone clip has no samples");
+        }
+        catch (Exception ex)
+        {
+            RecoverFromReadFailure(ex.Message);
+            return;
+        }
+
+        int pos;
+        try { pos = Microphone.GetPosition(_device); }
+        catch { pos = -1; }
         if (pos < 0) { MaybeRecoverFromStall(); return; }
 
         int newSamples = pos >= _lastPos
             ? pos - _lastPos
-            : (_clip.samples - _lastPos) + pos;
+            : (clipSamples - _lastPos) + pos;
 
         if (newSamples <= 0) { MaybeRecoverFromStall(); return; }
 
         Volatile.Write(ref _lastAdvanceTicks, System.Diagnostics.Stopwatch.GetTimestamp());
         _lastProgressMs = Environment.TickCount64;
+        _recoveryAttempt = 0;
+        _nextRecoveryMs = 0;
 
         // Cap main-thread work: drop oldest backlog so a slow frame can't compound into a death spiral.
         const int MaxSamplesPerTick = SampleRate / 5;
         if (newSamples > MaxSamplesPerTick)
         {
-            _lastPos = (_lastPos + (newSamples - MaxSamplesPerTick)) % _clip.samples;
+            _lastPos = (_lastPos + (newSamples - MaxSamplesPerTick)) % clipSamples;
             newSamples = MaxSamplesPerTick;
         }
 
-        int start = _lastPos % _clip.samples;
-        int firstRead = Math.Min(newSamples, _clip.samples - start);
-        ReadAndPublish(start, firstRead);
+        try
+        {
+            int start = _lastPos % clipSamples;
+            int firstRead = Math.Min(newSamples, clipSamples - start);
+            ReadAndPublish(start, firstRead);
 
-        int remaining = newSamples - firstRead;
-        if (remaining > 0)
-            ReadAndPublish(0, remaining);
+            int remaining = newSamples - firstRead;
+            if (remaining > 0)
+                ReadAndPublish(0, remaining);
+        }
+        catch (Exception ex)
+        {
+            RecoverFromReadFailure(ex.Message);
+            return;
+        }
 
         _lastPos = pos;
     }
 
-    private enum StallDecision { None, Restart, GiveUpLogOnce }
-
-    private static StallDecision DecideStallAction(long now, long lastProgressMs, long lastRestartMs, int restartCount)
+    private void RecoverFromReadFailure(string failure)
     {
-        if (now - lastProgressMs < StallTimeoutMs) return StallDecision.None;
-        if (now - lastRestartMs  < RestartCooldownMs) return StallDecision.None;
-        if (restartCount >= MaxRestartsPerStart)
-            return restartCount == MaxRestartsPerStart ? StallDecision.GiveUpLogOnce : StallDecision.None;
-        return StallDecision.Restart;
+        var now = Environment.TickCount64;
+        VoiceDiagnostics.Log("voice.unity.mic.restart",
+            $"read-failed device=\"{DescribeDevice()}\" attempt={_recoveryAttempt + 1} error=\"{SafeDiagnostic(failure)}\"");
+        EndCurrentCapture();
+        _clip = null;
+        _recording = false;
+        ScheduleRecovery(now, "read failed");
     }
 
     private void MaybeRecoverFromStall()
     {
-        if (!_recording || _clip == null) return;
+        if (!_captureRequested || !_recording || _clip == null) return;
         long now = Environment.TickCount64;
-        switch (DecideStallAction(now, _lastProgressMs, _lastRestartMs, _restartCount))
-        {
-            case StallDecision.GiveUpLogOnce:
-                _restartCount++;
-                VoiceDiagnostics.Log("bcl.unity.mic.restart",
-                    $"giveUp device=\"{(string.IsNullOrEmpty(_device) ? "default" : _device)}\" attempts={MaxRestartsPerStart} stallMs={now - _lastProgressMs}");
-                return;
-            case StallDecision.Restart:
-                _restartCount++;
-                _lastRestartMs = now;
-                VoiceDiagnostics.Log("bcl.unity.mic.restart",
-                    $"reacquire device=\"{(string.IsNullOrEmpty(_device) ? "default" : _device)}\" attempt={_restartCount} stallMs={now - _lastProgressMs} lastPos={_lastPos}");
-                RestartCapture();
-                return;
-            default:
-                return;
-        }
+        if (now - _lastProgressMs < StallTimeoutMs) return;
+
+        VoiceDiagnostics.Log("voice.unity.mic.restart",
+            $"stalled device=\"{DescribeDevice()}\" attempt={_recoveryAttempt + 1} stallMs={now - _lastProgressMs} lastPos={_lastPos}");
+        EndCurrentCapture();
+        _clip = null;
+        _recording = false;
+        ScheduleRecovery(now, "stalled");
     }
 
-    private void RestartCapture()
+    private void MaybeRetryCapture()
     {
-        try { if (!string.IsNullOrEmpty(_device)) Microphone.End(_device); } catch { }
-        string dev = _device;
-        if (string.IsNullOrEmpty(dev) || !DeviceExists(dev))
-            dev = Microphone.devices.Length > 0 ? Microphone.devices[0] : "";
-        _device = dev;
-        try { _clip = Microphone.Start(_device, true, ClipSeconds, SampleRate); } catch { _clip = null; }
+        var now = Environment.TickCount64;
+        if (!ShouldAttemptRecovery(_captureRequested, _recording, now, _nextRecoveryMs)) return;
+        _device = ResolveDevice(_device);
+        TryStartCapture(now, "retry");
+    }
+
+    private bool TryStartCapture(long now, string reason)
+    {
+        AudioClip? clip = null;
+        string failure = "Microphone.Start returned null";
+        try
+        {
+            clip = Microphone.Start(_device, true, ClipSeconds, SampleRate);
+        }
+        catch (Exception ex)
+        {
+            failure = $"{ex.GetType().Name}: {ex.Message}";
+        }
+
+        _clip = clip;
         _lastPos = 0;
         _il2cppPollBuf = null;
-        _lastProgressMs = Environment.TickCount64;
-        _recording = _clip != null;
+        _lastProgressMs = now;
+        Volatile.Write(ref _lastAdvanceTicks, System.Diagnostics.Stopwatch.GetTimestamp());
+        _recording = clip != null;
+        if (_recording)
+        {
+            _nextRecoveryMs = 0;
+            VoiceDiagnostics.Log("voice.unity.mic.restart",
+                $"started device=\"{DescribeDevice()}\" reason={reason} attempt={_recoveryAttempt}");
+            return true;
+        }
+
+        ScheduleRecovery(now, failure);
+        return false;
+    }
+
+    private void ScheduleRecovery(long now, string failure)
+    {
+        _recoveryAttempt = Math.Min(_recoveryAttempt + 1, 30);
+        var delayMs = RecoveryDelayMilliseconds(_recoveryAttempt, InitialRetryDelayMs, MaxRetryDelayMs);
+        _nextRecoveryMs = now + delayMs;
+        VoiceDiagnostics.Log("voice.unity.mic.restart",
+            $"retry-scheduled device=\"{DescribeDevice()}\" attempt={_recoveryAttempt} delayMs={delayMs} error=\"{SafeDiagnostic(failure)}\"");
+    }
+
+    private void EndCurrentCapture()
+    {
+        // Empty string is the IL2CPP-safe representation of Unity's default device and is the
+        // same value passed to Start, so it must also be passed to End to release the mic lease.
+        try { Microphone.End(_device); } catch { }
+    }
+
+    internal static bool ShouldAttemptRecovery(bool requested, bool recording, long nowMs, long nextRecoveryMs)
+        => requested && !recording && nowMs >= nextRecoveryMs;
+
+    internal static int RecoveryDelayMilliseconds(int attempt, int initialDelayMs, int maximumDelayMs)
+    {
+        var initial = Math.Max(1, initialDelayMs);
+        var maximum = Math.Max(initial, maximumDelayMs);
+        var shift = Math.Clamp(attempt - 1, 0, 20);
+        var delay = (long)initial << shift;
+        return (int)Math.Min(delay, maximum);
+    }
+
+    internal static int RecoveryDelayMilliseconds(
+        int attempt,
+        int initialDelayMs,
+        int maximumDelayMs,
+        int minimumDelayMs)
+    {
+        var effectiveMaximum = Math.Max(Math.Max(1, initialDelayMs), maximumDelayMs);
+        var minimum = Math.Clamp(minimumDelayMs, 1, effectiveMaximum);
+        return Math.Max(
+            minimum,
+            RecoveryDelayMilliseconds(attempt, initialDelayMs, maximumDelayMs));
     }
 
     private void ReadAndPublish(int start, int count)
@@ -221,8 +295,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
     bool ICaptureSource.Start(string? deviceId)
     {
-        Start(deviceId ?? string.Empty);
-        return _recording;
+        return Start(deviceId ?? string.Empty);
     }
 
     public CaptureHealth Health
@@ -238,13 +311,27 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
     public void Dispose() => Stop();
 
-    public static string[] GetDeviceNames() => Microphone.devices;
-
-    private static bool DeviceExists(string name)
+    public static string[] GetDeviceNames()
     {
-        foreach (var d in Microphone.devices)
-            if (d == name) return true;
-        return false;
+        try { return Microphone.devices; }
+        catch { return Array.Empty<string>(); }
     }
+
+    private string DescribeDevice() => VoiceDiagnostics.DescribeDevice(_device);
+
+    private static string SafeDiagnostic(string value)
+        => (value ?? string.Empty).Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
+
+    private static string ResolveDevice(string name)
+    {
+        var devices = GetDeviceNames();
+        if (!string.IsNullOrEmpty(name))
+        {
+            foreach (var device in devices)
+                if (device == name) return name;
+        }
+        return devices.Length > 0 ? devices[0] : string.Empty;
+    }
+
 }
 #endif

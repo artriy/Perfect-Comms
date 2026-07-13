@@ -151,6 +151,17 @@ internal static class VoiceDiagnostics
         PendingSignal.Set();
     }
 
+    // Device labels may contain a user's real name, headset serial, or Bluetooth address. Keep
+    // enough stable metadata to correlate selection/recovery without writing that label to a
+    // shareable diagnostic file.
+    internal static string DescribeDevice(string? deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return "default=true";
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(deviceId));
+        return $"default=false idHash={Convert.ToHexString(bytes, 0, 6)} idChars={deviceId.Length}";
+    }
+
     private static void MirrorPluginLog(string severity, string message)
     {
         // This only enqueues. Writer failures use WriteFallbackError directly, never these

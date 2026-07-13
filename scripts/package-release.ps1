@@ -90,6 +90,8 @@ Write-Host "release.package.protocol network=$networkProtocol sidecar=$managedSi
 
 if ($Configuration -eq "Android") {
     Assert-ReleaseAsset "Libs\pc-mobile\libpc_mobile.so"
+    Assert-ReleaseAsset "release-assets\android\AndroidManifest.xml"
+    Assert-ReleaseAsset "release-assets\android\README.md"
 } else {
     @(
         "Libs\pc-capture\pc-capture-win-x64.exe",
@@ -144,7 +146,12 @@ if (Test-Path $output) { Remove-Item $output -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $output "BepInEx\plugins") | Out-Null
 
 Copy-Item $dll (Join-Path $output "BepInEx\plugins\PerfectComms.dll")
-if ($Configuration -ne "Android") {
+if ($Configuration -eq "Android") {
+    $androidOutput = Join-Path $output "Android"
+    New-Item -ItemType Directory -Force -Path $androidOutput | Out-Null
+    Copy-Item (Join-Path $root "release-assets\android\AndroidManifest.xml") (Join-Path $androidOutput "AndroidManifest.xml")
+    Copy-Item (Join-Path $root "release-assets\android\README.md") (Join-Path $androidOutput "README.md")
+} else {
     $helperSrc = Join-Path $root "Libs\pc-capture"
     $helperDst = Join-Path $output "BepInEx\plugins\pc-capture"
     New-Item -ItemType Directory -Force -Path $helperDst | Out-Null

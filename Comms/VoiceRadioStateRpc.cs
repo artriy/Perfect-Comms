@@ -8,17 +8,35 @@ internal static class VoiceRadioStateRpc
 {
     private const byte RpcId = 205;
 
-    public static void Send(byte playerId, VoiceTeamRadioChannel channel)
+    public static bool TrySend(byte playerId, VoiceTeamRadioChannel channel)
     {
-        var writer = StartWriter();
-        if (writer == null) return;
+        try
+        {
+            var writer = StartWriter();
+            if (writer == null)
+            {
+                VoiceDiagnostics.Log("radio.rpc.send_deferred", $"player={playerId} reason=writer-unavailable");
+                return false;
+            }
 
-        channel = VoiceTeamRadioChannels.Normalize(channel);
-        writer.Write(playerId);
-        writer.Write(VoiceTeamRadioChannels.IsActive(channel));
-        writer.Write((byte)channel);
-        FinishWriter(writer);
+            channel = VoiceTeamRadioChannels.Normalize(channel);
+            writer.Write(playerId);
+            writer.Write(VoiceTeamRadioChannels.IsActive(channel));
+            writer.Write((byte)channel);
+            FinishWriter(writer);
+            return true;
+        }
+        catch (System.Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "radio.rpc.send_failed",
+                $"player={playerId} channel={channel} errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+            return false;
+        }
     }
+
+    private static string Safe(string? value)
+        => (value ?? string.Empty).Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
 
     private static MessageWriter? StartWriter()
     {

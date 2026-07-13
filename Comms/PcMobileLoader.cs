@@ -102,6 +102,10 @@ internal static class PcMobileLoader
                 ?? throw new FileNotFoundException("embedded pc-mobile resource disappeared", ResourceName);
             using (var dst = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
+                // Keep the trusted descriptor open, but remove path-based write access before
+                // copying any executable bytes. This follows Android's safe DCL ordering and
+                // prevents another process from replacing content through the extraction path.
+                MakeReadOnly(tmp);
                 copySource.CopyTo(dst);
                 dst.Flush(flushToDisk: true);
             }
@@ -125,9 +129,9 @@ internal static class PcMobileLoader
 
     private static void MakeReadOnly(string path)
     {
-        // Android 17 requires native files passed to System.load/dlopen to be read-only, and the
-        // same rule closes the modification window on earlier releases. Fail closed if chmod does
-        // not take effect instead of loading writable executable code.
+        // Android 17 requires native files passed to System.load/dlopen to be read-only. Applying
+        // the same safe-DCL ordering while the trusted writer is already open also closes the
+        // modification window on earlier releases. Fail closed instead of loading writable code.
         if (chmod(path, ReadExecuteMode) != 0)
             throw new IOException($"could not mark pc-mobile read-only (errno {Marshal.GetLastWin32Error()})");
     }

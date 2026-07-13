@@ -17,7 +17,7 @@ internal interface IVoiceTransport
 
 internal interface ISignalingSender
 {
-    void Send(int targetClientId, SignalMsgType type, byte[] payload);
+    bool Send(int targetClientId, SignalMsgType type, byte[] payload);
 }
 
 internal enum PeerState
@@ -194,15 +194,25 @@ internal sealed class PeerSessionManager
     public const int ProtocolVersion = 3;
     public const int MinCompatibleVersion = 3;
     private const long HelloResendIntervalMs = 3000;
-    private const long HandshakeTimeoutMs = 12000;
+    private const long FailedHelloAckRetryIntervalMs = 500;
+    internal const long HandshakeTimeoutMs = 12000;
     private const long ReinitThrottleMs = 3000;
     private const long DisconnectedGraceMs = 8000;
+    private const int MaxPendingRemoteCandidates = 64;
+    private const long PendingRemoteCandidateTtlMs = 12000;
+    private const long FailedLocalSignalRetryIntervalMs = 500;
+    private const int MaxPendingLocalCandidates = 64;
+
+    private readonly record struct PendingRemoteCandidate(long NegotiationId, string Candidate, long ReceivedAtMs);
+    private readonly record struct PendingLocalSignal(SignalMsgType Type, byte[] Payload);
 
     private sealed class PeerEntry
     {
         public PeerState State = PeerState.Idle;
         public bool HelloSent;
         public bool HelloReceived;
+        public bool RemoteHelloAcknowledged;
+        public long LastHelloAcknowledgementMs;
         public bool Added;
         public long LastHelloSentMs;
         public long LastProgressMs;
@@ -217,6 +227,10 @@ internal sealed class PeerSessionManager
         public long RemoteCandidatesReceived;
         public long RemoteCandidatesForwarded;
         public long RejectedCandidates;
+        public readonly List<PendingRemoteCandidate> PendingRemoteCandidates = new();
+        public PendingLocalSignal? PendingLocalSdp;
+        public readonly List<PendingLocalSignal> PendingLocalCandidates = new();
+        public long LastLocalSignalAttemptMs;
     }
 
     private readonly int _localClientId;
@@ -230,7 +244,10 @@ internal sealed class PeerSessionManager
     // generations process-wide so a delayed close/state event from the previous lobby can never
     // collide with a new manager's first generation and disturb its fresh peer.
     private static int _nextProcessGeneration;
-    private long _nextNegotiationId;
+    // Negotiation ids travel over RPC and can outlive a particular backend instance. Keep them
+    // process-wide just like generations so a delayed offer/answer from a replaced manager can
+    // never collide with the new manager's first negotiation.
+    private static long _nextProcessNegotiationId;
     private long _localCandidatesAttempted;
     private long _remoteCandidatesReceived;
     private long _remoteCandidatesForwarded;
@@ -289,6 +306,28 @@ internal sealed class PeerSessionManager
 
     internal int EstablishedPeerCount => _peers.Values.Count(peer => peer.State == PeerState.Established);
 
+    /// <summary>
+    /// Returns true while at least one peer is inside the manager-owned ICE/SDP negotiation
+    /// deadline. Room-level recovery must not tear down the backend during this interval: doing
+    /// so discards a negotiation which the native engine is still legitimately completing.
+    /// </summary>
+    internal bool HasActiveNegotiation(long nowMs)
+    {
+        foreach (var peer in _peers.Values)
+        {
+            if (peer.State is not (PeerState.Offering or PeerState.Answering or PeerState.Connected))
+                continue;
+            if (peer.LastProgressMs <= 0)
+                continue;
+
+            var elapsedMs = nowMs - peer.LastProgressMs;
+            if (elapsedMs >= 0 && elapsedMs < HandshakeTimeoutMs)
+                return true;
+        }
+
+        return false;
+    }
+
     internal PeerSessionDiagnosticsSnapshot GetDiagnosticsSnapshot()
     {
         var peerStates = _peers.Count == 0
@@ -333,12 +372,9 @@ internal sealed class PeerSessionManager
 
         if (peer.State is PeerState.Idle or PeerState.Greeted)
         {
-            peer.HelloSent = true;
-            peer.LastHelloSentMs = nowMs;
             peer.LastReinitMs = nowMs;
             LogEvent("recover", clientId, peer, "action=resend-hello");
-            SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "targeted-recovery");
-            return true;
+            return SendHello(clientId, peer, nowMs, force: true, reason: "targeted-recovery");
         }
 
         if (!peer.HelloReceived)
@@ -365,8 +401,7 @@ internal sealed class PeerSessionManager
         }
         var peer = GetOrCreate(clientId);
         LogEvent("player-joined", clientId, peer, $"nowMs={nowMs}");
-        SendHelloIfNeeded(clientId, peer);
-        peer.LastHelloSentMs = nowMs;
+        SendHelloIfNeeded(clientId, peer, nowMs);
         TryStartSession(clientId, peer, nowMs);
     }
 
@@ -375,17 +410,41 @@ internal sealed class PeerSessionManager
         foreach (var pair in _peers)
         {
             var peer = pair.Value;
+            PruneExpiredPendingCandidates(pair.Key, peer, nowMs);
             if (peer.State is PeerState.Idle or PeerState.Greeted)
             {
-                if (!peer.HelloSent) continue;
-                if (nowMs - peer.LastHelloSentMs < HelloResendIntervalMs) continue;
-                peer.LastHelloSentMs = nowMs;
-                SendSignal(pair.Key, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "hello-resend-timeout");
+                var acknowledgementPending = peer.HelloReceived && !peer.RemoteHelloAcknowledged;
+                var firstHelloFailed = !peer.HelloSent;
+                var retryInterval = acknowledgementPending || firstHelloFailed
+                    ? FailedHelloAckRetryIntervalMs
+                    : HelloResendIntervalMs;
+                if (peer.LastHelloSentMs != 0 && nowMs - peer.LastHelloSentMs < retryInterval) continue;
+                var reason = acknowledgementPending
+                    ? "remote-hello-ack-retry"
+                    : firstHelloFailed ? "initial-hello-send-retry" : "hello-resend-timeout";
+                // Commit the acknowledgement guard before SendHello: test transports and the
+                // in-process two-client harness can deliver synchronously and re-enter HandleHello.
+                if (acknowledgementPending)
+                {
+                    peer.RemoteHelloAcknowledged = true;
+                    peer.LastHelloAcknowledgementMs = nowMs;
+                }
+                var sent = SendHello(pair.Key, peer, nowMs, force: true, reason: reason);
+                if (acknowledgementPending && !sent)
+                {
+                    peer.RemoteHelloAcknowledged = false;
+                    peer.LastHelloAcknowledgementMs = 0;
+                }
+                else if (acknowledgementPending)
+                {
+                    TryStartSession(pair.Key, peer, nowMs);
+                }
                 if (peer.RestartRequested)
                     SendSignal(pair.Key, peer, SignalMsgType.Restart, Array.Empty<byte>(), "restart-resend-with-hello");
             }
             else if (peer.State is PeerState.Offering or PeerState.Answering or PeerState.Connected)
             {
+                RetryPendingLocalSignals(pair.Key, peer, nowMs);
                 if (peer.LastProgressMs == 0) continue;
                 if (nowMs - peer.LastProgressMs < HandshakeTimeoutMs) continue;
                 if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
@@ -620,6 +679,7 @@ internal sealed class PeerSessionManager
     {
         var previousGeneration = peer.Generation;
         var previousNegotiationId = peer.NegotiationId;
+        ClearPendingLocalSignals(peer);
         peer.Generation = NextGeneration();
         peer.LastReinitMs = nowMs;
         peer.DegradedSinceMs = 0;
@@ -646,8 +706,7 @@ internal sealed class PeerSessionManager
             peer.RestartRequested = true;
             SetState(clientId, peer, PeerState.Greeted, "reinitiate-request-remote-offer");
             peer.LastProgressMs = 0;
-            peer.LastHelloSentMs = nowMs;
-            SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "reinitiate-answerer-hello");
+            SendHello(clientId, peer, nowMs, force: true, reason: "reinitiate-answerer-hello");
             SendSignal(clientId, peer, SignalMsgType.Restart, Array.Empty<byte>(), "reinitiate-answerer-restart");
         }
     }
@@ -665,10 +724,23 @@ internal sealed class PeerSessionManager
     }
 
     public void Reset()
+        => ResetCore(notifyRemote: false, reason: "local-reset");
+
+    public void ResetAndNotify(string reason)
+        => ResetCore(notifyRemote: true, reason: reason);
+
+    private void ResetCore(bool notifyRemote, string reason)
     {
-        VoiceDiagnostics.Log("signaling.session.reset", $"local={_localClientId} peers={_peers.Count}");
+        VoiceDiagnostics.Log(
+            "signaling.session.reset",
+            $"local={_localClientId} peers={_peers.Count} notifyRemote={Bool(notifyRemote)} reason={LogSafe(reason)}");
         foreach (var clientId in _peers.Keys.ToList())
+        {
+            var peer = _peers[clientId];
+            if (notifyRemote)
+                SendSignal(clientId, peer, SignalMsgType.Bye, Array.Empty<byte>(), $"reset:{reason}");
             DropPeer(clientId);
+        }
     }
 
     public void OnSignal(int senderClientId, SignalMsgType type, byte[] payload, long nowMs = 0)
@@ -694,7 +766,7 @@ internal sealed class PeerSessionManager
             case SignalMsgType.Hello: HandleHello(senderClientId, payload, nowMs); break;
             case SignalMsgType.Offer: HandleOffer(senderClientId, payload, nowMs); break;
             case SignalMsgType.Answer: HandleAnswer(senderClientId, payload, nowMs); break;
-            case SignalMsgType.Candidate: HandleCandidate(senderClientId, payload); break;
+            case SignalMsgType.Candidate: HandleCandidate(senderClientId, payload, nowMs); break;
             case SignalMsgType.Bye:
                 LogEvent("signal-accepted", senderClientId, existingPeer, $"type={type} payloadBytes={payloadBytes}");
                 DropPeer(senderClientId);
@@ -708,6 +780,9 @@ internal sealed class PeerSessionManager
     }
 
     public void OnLocalSdp(int clientId, int generation, string sdpType, string sdp)
+        => OnLocalSdp(clientId, generation, sdpType, sdp, Environment.TickCount64);
+
+    internal void OnLocalSdp(int clientId, int generation, string sdpType, string sdp, long nowMs)
     {
         if (!TryGetCurrentPeer(clientId, generation, out var peer))
         {
@@ -725,16 +800,35 @@ internal sealed class PeerSessionManager
             clientId,
             peer,
             $"accepted=true sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} signalType={(isOffer ? SignalMsgType.Offer : SignalMsgType.Answer)}");
-        SendSignal(
+        var signal = new PendingLocalSignal(
+            isOffer ? SignalMsgType.Offer : SignalMsgType.Answer,
+            SignalPayload.Sdp(peer.NegotiationId, sdpType, sdp));
+        peer.LastLocalSignalAttemptMs = nowMs;
+        var sent = SendSignal(
             clientId,
             peer,
-            isOffer ? SignalMsgType.Offer : SignalMsgType.Answer,
-            SignalPayload.Sdp(peer.NegotiationId, sdpType, sdp),
+            signal.Type,
+            signal.Payload,
             "local-sdp");
+        if (!sent)
+        {
+            peer.PendingLocalSdp = signal;
+            peer.LastProgressMs = nowMs;
+            return;
+        }
+
+        peer.PendingLocalSdp = null;
+        // SDP creation can be delayed by device/RTC startup. A successful Offer/Answer is fresh
+        // handshake progress, so give the remote side the full timeout window from this point instead
+        // of retaining the deadline from AddPeer/the incoming Offer.
+        peer.LastProgressMs = nowMs;
         if (!isOffer) SetState(clientId, peer, PeerState.Connected, "local-answer-sent");
     }
 
     public void OnLocalCandidate(int clientId, int generation, string candidate)
+        => OnLocalCandidate(clientId, generation, candidate, Environment.TickCount64);
+
+    internal void OnLocalCandidate(int clientId, int generation, string candidate, long nowMs)
     {
         if (!TryGetCurrentPeer(clientId, generation, out var peer))
         {
@@ -753,12 +847,92 @@ internal sealed class PeerSessionManager
             clientId,
             peer,
             $"accepted=true candidateBytes={Utf8Length(candidate)} peerCandidateAttempt={peer.LocalCandidatesAttempted} totalCandidateAttempts={_localCandidatesAttempted}");
-        SendSignal(
+        var signal = new PendingLocalSignal(
+            SignalMsgType.Candidate,
+            SignalPayload.Candidate(peer.NegotiationId, candidate));
+        if (peer.PendingLocalSdp.HasValue || peer.PendingLocalCandidates.Count > 0)
+        {
+            QueuePendingLocalCandidate(
+                clientId,
+                peer,
+                signal,
+                peer.PendingLocalSdp.HasValue ? "waiting-for-sdp" : "preserve-candidate-order");
+            return;
+        }
+
+        peer.LastLocalSignalAttemptMs = nowMs;
+        if (!SendSignal(clientId, peer, signal.Type, signal.Payload, "local-candidate"))
+            QueuePendingLocalCandidate(clientId, peer, signal, "send-failed");
+    }
+
+    private void QueuePendingLocalCandidate(
+        int clientId,
+        PeerEntry peer,
+        PendingLocalSignal signal,
+        string reason)
+    {
+        if (peer.PendingLocalCandidates.Any(item => item.Payload.AsSpan().SequenceEqual(signal.Payload)))
+        {
+            LogEvent(
+                "local-candidate-buffer",
+                clientId,
+                peer,
+                $"action=duplicate-skip reason={reason} pending={peer.PendingLocalCandidates.Count}");
+            return;
+        }
+
+        if (peer.PendingLocalCandidates.Count >= MaxPendingLocalCandidates)
+        {
+            peer.PendingLocalCandidates.RemoveAt(0);
+            LogReject(
+                "local-candidate-buffer",
+                clientId,
+                peer,
+                "capacity-evicted-oldest",
+                $"capacity={MaxPendingLocalCandidates}");
+        }
+
+        peer.PendingLocalCandidates.Add(signal);
+        LogEvent(
+            "local-candidate-buffer",
             clientId,
             peer,
-            SignalMsgType.Candidate,
-            SignalPayload.Candidate(peer.NegotiationId, candidate),
-            "local-candidate");
+            $"action=queued reason={reason} pending={peer.PendingLocalCandidates.Count}");
+    }
+
+    private void RetryPendingLocalSignals(int clientId, PeerEntry peer, long nowMs)
+    {
+        if (!peer.PendingLocalSdp.HasValue && peer.PendingLocalCandidates.Count == 0) return;
+        if (peer.LastLocalSignalAttemptMs != 0
+            && nowMs - peer.LastLocalSignalAttemptMs < FailedLocalSignalRetryIntervalMs)
+            return;
+
+        peer.LastLocalSignalAttemptMs = nowMs;
+        if (peer.PendingLocalSdp is { } sdp)
+        {
+            if (!SendSignal(clientId, peer, sdp.Type, sdp.Payload, "local-sdp-retry"))
+                return;
+
+            peer.PendingLocalSdp = null;
+            peer.LastProgressMs = nowMs;
+            if (sdp.Type == SignalMsgType.Answer)
+                SetState(clientId, peer, PeerState.Connected, "local-answer-retry-sent");
+        }
+
+        while (peer.PendingLocalCandidates.Count > 0)
+        {
+            var candidate = peer.PendingLocalCandidates[0];
+            if (!SendSignal(clientId, peer, candidate.Type, candidate.Payload, "local-candidate-retry"))
+                return;
+            peer.PendingLocalCandidates.RemoveAt(0);
+        }
+    }
+
+    private static void ClearPendingLocalSignals(PeerEntry peer)
+    {
+        peer.PendingLocalSdp = null;
+        peer.PendingLocalCandidates.Clear();
+        peer.LastLocalSignalAttemptMs = 0;
     }
 
     private void HandleHello(int clientId, byte[] payload, long nowMs)
@@ -780,10 +954,109 @@ internal sealed class PeerSessionManager
         }
 
         var peer = GetOrCreate(clientId);
+        var firstCompatibleHello = !peer.HelloReceived;
         peer.HelloReceived = true;
-        LogEvent("signal-accepted", clientId, peer, $"type=Hello protocol={version} minCompatible={minCompatible}");
-        SendHelloIfNeeded(clientId, peer);
+        LogEvent(
+            "signal-accepted",
+            clientId,
+            peer,
+            $"type=Hello protocol={version} minCompatible={minCompatible} firstCompatible={Bool(firstCompatibleHello)}");
+
+        // Even if OnPlayerJoined already sent a Hello, the remote may have attached its RPC
+        // subscriber later and never observed it. Acknowledge the first compatible remote Hello
+        // before AddPeer can synchronously emit Offer/candidates. A bounded refresh also lets a
+        // replacement manager recover when its predecessor's Bye was lost, without turning two
+        // healthy peers into an unbounded Hello echo loop.
+        var acknowledgementAlreadySent = peer.RemoteHelloAcknowledged;
+        var previousAcknowledgementMs = peer.LastHelloAcknowledgementMs;
+        var acknowledgementRefreshDue = acknowledgementAlreadySent
+                                        && nowMs >= previousAcknowledgementMs
+                                        && nowMs - previousAcknowledgementMs >= HelloResendIntervalMs;
+        var stateBeforeAcknowledgement = peer.State;
+        var generationBeforeAcknowledgement = peer.Generation;
+        var negotiationBeforeAcknowledgement = peer.NegotiationId;
+        var addedBeforeAcknowledgement = peer.Added;
+        if (!acknowledgementAlreadySent || acknowledgementRefreshDue)
+        {
+            var reason = acknowledgementRefreshDue
+                ? "duplicate-remote-hello-ack"
+                : peer.HelloSent ? "first-remote-hello-ack" : "initial-hello-response";
+            // Set this before the send because a synchronous/reentrant signaling transport can
+            // deliver the reciprocal Hello back into this manager before SendHello returns.
+            peer.RemoteHelloAcknowledged = true;
+            peer.LastHelloAcknowledgementMs = nowMs;
+            if (!SendHello(clientId, peer, nowMs, force: true, reason: reason))
+            {
+                peer.RemoteHelloAcknowledged = acknowledgementAlreadySent;
+                peer.LastHelloAcknowledgementMs = previousAcknowledgementMs;
+                LogReject(
+                    "hello",
+                    clientId,
+                    peer,
+                    "ack-send-failed",
+                    $"firstCompatible={Bool(firstCompatibleHello)} refresh={Bool(acknowledgementRefreshDue)}");
+                return;
+            }
+        }
+
+        // SendHello may synchronously feed a response back into this manager in tests and local
+        // harnesses. Never mutate a peer that was replaced or removed during that callback.
+        if (!_peers.TryGetValue(clientId, out var currentPeer) || !ReferenceEquals(currentPeer, peer))
+            return;
+
+        var activeGenerationStillUnchanged = peer.State == stateBeforeAcknowledgement
+                                             && peer.Generation == generationBeforeAcknowledgement
+                                             && peer.NegotiationId == negotiationBeforeAcknowledgement
+                                             && peer.Added == addedBeforeAcknowledgement;
+        if (acknowledgementRefreshDue
+            && activeGenerationStillUnchanged
+            && (peer.Added || peer.State is PeerState.Offering or PeerState.Connected or PeerState.Established))
+        {
+            RebootstrapAfterDuplicateHello(clientId, peer, nowMs);
+            return;
+        }
         TryStartSession(clientId, peer, nowMs);
+    }
+
+    private void RebootstrapAfterDuplicateHello(int clientId, PeerEntry peer, long nowMs)
+    {
+        var previousGeneration = peer.Generation;
+        var previousNegotiationId = peer.NegotiationId;
+        ClearPendingLocalSignals(peer);
+        peer.PendingRemoteCandidates.Clear();
+        peer.Generation = NextGeneration();
+        peer.LastReinitMs = nowMs;
+        peer.DegradedSinceMs = 0;
+        peer.RestartRequested = false;
+        if (peer.Added)
+        {
+            TransportRemovePeer(clientId, peer, "replacement-manager-hello");
+            peer.Added = false;
+        }
+
+        if (LocalIsOfferer(clientId))
+        {
+            peer.NegotiationId = NextNegotiationId();
+            peer.Added = true;
+            SetState(clientId, peer, PeerState.Offering, "replacement-manager-hello-local-offerer");
+            peer.LastProgressMs = nowMs;
+            TransportAddPeer(clientId, peer, isOfferer: true, "replacement-manager-hello");
+        }
+        else
+        {
+            // A replacement process can restart its monotonic counter. Once its fresh Hello has
+            // been acknowledged, forget the predecessor's negotiation id so the first new Offer
+            // cannot be mistaken for a delayed/stale one.
+            peer.NegotiationId = 0;
+            SetState(clientId, peer, PeerState.Answering, "replacement-manager-hello-wait-for-offer");
+            peer.LastProgressMs = nowMs;
+        }
+
+        LogEvent(
+            "recover",
+            clientId,
+            peer,
+            $"action=rebootstrap-replacement-manager previousGeneration={previousGeneration} previousNegotiation={previousNegotiationId} nowMs={nowMs}");
     }
 
     private void HandleOffer(int clientId, byte[] payload, long nowMs)
@@ -831,6 +1104,7 @@ internal sealed class PeerSessionManager
 
         if (peer.Added)
         {
+            ClearPendingLocalSignals(peer);
             peer.Generation = NextGeneration();
             TransportRemovePeer(clientId, peer, "newer-remote-offer");
             peer.Added = false;
@@ -842,6 +1116,7 @@ internal sealed class PeerSessionManager
         SetState(clientId, peer, PeerState.Answering, "remote-offer-accepted");
         peer.LastProgressMs = nowMs;
         TransportSetRemoteSdp(clientId, peer, sdpType, sdp, "remote-offer");
+        ReplayPendingCandidates(clientId, peer, negotiationId, nowMs);
         LogEvent("signal-accepted", clientId, peer, $"type=Offer sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
     }
 
@@ -894,7 +1169,7 @@ internal sealed class PeerSessionManager
         LogEvent("signal-accepted", clientId, peer, $"type=Answer sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
     }
 
-    private void HandleCandidate(int clientId, byte[] payload)
+    private void HandleCandidate(int clientId, byte[] payload, long nowMs)
     {
         _remoteCandidatesReceived++;
         var knownPeer = FindPeer(clientId);
@@ -934,6 +1209,14 @@ internal sealed class PeerSessionManager
         }
         if (negotiationId != peer.NegotiationId)
         {
+            // Native ICE can race slightly ahead of the SDP callback. On the answerer, retain only
+            // candidates for a strictly newer negotiation until its Offer arrives; never attach
+            // them to the current generation. The bounded queue mirrors the native pending-ICE cap.
+            if (!LocalIsOfferer(clientId) && negotiationId > peer.NegotiationId)
+            {
+                QueuePendingCandidate(clientId, peer, negotiationId, candidate, nowMs);
+                return;
+            }
             CountRejectedCandidate(peer);
             LogReject("candidate", clientId, peer, "negotiation-mismatch", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
             return;
@@ -944,6 +1227,106 @@ internal sealed class PeerSessionManager
             LogReject("candidate", clientId, peer, "native-peer-not-added", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
             return;
         }
+        ForwardRemoteCandidate(clientId, peer, candidate, "live");
+    }
+
+    private void QueuePendingCandidate(
+        int clientId,
+        PeerEntry peer,
+        long negotiationId,
+        string candidate,
+        long nowMs)
+    {
+        if (peer.PendingRemoteCandidates.Any(item =>
+                item.NegotiationId == negotiationId
+                && string.Equals(item.Candidate, candidate, StringComparison.Ordinal)))
+        {
+            LogEvent(
+                "candidate-buffer",
+                clientId,
+                peer,
+                $"action=duplicate-skip negotiation={negotiationId} pending={peer.PendingRemoteCandidates.Count}");
+            return;
+        }
+
+        if (peer.PendingRemoteCandidates.Count >= MaxPendingRemoteCandidates)
+        {
+            var evicted = peer.PendingRemoteCandidates[0];
+            peer.PendingRemoteCandidates.RemoveAt(0);
+            CountRejectedCandidate(peer);
+            LogReject(
+                "candidate-buffer",
+                clientId,
+                peer,
+                "capacity-evicted-oldest",
+                $"evictedNegotiation={evicted.NegotiationId} capacity={MaxPendingRemoteCandidates}");
+        }
+
+        peer.PendingRemoteCandidates.Add(new PendingRemoteCandidate(negotiationId, candidate, nowMs));
+        LogEvent(
+            "candidate-buffer",
+            clientId,
+            peer,
+            $"action=queued negotiation={negotiationId} candidateBytes={Utf8Length(candidate)} pending={peer.PendingRemoteCandidates.Count}");
+    }
+
+    private void ReplayPendingCandidates(int clientId, PeerEntry peer, long negotiationId, long nowMs)
+    {
+        if (peer.PendingRemoteCandidates.Count == 0) return;
+
+        for (var index = peer.PendingRemoteCandidates.Count - 1; index >= 0; index--)
+        {
+            var pending = peer.PendingRemoteCandidates[index];
+            if (HasPendingCandidateExpired(pending, nowMs) || pending.NegotiationId < negotiationId)
+            {
+                peer.PendingRemoteCandidates.RemoveAt(index);
+                CountRejectedCandidate(peer);
+                LogReject(
+                    "candidate-buffer",
+                    clientId,
+                    peer,
+                    HasPendingCandidateExpired(pending, nowMs) ? "expired" : "stale-negotiation",
+                    $"candidateNegotiation={pending.NegotiationId} activeNegotiation={negotiationId}");
+            }
+        }
+
+        // Preserve original candidate order when forwarding the matching negotiation.
+        for (var index = 0; index < peer.PendingRemoteCandidates.Count;)
+        {
+            var pending = peer.PendingRemoteCandidates[index];
+            if (pending.NegotiationId != negotiationId)
+            {
+                index++;
+                continue;
+            }
+
+            peer.PendingRemoteCandidates.RemoveAt(index);
+            ForwardRemoteCandidate(clientId, peer, pending.Candidate, "buffered-after-offer");
+        }
+    }
+
+    private void PruneExpiredPendingCandidates(int clientId, PeerEntry peer, long nowMs)
+    {
+        for (var index = peer.PendingRemoteCandidates.Count - 1; index >= 0; index--)
+        {
+            var pending = peer.PendingRemoteCandidates[index];
+            if (!HasPendingCandidateExpired(pending, nowMs)) continue;
+            peer.PendingRemoteCandidates.RemoveAt(index);
+            CountRejectedCandidate(peer);
+            LogReject(
+                "candidate-buffer",
+                clientId,
+                peer,
+                "expired",
+                $"candidateNegotiation={pending.NegotiationId} pending={peer.PendingRemoteCandidates.Count}");
+        }
+    }
+
+    private static bool HasPendingCandidateExpired(PendingRemoteCandidate pending, long nowMs)
+        => nowMs >= pending.ReceivedAtMs && nowMs - pending.ReceivedAtMs > PendingRemoteCandidateTtlMs;
+
+    private void ForwardRemoteCandidate(int clientId, PeerEntry peer, string candidate, string source)
+    {
         TransportAddIceCandidate(clientId, peer, candidate);
         peer.RemoteCandidatesForwarded++;
         _remoteCandidatesForwarded++;
@@ -951,7 +1334,7 @@ internal sealed class PeerSessionManager
             "signal-accepted",
             clientId,
             peer,
-            $"type=Candidate candidateBytes={Utf8Length(candidate)} peerCandidateRx={peer.RemoteCandidatesReceived} peerCandidateForwarded={peer.RemoteCandidatesForwarded} totalCandidateRx={_remoteCandidatesReceived} totalCandidateForwarded={_remoteCandidatesForwarded}");
+            $"type=Candidate source={source} candidateBytes={Utf8Length(candidate)} peerCandidateRx={peer.RemoteCandidatesReceived} peerCandidateForwarded={peer.RemoteCandidatesForwarded} totalCandidateRx={_remoteCandidatesReceived} totalCandidateForwarded={_remoteCandidatesForwarded}");
     }
 
     private void HandleRestart(int clientId, byte[] payload, long nowMs)
@@ -1084,18 +1467,34 @@ internal sealed class PeerSessionManager
         }
     }
 
-    private void SendHelloIfNeeded(int clientId, PeerEntry peer)
+    private bool SendHelloIfNeeded(int clientId, PeerEntry peer, long nowMs)
+        => SendHello(clientId, peer, nowMs, force: false, reason: "initial-hello");
+
+    private bool SendHello(int clientId, PeerEntry peer, long nowMs, bool force, string reason)
     {
-        if (peer.HelloSent)
+        if (!force && peer.HelloSent)
         {
             LogEvent("hello-skip", clientId, peer, "reason=already-sent");
-            return;
+            return true;
         }
+
+        var previouslySent = peer.HelloSent;
+        // Set before invoking the sender because tests and local transports can synchronously feed
+        // the remote response back into this manager. Revert only a first-send failure.
         peer.HelloSent = true;
+        peer.LastHelloSentMs = nowMs;
         if (peer.State == PeerState.Idle) SetState(clientId, peer, PeerState.Greeted, "send-initial-hello");
-        SendSignal(clientId, peer, SignalMsgType.Hello, SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion), "initial-hello");
-        if (peer.RelayOnly)
+        var sent = SendSignal(
+            clientId,
+            peer,
+            SignalMsgType.Hello,
+            SignalPayload.Hello(ProtocolVersion, MinCompatibleVersion),
+            reason);
+        if (!sent && !previouslySent)
+            peer.HelloSent = false;
+        if (sent && peer.RelayOnly)
             SendSignal(clientId, peer, SignalMsgType.IceMode, SignalPayload.IceMode(true), "initial-relay-policy");
+        return sent;
     }
 
     private void DropPeer(int clientId)
@@ -1116,8 +1515,13 @@ internal sealed class PeerSessionManager
 
     private long NextNegotiationId()
     {
-        if (_nextNegotiationId == long.MaxValue) _nextNegotiationId = 0;
-        return ++_nextNegotiationId;
+        while (true)
+        {
+            var current = Interlocked.Read(ref _nextProcessNegotiationId);
+            var next = current == long.MaxValue ? 1 : current + 1;
+            if (Interlocked.CompareExchange(ref _nextProcessNegotiationId, next, current) == current)
+                return next;
+        }
     }
 
     private PeerEntry GetOrCreate(int clientId)
@@ -1173,7 +1577,7 @@ internal sealed class PeerSessionManager
     private PeerEntry? FindPeer(int clientId)
         => _peers.TryGetValue(clientId, out var peer) ? peer : null;
 
-    private void SendSignal(
+    private bool SendSignal(
         int clientId,
         PeerEntry peer,
         SignalMsgType type,
@@ -1187,12 +1591,15 @@ internal sealed class PeerSessionManager
             $"type={type} payloadBytes={payload.Length} reason={reason}");
         try
         {
-            _sender.Send(clientId, type, payload);
+            var sent = _sender.Send(clientId, type, payload);
+            if (!sent)
+                LogReject("signal-tx", clientId, peer, "send-failed", $"type={type} reason={reason}");
+            return sent;
         }
         catch (Exception ex)
         {
             LogError("signal-tx", clientId, peer, ex, $"type={type} reason={reason}");
-            throw;
+            return false;
         }
     }
 

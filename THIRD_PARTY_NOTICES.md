@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 Perfect Comms embeds the following third-party native libraries as assembly resources and extracts them at
-runtime (Windows, x64 and x86). Their licenses are reproduced or referenced below.
+runtime for the applicable desktop platform. Their licenses are reproduced or referenced below.
 
 ## libopus 1.6.1 (voice codec, with DRED + deep PLC + OSCE)
 
@@ -13,7 +13,8 @@ runtime (Windows, x64 and x86). Their licenses are reproduced or referenced belo
 
 ## DeepFilterNet 3 / libDF (noise suppression)
 
-- Files: `Libs/df.x64.dll`, `Libs/df.x86.dll`
+- Release files: `Libs/dsp/df.x64.dll`, `Libs/dsp/df.x86.dll`, `Libs/dsp/libdf.so`,
+  `Libs/dsp/libdf.dylib`
 - Upstream: https://github.com/Rikorose/DeepFilterNet (commit `d375b2d8309e0935d165700c91da9de862a99c31`)
 - License: dual MIT OR Apache-2.0. Full text in `Libs/df.COPYING`.
 - The default DeepFilterNet 3 model (author: Hendrik Schroeter / Rikorose) is compiled into the cdylib via the
@@ -24,7 +25,8 @@ runtime (Windows, x64 and x86). Their licenses are reproduced or referenced belo
 
 ## webrtc-audio-processing (acoustic echo cancellation AEC3 + automatic gain control AGC2 + high-pass filter)
 
-- Files: `Libs/webrtc-apm.x64.dll`, `Libs/webrtc-apm.x86.dll`
+- Release files: `Libs/dsp/webrtc-apm.x64.dll`, `Libs/dsp/webrtc-apm.x86.dll`,
+  `Libs/dsp/libwebrtc-apm.so`, `Libs/dsp/libwebrtc-apm.dylib`
 - Upstream: WebRTC AudioProcessingModule (Google), via the PulseAudio standalone fork
   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing (v2.1, WebRTC M131). Prebuilt Windows
   binaries from the `LSXPrime/webrtc-audio-processing` mirror.
@@ -38,12 +40,5 @@ unambiguous, otherwise see upstream.
 
 | Assembly | License |
 |----------|---------|
-| Concentus (managed Opus codec, used on non-Windows builds) | see upstream (xiph/Opus-derived) |
-| SIPSorcery, SIPSorceryMedia.Abstractions | see upstream |
-| websocket-sharp | MIT |
 | SocketIOClient, SocketIO.Core, SocketIO.Serializer.* | MIT |
-| BouncyCastle.Cryptography | MIT |
-| DnsClient | Apache-2.0 |
-| Microsoft.Extensions.DependencyInjection.Abstractions, Microsoft.Extensions.Logging.Abstractions | MIT (.NET Foundation) |
-| System.Diagnostics.DiagnosticSource, System.Text.Encodings.Web, System.Text.Json | MIT (.NET Foundation) |
-| Interstellar, Interstellar.Messages | third-party voice backend; see its distribution for license terms |
+| System.Text.Encodings.Web, System.Text.Json | MIT (.NET Foundation) |

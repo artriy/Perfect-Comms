@@ -55,4 +55,7 @@ internal readonly record struct VoicePlayerSnapshot(
     float ControlledVictimLightRadius,
     // Third-party mod voice state (PerfectComms.Api), resolved once per player in the snapshot
     // builder. One bundled field keeps the API isolated from the core snapshot shape.
-    ExternalVoiceState External = default);
+    ExternalVoiceState External = default,
+    // Needed by HUD-independent transition policy: when LocalPlayer/Data is being rebuilt, the
+    // last authenticated snapshot must preserve this role mute instead of briefly unmuting.
+    bool IsGlitchHacked = false);

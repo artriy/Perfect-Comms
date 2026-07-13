@@ -14,7 +14,9 @@ using VoiceChatPlugin.VoiceChat;
 namespace VoiceChatPlugin;
 
 [BepInPlugin(Id, "Perfect Comms", Version)]
+#if !ANDROID
 [BepInProcess("Among Us.exe")]
+#endif
 public class VoiceChatPluginMain : BasePlugin
 {
     public const string Id = "com.edgetel.perfectcomms";
@@ -37,11 +39,13 @@ public class VoiceChatPluginMain : BasePlugin
 
     internal static void ShutdownVoiceRuntime(string reason)
     {
+        try { VoiceLobbyRegistryPublisher.ClearLocalListing(); }
+        catch { /* listing deletion is best-effort and cannot block local audio/process teardown */ }
         try { VoiceChatRoom.ShutdownCurrentRoom(reason); }
         catch { /* process/domain shutdown must continue even if the room is already gone */ }
 #if WINDOWS
-        // A room release deliberately leaves the reusable helper idle. Process/domain shutdown is
-        // the one boundary that must synchronously terminate it, even when no room is active.
+        // Room release normally terminates the helper. This remains the final safety boundary for
+        // shutdown while a room is active or if teardown was interrupted by process/domain unload.
         try { SidecarVoiceHost.Shutdown(reason); }
         catch { /* the OS will finish teardown; never block the remaining shutdown hooks */ }
 #endif

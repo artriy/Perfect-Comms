@@ -16,9 +16,23 @@ internal sealed class MobileVoiceClient : IDisposable
     private const int MicFrame = SidecarProtocol.AudioSamples;         // 960 mono @ 48k (20ms)
     private const int PlaybackFrame = SidecarProtocol.AudioOutSamples; // 1920 interleaved stereo
     private const int SignalBufBytes = 64 * 1024;
+    private const int ShutdownTimeoutMs = 2_000;
+    private const int InitialStartRetryMs = 500;
+    private const int MaximumStartRetryMs = 30_000;
+    private const int WorkerStallTimeoutMs = 5_000;
+    private const int NativeHealthProbeIntervalMs = 1_000;
+
+    private static readonly object StartRetryGate = new();
+    private static bool _startInProgress;
+    private static int _startFailures;
+    private static long _startNotBeforeMs;
 
     private IntPtr _h;
+    private int _activeNativeCalls;
+    private int _faulted;
     private volatile bool _running;
+    private long _pollHeartbeatMs;
+    private long _pumpHeartbeatMs;
     private Thread? _pollThread;
     private Thread? _pumpThread;
 
@@ -41,24 +55,65 @@ internal sealed class MobileVoiceClient : IDisposable
     public event Action<float, bool>? OnLevel;
     public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
 
-    public bool IsRunning => _running && _h != IntPtr.Zero;
+    public bool IsRunning
+    {
+        get
+        {
+            if (!_running || Volatile.Read(ref _faulted) != 0 || ReadHandle() == IntPtr.Zero)
+                return false;
+            var now = Environment.TickCount64;
+            return WorkerHeartbeatsHealthy(
+                now,
+                Volatile.Read(ref _pollHeartbeatMs),
+                Volatile.Read(ref _pumpHeartbeatMs),
+                WorkerStallTimeoutMs);
+        }
+    }
+    public bool StartWasDeferred { get; private set; }
+    public int StartRetryAfterMs { get; private set; }
 
     public bool Start()
     {
-        if (!PcMobileLoader.EnsureLoaded()) return false;
-        _h = PcMobileNative.pc_engine_new();
-        if (_h == IntPtr.Zero)
+        if (IsRunning) return true;
+        if (!TryBeginStart(out var retryAfterMs))
         {
-            VoiceDiagnostics.DebugWarning("[VC] pc_engine_new returned null");
+            StartWasDeferred = true;
+            StartRetryAfterMs = retryAfterMs;
             return false;
         }
-        _running = true;
-        _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "PcMobilePoll" };
-        _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "PcMobilePump" };
-        _pollThread.Start();
-        _pumpThread.Start();
-        VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient started");
-        return true;
+
+        StartWasDeferred = false;
+        StartRetryAfterMs = 0;
+        try
+        {
+            if (!PcMobileLoader.EnsureLoaded())
+                return FailStart("pc-mobile load failed");
+
+            var handle = PcMobileNative.pc_engine_new();
+            if (handle == IntPtr.Zero)
+                return FailStart("pc_engine_new returned null");
+
+            Interlocked.Exchange(ref _h, handle);
+            Volatile.Write(ref _faulted, 0);
+            _running = true;
+            var now = Environment.TickCount64;
+            Volatile.Write(ref _pollHeartbeatMs, now);
+            Volatile.Write(ref _pumpHeartbeatMs, now);
+            _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "PcMobilePoll" };
+            _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "PcMobilePump" };
+            _pollThread.Start();
+            _pumpThread.Start();
+            CompleteStart(success: true);
+            VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient started");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _running = false;
+            var handle = Interlocked.Exchange(ref _h, IntPtr.Zero);
+            ShutdownDetachedHandle(handle, "start-failed");
+            return FailStart($"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void Control(byte[] framed)
@@ -70,7 +125,9 @@ internal sealed class MobileVoiceClient : IDisposable
         json[jsonLen] = 0;
         lock (_ctrlLock)
         {
-            if (_h != IntPtr.Zero) PcMobileNative.pc_control(_h, json);
+            if (!TryAcquireNativeHandle(out var handle)) return;
+            try { PcMobileNative.pc_control(handle, json); }
+            finally { ReleaseNativeHandle(); }
         }
     }
 
@@ -93,7 +150,7 @@ internal sealed class MobileVoiceClient : IDisposable
         if (mono == null || count <= 0) return;
         lock (_micLock)
         {
-            if (_h == IntPtr.Zero) return;
+            if (ReadHandle() == IntPtr.Zero) return;
             int i = 0;
             while (i < count)
             {
@@ -105,10 +162,23 @@ internal sealed class MobileVoiceClient : IDisposable
                 {
                     // Native emits the configured gain/VAD level event at a bounded 100 ms cadence.
                     // Do not race it with a per-frame hard-coded speaking threshold here.
-                    _ = PcMobileNative.pc_push_mic(_h, _micAccum, MicFrame);
+                    if (TryAcquireNativeHandle(out var handle))
+                    {
+                        try { _ = PcMobileNative.pc_push_mic(handle, _micAccum, MicFrame); }
+                        finally { ReleaseNativeHandle(); }
+                    }
                     _micFill = 0;
                 }
             }
+        }
+    }
+
+    public void ResetMicInput()
+    {
+        lock (_micLock)
+        {
+            Array.Clear(_micAccum, 0, _micAccum.Length);
+            _micFill = 0;
         }
     }
 
@@ -131,55 +201,108 @@ internal sealed class MobileVoiceClient : IDisposable
 
     private void PumpLoop()
     {
-        long nextDeadline = 0;
-        while (_running)
+        try
         {
-            var h = _h;
-            int got = h != IntPtr.Zero ? PcMobileNative.pc_pull_playback(h, _pumpBuf, PlaybackFrame) : 0;
-            if (got > 0)
+            long nextDeadline = 0;
+            while (_running)
             {
-                lock (_ringLock)
+                Volatile.Write(ref _pumpHeartbeatMs, Environment.TickCount64);
+                var got = 0;
+                if (TryAcquireNativeHandle(out var handle))
                 {
-                    for (int i = 0; i < got; i++)
+                    try { got = PcMobileNative.pc_pull_playback(handle, _pumpBuf, PlaybackFrame); }
+                    finally { ReleaseNativeHandle(); }
+                }
+                if (got > 0)
+                {
+                    lock (_ringLock)
                     {
-                        if (_ringCount >= _ring.Length)
+                        for (int i = 0; i < got; i++)
                         {
-                            _ringRead = (_ringRead + 1) % _ring.Length;
-                            _ringCount--;
+                            if (_ringCount >= _ring.Length)
+                            {
+                                _ringRead = (_ringRead + 1) % _ring.Length;
+                                _ringCount--;
+                            }
+                            _ring[_ringWrite] = _pumpBuf[i];
+                            _ringWrite = (_ringWrite + 1) % _ring.Length;
+                            _ringCount++;
                         }
-                        _ring[_ringWrite] = _pumpBuf[i];
-                        _ringWrite = (_ringWrite + 1) % _ring.Length;
-                        _ringCount++;
                     }
                 }
-            }
 
-            var now = Stopwatch.GetTimestamp();
-            nextDeadline = MobilePlaybackCadence.NextDeadline(nextDeadline, now, Stopwatch.Frequency);
-            var delayMs = MobilePlaybackCadence.DelayMilliseconds(
-                Stopwatch.GetTimestamp(),
-                nextDeadline,
-                Stopwatch.Frequency);
-            if (delayMs > 0) Thread.Sleep(delayMs);
-            else Thread.Yield();
+                var now = Stopwatch.GetTimestamp();
+                nextDeadline = MobilePlaybackCadence.NextDeadline(nextDeadline, now, Stopwatch.Frequency);
+                var delayMs = MobilePlaybackCadence.DelayMilliseconds(
+                    Stopwatch.GetTimestamp(),
+                    nextDeadline,
+                    Stopwatch.Frequency);
+                if (delayMs > 0) Thread.Sleep(delayMs);
+                else Thread.Yield();
+            }
+        }
+        catch (Exception ex)
+        {
+            MarkFault("pump", ex);
         }
     }
 
     private void PollLoop()
     {
-        var buf = new byte[SignalBufBytes];
-        while (_running)
+        try
         {
-            var h = _h;
-            int got = h != IntPtr.Zero ? PcMobileNative.pc_poll_signal(h, buf, buf.Length) : 0;
-            if (got > 0)
+            var buf = new byte[SignalBufBytes];
+            var nextHealthProbeMs = 0L;
+            while (_running)
             {
-                Dispatch(Encoding.UTF8.GetString(buf, 0, got));
-                continue;
+                var nowMs = Environment.TickCount64;
+                Volatile.Write(ref _pollHeartbeatMs, nowMs);
+                var got = 0;
+                if (TryAcquireNativeHandle(out var handle))
+                {
+                    try
+                    {
+                        got = PcMobileNative.pc_poll_signal(handle, buf, buf.Length);
+                        if (nowMs >= nextHealthProbeMs)
+                        {
+                            nextHealthProbeMs = nowMs + NativeHealthProbeIntervalMs;
+                            if (float.IsNaN(PcMobileNative.pc_mic_level(handle)))
+                                throw new InvalidOperationException("native engine reported unhealthy");
+                        }
+                    }
+                    finally { ReleaseNativeHandle(); }
+                }
+                if (got > 0)
+                {
+                    Dispatch(Encoding.UTF8.GetString(buf, 0, got));
+                    continue;
+                }
+                Thread.Sleep(5);
             }
-            Thread.Sleep(5);
+        }
+        catch (Exception ex)
+        {
+            MarkFault("poll", ex);
         }
     }
+
+    private void MarkFault(string worker, Exception ex)
+    {
+        if (Interlocked.Exchange(ref _faulted, 1) != 0) return;
+        _running = false;
+        VoiceDiagnostics.Log("voice.mobile.worker",
+            $"state=faulted worker={worker} error=\"{ex.Message.Replace('"', '\'')}\"");
+    }
+
+    internal static bool WorkerHeartbeatsHealthy(
+        long nowMs,
+        long pollHeartbeatMs,
+        long pumpHeartbeatMs,
+        int timeoutMs)
+        => pollHeartbeatMs > 0
+           && pumpHeartbeatMs > 0
+           && nowMs - pollHeartbeatMs <= timeoutMs
+           && nowMs - pumpHeartbeatMs <= timeoutMs;
 
     private void Dispatch(string json)
     {
@@ -210,16 +333,147 @@ internal sealed class MobileVoiceClient : IDisposable
     public void Dispose()
     {
         _running = false;
-        try { _pollThread?.Join(); } catch { }
-        try { _pumpThread?.Join(); } catch { }
-        lock (_micLock)
-        lock (_ctrlLock)
+        ResetMicInput();
+        lock (_ringLock)
         {
-            var h = _h;
-            _h = IntPtr.Zero;
-            if (h != IntPtr.Zero) PcMobileNative.pc_engine_free(h);
+            Array.Clear(_ring, 0, _ring.Length);
+            _ringRead = 0;
+            _ringWrite = 0;
+            _ringCount = 0;
         }
-        VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient disposed");
+        var handle = Interlocked.Exchange(ref _h, IntPtr.Zero);
+        var hadRuntime = handle != IntPtr.Zero || _pollThread != null || _pumpThread != null;
+        ShutdownDetachedHandle(handle, "dispose");
+        if (hadRuntime)
+            VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient disposed");
+    }
+
+    private bool TryAcquireNativeHandle(out IntPtr handle)
+    {
+        while (true)
+        {
+            handle = ReadHandle();
+            if (handle == IntPtr.Zero) return false;
+            Interlocked.Increment(ref _activeNativeCalls);
+            if (ReadHandle() == handle) return true;
+            Interlocked.Decrement(ref _activeNativeCalls);
+        }
+    }
+
+    private void ReleaseNativeHandle() => Interlocked.Decrement(ref _activeNativeCalls);
+
+    private IntPtr ReadHandle() => Interlocked.CompareExchange(ref _h, IntPtr.Zero, IntPtr.Zero);
+
+    private void ShutdownDetachedHandle(IntPtr handle, string reason)
+    {
+        var deadline = Stopwatch.GetTimestamp() + ShutdownTimeoutMs * Stopwatch.Frequency / 1000;
+        var pollStopped = JoinUntil(_pollThread, deadline);
+        var pumpStopped = JoinUntil(_pumpThread, deadline);
+        _pollThread = null;
+        _pumpThread = null;
+
+        while (Volatile.Read(ref _activeNativeCalls) != 0 && Stopwatch.GetTimestamp() < deadline)
+            Thread.Sleep(1);
+
+        var activeCalls = Volatile.Read(ref _activeNativeCalls);
+        if (handle == IntPtr.Zero) return;
+        if (!pollStopped || !pumpStopped || activeCalls != 0)
+        {
+            // The current ABI has no cancellation primitive for an in-flight native call. Leaking
+            // this detached handle until process exit is safer than a use-after-free or freezing
+            // Unity's main thread indefinitely.
+            VoiceDiagnostics.Log("voice.mobile.shutdown",
+                $"state=abandoned-handle reason={reason} pollStopped={pollStopped} pumpStopped={pumpStopped} activeCalls={activeCalls}");
+            return;
+        }
+
+        try
+        {
+            var freeThread = new Thread(() =>
+            {
+                try { PcMobileNative.pc_engine_free(handle); }
+                catch (Exception ex)
+                {
+                    VoiceDiagnostics.Log("voice.mobile.shutdown",
+                        $"state=free-failed reason={reason} error=\"{ex.Message.Replace('"', '\'')}\"");
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "PcMobileFree",
+            };
+            freeThread.Start();
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("voice.mobile.shutdown",
+                $"state=free-thread-failed reason={reason} error=\"{ex.Message.Replace('"', '\'')}\"");
+        }
+    }
+
+    private static bool JoinUntil(Thread? worker, long deadline)
+    {
+        if (worker == null || !worker.IsAlive) return true;
+        if (ReferenceEquals(worker, Thread.CurrentThread)) return false;
+        try
+        {
+            var remainingTicks = deadline - Stopwatch.GetTimestamp();
+            if (remainingTicks <= 0) return !worker.IsAlive;
+            var remainingMs = Math.Max(1, (int)Math.Min(int.MaxValue,
+                remainingTicks * 1000L / Stopwatch.Frequency));
+            return worker.Join(remainingMs);
+        }
+        catch { return false; }
+    }
+
+    private bool FailStart(string reason)
+    {
+        var delayMs = CompleteStart(success: false);
+        StartRetryAfterMs = delayMs;
+        VoiceDiagnostics.Log("voice.mobile.start",
+            $"state=retry-scheduled delayMs={delayMs} reason=\"{reason.Replace('"', '\'')}\"");
+        return false;
+    }
+
+    private static bool TryBeginStart(out int retryAfterMs)
+    {
+        lock (StartRetryGate)
+        {
+            var now = Environment.TickCount64;
+            if (_startInProgress)
+            {
+                retryAfterMs = 100;
+                return false;
+            }
+            if (now < _startNotBeforeMs)
+            {
+                retryAfterMs = (int)Math.Min(int.MaxValue, _startNotBeforeMs - now);
+                return false;
+            }
+            _startInProgress = true;
+            retryAfterMs = 0;
+            return true;
+        }
+    }
+
+    private static int CompleteStart(bool success)
+    {
+        lock (StartRetryGate)
+        {
+            _startInProgress = false;
+            if (success)
+            {
+                _startFailures = 0;
+                _startNotBeforeMs = 0;
+                return 0;
+            }
+
+            _startFailures = Math.Min(_startFailures + 1, 30);
+            var delayMs = AndroidMicrophone.RecoveryDelayMilliseconds(
+                _startFailures, InitialStartRetryMs, MaximumStartRetryMs);
+            _startNotBeforeMs = Environment.TickCount64 + delayMs;
+            return delayMs;
+        }
     }
 }
 #endif

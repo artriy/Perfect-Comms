@@ -5,7 +5,7 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal sealed class RpcSignalingSender : ISignalingSender
 {
-    public void Send(int targetClientId, SignalMsgType type, byte[] payload)
+    public bool Send(int targetClientId, SignalMsgType type, byte[] payload)
         => AmongUsRpcSignaling.Send(targetClientId, type, payload);
 }
 

@@ -26,22 +26,26 @@ internal class PermissionHelper : MonoBehaviour
         ClassInjector.RegisterTypeInIl2Cpp<PermissionHelper>();
     }
 
-    private VoiceChatRoom? _room;
-    private string         _device = "";
+    private VoiceChatRoom? _pendingRoom;
+    private string _pendingDevice = "";
+    private bool _requestInFlight;
 
     internal void RequestMicAndStart(VoiceChatRoom room, string device)
     {
-        _room   = room;
-        _device = device;
+        _pendingRoom = room;
+        _pendingDevice = device;
 
         // If permission already granted, start immediately
         if (Application.HasUserAuthorization(UserAuthorization.Microphone))
         {
-            _room?.StartMicNow(_device);
+            CompletePending(granted: true);
             return;
         }
 
-        // Request permission then start when granted
+        // One OS request at a time. Repeated device changes or a room replacement update the
+        // pending target; the completion applies only to whichever room is still current.
+        if (_requestInFlight) return;
+        _requestInFlight = true;
         StartCoroutine(RequestAndStart().WrapToIl2Cpp());
     }
 
@@ -50,18 +54,28 @@ internal class PermissionHelper : MonoBehaviour
         VoiceDiagnostics.DebugInfo("[VC] Android: requesting microphone permission...");
         yield return Application.RequestUserAuthorization(UserAuthorization.Microphone);
 
-        if (Application.HasUserAuthorization(UserAuthorization.Microphone))
+        var granted = Application.HasUserAuthorization(UserAuthorization.Microphone);
+        if (granted)
         {
             VoiceDiagnostics.DebugInfo("[VC] Android: microphone permission granted.");
-            _room?.StartMicNow(_device);
         }
         else
         {
             VoiceDiagnostics.DebugWarning("[VC] Android: microphone permission denied.");
         }
 
-        _room   = null;
-        _device = "";
+        CompletePending(granted);
+    }
+
+    private void CompletePending(bool granted)
+    {
+        _requestInFlight = false;
+        var room = _pendingRoom;
+        var device = _pendingDevice;
+        _pendingRoom = null;
+        _pendingDevice = "";
+        if (granted && room != null && ReferenceEquals(VoiceChatRoom.Current, room))
+            room.StartMicAfterPermission(device);
     }
 }
 #endif

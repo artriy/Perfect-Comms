@@ -48,7 +48,7 @@ struct DecodeState {
 pub struct Engine {
     rtc: Arc<RtcEngine>,
     dsp: Mutex<Dsp>,
-    enc: Mutex<Option<OpusCodec>>,
+    enc: Mutex<OpusCodec>,
     dec: Mutex<DecodeState>,
     gs: Arc<GameState>,
     sig_rx: Mutex<Receiver<LocalSignal>>,
@@ -63,11 +63,19 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Engine {
+        Self::try_new().expect("pc-capture: Opus encoder/decoder initialization failed")
+    }
+
+    /// Constructs an engine only when its transmit codec is usable. Mobile callers surface this
+    /// failure as a null FFI handle so managed recovery can retry; a healthy-looking engine with no
+    /// encoder would otherwise negotiate peers and emit speaking levels while sending no RTP.
+    pub fn try_new() -> Result<Engine, audiopus::Error> {
         let (sig_tx, sig_rx) = std::sync::mpsc::channel::<LocalSignal>();
-        Engine {
+        let encoder = OpusCodec::new()?;
+        Ok(Engine {
             rtc: Arc::new(RtcEngine::new(sig_tx)),
             dsp: Mutex::new(Dsp::new(initial_dsp_config())),
-            enc: Mutex::new(OpusCodec::new().ok()),
+            enc: Mutex::new(encoder),
             dec: Mutex::new(DecodeState {
                 decoders: HashMap::new(),
                 last_seq: HashMap::new(),
@@ -85,7 +93,7 @@ impl Engine {
             synthetic: Mutex::new(None),
             local_level_cadence: Mutex::new(LevelCadence::new(Instant::now())),
             level: AtomicU32::new(0),
-        }
+        })
     }
 
     pub fn push_mic(&self, samples: &[f32]) -> f32 {
@@ -112,13 +120,14 @@ impl Engine {
                 .publish_local(window_peak, window_peak >= input.vad_threshold);
         }
 
-        let pkt = match self.enc.lock().unwrap().as_mut() {
-            Some(enc) => enc.encode(&buf),
-            None => Vec::new(),
-        };
-        if !pkt.is_empty() {
-            self.rtc.send_opus(&pkt);
-        }
+        let pkt = self.enc.lock().unwrap().encode(&buf);
+        // DTX is disabled, so every valid 20 ms frame must produce a packet. Treat an encoder
+        // failure as fatal at the FFI catch boundary instead of running forever as silent RTP.
+        assert!(
+            !pkt.is_empty(),
+            "pc-capture: Opus encoder produced no packet"
+        );
+        self.rtc.send_opus(&pkt);
         pk
     }
 
@@ -139,7 +148,7 @@ impl Engine {
                     Ok(c) => {
                         state.decoders.insert(peer.clone(), c);
                     }
-                    Err(_) => continue,
+                    Err(error) => panic!("pc-capture: Opus decoder initialization failed: {error}"),
                 }
             }
             let last = state.last_seq.get(&peer).copied();

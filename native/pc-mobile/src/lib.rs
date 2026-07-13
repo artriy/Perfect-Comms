@@ -3,15 +3,44 @@
 use pc_capture::engine::Engine;
 use std::ffi::{c_char, c_float, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{ptr, slice};
 
 // ABI 3 adds protocol-7 input/synthetic controls and bounded peer-level telemetry.
 pub const PC_ABI_VERSION: c_int = 3;
 
+// Release packaging reads this exported, NUL-terminated marker directly from the ELF file.
+// Keep its decimal value in sync with PC_ABI_VERSION and scripts/verify-release-assets.py.
+#[used]
+#[no_mangle]
+pub static PC_MOBILE_ABI_MARKER: [u8; 29] = *b"PERFECTCOMMS_PC_MOBILE_ABI=3\0";
+
 const _: fn() = || {
     fn assert_sync_send<T: Sync + Send>() {}
     assert_sync_send::<Engine>();
 };
+
+pub struct MobileEngine {
+    engine: Engine,
+    healthy: AtomicBool,
+}
+
+impl MobileEngine {
+    fn try_new() -> Option<Self> {
+        Some(Self {
+            engine: Engine::try_new().ok()?,
+            healthy: AtomicBool::new(true),
+        })
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
+
+    fn mark_unhealthy(&self) {
+        self.healthy.store(false, Ordering::Release);
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn pc_abi_version() -> c_int {
@@ -19,12 +48,17 @@ pub extern "C" fn pc_abi_version() -> c_int {
 }
 
 #[no_mangle]
-pub extern "C" fn pc_engine_new() -> *mut Engine {
-    catch_unwind(|| Box::into_raw(Box::new(Engine::new()))).unwrap_or(ptr::null_mut())
+pub extern "C" fn pc_engine_new() -> *mut MobileEngine {
+    catch_unwind(|| {
+        MobileEngine::try_new()
+            .map(|engine| Box::into_raw(Box::new(engine)))
+            .unwrap_or(ptr::null_mut())
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pc_engine_free(handle: *mut Engine) {
+pub unsafe extern "C" fn pc_engine_free(handle: *mut MobileEngine) {
     if handle.is_null() {
         return;
     }
@@ -32,85 +66,129 @@ pub unsafe extern "C" fn pc_engine_free(handle: *mut Engine) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pc_control(handle: *mut Engine, json: *const c_char) {
+pub unsafe extern "C" fn pc_control(handle: *mut MobileEngine, json: *const c_char) {
     if handle.is_null() || json.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        let engine = &*handle;
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return;
+    }
+    if catch_unwind(AssertUnwindSafe(|| {
         if let Ok(s) = CStr::from_ptr(json).to_str() {
-            engine.control(s);
+            mobile.engine.control(s);
         }
-    }));
+    }))
+    .is_err()
+    {
+        mobile.mark_unhealthy();
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pc_push_mic(
-    handle: *mut Engine,
+    handle: *mut MobileEngine,
     samples: *const c_float,
     len: c_int,
 ) -> c_float {
     if handle.is_null() || samples.is_null() || len <= 0 {
         return 0.0;
     }
-    catch_unwind(AssertUnwindSafe(|| {
-        let engine = &*handle;
-        engine.push_mic(slice::from_raw_parts(samples, len as usize))
-    }))
-    .unwrap_or(0.0)
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return 0.0;
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        mobile
+            .engine
+            .push_mic(slice::from_raw_parts(samples, len as usize))
+    })) {
+        Ok(level) => level,
+        Err(_) => {
+            mobile.mark_unhealthy();
+            0.0
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pc_pull_playback(
-    handle: *mut Engine,
+    handle: *mut MobileEngine,
     out: *mut c_float,
     cap: c_int,
 ) -> c_int {
     if handle.is_null() || out.is_null() || cap <= 0 {
         return 0;
     }
-    catch_unwind(AssertUnwindSafe(|| {
-        let engine = &*handle;
-        engine.pull_playback(slice::from_raw_parts_mut(out, cap as usize)) as c_int
-    }))
-    .unwrap_or(0)
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return 0;
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        mobile
+            .engine
+            .pull_playback(slice::from_raw_parts_mut(out, cap as usize)) as c_int
+    })) {
+        Ok(written) => written,
+        Err(_) => {
+            mobile.mark_unhealthy();
+            0
+        }
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pc_mic_level(handle: *mut Engine) -> c_float {
+pub unsafe extern "C" fn pc_mic_level(handle: *mut MobileEngine) -> c_float {
     if handle.is_null() {
         return 0.0;
     }
-    catch_unwind(AssertUnwindSafe(|| (*handle).level())).unwrap_or(0.0)
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return c_float::NAN;
+    }
+    match catch_unwind(AssertUnwindSafe(|| mobile.engine.level())) {
+        Ok(level) => level,
+        Err(_) => {
+            mobile.mark_unhealthy();
+            c_float::NAN
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pc_poll_signal(
-    handle: *mut Engine,
+    handle: *mut MobileEngine,
     out: *mut c_char,
     cap: c_int,
 ) -> c_int {
     if handle.is_null() || out.is_null() || cap <= 1 {
         return 0;
     }
-    catch_unwind(AssertUnwindSafe(|| {
-        let engine = &*handle;
-        match engine.poll_signal() {
-            Some(json) => {
-                let bytes = json.as_bytes();
-                if bytes.len() + 1 > cap as usize {
-                    return -1;
-                }
-                ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-                *out.add(bytes.len()) = 0;
-
-                engine.ack_signal();
-                bytes.len() as c_int
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return 0;
+    }
+    match catch_unwind(AssertUnwindSafe(|| match mobile.engine.poll_signal() {
+        Some(json) => {
+            let bytes = json.as_bytes();
+            if bytes.len() + 1 > cap as usize {
+                return -1;
             }
-            None => 0,
+
+            ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+            *out.add(bytes.len()) = 0;
+
+            mobile.engine.ack_signal();
+            bytes.len() as c_int
         }
-    }))
-    .unwrap_or(0)
+        None => 0,
+    })) {
+        Ok(written) => written,
+        Err(_) => {
+            mobile.mark_unhealthy();
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -121,6 +199,10 @@ mod tests {
     fn abi_version_matches_protocol_7_contract() {
         assert_eq!(PC_ABI_VERSION, 3);
         assert_eq!(pc_abi_version(), 3);
+        assert_eq!(
+            PC_MOBILE_ABI_MARKER.as_slice(),
+            format!("PERFECTCOMMS_PC_MOBILE_ABI={PC_ABI_VERSION}\0").as_bytes()
+        );
     }
 
     #[test]
@@ -133,5 +215,12 @@ mod tests {
             assert_eq!(pc_mic_level(ptr::null_mut()), 0.0);
             assert_eq!(pc_poll_signal(ptr::null_mut(), ptr::null_mut(), 0), 0);
         }
+    }
+
+    #[test]
+    fn engine_creation_requires_a_working_opus_codec() {
+        let handle = pc_engine_new();
+        assert!(!handle.is_null());
+        unsafe { pc_engine_free(handle) };
     }
 }

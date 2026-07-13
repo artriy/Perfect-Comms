@@ -7,6 +7,108 @@ using Xunit;
 
 public sealed class ManagedVoiceHardeningTests
 {
+    [Fact]
+    public void JoinGuardVersionMatchesBuiltPluginVersion()
+    {
+        var assemblyVersion = typeof(PerfectCommsVoiceBackend)
+            .Assembly
+            .GetName()
+            .Version;
+
+        Assert.NotNull(assemblyVersion);
+        Assert.Equal(
+            VoiceChatPlugin.VoiceChatPluginMain.Version,
+            $"{assemblyVersion!.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}");
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Tasks, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, true)]
+    [InlineData((int)VoiceGamePhase.Exile, true)]
+    [InlineData((int)VoiceGamePhase.Lobby, false)]
+    [InlineData((int)VoiceGamePhase.Intro, false)]
+    [InlineData((int)VoiceGamePhase.EndGame, false)]
+    public void MissingHudOrLocalIdentityFailsClosedOnlyInRestrictedGameplay(
+        int phaseValue,
+        bool expected)
+    {
+        var phase = (VoiceGamePhase)phaseValue;
+        Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(phase));
+        Assert.Equal(expected, VoiceChatHudState.ShouldFailClosedWithoutLocalIdentity(phase));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false, false)]
+    [InlineData(false, true, false, false, false)]
+    [InlineData(false, false, true, false, false)]
+    [InlineData(false, false, false, true, false)]
+    [InlineData(false, false, false, false, true)]
+    public void EveryIndependentTransmitBlockMutesCaptureButNotTheSpeaker(
+        bool speakerMuted,
+        bool manualMuted,
+        bool pushToTalkMuted,
+        bool roleMuted,
+        bool policyMuted)
+    {
+        Assert.True(VoiceChatHudState.CombineTransmitMute(
+            speakerMuted, manualMuted, pushToTalkMuted, roleMuted, policyMuted));
+    }
+
+    [Theory]
+    [InlineData(true, true, false, false, true)]
+    [InlineData(true, false, true, true, true)]
+    [InlineData(true, false, true, false, false)]
+    [InlineData(false, true, true, true, false)]
+    public void RelayPolicyPreservesAutomaticSessionEscalation(
+        bool natFix,
+        bool sessionLatch,
+        bool wine,
+        bool wineSetting,
+        bool expected)
+    {
+        Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldForceRelayPolicy(
+            natFix, sessionLatch, wine, wineSetting));
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public void PendingTurnIntentAlwaysSchedulesAnotherCredentialAttempt(
+        bool pendingPeers,
+        bool forceAwaiting,
+        bool refreshAwaiting)
+    {
+        Assert.True(PerfectCommsVoiceBackend.ShouldRetryPendingTurnIntent(
+            pendingPeers, forceAwaiting, refreshAwaiting));
+    }
+
+    [Fact]
+    public void SameRoomMediaResetPreservesPendingHostAuthorityGeneration()
+    {
+        Assert.False(VoiceChatRoom.ShouldClearHostAuthorityOnSettingsReset(
+            clearRemote: false,
+            preserveHostAuthority: true));
+        Assert.True(VoiceChatRoom.ShouldClearHostAuthorityOnSettingsReset(
+            clearRemote: true,
+            preserveHostAuthority: true));
+    }
+
+    [Theory]
+    [InlineData(7, -1, false, true)]
+    [InlineData(7, -1, true, false)]
+    [InlineData(-1, -1, false, false)]
+    [InlineData(7, 8, false, false)]
+    public void KnownHostBecomingUnresolvedStartsOneBoundedResyncGeneration(
+        int previousHost,
+        int resolvedHost,
+        bool alreadyPending,
+        bool expected)
+    {
+        Assert.Equal(expected, VoiceChatRoom.ShouldBeginUnknownHostResync(
+            previousHost, resolvedHost, alreadyPending));
+    }
+
     private static JsonElement DecodeControl(byte[] frame)
     {
         Assert.True(SidecarProtocol.TryParseFrame(
@@ -53,6 +155,19 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
+    public void StreamingDeviceUpdatesAreAcceptedAndParsed()
+    {
+        const string json = "{\"op\":\"devices\",\"devices\":[{\"id\":\"mic-1\",\"name\":\"Mic One\",\"default\":true}]," +
+                            "\"outputDevices\":[{\"id\":\"spk-1\",\"name\":\"Speaker One\",\"default\":true}]}";
+
+        Assert.True(SidecarVoiceClient.TryReadDeviceUpdate(json, out var inputs, out var outputs));
+        Assert.Equal(new[] { "Mic One" }, inputs);
+        Assert.Equal(new[] { "Speaker One" }, outputs);
+        Assert.False(SidecarVoiceClient.TryReadDeviceUpdate(
+            "{\"op\":\"devices\",\"devices\":[]}", out _, out _));
+    }
+
+    [Fact]
     public void PeerLevelParserIsBoundedAndClampsFinitePeaks()
     {
         const string json = "{\"op\":\"peer-levels\",\"levels\":[" +
@@ -82,10 +197,160 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
+    public void RecoverableMicErrorDoesNotClassifyControlTransportAsDead()
+    {
+        Assert.True(SidecarVoiceClient.IsRecoverableHelperError("mic-error"));
+        Assert.True(SidecarVoiceClient.IsRecoverableHelperError("MIC-ERROR"));
+        Assert.False(SidecarVoiceClient.IsRecoverableHelperError("busy"));
+        Assert.False(SidecarVoiceClient.IsRecoverableHelperError("rtc-error"));
+        Assert.False(SidecarVoiceClient.IsRecoverableHelperError(null));
+    }
+
+    [Fact]
+    public void SidecarRecoveryBackoffContinuesAfterCircuitBreaker()
+    {
+        Assert.Equal(750, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(0));
+        Assert.Equal(1_500, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(1));
+        Assert.Equal(3_000, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(2));
+        Assert.Equal(24_000, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(5));
+        Assert.Equal(30_000, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(6));
+        Assert.Equal(30_000, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(100));
+    }
+
+    [Fact]
+    public void UnstableHeartbeatFlapsKeepTheirSpentBudgetAndIncreasingBackoff()
+    {
+        var immediateRestarts = 0;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var immediate = PerfectCommsVoiceBackend.DecideHeartbeatRecovery(
+                immediateRestarts,
+                uptimeTicks: TimeSpan.FromSeconds(2).Ticks);
+            Assert.True(immediate.RestartImmediately);
+            Assert.False(immediate.ResetRecoveryBackoff);
+            immediateRestarts = immediate.ImmediateRestarts;
+        }
+
+        var firstBreaker = PerfectCommsVoiceBackend.DecideHeartbeatRecovery(
+            immediateRestarts,
+            uptimeTicks: TimeSpan.FromSeconds(2).Ticks);
+        Assert.False(firstBreaker.RestartImmediately);
+        Assert.Equal(3, firstBreaker.ImmediateRestarts);
+        Assert.Equal(750, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(0));
+
+        // A short-lived successful start does not alter either counter. Its next loss therefore
+        // remains on the breaker and advances to the next delay instead of returning to 750ms.
+        var afterShortSuccess = PerfectCommsVoiceBackend.DecideHeartbeatRecovery(
+            firstBreaker.ImmediateRestarts,
+            uptimeTicks: TimeSpan.FromSeconds(2).Ticks);
+        Assert.False(afterShortSuccess.RestartImmediately);
+        Assert.Equal(1_500, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(1));
+    }
+
+    [Fact]
+    public void StableHeartbeatSessionEarnsOneFreshImmediateRestartBudget()
+    {
+        var decision = PerfectCommsVoiceBackend.DecideHeartbeatRecovery(
+            priorImmediateRestarts: 3,
+            uptimeTicks: TimeSpan.FromSeconds(30).Ticks);
+
+        Assert.True(decision.RestartImmediately);
+        Assert.Equal(1, decision.ImmediateRestarts);
+        Assert.True(decision.ResetRecoveryBackoff);
+    }
+
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, false)]
+    public void OnlyForcedSameRoomBackendRebuildPreservesRecoveryEscalation(
+        bool forceRebuild,
+        bool continuingSameRoom,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VoiceChatRoom.ShouldPreserveMissingPeerRecoveryState(forceRebuild, continuingSameRoom));
+    }
+
+    [Fact]
+    public void PreservedSameRoomCollapseAdvancesBackoffAndReachesRelayAttempt()
+    {
+        Assert.True(VoiceChatRoom.ShouldPreserveMissingPeerRecoveryState(
+            forceRebuild: true,
+            continuingSameRoom: true));
+        Assert.Equal(5f, VoiceChatRoom.RecoveryBackoffSeconds(0));
+        Assert.Equal(10f, VoiceChatRoom.RecoveryBackoffSeconds(1));
+        Assert.Equal(20f, VoiceChatRoom.RecoveryBackoffSeconds(2));
+        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 0,
+            openChannelsRaw: 0,
+            remotePlayers: 2,
+            globalAttempt: 1));
+        Assert.True(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 0,
+            openChannelsRaw: 0,
+            remotePlayers: 2,
+            globalAttempt: 2));
+    }
+
+    [Fact]
+    public void RelayEscalationUsesEstablishedTransportNotRouteMappings()
+    {
+        Assert.True(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 0, openChannelsRaw: 0, remotePlayers: 2, globalAttempt: 2));
+        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 1, openChannelsRaw: 1, remotePlayers: 2, globalAttempt: 2));
+        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 0, openChannelsRaw: 1, remotePlayers: 2, globalAttempt: 2));
+        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
+            openPeers: 0, openChannelsRaw: 0, remotePlayers: 2, globalAttempt: 1));
+    }
+
+    [Fact]
+    public void HostMigrationPolicyExpiresAndHudIndependentAudioTickCoversEveryPhase()
+    {
+        Assert.True(VoiceChatRoom.CanUseTransitionalHostPolicy(
+            resyncPending: true, hasRemoteSnapshot: true, waitedSeconds: 9.99f));
+        Assert.False(VoiceChatRoom.CanUseTransitionalHostPolicy(
+            resyncPending: true, hasRemoteSnapshot: true, waitedSeconds: 10f));
+        Assert.True(VoiceChatRoom.HasHostPolicyResyncTimedOut(true, 10f));
+        Assert.False(VoiceChatRoom.HasHostPolicyResyncTimedOut(false, 100f));
+
+        Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase.EndGame));
+        Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase.Lobby));
+        Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase.Tasks));
+        Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase.Meeting));
+    }
+
+    [Fact]
+    public void RpcPumpDeadlinesAdvanceIndependently()
+    {
+        long rosterNext = 0;
+        long sessionNext = 0;
+
+        Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_000, ref rosterNext, 250));
+        Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_000, ref sessionNext, 100));
+        Assert.Equal(1_250, rosterNext);
+        Assert.Equal(1_100, sessionNext);
+
+        Assert.False(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_099, ref sessionNext, 100));
+        Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_100, ref sessionNext, 100));
+        Assert.False(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_100, ref rosterNext, 250));
+        Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_250, ref rosterNext, 250));
+    }
+
+    [Fact]
     public void SidecarLivenessUsesLevelEventsInsteadOfRetiredPcmFrames()
     {
-        Assert.Equal(4, PerfectCommsVoiceBackend.SelectCaptureActivity(
-            nativeSidecarOwnsCapture: true, sidecarLevelEvents: 4, managedPcmSamples: 0));
+        var silentLevelCadence = PerfectCommsVoiceBackend.SelectCaptureActivity(
+            nativeSidecarOwnsCapture: true, sidecarLevelEvents: 4, managedPcmSamples: 0);
+        Assert.Equal(4, silentLevelCadence);
+        // Activity counts callback/telemetry cadence, not amplitude: a working user who simply
+        // stays silent remains healthy and never drives a false capture restart.
+        Assert.Equal(CaptureHealth.Healthy,
+            CaptureSupervisor.ClassifySamples(silentLevelCadence, unmutedAndCapturing: true));
         Assert.Equal(960, PerfectCommsVoiceBackend.SelectCaptureActivity(
             nativeSidecarOwnsCapture: false, sidecarLevelEvents: 0, managedPcmSamples: 960));
         Assert.Equal(0, PerfectCommsVoiceBackend.SelectCaptureActivity(
@@ -93,14 +358,12 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
-    public void DuplicateRouteWinnerIsStableAndPrefersMappedSocket()
+    public void DuplicateRouteWinnerIsStable()
     {
         Assert.True(PerfectCommsVoiceBackend.PreferSecondRouteRecord(
-            "rpc-route:7", "socket-b", mappedSocket: "socket-b"));
+            "rpc-route:9", "rpc-route:7"));
         Assert.False(PerfectCommsVoiceBackend.PreferSecondRouteRecord(
-            "socket-b", "rpc-route:7", mappedSocket: "socket-b"));
-        Assert.True(PerfectCommsVoiceBackend.PreferSecondRouteRecord(
-            "socket-z", "socket-a", mappedSocket: null));
+            "rpc-route:7", "rpc-route:9"));
     }
 
     [Fact]
