@@ -73,10 +73,9 @@ Before tagging, open **Actions -> Release -> Run workflow** and run it against
 managed, native, RTC, desktop, Android, and packaging gates, then uploads a
 `PerfectComms-packages-*` Actions artifact for 14 days containing:
 
-- `PerfectComms.dll` and `PerfectComms-Release.zip` for every supported desktop
-  platform;
+- `PerfectComms.dll` for every supported desktop platform;
 - `PerfectComms+dependencies.zip` with BepInEx;
-- `PerfectCommsAndroid.dll` and `PerfectComms-Android.zip` for Android.
+- `PerfectCommsAndroid.dll` for Android.
 
 ### Publishing a release
 
@@ -89,5 +88,5 @@ managed, native, RTC, desktop, Android, and packaging gates, then uploads a
 4. Create and push tag `vX.Y.Z` on that tested `main` commit.
 
 The tag run repeats every gate, verifies the tag is on `main`, checks every
-version field, publishes the five release assets, and generates GitHub release
+version field, publishes the three release assets, and generates GitHub release
 notes automatically. A failed gate cannot publish a partial release.

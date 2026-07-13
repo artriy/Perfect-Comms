@@ -95,8 +95,6 @@ jobs:
           name: PerfectComms-packages-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/PerfectComms+dependencies.zip
-            artifacts/PerfectComms-Release.zip
-            artifacts/PerfectComms-Android.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll
           if-no-files-found: error
@@ -108,7 +106,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/PerfectComms+dependencies.zip
-            artifacts/PerfectComms-Release.zip
-            artifacts/PerfectComms-Android.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll
