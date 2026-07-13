@@ -270,6 +270,22 @@ internal static class VoiceJoinGuard
     {
         public static void Prefix(InnerNetClient __instance, ref DisconnectReasons reason)
         {
+            // DisconnectInternal is the earliest deterministic local-lobby exit boundary. Release
+            // the voice session here (capture, peers, routing, and the helper process). EndGame ->
+            // lobby transitions do not disconnect and therefore retain the same uninterrupted lease.
+            var lifetimeReason = $"innernet-disconnect:{reason}";
+            VoiceRoomLifetimeGate.MarkExplicitDisconnect(lifetimeReason);
+            try { VoiceLobbyRegistryPublisher.ClearLocalListing(); }
+            catch { /* registry cleanup must never interfere with vanilla disconnect */ }
+            try { VoiceChatRoom.CloseCurrentRoom(lifetimeReason); }
+            catch (Exception ex)
+            {
+                // Never let plugin cleanup prevent the game's own disconnect. The latch stays set,
+                // so the driver still cannot recreate voice from lingering EndGame scene objects.
+                try { VoiceDiagnostics.Log("voice.room.lifetime", $"event=disconnect-cleanup-failed errorType={ex.GetType().Name}"); }
+                catch { }
+            }
+
             // Reactor also swaps this screen; when it's present we never set our reason
             // (all our patches stand down), but bail explicitly so we can never clobber
             // Reactor's own kick-reason screen.
@@ -279,6 +295,27 @@ internal static class VoiceJoinGuard
             __instance.LastCustomDisconnect = _pendingKickReason;
             _pendingKickReason = null;
             Dbg("disconnect swap -> perfect comms reason");
+        }
+    }
+
+    [HarmonyPatch(typeof(AmongUsClient), nameof(AmongUsClient.OnGameJoined))]
+    private static class OnGameJoinedPatch
+    {
+        public static void Postfix()
+        {
+            // This is a confirmed new network session, unlike stale Joined/scene state that can
+            // remain visible while DisconnectInternal is still transitioning away from EndGame.
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("among-us-on-game-joined");
+            try
+            {
+                // Begin helper launch and device setup from the authoritative join callback instead
+                // of waiting for the next scene/driver poll and a fully-built PlayerControl roster.
+                VoiceChatRoom.EnsureStartedForJoinedSession();
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.DebugError($"[VC] OnGameJoined voice bootstrap failed: {ex.Message}");
+            }
         }
     }
 }

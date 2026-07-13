@@ -2,19 +2,18 @@ using InnerNet;
 using VoiceChatPlugin.Audio;
 using VoiceChatPlugin.VoiceChat;
 using UnityEngine;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
 /// Manages the in-game voice chat session.
 ///
-/// Audio transport uses the Interstellar voice backend instead of custom Among Us voice RPCs.
-///
-/// Remote voice playback and routing are owned by the Interstellar backend.
+/// C# owns game-state routing and authenticated Among Us RPC signaling. Native pc-capture/pc-mobile
+/// engines own capture, WebRTC RTP media, jitter buffering, mixing, and playback.
 /// </summary>
 public class VoiceChatRoom
 {
@@ -23,25 +22,25 @@ public class VoiceChatRoom
     private const float BootstrapWindowSeconds = 6f;
     private const float BootstrapRefreshInterval = 0.50f;
     private const float MissingPeerRecoveryGraceSeconds = 8f;
-    private const float InterstellarSwitchPeerRecoveryGraceSeconds = 2f;
-    private const float HostSyncWaitTimeoutSeconds = 10f;
     private const float MissingPeerRecoveryIntervalSeconds = 5f;
     private const float PeerEscalationDeferralRecheckSeconds = 3f;
-    private const int PeerEscalationDeferralMaxConsecutive = 4;
     private const double RadioStateRpcHeartbeatSeconds = 1.0;
     private const float TransitionTraceSeconds = 45f;
+    private const float TransitionRosterRetentionMaxSeconds = 3f;
     private const float TransitionTraceStateInterval = 0.25f;
     private const int TransitionTraceAudioFrames = 64;
     private const int TransitionTracePerfEvents = 48;
     private const double StalePlaybackBufferTimeoutSeconds = VoiceProtocol.MaxQueuedFrameAgeSeconds;
     private const double SlowUpdateLogThresholdMs = 20.0;
     private const double SlowOperationLogThresholdMs = 2.0;
-    private const double HostSettingsResponseRateLimitSeconds = 2.0;
     private const float HostVoiceRefreshCooldownSeconds = 10f;
     private const float LocalVoiceRefreshCooldownSeconds = 10f;
+    private const float HostPolicySyncFallbackSeconds = 10f;
 
     // ── Singleton ─────────────────────────────────────────────────────────────
-    public static VoiceChatRoom? Current { get; private set; }
+    private static readonly object CurrentLifecycleLock = new();
+    private static VoiceChatRoom? _current;
+    public static VoiceChatRoom? Current => Volatile.Read(ref _current);
 
     // ── Virtual components ─────────────────────────────────────────────────────
     private readonly List<IVoiceComponent> _virtualMics     = new();
@@ -54,19 +53,22 @@ public class VoiceChatRoom
 
     // ── Microphone ─────────────────────────────────────────────────────────────
     public bool UsingMicrophone => _voiceBackend?.UsingMicrophone == true;
-    internal bool IsBetterCrewLinkBackendActive => _betterCrewLinkVoice != null;
-    internal int BetterCrewLinkPublicLobbyJoinEpoch => _betterCrewLinkVoice?.PublicLobbyJoinEpoch ?? 0;
+    private readonly object _backendLifecycleSync = new();
     private IVoiceBackend? _voiceBackend;
-    private InterstellarVoiceBackend? _interstellarVoice;
-    private BetterCrewLinkVoiceBackend? _betterCrewLinkVoice;
+    private PerfectCommsVoiceBackend? _perfectCommsVoice;
     private VoiceRoomSettingsSnapshot? _lastSentHostSettings;
     private int _lastSentModOptionRevision = -1;
-    private DateTime _lastSentHostSettingsUtc = DateTime.MinValue;
-    private const double MinHostSettingsSnapshotIntervalSeconds = 1.0;
-    private DateTime _lastHostSettingsRequestUtc = DateTime.MinValue;
+    private readonly SuccessfulSendGate _hostSettingsBroadcastGate = new(
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromSeconds(1));
+    private readonly SuccessfulSendGate _hostSettingsRequestGate = new(
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromSeconds(2));
+    private ClientRosterSignature? _lastSentHostSettingsRoster;
     private int _lastObservedHostClientId = -1;
     private bool _hostSettingsResyncPending;
-    private float _hostSyncWaitStartTime = -1f;
+    private float _hostPolicyWaitStartTime = -1f;
+    private bool _hostPolicyFallbackLogged;
     private int _lastAppliedHostVoiceRefreshNonce;
     private float _lastAppliedHostVoiceRefreshTime = -999f;
     private const float HostVoiceRefreshApplyCooldownSeconds = 8f;
@@ -76,17 +78,15 @@ public class VoiceChatRoom
     // the new host's first refresh would otherwise collide with the old host's nonce 1 and be ignored by
     // every client as a duplicate — exactly when voice is most likely broken.
     private static int _nextHostVoiceRefreshNonce = new System.Random().Next(1, int.MaxValue / 2);
-    private byte _lastRadioRpcPlayerId = byte.MaxValue;
-    private VoiceTeamRadioChannel _lastRadioRpcChannel = VoiceTeamRadioChannel.None;
-    private DateTime _lastRadioRpcSentUtc = DateTime.MinValue;
-    private VoiceTransportBackend _activeBackend = VoiceTransportBackend.BetterCrewLink;
-    // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the active backend, used
-    // for Interstellar whose VCRoom.Rejoin (RequestReload) cannot repopulate cleared peers.
+    private readonly RadioStateSyncTracker _radioStateSync = new(
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
+    // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the native media session.
     private bool _forceBackendRebuild;
-    private string? _activeEndpoint;
+    private bool _relayOnlyForSession;
     private string? _activeRoomCode;
     private string? _activeRegion;
-    internal IEnumerable<VoiceRemoteOverlayState> InterstellarRemoteOverlayStates => _voiceBackend?.RemoteOverlayStates ?? Enumerable.Empty<VoiceRemoteOverlayState>();
+    internal IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates => _voiceBackend?.RemoteOverlayStates ?? Enumerable.Empty<VoiceRemoteOverlayState>();
 
     // Allocation-free per-frame path used by VoiceOverlayState.Build.
     internal void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer)
@@ -98,10 +98,6 @@ public class VoiceChatRoom
         => _voiceBackend?.TrySetRemoteVolume(playerId, playerName, volume) == true;
     internal int ResetRemotePeerMappingsNoMute()
         => _voiceBackend?.ResetPeerMappingsNoMute() ?? 0;
-    internal bool TryPublishBetterCrewLinkLobby(VoiceLobbyPublishRequest request)
-        => _betterCrewLinkVoice?.TryPublishPublicLobby(request) == true;
-    internal bool TryRemoveBetterCrewLinkLobby(string code)
-        => _betterCrewLinkVoice?.TryRemovePublicLobby(code) == true;
     public float LocalMicLevel => _voiceBackend?.LocalLevel ?? 0f;
     public bool LocalMicSpeaking => _voiceBackend?.LocalSpeaking == true;
     public bool Mute  { get; private set; }
@@ -110,6 +106,7 @@ public class VoiceChatRoom
 
     // ── Speaker ────────────────────────────────────────────────────────────────
     public bool UsingSpeaker => _voiceBackend?.UsingSpeaker == true;
+    internal bool VoiceTransportInitializing => _perfectCommsVoice?.IsInitializing == true;
 
     // ── Misc ───────────────────────────────────────────────────────────────────
     private bool  _commsSabActive;
@@ -119,6 +116,11 @@ public class VoiceChatRoom
     private string _lastName = null!;
     private float  _lastCompatibilityRefreshTime = -999f;
     private float  _snapshotRefreshTimer;
+    private int _snapshotGameId;
+    private bool _retainingTransitionSnapshot;
+    private readonly Dictionary<int, float> _missingSnapshotClientSince = new();
+    private readonly HashSet<int> _authenticatedSnapshotClientIds = new();
+    private float _authRosterUnavailableSince = -1f;
     private float  _bootstrapUntilTime = -999f;
     private float  _bootstrapRefreshTimer;
     private float _missingPeerRecoveryReadyTime = -999f;
@@ -139,14 +141,24 @@ public class VoiceChatRoom
     private const int MissingPeerRecoveryBackoffShiftCap = 4;    // max backoff doublings (5s base -> ~80s cap on the global path)
     private bool _haveTracePhase;
     private VoiceGamePhase _lastTracePhase = VoiceGamePhase.Unknown;
+    private bool _haveRoutingPhase;
+    private VoiceGamePhase _lastRoutingPhase = VoiceGamePhase.Unknown;
     private DateTime _transitionTraceUntilUtc = DateTime.MinValue;
     private float _transitionTraceStateTimer;
     private int _tracePerfEventsRemaining;
     private string? _lastLoggedLocalState;
     private string? _lastLoggedOptions;
     private DateTime _lastDebugStateLogUtc = DateTime.MinValue;
-    private readonly ConcurrentQueue<VoiceBackendCustomMessage> _pendingBackendCustomMessages = new();
-    private readonly Dictionary<string, DateTime> _lastHostSettingsResponseBySender = new();
+    private readonly Dictionary<string, SuccessfulSendGate> _hostSettingsResponseGates = new();
+    private int _closed;
+
+    private readonly record struct ClientRosterSignature(int Count, int Xor, long Sum);
+    private enum AuthenticatedRosterCollectionState
+    {
+        Unavailable,
+        Empty,
+        Populated,
+    }
 
     // ======================================================================
     // Factory
@@ -154,27 +166,101 @@ public class VoiceChatRoom
 
     public static VoiceChatRoom Start()
     {
-        Current?.Close();
-        Current = new VoiceChatRoom();
-        return Current;
+        VoiceChatRoom room;
+        lock (CurrentLifecycleLock)
+        {
+            var previous = Interlocked.Exchange(ref _current, null);
+            previous?.Close("room replaced", clearUi: true);
+            room = new VoiceChatRoom();
+            Volatile.Write(ref _current, room);
+        }
+        room.TryStartTransportBootstrap("room-start");
+        return room;
+    }
+
+    internal static VoiceChatRoom EnsureStartedForJoinedSession()
+    {
+        VoiceChatRoom room;
+        lock (CurrentLifecycleLock)
+        {
+            room = Current!;
+            if (room == null)
+            {
+                room = new VoiceChatRoom();
+                Volatile.Write(ref _current, room);
+            }
+        }
+        room.TryStartTransportBootstrap("among-us-on-game-joined");
+        return room;
+    }
+
+    private void TryStartTransportBootstrap(string source)
+    {
+        if (_voiceBackend != null || Volatile.Read(ref _closed) != 0)
+            return;
+        try
+        {
+            EnsureVoiceBackend(null, VoiceSettings.Instance);
+            if (_voiceBackend != null)
+                VoiceDiagnostics.Log("transport.bootstrap.early", $"source={source} result=started");
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.DebugError($"[VC] Early transport bootstrap failed source={source}: {ex.Message}");
+        }
     }
 
     public static void CloseCurrentRoom()
+        => CloseCurrentRoom("room close");
+
+    internal static void CloseCurrentRoom(string reason)
+        => CloseCurrentRoomCore(reason, clearUi: true);
+
+    // Process/domain shutdown may run after Unity objects have begun tearing down. Release the
+    // active session without touching HUD GameObjects; the process host is shut down separately.
+    internal static void ShutdownCurrentRoom(string reason)
+        => CloseCurrentRoomCore(reason, clearUi: false);
+
+    // Scene callbacks run before the next room tick. Expire the small periodic snapshot cache so
+    // EndGame/lobby/intro routing consumes the new phase on that very tick instead of up to 50 ms
+    // later, while keeping the backend and sidecar lease continuously alive.
+    internal static void NotifyScenePhaseBoundary()
     {
-        Current?.Close();
-        Current = null;
+        var current = Current;
+        if (current != null)
+            current._snapshotRefreshTimer = 0f;
+    }
+
+    private static void CloseCurrentRoomCore(string reason, bool clearUi)
+    {
+        lock (CurrentLifecycleLock)
+        {
+            var room = Interlocked.Exchange(ref _current, null);
+            room?.Close(reason, clearUi);
+        }
     }
 
     internal static void ClearVoiceUiForLifecycleReset(string reason)
     {
-        PingTrackerPatch.ClearSpeakingBar();
-        MeetingSpeakingIndicatorPatch.ClearAllIndicators();
-        VoiceOverlayState.InvalidateCache();
-        VoiceVolumeMenu.ForceClose();
-        CrewmateAvatarRenderer.ClearCache();
-        VoiceCameraState.Clear();
-        VoiceProximityCalculator.ResetSightState();
-        VoiceDiagnostics.Log("voice.ui.clear", $"reason={LogSafe(reason)}");
+        RunCleanupStep("speaking-bar", PingTrackerPatch.ClearSpeakingBar);
+        RunCleanupStep("meeting-indicators", MeetingSpeakingIndicatorPatch.ClearAllIndicators);
+        RunCleanupStep("overlay-cache", VoiceOverlayState.InvalidateCache);
+        RunCleanupStep("volume-menu", VoiceVolumeMenu.ForceClose);
+        RunCleanupStep("avatar-cache", CrewmateAvatarRenderer.ClearCache);
+        RunCleanupStep("camera-state", VoiceCameraState.Clear);
+        RunCleanupStep("sight-state", VoiceProximityCalculator.ResetSightState);
+        RunCleanupStep("audio-policy-cache", VoiceChatHudState.ResetAudioPolicyCache);
+        try { VoiceDiagnostics.Log("voice.ui.clear", $"reason={LogSafe(reason)}"); } catch { }
+    }
+
+    private static void RunCleanupStep(string stage, Action cleanup)
+    {
+        try { cleanup(); }
+        catch (Exception ex)
+        {
+            try { VoiceDiagnostics.Log("voice.cleanup.error", $"stage={stage} error=\"{LogSafe(ex.Message)}\""); }
+            catch { }
+        }
     }
 
     // ======================================================================
@@ -228,11 +314,27 @@ public class VoiceChatRoom
             settings?.EchoCancellationEnabled.Value ?? true,
             settings?.MicSensitivity.Value ?? 1f);
 
+    public void RebuildCaptureSupervisor() => _perfectCommsVoice?.RebuildCaptureSupervisor();
+
     public void SetMute(bool mute)
     {
         bool wasMuted = Mute;
         Mute = mute;
+#if ANDROID
+        if (!mute && !Application.HasUserAuthorization(UserAuthorization.Microphone))
+        {
+            // Preserve listen-only playback while the OS prompt is pending/denied. The backend
+            // remains capture-muted until PermissionHelper confirms permission on this live room.
+            if (wasMuted)
+                SetMicrophone(VoiceSettings.Instance?.MicrophoneDevice ?? string.Empty);
+        }
+        else
+        {
+            _voiceBackend?.SetMute(mute);
+        }
+#else
         _voiceBackend?.SetMute(mute);
+#endif
         if (!mute && wasMuted)
             StartBootstrapWindow("local unmuted");
     }
@@ -247,6 +349,14 @@ public class VoiceChatRoom
     public void SetMicrophone(string deviceName)
     {
 #if ANDROID
+        if (Mute)
+        {
+            // Store the selected device without prompting or opening capture. A listen-only user
+            // can stay muted for the entire session; unmuting requests permission at that point.
+            StartMicNow(deviceName ?? string.Empty);
+            return;
+        }
+
         if (VoiceChatPluginMain.ResidentObject != null)
         {
             var behaviour = VoiceChatPluginMain.ResidentObject.GetComponent<PermissionHelper>()
@@ -267,6 +377,16 @@ public class VoiceChatRoom
         var settings = VoiceSettings.Instance;
         _voiceBackend?.SetMicrophone(deviceName, settings?.MicVolume.Value ?? 1f);
     }
+
+#if ANDROID
+    internal void StartMicAfterPermission(string deviceName)
+    {
+        if (Volatile.Read(ref _closed) != 0 || !ReferenceEquals(Current, this) || Mute)
+            return;
+        StartMicNow(deviceName);
+        _voiceBackend?.SetMute(false);
+    }
+#endif
 
     // ======================================================================
     // Speaker
@@ -297,7 +417,6 @@ public class VoiceChatRoom
         string updateStep = "speaker-check";
         updateStep = "transport";        TryUpdateLocalProfile();
         TryRunBootstrapRefresh();        TickVoiceBackend(CurrentSnapshot);
-        DrainBackendCustomMessages();
         MaybeLogNetworkStats();
 
         updateStep = "snapshot";
@@ -321,11 +440,135 @@ public class VoiceChatRoom
         {
             _snapshotRefreshTimer = StateRefreshInterval;
             long __snapTicks = VoiceFrameProfiler.Begin();
-            CurrentSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive);
+            var refreshedSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive);
+            var currentGameId = ResolveCurrentGameId();
+            var explicitDisconnect = VoiceRoomLifetimeGate.IsExplicitDisconnectLatched;
+            var previousRetainable = VoiceRoomLifetimeGate.CanRetainSnapshot(
+                CurrentSnapshot != null,
+                _snapshotGameId,
+                currentGameId,
+                explicitDisconnect);
+
+            // Scene transitions often remove PlayerControls before the authenticated InnerNet
+            // roster changes. Promote the freshly observed phase immediately, but merge a missing
+            // established identity only while allClients still authenticates it. Non-EndGame gaps
+            // are bounded; EndGame keeps its authenticated roster because it has no world roster.
+            if (previousRetainable && CurrentSnapshot != null)
+            {
+                var authRosterState = CollectAuthenticatedSnapshotClientIds();
+                if (authRosterState == AuthenticatedRosterCollectionState.Populated)
+                {
+                    _authRosterUnavailableSince = -1f;
+                    refreshedSnapshot = VoiceSnapshotTransitionMerger.Merge(
+                        refreshedSnapshot,
+                        CurrentSnapshot,
+                        _authenticatedSnapshotClientIds,
+                        _missingSnapshotClientSince,
+                        Time.realtimeSinceStartup,
+                        TransitionRosterRetentionMaxSeconds);
+                }
+                else if (authRosterState == AuthenticatedRosterCollectionState.Empty)
+                {
+                    var now = Time.realtimeSinceStartup;
+                    _authRosterUnavailableSince = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
+                        refreshedSnapshot.Phase,
+                        CurrentSnapshot.Phase,
+                        _authRosterUnavailableSince,
+                        now);
+                    var gapSeconds = _authRosterUnavailableSince < 0f
+                        ? 0f
+                        : Math.Max(0f, now - _authRosterUnavailableSince);
+                    var wasAlreadyRetained = CurrentSnapshot.RoutingRosterRetained;
+                    refreshedSnapshot = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+                        refreshedSnapshot,
+                        CurrentSnapshot,
+                        gapSeconds,
+                        TransitionRosterRetentionMaxSeconds);
+                    if (!wasAlreadyRetained && refreshedSnapshot.RoutingRosterRetained)
+                    {
+                        VoiceDiagnostics.Log(
+                            "voice.snapshot.auth_roster_empty",
+                            $"phase={refreshedSnapshot.Phase} action=retain-prior players={refreshedSnapshot.Players.Count} gapSeconds={gapSeconds:0.000} gameId={currentGameId}");
+                    }
+                }
+                else if (refreshedSnapshot.Phase == VoiceGamePhase.EndGame
+                         || VoiceSnapshotTransitionMerger.IsBoundedAuthGapPhase(refreshedSnapshot.Phase))
+                {
+                    var now = Time.realtimeSinceStartup;
+                    // Start the bounded clock only after EndGame. Its own missing world roster is
+                    // expected and the explicit-disconnect lifetime gate still stops voice at once.
+                    _authRosterUnavailableSince = VoiceSnapshotTransitionMerger.NextAuthGapStart(
+                        refreshedSnapshot.Phase,
+                        CurrentSnapshot.Phase,
+                        _authRosterUnavailableSince,
+                        now);
+
+                    var wasAlreadyRetained = CurrentSnapshot.RoutingRosterRetained;
+                    var gapSeconds = _authRosterUnavailableSince < 0f
+                        ? 0f
+                        : Math.Max(0f, now - _authRosterUnavailableSince);
+                    refreshedSnapshot = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringAuthGap(
+                        refreshedSnapshot,
+                        CurrentSnapshot,
+                        gapSeconds,
+                        TransitionRosterRetentionMaxSeconds);
+                    if (!wasAlreadyRetained && refreshedSnapshot.RoutingRosterRetained)
+                    {
+                        VoiceDiagnostics.Log(
+                            "voice.snapshot.auth_roster_unavailable",
+                            $"phase={refreshedSnapshot.Phase} action=retain-prior players={refreshedSnapshot.Players.Count} gapSeconds={gapSeconds:0.000} gameId={currentGameId}");
+                    }
+                }
+                else
+                {
+                    _authRosterUnavailableSince = -1f;
+                    _missingSnapshotClientSince.Clear();
+                }
+            }
+            else
+            {
+                _authRosterUnavailableSince = -1f;
+                _missingSnapshotClientSince.Clear();
+            }
+
+            var refreshDecision = VoiceRoomLifetimeGate.DecideSnapshotRefresh(
+                sessionActive: currentGameId != 0 && !explicitDisconnect,
+                refreshedUsable: IsRefreshedSnapshotUsableForRouting(refreshedSnapshot),
+                // The merger is the only retention path: it verifies live InnerNet membership,
+                // carries the current phase, and expires each absence. Falling back to the exact
+                // previous snapshot would reintroduce stale phase/roster state.
+                previousUsable: false,
+                previousRetainable: false);
+            if (refreshDecision == VoiceSnapshotRefreshDecision.UseRefreshed)
+            {
+                if (_retainingTransitionSnapshot && !refreshedSnapshot.RoutingRosterRetained)
+                    VoiceDiagnostics.Log(
+                        "voice.snapshot.transition_recovered",
+                        $"phase={refreshedSnapshot.Phase} players={refreshedSnapshot.Players.Count} gameId={currentGameId}");
+                if (!_retainingTransitionSnapshot && refreshedSnapshot.RoutingRosterRetained)
+                    VoiceDiagnostics.Log(
+                        "voice.snapshot.transition_retained",
+                        $"previousPhase={CurrentSnapshot?.Phase.ToString() ?? "none"} refreshedPhase={refreshedSnapshot.Phase} " +
+                        $"previousPlayers={CurrentSnapshot?.Players.Count ?? 0} routedPlayers={refreshedSnapshot.Players.Count} gameId={currentGameId}");
+                _retainingTransitionSnapshot = refreshedSnapshot.RoutingRosterRetained;
+                CurrentSnapshot = refreshedSnapshot;
+                _snapshotGameId = currentGameId;
+            }
+            else if (refreshDecision == VoiceSnapshotRefreshDecision.Clear)
+            {
+                _retainingTransitionSnapshot = false;
+                _authRosterUnavailableSince = -1f;
+                _missingSnapshotClientSince.Clear();
+                CurrentSnapshot = null;
+                _snapshotGameId = 0;
+            }
             VoiceFrameProfiler.End("room.snapshot", __snapTicks);
         }
 
         var snapshot = CurrentSnapshot;
+        // Audio policy is room-owned and must follow the effective snapshot phase even when the HUD
+        // update returned early (or did not run in a transition frame).
+        VoiceChatHudState.ApplyAudioPolicy(snapshot);
         Vector2? listenerPos = snapshot?.LocalPosition;
         // One-time-per-map occlusion warm-up so the first in-range speaker doesn't pay the physics-broadphase
         // build + door-cache scan (~70-100ms) mid-round. No-op after the first call for a given map.
@@ -353,13 +596,17 @@ public class VoiceChatRoom
 
         if (_voiceBackend != null)
         {
+            // Negotiate ICE immediately, but do not apply untrusted local rule defaults while a
+            // client is still waiting for its host's authenticated policy snapshot.
+            var policyReady = IsHostPolicyReady();
+            var routedSnapshot = policyReady ? snapshot : null;
             long __backendTicks = VoiceFrameProfiler.Begin();
-            _voiceBackend.Update(snapshot, speakerCache, _virtualMics, localInVent, _commsSabActive);
+            _voiceBackend.Update(routedSnapshot, speakerCache, _virtualMics, localInVent, _commsSabActive);
             VoiceFrameProfiler.End("room.backend", __backendTicks);
-            if (snapshot != null)
-                SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+            if (routedSnapshot != null)
+                SendRadioState(routedSnapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
             long __recoveryTicks = VoiceFrameProfiler.Begin();
-            TryRecoverMissingBackendPeers(snapshot);
+            TryRecoverMissingBackendPeers(routedSnapshot);
             VoiceFrameProfiler.End("room.recovery", __recoveryTicks);
         }
 
@@ -367,6 +614,40 @@ public class VoiceChatRoom
         MaybeLogTransitionTraceState(snapshot);
 
         TraceUpdateCost(updateStartTicks, updateStep, snapshot);
+    }
+
+    private bool IsRefreshedSnapshotUsableForRouting(VoiceGameStateSnapshot snapshot)
+        => VoiceRoomLifetimeGate.IsSafeForRouting(snapshot);
+
+    private AuthenticatedRosterCollectionState CollectAuthenticatedSnapshotClientIds()
+    {
+        _authenticatedSnapshotClientIds.Clear();
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null)
+                return AuthenticatedRosterCollectionState.Unavailable;
+
+            if (client.ClientId >= 0)
+                _authenticatedSnapshotClientIds.Add(client.ClientId);
+            var authenticatedRosterEntries = 0;
+            foreach (var member in client.allClients)
+            {
+                if (member != null && member.Id >= 0)
+                {
+                    authenticatedRosterEntries++;
+                    _authenticatedSnapshotClientIds.Add(member.Id);
+                }
+            }
+            return authenticatedRosterEntries == 0
+                ? AuthenticatedRosterCollectionState.Empty
+                : AuthenticatedRosterCollectionState.Populated;
+        }
+        catch
+        {
+            _authenticatedSnapshotClientIds.Clear();
+            return AuthenticatedRosterCollectionState.Unavailable;
+        }
     }
 
     private bool IsLocalHost()
@@ -416,7 +697,7 @@ public class VoiceChatRoom
 
         _lastLocalVoiceRefreshRequestTime = Time.time;
         VoiceDiagnostics.Log("voice.refresh.local.requested",
-            $"backend={_activeBackend} room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
+            $"backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
         ApplyLocalVoiceRefresh("keybind");
     }
 
@@ -439,7 +720,7 @@ public class VoiceChatRoom
         var nonce = CreateHostVoiceRefreshNonce();
         var localClientId = ResolveLocalClientId(CurrentSnapshot);
         VoiceDiagnostics.Log("voice.refresh.requested",
-            $"nonce={nonce} hostClient={localClientId} backend={_activeBackend} room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")}");
+            $"nonce={nonce} hostClient={localClientId} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")}");
 
         VoiceHostRefreshRpc.Send(nonce);
         ApplyHostVoiceRefresh(VoiceHostAuthority.FromPlayer(PlayerControl.LocalPlayer, "local"), nonce, "keybind");
@@ -507,7 +788,7 @@ public class VoiceChatRoom
         _lastAppliedHostVoiceRefreshNonce = nonce;
         var snapshot = CurrentSnapshot;
         VoiceDiagnostics.Log("voice.refresh.applied",
-            $"{sender.ToDiagnosticFields()} nonce={nonce} trigger={trigger} backend={_activeBackend} room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
+            $"{sender.ToDiagnosticFields()} nonce={nonce} trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
 
         VoiceChatHudState.ShowToast(trigger == "rpc"
             ? "Host refreshed voice connections"
@@ -522,7 +803,7 @@ public class VoiceChatRoom
     {
         var snapshot = CurrentSnapshot;
         VoiceDiagnostics.Log("voice.refresh.local.applied",
-            $"trigger={trigger} backend={_activeBackend} room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
+            $"trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
 
         VoiceChatHudState.ShowToast("Voice connection refreshed");
 
@@ -531,29 +812,189 @@ public class VoiceChatRoom
         Rejoin("local voice refresh");
     }
 
-    private void SendHostSettingsSnapshot(bool force)
+    private bool SendHostSettingsSnapshot(bool force, string reason, int targetClientId = -1)
     {
-        if (!IsLocalHost() || _voiceBackend == null) return;
+        if (!IsLocalHost()) return false;
 
         var settings = VoiceRoomSettingsSnapshot.FromGameOptions();
         int modRevision = VoiceModRegistry.OptionRevision;
-        if (!force)
+        var now = DateTime.UtcNow;
+        var isBroadcast = targetClientId < 0;
+        var roster = isBroadcast ? CaptureClientRosterSignature() : null;
+        var rosterChanged = isBroadcast
+                            && roster.HasValue
+                            && (!_lastSentHostSettingsRoster.HasValue || _lastSentHostSettingsRoster.Value != roster.Value);
+        var effectiveForce = force || rosterChanged;
+
+        if (isBroadcast)
         {
-            // Re-broadcast when either the core settings OR any third-party mod host-option changed.
-            if (_lastSentHostSettings.HasValue && _lastSentHostSettings.Value.Equals(settings)
+            if (!effectiveForce
+                && _lastSentHostSettings.HasValue
+                && _lastSentHostSettings.Value.Equals(settings)
                 && _lastSentModOptionRevision == modRevision)
-                return;
-            if ((DateTime.UtcNow - _lastSentHostSettingsUtc).TotalSeconds < MinHostSettingsSnapshotIntervalSeconds)
-                return;
+                return false;
+            if (!_hostSettingsBroadcastGate.CanAttempt(now, force: effectiveForce))
+                return false;
         }
 
         // Authority only via authenticated Among Us RPC; the side-channel's self-asserted
         // sender id would let any peer forge host voice settings.
-        VoiceRoomSettingsRpc.SendSnapshot(settings);
-        _lastSentHostSettings = settings;
-        _lastSentModOptionRevision = modRevision;
-        _lastSentHostSettingsUtc = DateTime.UtcNow;
-        VoiceDiagnostics.Log("settings.sent", $"kind=host-snapshot transport={_activeBackend} rpc=true");
+        var sent = VoiceRoomSettingsRpc.TrySendSnapshot(settings, targetClientId);
+        if (isBroadcast)
+            _hostSettingsBroadcastGate.RecordAttempt(now, sent);
+        if (!sent)
+        {
+            VoiceDiagnostics.Log(
+                "settings.send_deferred",
+                $"kind=host-snapshot transport=among-us-rpc target={targetClientId} reason={reason} rosterChanged={rosterChanged}");
+            return false;
+        }
+
+        // A targeted response must not advance global broadcast dedupe: the rest of the lobby did
+        // not receive it. Broadcast fallback responses may safely advance it.
+        if (isBroadcast)
+        {
+            _lastSentHostSettings = settings;
+            _lastSentModOptionRevision = modRevision;
+            if (roster.HasValue)
+                _lastSentHostSettingsRoster = roster;
+        }
+        VoiceDiagnostics.Log(
+            "settings.sent",
+            $"kind=host-snapshot transport=among-us-rpc target={targetClientId} reason={reason} rosterChanged={rosterChanged}");
+        return true;
+    }
+
+    private bool IsHostPolicyReady()
+    {
+        if (IsLocalHost())
+        {
+            if (_hostPolicyFallbackLogged)
+            {
+                VoiceDiagnostics.Log(
+                    "settings.policy.synced_after_fallback",
+                    $"waited={Math.Max(0f, Time.realtimeSinceStartup - _hostPolicyWaitStartTime):0.000}s");
+            }
+
+            _hostPolicyWaitStartTime = -1f;
+            _hostPolicyFallbackLogged = false;
+            return true;
+        }
+
+        var now = Time.realtimeSinceStartup;
+
+        if (_hostSettingsResyncPending)
+        {
+            if (_hostPolicyWaitStartTime < 0f)
+                _hostPolicyWaitStartTime = now;
+
+            var migrationWaited = Math.Max(0f, now - _hostPolicyWaitStartTime);
+            if (CanUseTransitionalHostPolicy(
+                    resyncPending: true,
+                    hasRemoteSnapshot: VoiceRoomSettingsState.RemoteSnapshot.HasValue,
+                    waitedSeconds: migrationWaited))
+            {
+                // Preserve the last authenticated host policy briefly so host migration does not
+                // cut voice while the new authority is resolving. It is explicitly transitional:
+                // the branch below expires it even when the replacement host never responds.
+                return VoiceRoomSettingsState.RemoteSnapshot.HasValue;
+            }
+
+            if (!HasHostPolicyResyncTimedOut(resyncPending: true, waitedSeconds: migrationWaited))
+                return false;
+
+            if (VoiceRoomSettingsState.RemoteSnapshot.HasValue)
+            {
+                VoiceRoomSettingsState.ClearRemote();
+                VoiceDiagnostics.Log(
+                    "settings.host.remote_expired",
+                    $"reason=resync-timeout hostClient={_lastObservedHostClientId} waited={migrationWaited:0.000}s");
+            }
+
+            if (!_hostPolicyFallbackLogged)
+            {
+                _hostPolicyFallbackLogged = true;
+                VoiceDiagnostics.Log(
+                    "settings.policy.fallback",
+                    $"reason=host-transfer-timeout waited={migrationWaited:0.000}s action=use-local-policy transport=native-engine");
+            }
+
+            // Keep resync pending so authenticated requests continue. A later new-host snapshot
+            // replaces the fallback and clears the pending generation in Note...Applied.
+            return true;
+        }
+
+        if (VoiceRoomSettingsState.RemoteSnapshot.HasValue)
+        {
+            if (_hostPolicyFallbackLogged)
+            {
+                VoiceDiagnostics.Log(
+                    "settings.policy.synced_after_fallback",
+                    $"waited={Math.Max(0f, now - _hostPolicyWaitStartTime):0.000}s");
+            }
+
+            _hostPolicyWaitStartTime = -1f;
+            _hostPolicyFallbackLogged = false;
+            return true;
+        }
+
+        if (_hostPolicyWaitStartTime < 0f)
+            _hostPolicyWaitStartTime = now;
+
+        var waited = Math.Max(0f, now - _hostPolicyWaitStartTime);
+        if (waited < HostPolicySyncFallbackSeconds)
+            return false;
+
+        if (!_hostPolicyFallbackLogged)
+        {
+            _hostPolicyFallbackLogged = true;
+            VoiceDiagnostics.Log(
+                "settings.policy.fallback",
+                $"reason=host-snapshot-timeout waited={waited:0.000}s action=use-local-policy transport=native-engine");
+        }
+
+        // This is a policy-only compatibility fallback for vanilla/older hosts. The native media
+        // session and authenticated RPC signaling were already allowed to bootstrap immediately.
+        return true;
+    }
+
+    internal static bool HasHostPolicyResyncTimedOut(bool resyncPending, float waitedSeconds)
+        => resyncPending && waitedSeconds >= HostPolicySyncFallbackSeconds;
+
+    internal static bool CanUseTransitionalHostPolicy(
+        bool resyncPending,
+        bool hasRemoteSnapshot,
+        float waitedSeconds)
+        => resyncPending
+           && hasRemoteSnapshot
+           && !HasHostPolicyResyncTimedOut(true, waitedSeconds);
+
+    private static ClientRosterSignature? CaptureClientRosterSignature()
+    {
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client == null) return null;
+            var count = 0;
+            var xor = 0;
+            long sum = 0;
+            foreach (var entry in client.allClients)
+            {
+                if (entry == null || entry.Id < 0) continue;
+                count++;
+                uint hash = 2166136261u;
+                var id = entry.Id;
+                for (var index = 0; index < 4; index++)
+                    hash = (hash ^ (uint)((id >> (index * 8)) & 0xFF)) * 16777619u;
+                xor ^= unchecked((int)hash);
+                sum += id;
+            }
+            return new ClientRosterSignature(count, xor, sum);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void TickVoiceBackend(VoiceGameStateSnapshot? snapshot)
@@ -561,45 +1002,37 @@ public class VoiceChatRoom
         TrackHostSettingsAuthority(snapshot);
         var settings = VoiceSettings.Instance;
 
-        if (_voiceBackend == null && ShouldWaitForHostSync())
-        {
-            RequestHostSettingsSnapshotIfNeeded();
-            return;
-        }
-
-        var roomSettings = VoiceRoomSettingsState.Current;
-        var endpoint = VoiceEndpointSettings.ResolveHostSelected(
-            roomSettings,
-            settings?.BetterCrewLinkServerUrl.Value,
-            settings?.InterstellarServerUrl.Value);
-        if (!VoiceEndpointSettings.InterstellarEnabled && endpoint.IsInterstellar)
-            endpoint = VoiceEndpointSettings.Resolve(VoiceTransportBackend.BetterCrewLink, settings?.BetterCrewLinkServerUrl.Value, null);
-
-        EnsureVoiceBackend(snapshot, settings, endpoint);
-        SendHostSettingsSnapshot(force: false);
+        // Bootstrap native media and authenticated signaling immediately. Host settings are policy,
+        // not transport identity, and synchronize independently below.
+        EnsureVoiceBackend(snapshot, settings);
+        SendHostSettingsSnapshot(force: false, reason: "periodic-or-roster-change");
         RequestHostSettingsSnapshotIfNeeded();
-    }
-
-    // Defer the first backend build until the host settings snapshot arrives: a fresh joiner's local default backend may be Interstellar, whose websocket connect freezes Wine clients and desyncs the lobby. Timeout fallback keeps no-PerfectComms-host lobbies working.
-    private bool ShouldWaitForHostSync()
-    {
-        if (IsLocalHost() || VoiceRoomSettingsState.RemoteSnapshot.HasValue)
-        {
-            _hostSyncWaitStartTime = -1f;
-            return false;
-        }
-
-        if (_hostSyncWaitStartTime < 0f)
-            _hostSyncWaitStartTime = Time.time;
-
-        return Time.time - _hostSyncWaitStartTime < HostSyncWaitTimeoutSeconds;
     }
 
     private void TrackHostSettingsAuthority(VoiceGameStateSnapshot? snapshot)
     {
         var hostClientId = VoiceHostAuthority.ResolveHostClientId(snapshot);
         if (hostClientId < 0)
+        {
+            // A known host becoming temporarily unresolved is itself an authority-generation gap.
+            // Keep the previous authenticated policy only for the bounded migration window and
+            // continue requesting a fresh snapshot. Otherwise a host leave during roster rebuild
+            // could leave the old host's policy authoritative indefinitely.
+            if (ShouldBeginUnknownHostResync(
+                    _lastObservedHostClientId,
+                    hostClientId,
+                    _hostSettingsResyncPending))
+            {
+                _hostSettingsResyncPending = true;
+                _hostPolicyWaitStartTime = Time.realtimeSinceStartup;
+                _hostPolicyFallbackLogged = false;
+                _hostSettingsRequestGate.Reset();
+                VoiceDiagnostics.Log(
+                    "settings.host.unresolved",
+                    $"previousHost={_lastObservedHostClientId} action=request-fresh-policy transitionalSeconds={HostPolicySyncFallbackSeconds:0}");
+            }
             return;
+        }
 
         if (_lastObservedHostClientId < 0)
         {
@@ -613,9 +1046,13 @@ public class VoiceChatRoom
         var oldHostClientId = _lastObservedHostClientId;
         _lastObservedHostClientId = hostClientId;
         _lastSentHostSettings = null;
-        _lastHostSettingsRequestUtc = DateTime.MinValue;
-        _lastHostSettingsResponseBySender.Clear();
+        _lastSentHostSettingsRoster = null;
+        _hostSettingsBroadcastGate.Reset();
+        _hostSettingsRequestGate.Reset();
+        _hostSettingsResponseGates.Clear();
         _hostSettingsResyncPending = true;
+        _hostPolicyWaitStartTime = Time.realtimeSinceStartup;
+        _hostPolicyFallbackLogged = false;
 
         var localClientId = ResolveLocalClientId(snapshot);
         var localIsNewHost = localClientId >= 0 && localClientId == hostClientId;
@@ -630,15 +1067,26 @@ public class VoiceChatRoom
             }
 
             _hostSettingsResyncPending = false;
+            _hostPolicyWaitStartTime = -1f;
             VoiceDiagnostics.Log("settings.host.promoted", $"oldHost={oldHostClientId} newHost={hostClientId} localClient={localClientId}");
-            SendHostSettingsSnapshot(force: true);
-            VoiceDiagnostics.Log("settings.host.resync_sent", $"reason=host-transfer newHost={hostClientId}");
+            var sent = SendHostSettingsSnapshot(force: true, reason: "host-promoted");
+            VoiceDiagnostics.Log(
+                sent ? "settings.host.resync_sent" : "settings.host.resync_deferred",
+                $"reason=host-transfer newHost={hostClientId} sent={sent}");
             return;
         }
 
         VoiceDiagnostics.Log("settings.host.resync_requested", $"oldHost={oldHostClientId} newHost={hostClientId} localClient={localClientId} hasRemote={VoiceRoomSettingsState.RemoteSnapshot.HasValue}");
         RequestHostSettingsSnapshot(force: true, reason: "host-transfer");
     }
+
+    internal static bool ShouldBeginUnknownHostResync(
+        int previousHostClientId,
+        int resolvedHostClientId,
+        bool alreadyPending)
+        => previousHostClientId >= 0
+           && resolvedHostClientId < 0
+           && !alreadyPending;
 
     private int ResolveLocalClientId(VoiceGameStateSnapshot? snapshot)
     {
@@ -655,74 +1103,114 @@ public class VoiceChatRoom
         }
     }
 
-    private void EnsureVoiceBackend(VoiceGameStateSnapshot? snapshot, VoiceChatLocalSettings? settings, VoiceEndpoint endpoint)
+    private void EnsureVoiceBackend(VoiceGameStateSnapshot? snapshot, VoiceChatLocalSettings? settings)
     {
-        if (snapshot == null || !TryGetVoiceRoomIdentity(snapshot, endpoint.Backend, out var roomCode, out var region))
+        // Process/domain shutdown is the one lifecycle path that can race the Unity update thread.
+        // Serialize publication, initial configuration, and disposal so Close cannot observe null,
+        // return, and then have this method publish a newly owned media session behind it.
+        lock (_backendLifecycleSync)
+            EnsureVoiceBackendCore(snapshot, settings);
+    }
+
+    private void EnsureVoiceBackendCore(VoiceGameStateSnapshot? snapshot, VoiceChatLocalSettings? settings)
+    {
+        if (Volatile.Read(ref _closed) != 0)
+            return;
+        if (!TryGetVoiceRoomIdentity(out var roomCode, out var region))
             return;
 
         bool forceRebuild = _forceBackendRebuild;
         _forceBackendRebuild = false;
+        var continuingSameRoom = string.Equals(_activeRoomCode, roomCode, StringComparison.Ordinal);
+        var preserveRecoveryState = ShouldPreserveMissingPeerRecoveryState(forceRebuild, continuingSameRoom);
+        if (!continuingSameRoom)
+            _relayOnlyForSession = false;
 
         if (!forceRebuild
             && _voiceBackend != null
-            && _activeBackend == endpoint.Backend
-            && string.Equals(_activeEndpoint, endpoint.ServerUrl, StringComparison.Ordinal)
-            && string.Equals(_activeRoomCode, roomCode, StringComparison.Ordinal)
-            && string.Equals(_activeRegion, region, StringComparison.Ordinal))
+            && continuingSameRoom)
         {
+            _activeRegion = region;
             return;
         }
 
-        var endpointLabel = endpoint.IsInterstellar ? VoiceEndpointSettings.BuildInterstellarRoomUrl(endpoint.ServerUrl) : endpoint.ServerUrl;
-        VoiceDiagnostics.Log("transport.switch", $"backend={endpoint.Backend} room={roomCode} region={region} endpoint={endpointLabel}");
+        VoiceDiagnostics.Log("transport.switch", $"backend=native-engine signaling=among-us-rpc room={roomCode} region={region}");
         ClearVoiceUiForLifecycleReset("transport switch");
         DisposeVoiceBackend();
-        if (IsLocalHost())
-            VoiceRoomSettingsState.ClearRemote();
+        if (Volatile.Read(ref _closed) != 0)
+            return;
         _lastSentHostSettings = null;
-        _lastHostSettingsRequestUtc = DateTime.MinValue;
+        _hostSettingsRequestGate.Reset();
         ResetRadioStateSync();
-        _voiceBackend = endpoint.IsInterstellar
-            ? new InterstellarVoiceBackend(roomCode, region, endpoint.ServerUrl)
-            : new BetterCrewLinkVoiceBackend(roomCode, region, endpoint.ServerUrl);
-        _interstellarVoice = _voiceBackend as InterstellarVoiceBackend;
-        _betterCrewLinkVoice = _voiceBackend as BetterCrewLinkVoiceBackend;
+        var backend = new PerfectCommsVoiceBackend(roomCode, region, _relayOnlyForSession);
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            backend.Dispose();
+            return;
+        }
+        _voiceBackend = backend;
+        _perfectCommsVoice = backend;
+        // Process/domain shutdown can close this room from another thread. If that close won after
+        // the pre-publication check above, it saw no backend to dispose; publish first, then perform
+        // a closed-state rollback so the newly created media owner can never be stranded on the
+        // closed room. If Close already claimed it, its exchange owns disposal instead.
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            var published = Interlocked.CompareExchange(ref _voiceBackend, null, backend);
+            _perfectCommsVoice = null;
+            if (ReferenceEquals(published, backend))
+                backend.Dispose();
+            return;
+        }
         // P1.2: pre-warm the one-time HUD init (sprite PNG decode + button/tooltip GameObjects) here, off the
         // game-entry frame — the same room-construction lifecycle slot as the backend's WarmOpusCodec. Runs on
         // the Unity main thread (this method already touches VoiceChatHudState below) and is idempotent, so the
         // per-frame EnsureHudButtons path remains the fallback.
-        VoiceChatHudState.Prewarm();
-        _voiceBackend.CustomMessageReceived += HandleBackendCustomMessage;
-        _voiceBackend.SetMute(Mute);
-        SetMasterVolume(settings?.MasterVolume.Value ?? 1f);
-        _voiceBackend.SetNoiseGate(
+        try { VoiceChatHudState.Prewarm(); }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.DebugError($"[VC] HUD prewarm failed during transport bootstrap: {ex.Message}");
+        }
+        backend.SetMute(Mute);
+        backend.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(settings?.MasterVolume.Value ?? 1f));
+        backend.SetNoiseGate(
             ApplyMicSensitivity(settings?.NoiseGateThreshold.Value ?? 0.003f, settings?.MicSensitivity.Value ?? 1f),
             ApplyMicSensitivity(settings?.VadThreshold.Value ?? 0.004f, settings?.MicSensitivity.Value ?? 1f));
-        _voiceBackend.SetCaptureRuntimeOptions(BuildCaptureRuntimeOptions(settings));
+        backend.SetCaptureRuntimeOptions(BuildCaptureRuntimeOptions(settings));
 #if ANDROID
         SetMicrophone(settings?.MicrophoneDevice ?? string.Empty);
 #else
-        _voiceBackend.SetMicrophone(settings?.MicrophoneDevice ?? string.Empty, settings?.MicVolume.Value ?? 1f);
+        backend.SetMicrophone(settings?.MicrophoneDevice ?? string.Empty, settings?.MicVolume.Value ?? 1f);
 #endif
 #if WINDOWS
-        _voiceBackend.SetSpeaker(settings?.SpeakerDevice ?? string.Empty);
+        backend.SetSpeaker(settings?.SpeakerDevice ?? string.Empty);
 #else
-        _voiceBackend.SetSpeaker(string.Empty);
+        backend.SetSpeaker(string.Empty);
 #endif
-        if (snapshot.TryGetLocalPlayer(out var localPlayer))
-            _voiceBackend.UpdateProfile(snapshot.LocalPlayerId, localPlayer.PlayerName);
-        SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
-        _activeBackend = endpoint.Backend;
-        _activeEndpoint = endpoint.ServerUrl;
+        if (snapshot != null)
+        {
+            if (snapshot.TryGetLocalPlayer(out var localPlayer))
+                backend.UpdateProfile(snapshot.LocalPlayerId, localPlayer.PlayerName);
+            SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+        }
         _activeRoomCode = roomCode;
         _activeRegion = region;
-        _missingPeerRecoveryReadyTime = Time.time + (endpoint.IsInterstellar ? InterstellarSwitchPeerRecoveryGraceSeconds : MissingPeerRecoveryGraceSeconds);
-        _lastMissingPeerRecoveryTime = -999f;
-        ResetMissingPeerRecoveryStormGuard();
-        StartBootstrapWindow($"backend switched to {endpoint.Backend}");
+        _missingPeerRecoveryReadyTime = Time.time + MissingPeerRecoveryGraceSeconds;
+        if (!preserveRecoveryState)
+        {
+            _lastMissingPeerRecoveryTime = -999f;
+            ResetMissingPeerRecoveryStormGuard();
+        }
+        else
+        {
+            VoiceDiagnostics.Log(
+                "transport.peer-recovery.state-preserved",
+                $"room={roomCode} globalAttempts={_globalRebuildAttempts} targetedAttempts={_missingPeerRecoveryAttempts} relayOnly={_relayOnlyForSession}");
+        }
+        StartBootstrapWindow("native media session started");
         ForceUpdateLocalProfile();
-        SendHostSettingsSnapshot(force: true);
-        VoiceDiagnostics.Log("transport.selected", $"backend={endpoint.Backend} room={roomCode} region={region} endpoint={endpointLabel} mic={UsingMicrophone} speaker={UsingSpeaker} localLevel={LocalMicLevel:0.000}");
+        SendHostSettingsSnapshot(force: true, reason: "media-session-started");
+        VoiceDiagnostics.Log("transport.selected", $"backend=native-engine signaling=among-us-rpc room={roomCode} region={region} mic={UsingMicrophone} speaker={UsingSpeaker} localLevel={LocalMicLevel:0.000}");
     }
 
     private void TryRecoverMissingBackendPeers(VoiceGameStateSnapshot? snapshot)
@@ -730,15 +1218,14 @@ public class VoiceChatRoom
         if (_voiceBackend == null || snapshot == null)
             return;
 
-        // During a round transition (game ends -> EndGame -> lobby reforms) the local player is briefly
-        // unassigned (PlayerId 255, not yet in the snapshot). While that holds the backend cannot re-announce
-        // its identity to the signaling server (JoinAsync requires a real local playerId), so peers that
-        // survived the transition legitimately read as unmapped. Firing recovery in this window misreads the
-        // settling state as a mesh collapse and forces a destructive global rebuild (new socket) right as the
-        // lobby reforms -- the visible "everyone reconnects a few seconds after returning to the lobby" glitch.
-        // Defer recovery (keep the grace fresh) until the local player resolves; the per-frame re-announce in
-        // the backend Update then remaps the surviving peers in place, with no socket churn.
-        if (!snapshot.TryGetLocalPlayer(out _))
+        // A retained/incomplete transition roster is deliberately not evidence of transport loss.
+        // EndGame has no world roster at all, and lobby/meeting scene changes can temporarily carry
+        // authenticated identities while LocalPlayer or AllPlayerControls is rebuilding. Recovery here
+        // would misread that settling state as a mesh collapse and destructively rebuild healthy media.
+        if (snapshot.Phase == VoiceGamePhase.EndGame
+            || snapshot.RoutingRosterRetained
+            || !snapshot.LiveLocalPlayerResolved
+            || !snapshot.PlayerEnumerationCompleted)
         {
             _missingPeerRecoveryReadyTime = Time.time + MissingPeerRecoveryGraceSeconds;
             return;
@@ -810,21 +1297,16 @@ public class VoiceChatRoom
         if (Time.time - _lastMissingPeerRecoveryTime < backoff)
             return;
 
-        bool deferRequested = _betterCrewLinkVoice?.ShouldDeferPeerEscalation == true;
-        if (deferRequested && _consecutivePeerEscalationDeferrals < PeerEscalationDeferralMaxConsecutive)
-        {
-            _consecutivePeerEscalationDeferrals++;
-            _missingPeerRecoveryReadyTime = Time.time + PeerEscalationDeferralRecheckSeconds;
-            VoiceDiagnostics.Log("transport.peer-recovery.deferred",
-                $"backend={_activeBackend} reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
-                $"collapsed={collapsed} recheckSec={PeerEscalationDeferralRecheckSeconds:0.0} deferrals={_consecutivePeerEscalationDeferrals}/{PeerEscalationDeferralMaxConsecutive}");
-            return;
-        }
+        bool deferRequested = _perfectCommsVoice?.ShouldDeferPeerEscalation == true;
         if (deferRequested)
         {
+            if (_consecutivePeerEscalationDeferrals < int.MaxValue)
+                _consecutivePeerEscalationDeferrals++;
+            _missingPeerRecoveryReadyTime = Time.time + PeerEscalationDeferralRecheckSeconds;
             VoiceDiagnostics.Log("transport.peer-recovery.deferred",
-                $"backend={_activeBackend} reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
-                $"collapsed={collapsed} deferred=overridden deferrals={_consecutivePeerEscalationDeferrals}/{PeerEscalationDeferralMaxConsecutive}");
+                $"backend=native-engine reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
+                $"collapsed={collapsed} recheckSec={PeerEscalationDeferralRecheckSeconds:0.0} deferrals={_consecutivePeerEscalationDeferrals}");
+            return;
         }
         _consecutivePeerEscalationDeferrals = 0;
 
@@ -832,52 +1314,52 @@ public class VoiceChatRoom
 
         _lastMissingPeerRecoveryTime = Time.time;
         string remoteSignatureText = DescribeExpectedRemotePlayers(snapshot);
+        string rpcPeerDiagnostics = _perfectCommsVoice?.DescribeRpcPeerDiagnostics() ?? "backend-unavailable";
         VoiceDiagnostics.Log("transport.peer-recovery",
-            $"backend={_activeBackend} reason=missing-peer remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} rawPeers={_voiceBackend.PeerCount} " +
+            $"backend=native-engine reason=missing-peer remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} rawPeers={_voiceBackend.PeerCount} " +
             $"mode={(finalCollapseAttempt ? "global" : collapsed ? "collapse-targeted" : "targeted")} attempt={(collapsed ? _globalRebuildAttempts + 1 : _missingPeerRecoveryAttempts + 1)}/{MissingPeerRecoveryMaxAttempts} healthyPeak={_lastHealthyMappedPeers} backoffSec={backoff:0.0} " +
             $"room={_activeRoomCode ?? "unknown"} region={_activeRegion ?? "unknown"} " +
-            $"liveClients=[{remoteSignatureText}]");
+            $"liveClients=[{remoteSignatureText}] rpcPeers=[{rpcPeerDiagnostics}]");
 
         bool didGlobal = false;
         if (finalCollapseAttempt)
         {
             // Automated relay escalation: if we've never mapped a single peer despite repeated global rebuilds
             // (remotePlayers exist but mappedPeers==0), direct/STUN ICE is clearly not working for this client
-            // (strict/symmetric NAT, or a Wine box where host-candidate gathering fails). Latch the BCL backend
+            // (strict/symmetric NAT, or a Wine box where host-candidate gathering fails). Latch the native session
             // to relay-only ICE before this rebuild so the fresh peer connections route through TURN. Reuses the
             // same forceRelay path the Wine fix validated; only fires after total failure, so a client whose
             // voice already works never reaches here.
-            if (mappedPeers == 0 && remotePlayers > 0 && _globalRebuildAttempts + 1 >= 2)
-                _betterCrewLinkVoice?.EscalateToRelayOnly($"global-attempt-{_globalRebuildAttempts + 1}");
+            if (ShouldEscalateTotalCollapseToRelay(
+                    openPeers,
+                    openChannelsRaw,
+                    remotePlayers,
+                    _globalRebuildAttempts + 1))
+            {
+                _relayOnlyForSession = true;
+                _perfectCommsVoice?.EscalateToRelayOnly($"global-attempt-{_globalRebuildAttempts + 1}");
+            }
 
             ClearVoiceUiForLifecycleReset("missing peer recovery");
-            // Force a full backend rebuild (dispose + reconnect => NEW socket id) rather than the backend's
-            // light Rejoin(), which reuses the socket. Both backends need this on a collapse:
-            //  - Interstellar's VCRoom.Rejoin only sends RequestReload and never clears the library's
-            //    audioInstances, so onConnectClient never re-fires and peers stay silent.
-            //  - BetterCrewLink's Rejoin() keeps the SAME socket id, so a split-brained peer (its channel reads
-            //    'open' while ours never opened) never sees us reconnect, never supersedes its stale connection,
-            //    and the collapse persists (the "two clients can't hear each other until one presses refresh"
-            //    bug). A new socket id forces the remote to supersede and renegotiate clean — exactly what the
-            //    manual voice-refresh keybind does.
+            // Rebuild only after a confirmed total collapse. Dispose sends Bye first so surviving
+            // peers discard the old negotiation generation before the replacement starts.
             _forceBackendRebuild = true;
-            ResetSettingsSyncState();
+            ResetSettingsSyncState(preserveHostAuthority: true);
             StartBootstrapWindow("missing voice backend peer");
             ForceUpdateLocalProfile();
             didGlobal = true;
         }
         else
         {
-            // Targeted, non-destructive recovery of only the unmapped/wedged client(s). -1 means the backend
-            // has no targeted path (e.g. Interstellar) — fall back to its global rebuild this attempt.
+            // Targeted, non-destructive recovery of only the unmapped/wedged client(s). A -1 result
+            // means there is no targeted path, so fall back to one global rebuild.
             int recovered = _voiceBackend.TryRecoverMissingClients(snapshot);
             if (recovered < 0)
             {
                 ClearVoiceUiForLifecycleReset("missing peer recovery");
-                // Same rationale as the collapse path: a full backend rebuild (new socket id) is what clears a
-                // split-brain; the backend's light Rejoin() reuses the socket and cannot.
+                // Rebuild the native session when targeted recovery is unavailable.
                 _forceBackendRebuild = true;
-                ResetSettingsSyncState();
+                ResetSettingsSyncState(preserveHostAuthority: true);
                 StartBootstrapWindow("missing voice backend peer");
                 ForceUpdateLocalProfile();
                 didGlobal = true;
@@ -885,7 +1367,7 @@ public class VoiceChatRoom
             else
             {
                 VoiceDiagnostics.Log("transport.peer-recovery-targeted",
-                    $"backend={_activeBackend} recovered={recovered} peers={mappedPeers} remotePlayers={remotePlayers}");
+                    $"backend=native-engine recovered={recovered} peers={mappedPeers} remotePlayers={remotePlayers}");
             }
         }
 
@@ -905,7 +1387,7 @@ public class VoiceChatRoom
             {
                 _missingPeerRecoveryLatched = true;
                 VoiceDiagnostics.Log("transport.peer-recovery-latched",
-                    $"backend={_activeBackend} attempts={_missingPeerRecoveryAttempts} peers={mappedPeers} remotePlayers={remotePlayers} " +
+                    $"backend=native-engine attempts={_missingPeerRecoveryAttempts} peers={mappedPeers} remotePlayers={remotePlayers} " +
                     $"reason=permanent-shortfall liveClients=[{remoteSignatureText}]");
             }
         }
@@ -921,13 +1403,36 @@ public class VoiceChatRoom
     internal static bool IsMeshCollapse(int mappedPeers, int remotePlayers)
         => mappedPeers == 0 || (remotePlayers > 0 && mappedPeers * 2 < remotePlayers);
 
+    // Route records are created from the game roster before ICE connects, so mappedPeers cannot
+    // prove transport health. Escalate only after repeated attempts with no established channel at
+    // all (including temporarily-unmapped survivors), which identifies a true direct/STUN collapse.
+    internal static bool ShouldEscalateTotalCollapseToRelay(
+        int openPeers,
+        int openChannelsRaw,
+        int remotePlayers,
+        int globalAttempt)
+        => remotePlayers > 0
+           && openPeers == 0
+           && openChannelsRaw == 0
+           && globalAttempt >= 2;
+
     // Exponential backoff (seconds) for a recovery attempt counter: the base interval doubled per prior
     // non-improving attempt, clamped so a stubborn shortfall slows down instead of re-firing every interval.
     // Pure + unit-tested. Shared by the targeted and global/collapse paths (each with its own counter).
     internal static float RecoveryBackoffSeconds(int attempts)
         => MissingPeerRecoveryIntervalSeconds * (1 << Math.Min(Math.Max(attempts, 0), MissingPeerRecoveryBackoffShiftCap));
 
-    private static int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    // A watchdog-requested rebuild of the same authenticated room is one recovery generation,
+    // not a fresh session. Keep its attempt counter, elapsed backoff and relay latch so repeated
+    // failures advance toward relay and the capped interval instead of restarting at attempt one.
+    internal static bool ShouldPreserveMissingPeerRecoveryState(bool forceRebuild, bool continuingSameRoom)
+        => forceRebuild && continuingSameRoom;
+
+    private bool IsExpectedRemotePlayer(VoicePlayerSnapshot player)
+        => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0 &&
+           (_perfectCommsVoice == null || _perfectCommsVoice.IsCompatibleRemoteClient(player.ClientId));
+
+    private int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
     {
         // Indexed loop over IReadOnlyList instead of LINQ .Count(predicate): the latter boxes a heap
         // enumerator on every call, and this runs per-frame via TryRecoverMissingBackendPeers (before its
@@ -937,7 +1442,7 @@ public class VoiceChatRoom
         for (int i = 0; i < players.Count; i++)
         {
             var player = players[i];
-            if (!player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+            if (IsExpectedRemotePlayer(player))
                 count++;
         }
         return count;
@@ -948,14 +1453,14 @@ public class VoiceChatRoom
     // don't build/compare the human-readable LINQ signature on every shortfall frame. Matches the de-LINQ'd
     // indexed-loop style of CountExpectedRemotePlayers. The human-readable signature (DescribeExpected...) is
     // only built once recovery actually fires.
-    private static int HashExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    private int HashExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
     {
         var players = snapshot.Players;
         int acc = 0;
         for (int i = 0; i < players.Count; i++)
         {
             var player = players[i];
-            if (player.IsLocal || player.Disconnected || player.IsDummy || player.ClientId < 0)
+            if (!IsExpectedRemotePlayer(player))
                 continue;
             // FNV-1a over the clientId bytes, XOR-accumulated so roster order doesn't change the result.
             uint h = 2166136261u;
@@ -969,56 +1474,17 @@ public class VoiceChatRoom
         return acc;
     }
 
-    private static string DescribeExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
+    private string DescribeExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
         => string.Join(",", snapshot.Players
-            .Where(player => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0)
+            .Where(IsExpectedRemotePlayer)
             .Select(player => $"{player.ClientId}:{LogSafe(player.PlayerName)}"));
 
-    private static bool TryGetVoiceRoomIdentity(VoiceGameStateSnapshot? snapshot, VoiceTransportBackend backend, out string roomCode, out string region)
-        => backend == VoiceTransportBackend.Interstellar
-            ? TryGetFangkuaiInterstellarRoomIdentity(snapshot, out roomCode, out region)
-            : TryGetBetterCrewLinkRoomIdentity(snapshot, out roomCode, out region);
-
-    private static bool TryGetFangkuaiInterstellarRoomIdentity(VoiceGameStateSnapshot? snapshot, out string roomCode, out string region)
+    private static bool TryGetVoiceRoomIdentity(out string roomCode, out string region)
     {
         roomCode = string.Empty;
         region = "default";
         var client = AmongUsClient.Instance;
-        if (client == null || snapshot == null)
-            return false;
-
-        try
-        {
-            if (client.GameId == 0)
-                return false;
-
-            roomCode = client.GameId.ToString();
-        }
-        catch
-        {
-            return false;
-        }
-
-        try
-        {
-            var networkAddress = client.networkAddress;
-            if (!string.IsNullOrWhiteSpace(networkAddress))
-                region = networkAddress.Trim();
-        }
-        catch
-        {
-            region = "default";
-        }
-
-        return !string.IsNullOrWhiteSpace(roomCode);
-    }
-
-    private static bool TryGetBetterCrewLinkRoomIdentity(VoiceGameStateSnapshot? snapshot, out string roomCode, out string region)
-    {
-        roomCode = string.Empty;
-        region = "default";
-        var client = AmongUsClient.Instance;
-        if (client == null || snapshot == null)
+        if (client == null)
             return false;
 
         try
@@ -1064,22 +1530,25 @@ public class VoiceChatRoom
 
     private void RequestHostSettingsSnapshotIfNeeded()
     {
-        RequestHostSettingsSnapshot(force: _hostSettingsResyncPending, reason: _hostSettingsResyncPending ? "host-transfer-pending" : "missing-host-snapshot");
+        RequestHostSettingsSnapshot(force: false, reason: _hostSettingsResyncPending ? "host-transfer-pending" : "missing-host-snapshot");
     }
 
     private void RequestHostSettingsSnapshot(bool force, string reason)
     {
         if (IsLocalHost()) return;
-        if (!force && VoiceRoomSettingsState.RemoteSnapshot.HasValue) return;
+        if (!force && VoiceRoomSettingsState.RemoteSnapshot.HasValue && !_hostSettingsResyncPending) return;
 
         var now = DateTime.UtcNow;
-        if ((now - _lastHostSettingsRequestUtc).TotalSeconds < 5)
-            return;
+        if (!_hostSettingsRequestGate.CanAttempt(now, force)) return;
 
         // Request the host snapshot over the authenticated RPC only (see SendHostSettingsSnapshot).
-        VoiceRoomSettingsRpc.SendRequest();
-        _lastHostSettingsRequestUtc = now;
-        VoiceDiagnostics.Log("settings.requested", $"kind=host-snapshot transport={_activeBackend} rpc=true reason={reason} force={force}");
+        var hostClientId = VoiceHostAuthority.ResolveHostClientId(CurrentSnapshot);
+        var targetClientId = hostClientId >= 0 ? hostClientId : -1;
+        var sent = VoiceRoomSettingsRpc.TrySendRequest(targetClientId);
+        _hostSettingsRequestGate.RecordAttempt(now, sent);
+        VoiceDiagnostics.Log(
+            sent ? "settings.requested" : "settings.request.deferred",
+            $"kind=host-snapshot transport=among-us-rpc reason={reason} force={force} target={targetClientId} sent={sent}");
     }
 
     internal static void RespondToHostSettingsRequest()
@@ -1099,44 +1568,56 @@ public class VoiceChatRoom
             return;
 
         current._hostSettingsResyncPending = false;
-        current._lastHostSettingsRequestUtc = DateTime.MinValue;
+        current._hostSettingsRequestGate.Reset();
+        current._hostPolicyWaitStartTime = -1f;
+        current._hostPolicyFallbackLogged = false;
         VoiceDiagnostics.Log("settings.host.resync_applied", $"transport={transport} hostClient={hostClientId} hostPlayer={hostPlayerId}");
     }
 
     internal static void NoteHostSettingsSnapshotRejected()
     {
         // Snapshot rejected (e.g. stale host id during migration): flag a re-request so settings
-        // converge once the host id resolves. The 5s throttle in RequestHostSettingsSnapshot bounds it.
+        // converge once the host id resolves. The successful-send gate bounds retries to 2 seconds.
         var current = Current;
         if (current == null || current.IsLocalHost())
             return;
 
+        if (!current._hostSettingsResyncPending)
+            current._hostPolicyWaitStartTime = Time.realtimeSinceStartup;
         current._hostSettingsResyncPending = true;
+        current._hostSettingsRequestGate.Reset();
+    }
+
+    private static int ResolveCurrentGameId()
+    {
+        try { return AmongUsClient.Instance?.GameId ?? 0; }
+        catch { return 0; }
     }
 
     private void RespondToHostSettingsRequestFromSender(VoiceHostSenderIdentity sender)
     {
         VoiceDiagnostics.Log("settings.request.received", sender.ToDiagnosticFields());
-        if (!IsLocalHost() || _voiceBackend == null) return;
-        if (IsHostSettingsRequestRateLimited(sender))
+        if (!IsLocalHost()) return;
+
+        var now = DateTime.UtcNow;
+        if (!_hostSettingsResponseGates.TryGetValue(sender.StableKey, out var gate))
+        {
+            gate = new SuccessfulSendGate(TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(2));
+            _hostSettingsResponseGates[sender.StableKey] = gate;
+        }
+        if (!gate.CanAttempt(now))
         {
             VoiceDiagnostics.Log("settings.request.rate_limited", sender.ToDiagnosticFields());
             return;
         }
 
-        SendHostSettingsSnapshot(force: true);
-    }
-
-    private bool IsHostSettingsRequestRateLimited(VoiceHostSenderIdentity sender)
-    {
-        var now = DateTime.UtcNow;
-        var key = sender.StableKey;
-        if (_lastHostSettingsResponseBySender.TryGetValue(key, out var last)
-            && (now - last).TotalSeconds < HostSettingsResponseRateLimitSeconds)
-            return true;
-
-        _lastHostSettingsResponseBySender[key] = now;
-        return false;
+        var targetClientId = sender.SenderClientId >= 0 ? sender.SenderClientId : -1;
+        var sent = SendHostSettingsSnapshot(force: true, reason: "request-response", targetClientId: targetClientId);
+        gate.RecordAttempt(now, sent);
+        if (!sent)
+            VoiceDiagnostics.Log(
+                "settings.request.response_deferred",
+                $"{sender.ToDiagnosticFields()} target={targetClientId}");
     }
 
     internal static void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel)
@@ -1147,7 +1628,6 @@ public class VoiceChatRoom
     private void SendRadioState(byte playerId, VoiceTeamRadioChannel channel)
     {
         channel = VoiceTeamRadioChannels.Normalize(channel);
-        _voiceBackend?.SendRadioState(playerId, channel);
         SyncRadioStateRpc(playerId, channel);
     }
 
@@ -1156,52 +1636,21 @@ public class VoiceChatRoom
         if (playerId == byte.MaxValue) return;
 
         var now = DateTime.UtcNow;
-        bool active = VoiceTeamRadioChannels.IsActive(channel);
-        bool changed = playerId != _lastRadioRpcPlayerId || channel != _lastRadioRpcChannel;
-        bool heartbeat = active && (now - _lastRadioRpcSentUtc).TotalSeconds >= RadioStateRpcHeartbeatSeconds;
-        if (!changed && !heartbeat) return;
+        if (!_radioStateSync.ShouldAttempt(playerId, channel, now)) return;
 
-        VoiceRadioStateRpc.Send(playerId, channel);
-        _lastRadioRpcPlayerId = playerId;
-        _lastRadioRpcChannel = channel;
-        _lastRadioRpcSentUtc = now;
-    }
-
-    private void HandleBackendCustomMessage(VoiceBackendCustomMessage message)
-    {
-        _pendingBackendCustomMessages.Enqueue(message.CopyPayload());
+        var sent = VoiceRadioStateRpc.TrySend(playerId, channel);
+        _radioStateSync.RecordAttempt(playerId, channel, now, sent);
     }
 
     private void DisposeVoiceBackend()
     {
-        if (_voiceBackend != null)
-            _voiceBackend.CustomMessageReceived -= HandleBackendCustomMessage;
-        _voiceBackend?.Dispose();
-        _voiceBackend = null;
-        _interstellarVoice = null;
-        _betterCrewLinkVoice = null;
-    }
-
-    private void DrainBackendCustomMessages()
-    {
-        while (_pendingBackendCustomMessages.TryDequeue(out var message))
+        lock (_backendLifecycleSync)
         {
-            try
-            {
-                ProcessBackendCustomMessage(message);
-            }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("settings.message.error", $"error=\"{LogSafe(ex.Message)}\"");
-            }
+            var backend = Interlocked.Exchange(ref _voiceBackend, null);
+            _perfectCommsVoice = null;
+            if (backend == null) return;
+            RunCleanupStep("backend-dispose", backend.Dispose);
         }
-    }
-
-    private void ProcessBackendCustomMessage(VoiceBackendCustomMessage backendMessage)
-    {
-        // SECURITY: side-channel sender id is self-asserted, so it is NOT trusted for authority;
-        // host settings and jail-voice flow only over authenticated RPC. Legacy payloads are ignored.
-        _ = backendMessage;
     }
 
     private static bool CheckCommsSabotage(out string source)
@@ -1254,14 +1703,20 @@ public class VoiceChatRoom
 
     private void Rejoin(string reason)
     {
-        ClearVoiceUiForLifecycleReset(reason);
+        // Media ownership is the non-negotiable cleanup boundary. Release it before touching any
+        // transition-sensitive Unity object so a destroyed HUD cannot strand a helper process.
         DisposeVoiceBackend();
+        ClearVoiceUiForLifecycleReset(reason);
         CurrentSnapshot = null;
+        _snapshotGameId = 0;
+        _retainingTransitionSnapshot = false;
+        _missingSnapshotClientSince.Clear();
+        _authenticatedSnapshotClientIds.Clear();
         _snapshotRefreshTimer = 0f;
         _missingPeerRecoveryReadyTime = -999f;
         _lastMissingPeerRecoveryTime = -999f;
         ResetMissingPeerRecoveryStormGuard();
-        ResetSettingsSyncState();
+        ResetSettingsSyncState(preserveHostAuthority: true);
         StartBootstrapWindow(reason);
     }
 
@@ -1277,39 +1732,62 @@ public class VoiceChatRoom
         _consecutivePeerEscalationDeferrals = 0;
     }
 
-    private void ResetSettingsSyncState()
+    private void ResetSettingsSyncState(bool clearRemote = false, bool preserveHostAuthority = false)
     {
-        VoiceRoomSettingsState.ClearRemote();
+        if (clearRemote)
+            VoiceRoomSettingsState.EndSession();
         _lastSentHostSettings = null;
-        _lastHostSettingsRequestUtc = DateTime.MinValue;
-        _lastObservedHostClientId = -1;
-        _hostSettingsResyncPending = false;
-        _lastHostSettingsResponseBySender.Clear();
-        _hostSyncWaitStartTime = -1f;
+        _lastSentModOptionRevision = -1;
+        _lastSentHostSettingsRoster = null;
+        _hostSettingsBroadcastGate.Reset();
+        _hostSettingsRequestGate.Reset();
+        if (ShouldClearHostAuthorityOnSettingsReset(clearRemote, preserveHostAuthority))
+        {
+            _lastObservedHostClientId = -1;
+            _hostSettingsResyncPending = false;
+            _hostPolicyWaitStartTime = -1f;
+            _hostPolicyFallbackLogged = false;
+        }
+        _hostSettingsResponseGates.Clear();
         ResetRadioStateSync();
     }
 
+    internal static bool ShouldClearHostAuthorityOnSettingsReset(
+        bool clearRemote,
+        bool preserveHostAuthority)
+        => clearRemote || !preserveHostAuthority;
+
     private void ResetRadioStateSync()
     {
-        _lastRadioRpcPlayerId = byte.MaxValue;
-        _lastRadioRpcChannel = VoiceTeamRadioChannel.None;
-        _lastRadioRpcSentUtc = DateTime.MinValue;
+        _radioStateSync.Reset();
     }
 
     public void Close()
+        => Close("room close", clearUi: true);
+
+    private void Close(string reason, bool clearUi)
     {
-        ClearVoiceUiForLifecycleReset("room close");
+        if (Interlocked.Exchange(ref _closed, 1) != 0)
+            return;
+        // Teardown first, UI second: Current may already be null and Unity objects may be half
+        // destroyed, but the sidecar/mobile lease must always be released exactly once.
         DisposeVoiceBackend();
+        if (clearUi)
+            ClearVoiceUiForLifecycleReset(reason);
         _lastCompatibilityRefreshTime = -999f;
         CurrentSnapshot = null;
+        _snapshotGameId = 0;
+        _retainingTransitionSnapshot = false;
+        _missingSnapshotClientSince.Clear();
+        _authenticatedSnapshotClientIds.Clear();
         _snapshotRefreshTimer = 0f;
         _bootstrapUntilTime = -999f;
         _bootstrapRefreshTimer = 0f;
-        ResetSettingsSyncState();
-        ResetTransitionTraceState();
-        VoiceDiagnostics.Log("room.close", "state cleared");
-        VoiceClientRegistry.Reset();
-        VoiceRoleMuteState.Reset();
+        RunCleanupStep("settings-reset", () => ResetSettingsSyncState(clearRemote: true));
+        RunCleanupStep("transition-trace-reset", ResetTransitionTraceState);
+        try { VoiceDiagnostics.Log("room.close", $"reason={LogSafe(reason)} state=cleared"); } catch { }
+        RunCleanupStep("client-registry-reset", VoiceClientRegistry.Reset);
+        RunCleanupStep("role-mute-reset", VoiceRoleMuteState.Reset);
     }
 
     private void TryUpdateLocalProfile()  => UpdateLocalProfile(false);
@@ -1394,12 +1872,27 @@ public class VoiceChatRoom
         _tracePerfEventsRemaining = 0;
         _haveTracePhase = false;
         _lastTracePhase = VoiceGamePhase.Unknown;
+        _haveRoutingPhase = false;
+        _lastRoutingPhase = VoiceGamePhase.Unknown;
         _lastLoggedLocalState = null;
         _lastLoggedOptions = null;
     }
 
     private void TrackTransitionPhase(VoiceGameStateSnapshot? snapshot)
     {
+        if (snapshot != null)
+        {
+            var routingPhase = snapshot.Phase;
+            var resetSight = ShouldResetSightStateForPhaseBoundary(
+                _haveRoutingPhase,
+                _lastRoutingPhase,
+                routingPhase);
+            _haveRoutingPhase = true;
+            _lastRoutingPhase = routingPhase;
+            if (resetSight)
+                VoiceProximityCalculator.ResetSightState();
+        }
+
         // Purely diagnostic phase tracking; skip entirely (incl. the initial-phase snapshot string build)
         // when diagnostics are disabled so no per-phase-change LINQ/string.Join runs in normal play.
         if (!VoiceDiagnostics.IsEnabled) return;
@@ -1420,6 +1913,13 @@ public class VoiceChatRoom
         StartTransitionTrace($"phase {previous}->{phase}", snapshot);
     }
 
+    internal static bool ShouldResetSightStateForPhaseBoundary(
+        bool havePreviousPhase,
+        VoiceGamePhase previousPhase,
+        VoiceGamePhase currentPhase)
+        => (!havePreviousPhase || previousPhase != currentPhase)
+           && currentPhase is VoiceGamePhase.Intro or VoiceGamePhase.EndGame;
+
     private void MaybeLogTransitionTraceState(VoiceGameStateSnapshot? snapshot)
     {
         if (!IsTransitionTraceActive) return;
@@ -1428,9 +1928,11 @@ public class VoiceChatRoom
         if (_transitionTraceStateTimer > 0f) return;
 
         _transitionTraceStateTimer = TransitionTraceStateInterval;
+        var rpcPeers = _perfectCommsVoice?.DescribeRpcPeerDiagnostics() ?? "backend-unavailable";
         VoiceDiagnostics.Log("transition.state",
             $"remaining={(_transitionTraceUntilUtc - DateTime.UtcNow).TotalSeconds:0.000}s " +
-            $"liveClients=[{DescribeLiveClients()}] registry=[{DescribeRegistryState()}] " +            $"micLevel={LocalMicLevel:0.000} micSpeaking={LocalMicSpeaking} mute={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} " +
+            $"liveClients=[{DescribeLiveClients()}] rpcPeers=[{rpcPeers}] legacyRegistry=[{DescribeRegistryState()}] " +
+            $"micLevel={LocalMicLevel:0.000} micSpeaking={LocalMicSpeaking} mute={Mute} speakerMuted={VoiceChatHudState.IsSpeakerMuted} " +
             $"snapshot=\"{LogSafe(DescribeTransitionSnapshot(snapshot))}\"");
         LogDetailedGameState(snapshot);
     }
@@ -1499,7 +2001,10 @@ public class VoiceChatRoom
             : string.Join(";", snapshot.Players.Select(p =>
                 $"p={p.PlayerId}/c={p.ClientId}/name={LogSafe(p.PlayerName)}/pos={FormatVector(p.Position)}/local={p.IsLocal}/dead={p.IsDead}/disc={p.Disconnected}/vis={p.IsVisible}"));
 
-        return $"phase={snapshot.Phase} map={snapshot.MapId} localClient={snapshot.LocalClientId} localPlayer={snapshot.LocalPlayerId} localPos={FormatVector(snapshot.LocalPosition)} meeting={snapshot.MeetingActive} comms={snapshot.CommsSabotageActive} players=[{players}]";
+        return $"phase={snapshot.Phase} map={snapshot.MapId} localClient={snapshot.LocalClientId} localPlayer={snapshot.LocalPlayerId} " +
+               $"localPos={FormatVector(snapshot.LocalPosition)} liveLocal={snapshot.LiveLocalPlayerResolved} " +
+               $"rosterRetained={snapshot.RoutingRosterRetained} enumerationComplete={snapshot.PlayerEnumerationCompleted} " +
+               $"meeting={snapshot.MeetingActive} comms={snapshot.CommsSabotageActive} players=[{players}]";
     }
 
     private string DescribeRegistryState()
@@ -1653,7 +2158,7 @@ public class VoiceChatRoom
         }
 
         var routeCounts = new Dictionary<VoiceProximityReason, int>();
-        foreach (var remote in InterstellarRemoteOverlayStates)
+        foreach (var remote in RemoteOverlayStates)
         {
             routeCounts.TryGetValue(remote.Reason, out int count);
             routeCounts[remote.Reason] = count + 1;

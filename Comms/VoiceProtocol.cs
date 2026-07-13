@@ -12,8 +12,11 @@ internal enum VoiceFrameFlags : byte
 
 internal static class VoiceProtocol
 {
-    public const int ProtocolVersion = 3;
-    public const int MinCompatibleVersion = 3;
+    // Protocol 4 is the native WebRTC RTP + Among Us RPC signaling transport. Protocol 3 used
+    // Socket.IO signaling and custom Opus data-channel frames; the two transports cannot form a
+    // voice session and must never be advertised as mutually compatible in public lobby metadata.
+    public const int ProtocolVersion = 4;
+    public const int MinCompatibleVersion = 4;
 
     public const int MaxEncodedAudioBytes = 4096;
     public const int AudioSequenceBytes = 4;

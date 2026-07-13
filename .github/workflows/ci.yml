@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  managed:
+    name: Managed build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release and helper scripts
+        run: |
+          python3 -m py_compile scripts/verify-release-assets.py
+          python3 scripts/verify-release-assets.py --self-test
+          python3 scripts/verify-release-assets.py --root . --configuration Android --manifest-only
+          bash -n scripts/package-release.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/ci-smoke-helper.sh
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+          cache: true
+          cache-dependency-path: |
+            packages.lock.json
+            PerfectComms.Tests/packages.lock.json
+      - name: Restore locked dependencies
+        run: dotnet restore PerfectComms.Tests/PerfectComms.Tests.csproj --locked-mode --nologo
+      - name: Build desktop managed code
+        run: dotnet build PerfectComms.csproj -c Release --no-restore --nologo
+      - name: Build Android managed code
+        run: dotnet build PerfectComms.csproj -c Android --no-restore --nologo
+      - name: Run managed tests
+        run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore --nologo
+
+  native-quality:
+    name: Native format, lint, and tests
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Rust formatting
+        run: |
+          cargo fmt --manifest-path native/pc-capture/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/pc-mobile/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/apm-sys/Cargo.toml --all -- --check
+      - name: Lint desktop shared core
+        run: cargo clippy --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
+      - name: Lint mobile wrapper
+        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Audit native dependency locks
+        run: |
+          cargo audit --file native/pc-capture/Cargo.lock
+          cargo audit --no-fetch --file native/pc-mobile/Cargo.lock
+          cargo audit --no-fetch --file native/apm-sys/Cargo.lock
+      - name: Test desktop shared core
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets
+
+  worker:
+    name: Cloudflare worker tests and dry run
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare/perfect-comms-lobbies
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloudflare/perfect-comms-lobbies/package-lock.json
+      - name: Install locked Worker dependencies
+        run: npm ci
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high
+      - name: Test Worker request handling
+        run: npm test
+      - name: Validate Worker deployment bundle
+        run: npm run deploy:dry-run

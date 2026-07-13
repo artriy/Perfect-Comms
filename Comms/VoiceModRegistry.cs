@@ -25,7 +25,9 @@ internal static class VoiceModRegistry
     private static readonly Dictionary<string, List<VoiceHostOption>> _boolOptions = new();
     private static readonly Dictionary<string, List<VoiceHostEnumOption>> _enumOptions = new();
 
-    // Host-synced values, keyed "modId.optionKey". Bool and int stored separately.
+    // Local host values and authenticated remote-host overrides, keyed "modId.optionKey". Keeping
+    // them separate prevents one lobby's host policy from becoming this client's local policy after
+    // disconnect/host migration, while still letting a promoted host retain its own configured values.
     private static readonly Dictionary<string, bool> _boolValues = new();
     private static readonly Dictionary<string, int> _enumValues = new();
 
@@ -68,14 +70,18 @@ internal static class VoiceModRegistry
     {
         if (string.IsNullOrEmpty(modId) || option == null) return;
         Add(_boolOptions, modId, option);
-        _boolValues.TryAdd(Compose(modId, option.Key), option.Default);
+        var key = Compose(modId, option.Key);
+        _boolValues.TryAdd(key, option.Default);
+        VoiceModRemoteOptionState.RegisterBool(key, option.Default);
     }
 
     internal static void AddHostEnumOption(string modId, VoiceHostEnumOption option)
     {
         if (string.IsNullOrEmpty(modId) || option == null) return;
         Add(_enumOptions, modId, option);
-        _enumValues.TryAdd(Compose(modId, option.Key), option.Default);
+        var key = Compose(modId, option.Key);
+        _enumValues.TryAdd(key, option.Default);
+        VoiceModRemoteOptionState.RegisterEnum(key, option.Default);
     }
 
     internal static void AddTab(string modId, string label)
@@ -100,10 +106,13 @@ internal static class VoiceModRegistry
         var prefix = modId + ".";
         var deadBools = new List<string>();
         foreach (var k in _boolValues.Keys) if (k.StartsWith(prefix, StringComparison.Ordinal)) deadBools.Add(k);
-        foreach (var k in deadBools) _boolValues.Remove(k);
+        foreach (var k in deadBools)
+            _boolValues.Remove(k);
         var deadEnums = new List<string>();
         foreach (var k in _enumValues.Keys) if (k.StartsWith(prefix, StringComparison.Ordinal)) deadEnums.Add(k);
-        foreach (var k in deadEnums) _enumValues.Remove(k);
+        foreach (var k in deadEnums)
+            _enumValues.Remove(k);
+        VoiceModRemoteOptionState.RemovePrefix(prefix);
     }
 
     // ---- Engine queries (fail-closed) ----
@@ -283,7 +292,9 @@ internal static class VoiceModRegistry
     internal static int OptionRevision { get; private set; }
 
     internal static bool GetBoolValue(string composedKey)
-        => _boolValues.TryGetValue(composedKey, out var v) && v;
+        => VoiceModRemoteOptionState.IsActive
+            ? VoiceModRemoteOptionState.GetBool(composedKey)
+            : _boolValues.TryGetValue(composedKey, out var v) && v;
 
     internal static void SetBoolValue(string composedKey, bool value)
     {
@@ -294,7 +305,9 @@ internal static class VoiceModRegistry
     }
 
     internal static int GetEnumValue(string composedKey)
-        => _enumValues.TryGetValue(composedKey, out var v) ? v : 0;
+        => VoiceModRemoteOptionState.IsActive
+            ? VoiceModRemoteOptionState.GetEnum(composedKey)
+            : _enumValues.TryGetValue(composedKey, out var v) ? v : 0;
 
     internal static void SetEnumValue(string composedKey, int value)
     {
@@ -325,17 +338,24 @@ internal static class VoiceModRegistry
     }
 
     // Apply a synced value received from the host (hash-matched, fail-closed on unknown).
+    internal static void BeginRemoteSync()
+        => VoiceModRemoteOptionState.BeginSync();
+
+    internal static void ClearRemoteSyncedValues()
+        => VoiceModRemoteOptionState.Clear();
+
     internal static void ApplySyncedValue(int hash, bool isEnum, int value)
     {
+        if (!VoiceModRemoteOptionState.IsActive) BeginRemoteSync();
         if (isEnum)
         {
             foreach (var key in _enumValues.Keys)
-                if (KeyHash(key) == hash) { _enumValues[key] = value; return; }
+                if (KeyHash(key) == hash) { VoiceModRemoteOptionState.SetEnum(key, value); return; }
         }
         else
         {
             foreach (var key in _boolValues.Keys)
-                if (KeyHash(key) == hash) { _boolValues[key] = value != 0; return; }
+                if (KeyHash(key) == hash) { VoiceModRemoteOptionState.SetBool(key, value != 0); return; }
         }
     }
 

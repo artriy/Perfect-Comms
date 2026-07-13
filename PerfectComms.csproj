@@ -8,10 +8,10 @@
 		<Product>Perfect Comms</Product>
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
-		<Version>3.2.3</Version>
-		<AssemblyVersion>3.2.3.0</AssemblyVersion>
-		<FileVersion>3.2.3.0</FileVersion>
-		<InformationalVersion>3.2.3</InformationalVersion>
+		<Version>4.0.0</Version>
+		<AssemblyVersion>4.0.0.0</AssemblyVersion>
+		<FileVersion>4.0.0.0</FileVersion>
+		<InformationalVersion>4.0.0</InformationalVersion>
 		<LangVersion>preview</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -19,19 +19,24 @@
 		<!-- Among Us/BepInEx IL2CPP currently targets net6.0; selected transitive libraries are runtime-compatible here despite newer TFM support warnings. -->
 		<SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
 		<GenerateAssemblyInfo>True</GenerateAssemblyInfo>
+		<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+		<NuGetAudit>true</NuGetAudit>
+		<NuGetAuditMode>all</NuGetAuditMode>
+		<NuGetAuditLevel>low</NuGetAuditLevel>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
 		<Configurations>Debug;Release;Android;Windows</Configurations>
-		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;cloudflare/**;scripts/**</DefaultItemExcludes>
+		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;cloudflare/**;scripts/**;native/**</DefaultItemExcludes>
 	</PropertyGroup>
 
 	<!--
     Platform configurations:
-      Windows  – default PC build; uses the Interstellar voice backend for mic/speaker.
-      Android  – Android/mobile build; uses Unity Microphone API + AudioSource for mic/speaker.
+      Desktop  – native pc-capture sidecar for media, capture, and playback.
+      Android  – in-process pc-mobile engine with Unity capture/playback surfaces.
     To build for Android, set the Configuration to "Android" in your IDE or run:
       dotnet build -c Android
   -->
 
-	<!-- Windows build (default): Interstellar voice backend -->
+	<!-- Desktop build (default): native sidecar media engine -->
 	<PropertyGroup Condition="'$(Configuration)' != 'Android'">
 		<DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
 	</PropertyGroup>
@@ -42,111 +47,112 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<!-- 735 is the newest pinned runtime compatible with the current official
+		     BepInEx.IL2CPP.MSBuild generator. 738+ removed CecilMetadataAccess and
+		     makes clean interop generation fail before compilation. -->
 		<PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.735" Private="false" ExcludeAssets="runtime;native" />
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.AutoPlugin" Version="1.1.0" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
-		<PackageReference Include="Concentus" Version="2.2.2" />
-		<PackageReference Include="SIPSorcery" Version="10.0.10" />
-		<PackageReference Include="SocketIOClient" Version="3.1.2" />
-		<PackageReference Include="ManagedBass" Version="4.0.2" />
+		<!-- These assemblies are loaded from embedded resources at runtime. Keep them
+		     explicit so a clean restore always stages the exact files embedded below. -->
+		<PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Json" Version="8.0.6" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIOClient" Version="3.1.2" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Serializer.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIO.Serializer.SystemTextJson" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<EmbeddedResource Include="Resources\**" />
 	</ItemGroup>
 
-	<ItemGroup>
-		<Reference Include="Interstellar">
-			<HintPath>Libs\Interstellar.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
-		<Reference Include="Interstellar.Messages">
-			<HintPath>Libs\Interstellar.Messages.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
-	</ItemGroup>
-
 	<ItemGroup Condition="'$(Configuration)' != 'Android'">
-		<EmbeddedResource Include="Libs\bass.x64.dll">
-			<LogicalName>Lib.bass.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\bass.x86.dll">
-			<LogicalName>Lib.bass.x86.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\opus.x64.dll">
 			<LogicalName>Lib.opus.x64.dll</LogicalName>
 		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\opus.x86.dll">
 			<LogicalName>Lib.opus.x86.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\df.x64.dll">
-			<LogicalName>Lib.df.x64.dll</LogicalName>
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(Configuration)' != 'Android'">
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x64.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x64.exe')">
+			<LogicalName>Lib.pc-capture.pc-capture-win-x64.exe</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\df.x86.dll">
-			<LogicalName>Lib.df.x86.dll</LogicalName>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x86.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x86.exe')">
+			<LogicalName>Lib.pc-capture.pc-capture-win-x86.exe</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\webrtc-apm.x64.dll">
-			<LogicalName>Lib.webrtc-apm.x64.dll</LogicalName>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-linux-x64" Condition="Exists('Libs\pc-capture\pc-capture-linux-x64')">
+			<LogicalName>Lib.pc-capture.pc-capture-linux-x64</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\webrtc-apm.x86.dll">
-			<LogicalName>Lib.webrtc-apm.x86.dll</LogicalName>
+		<EmbeddedResource Include="Libs\pc-capture\pc-capture-mac.zip" Condition="Exists('Libs\pc-capture\pc-capture-mac.zip')">
+			<LogicalName>Lib.pc-capture.pc-capture-mac.zip</LogicalName>
 		</EmbeddedResource>
 	</ItemGroup>
 
+	<ItemGroup Condition="'$(Configuration)' != 'Android'">
+		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x64.dll" Condition="Exists('Libs\dsp\webrtc-apm.x64.dll')">
+			<LogicalName>Lib.dsp.webrtc-apm.x64.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x86.dll" Condition="Exists('Libs\dsp\webrtc-apm.x86.dll')">
+			<LogicalName>Lib.dsp.webrtc-apm.x86.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.so" Condition="Exists('Libs\dsp\libwebrtc-apm.so')">
+			<LogicalName>Lib.dsp.libwebrtc-apm.so</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.dylib" Condition="Exists('Libs\dsp\libwebrtc-apm.dylib')">
+			<LogicalName>Lib.dsp.libwebrtc-apm.dylib</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(Configuration)' == 'Android'">
+		<EmbeddedResource Include="Libs\pc-mobile\libpc_mobile.so" Condition="'$(Configuration)' == 'Android' And Exists('Libs\pc-mobile\libpc_mobile.so')">
+			<LogicalName>Lib.pc-mobile.libpc_mobile.so</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
+	<!-- A normal build validates managed code and may intentionally omit native release
+	     payloads. The packaging scripts set ValidateReleaseAssets=true and require the
+	     complete platform set so a partial local helper cannot produce a green release. -->
+	<Target Name="AssertDesktopReleaseAssets" BeforeTargets="PrepareResources"
+		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' != 'Android'">
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x64.exe" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x86.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x86.exe" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-linux-x64')" Text="Missing release helper: Libs\pc-capture\pc-capture-linux-x64" />
+		<Error Condition="!Exists('Libs\pc-capture\pc-capture-mac.zip')" Text="Missing release helper: Libs\pc-capture\pc-capture-mac.zip" />
+		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x64.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x64.dll" />
+		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
+		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
+		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.dylib')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.dylib" />
+	</Target>
+
+	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="PrepareResources"
+		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' == 'Android'">
+		<Error Condition="!Exists('Libs\pc-mobile\libpc_mobile.so')"
+			Text="Missing Android release engine: Libs\pc-mobile\libpc_mobile.so. Build it with cargo-ndk for arm64-v8a before packaging." />
+		<Error Condition="!Exists('release-assets\android\AndroidManifest.xml')"
+			Text="Missing Android RECORD_AUDIO manifest fragment: release-assets\android\AndroidManifest.xml" />
+	</Target>
+
 	<ItemGroup>
-		<EmbeddedResource Include="$(NuGetPackageRoot)managedbass\4.0.2\lib\netstandard2.0\ManagedBass.dll">
-			<LogicalName>Lib.ManagedBass.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\Concentus.dll">
-			<LogicalName>Lib.Concentus.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\Interstellar.dll">
-			<LogicalName>Lib.Interstellar.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\Interstellar.Messages.dll">
-			<LogicalName>Lib.Interstellar.Messages.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcery\10.0.10\lib\net6.0\SIPSorcery.dll">
-			<LogicalName>Lib.SIPSorcery.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcerymedia.abstractions\10.0.10\lib\netstandard2.0\SIPSorceryMedia.Abstractions.dll">
-			<LogicalName>Lib.SIPSorceryMedia.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)sipsorcery.websocketsharp\0.0.1\lib\netstandard2.0\websocket-sharp.dll">
-			<LogicalName>Lib.websocket-sharp.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)bouncycastle.cryptography\2.6.2\lib\net6.0\BouncyCastle.Cryptography.dll">
-			<LogicalName>Lib.BouncyCastle.Cryptography.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)dnsclient\1.8.0\lib\net6.0\DnsClient.dll">
-			<LogicalName>Lib.DnsClient.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)microsoft.extensions.dependencyinjection.abstractions\10.0.7\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.DependencyInjection.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)microsoft.extensions.logging.abstractions\10.0.7\lib\netstandard2.0\Microsoft.Extensions.Logging.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Logging.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.diagnostics.diagnosticsource\10.0.7\lib\netstandard2.0\System.Diagnostics.DiagnosticSource.dll">
-			<LogicalName>Lib.System.Diagnostics.DiagnosticSource.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.text.encodings.web\8.0.0\lib\net6.0\System.Text.Encodings.Web.dll">
+		<EmbeddedResource Include="$(PkgSystem_Text_Encodings_Web)\lib\net6.0\System.Text.Encodings.Web.dll">
 			<LogicalName>Lib.System.Text.Encodings.Web.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)system.text.json\8.0.4\lib\net6.0\System.Text.Json.dll">
+		<EmbeddedResource Include="$(PkgSystem_Text_Json)\lib\net6.0\System.Text.Json.dll">
 			<LogicalName>Lib.System.Text.Json.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketioclient\3.1.2\lib\net6.0\SocketIOClient.dll">
+		<EmbeddedResource Include="$(PkgSocketIOClient)\lib\net6.0\SocketIOClient.dll">
 			<LogicalName>Lib.SocketIOClient.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.core\3.1.2\lib\netstandard2.0\SocketIO.Core.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Core)\lib\netstandard2.0\SocketIO.Core.dll">
 			<LogicalName>Lib.SocketIO.Core.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.serializer.core\3.1.2\lib\netstandard2.0\SocketIO.Serializer.Core.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Serializer_Core)\lib\netstandard2.0\SocketIO.Serializer.Core.dll">
 			<LogicalName>Lib.SocketIO.Serializer.Core.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(NuGetPackageRoot)socketio.serializer.systemtextjson\3.1.2\lib\netstandard2.0\SocketIO.Serializer.SystemTextJson.dll">
+		<EmbeddedResource Include="$(PkgSocketIO_Serializer_SystemTextJson)\lib\netstandard2.0\SocketIO.Serializer.SystemTextJson.dll">
 			<LogicalName>Lib.SocketIO.Serializer.SystemTextJson.dll</LogicalName>
 		</EmbeddedResource>
 	</ItemGroup>

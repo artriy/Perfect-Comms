@@ -74,7 +74,28 @@ public static class VoiceChatHudState
     private static bool _pushToTalkHeld;
     private static bool _speakerMuted;
     private static bool _initialized;
+    // Audio policy must survive the short windows where Unity has destroyed/recreated the HUD or
+    // LocalPlayer but the authenticated voice room is intentionally kept alive. Keep the last
+    // trustworthy local snapshot so role/death policy can be evaluated for the *current* phase
+    // without depending on a MapButton (or briefly treating an unresolved player as unrestricted).
+    private static VoicePlayerSnapshot? _lastTrustedLocalAudioState;
+    private static DateTime _nextAudioPolicyErrorLogUtc = DateTime.MinValue;
     private static float _overlayScale = 1.30f;
+    // SafeUpdateHud includes this marker in its throttled failure log. IL2CPP exceptions often lose
+    // their managed stack, so recording the operation about to run is the only reliable way to
+    // distinguish a not-yet-ready HUD template from role-state or scene-teardown failures.
+    private static string _lastUpdateStep = "not-started";
+
+    internal static string LastUpdateStep => _lastUpdateStep;
+
+    internal static void RecoverAfterUpdateFailure()
+    {
+        // Unity's managed wrapper can remain non-null for one frame after its native GameObject was
+        // destroyed. Drop every cached wrapper so the next HUD update clones fresh scene objects.
+        _cachedMainCamera = null;
+        DestroyButtons();
+        DestroyTooltips();
+    }
 
     public static bool IsMuted        => IsManualMuteActive();
     public static bool IsTeamRadio => IsInTeamRadioMode();
@@ -88,6 +109,13 @@ public static class VoiceChatHudState
         _toastExpiry = Time.time + ToastDurationSeconds;
     }
 
+    // Time.time is main-thread-only, so off-thread callers (sidecar supervisor / voice worker
+    // threads) stash the message here; UpdateHud drains it into ShowToast on the main thread.
+    private static volatile string? _pendingToast;
+
+    internal static void ShowToastThreadSafe(string message)
+        => _pendingToast = message ?? "";
+
     internal static void Init()
     {
         if (_initialized) return;
@@ -96,6 +124,8 @@ public static class VoiceChatHudState
         SceneManager.sceneLoaded +=
             (UnityEngine.Events.UnityAction<Scene, LoadSceneMode>)((_, __) =>
             {
+                _lastUpdateStep = "scene-reset";
+                _cachedMainCamera = null;
                 DestroyButtons();
                 DestroyTooltips();
                 DestroyToast();
@@ -282,86 +312,208 @@ public static class VoiceChatHudState
 
     internal static void UpdateHud()
     {
-        var hud = HudManager.Instance;
-        if (hud == null) return;
-        if (PlayerControl.LocalPlayer == null) return;
+        // This is deliberately before every HUD/PlayerControl readiness return. The audio engine is
+        // room-owned, not HUD-owned: a missing HUD, MapButton or rebuilding LocalPlayer must never
+        // leave the microphone in the policy state from the previous phase.
+        ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
 
+        _lastUpdateStep = "readiness.hud";
+        var hud = HudManager.Instance;
+        if (hud == null) { _lastUpdateStep = "waiting.hud"; return; }
+
+        _lastUpdateStep = "readiness.local-player";
+        var localPlayer = PlayerControl.LocalPlayer;
+        if (localPlayer == null) { _lastUpdateStep = "waiting.local-player"; return; }
+
+        // LocalPlayer becomes non-null a few frames before its GameData and the lobby HUD template
+        // are guaranteed to be ready. Do not run role queries or clone MapButton in that window.
+        // This was the timing in the observed one-shot early-lobby NullReferenceException.
+        _lastUpdateStep = "readiness.local-data";
+        if (localPlayer.Data == null) { _lastUpdateStep = "waiting.local-data"; return; }
+
+        _lastUpdateStep = "readiness.map-button";
+        if (hud.MapButton == null) { _lastUpdateStep = "waiting.map-button"; return; }
+
+        _lastUpdateStep = "pending-toast";
+        var pendingToast = _pendingToast;
+        if (pendingToast != null) { _pendingToast = null; ShowToast(pendingToast); }
+
+        _lastUpdateStep = "ensure-buttons";
         long bTicks = VoiceFrameProfiler.Begin();
         EnsureHudButtons(hud);
         VoiceFrameProfiler.End("hud.buttons", bTicks);
+        _lastUpdateStep = "ensure-tooltips";
         long tTicks = VoiceFrameProfiler.Begin();
         EnsureTooltips(hud);
         VoiceFrameProfiler.End("hud.tooltips", tTicks);
+        _lastUpdateStep = "ensure-parent";
         EnsureHudParent(hud);
+        _lastUpdateStep = "role-state";
         VoiceRoleMuteState.Update();
+        _lastUpdateStep = "apply-mic-state";
         ApplyMicState();
+        _lastUpdateStep = "button-visibility";
         UpdateHudButtonsVisibility();
+        _lastUpdateStep = "button-visuals";
         long vTicks = VoiceFrameProfiler.Begin();
         RefreshButtonVisuals();
         VoiceFrameProfiler.End("hud.visuals", vTicks);
+        _lastUpdateStep = "toast";
         UpdateToast(hud);
+        _lastUpdateStep = "complete";
+    }
+
+    internal static bool ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase phase) => true;
+
+    internal static string DescribeUpdateContext()
+    {
+        try
+        {
+            var hud = HudManager.Instance;
+            var local = PlayerControl.LocalPlayer;
+            return $"step={_lastUpdateStep} hud={hud != null} mapButton={hud != null && hud.MapButton != null} " +
+                   $"local={local != null} localData={local != null && local.Data != null} " +
+                   $"micObj={_micButtonObj != null} speakerObj={_spkButtonObj != null} jailObj={_jailButtonObj != null}";
+        }
+        catch (Exception ex)
+        {
+            return $"step={_lastUpdateStep} contextProbeFailed={ex.GetType().Name}";
+        }
     }
 
     private static void EnsureHudButtons(HudManager hud)
     {
         if (hud.MapButton == null) return;
+        _lastUpdateStep = "buttons.resolve-root";
         var root = ResolveHudRoot(hud);
 
         if (_micButtonObj == null)
         {
-            _micButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _micButtonObj.name = "VC_MicButton";
-            _micButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_micButtonObj);
-            _micIconSr = CreateIconChild(_micButtonObj, "VoiceChatPlugin.Resources.MicOn.png");
-            _micButtonSrs = null;
-            KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
-
-            _micButton = _micButtonObj.GetComponent<PassiveButton>();
-            _micButton.OnClick = new ButtonClickedEvent();
-            _micButton.OnClick.AddListener((Action)ToggleMutePublic);
-            _micButton.OnMouseOver = new UnityEvent();
-            _micButton.OnMouseOver.AddListener((Action)ShowMicTooltip);
-            _micButton.OnMouseOut = new UnityEvent();
-            _micButton.OnMouseOut.AddListener((Action)HideTooltips);
+            var obj = CreateHudButton(
+                hud,
+                root,
+                "mic",
+                "VC_MicButton",
+                "VoiceChatPlugin.Resources.MicOn.png",
+                ToggleMutePublic,
+                ShowMicTooltip,
+                hideTooltipOnMouseOut: true,
+                out var button,
+                out var icon,
+                out var renderers);
+            _micButtonObj = obj;
+            _micButton = button;
+            _micIconSr = icon;
+            _micButtonSrs = renderers;
             return; // build at most one button per frame: spreads the Instantiate + icon PNG-decode cost
         }
 
         if (_spkButtonObj == null)
         {
-            _spkButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _spkButtonObj.name = "VC_SpkButton";
-            _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_spkButtonObj);
-            _spkIconSr = CreateIconChild(_spkButtonObj, "VoiceChatPlugin.Resources.SpeakerOn.png");
-            _spkButtonSrs = null;
-            KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
-
-            _spkButton = _spkButtonObj.GetComponent<PassiveButton>();
-            _spkButton.OnClick = new ButtonClickedEvent();
-            _spkButton.OnClick.AddListener((Action)ToggleSpeakerPublic);
-            _spkButton.OnMouseOver = new UnityEvent();
-            _spkButton.OnMouseOver.AddListener((Action)ShowSpeakerTooltip);
-            _spkButton.OnMouseOut = new UnityEvent();
-            _spkButton.OnMouseOut.AddListener((Action)HideTooltips);
+            var obj = CreateHudButton(
+                hud,
+                root,
+                "speaker",
+                "VC_SpkButton",
+                "VoiceChatPlugin.Resources.SpeakerOn.png",
+                ToggleSpeakerPublic,
+                ShowSpeakerTooltip,
+                hideTooltipOnMouseOut: true,
+                out var button,
+                out var icon,
+                out var renderers);
+            _spkButtonObj = obj;
+            _spkButton = button;
+            _spkIconSr = icon;
+            _spkButtonSrs = renderers;
             return; // build at most one button per frame
         }
 
         if (_jailButtonObj == null)
         {
-            _jailButtonObj      = Object.Instantiate(hud.MapButton.gameObject, root);
-            _jailButtonObj.name = "VC_JailUnmuteButton";
-            _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
-            ClearButtonBG(_jailButtonObj);
-            CreateIconChild(_jailButtonObj, "VoiceChatPlugin.Resources.JailUnmute.png");
-            _jailButtonSrs = null;
-            KeepButtonOnTop(_jailButtonObj, ref _jailButtonSrs);
+            var obj = CreateHudButton(
+                hud,
+                root,
+                "jail",
+                "VC_JailUnmuteButton",
+                "VoiceChatPlugin.Resources.JailUnmute.png",
+                JailUnmutePublic,
+                onMouseOver: null,
+                hideTooltipOnMouseOut: false,
+                out var button,
+                out _,
+                out var renderers);
+            _jailButtonObj = obj;
+            _jailButton = button;
+            _jailButtonSrs = renderers;
+        }
+    }
 
-            _jailButton = _jailButtonObj.GetComponent<PassiveButton>();
-            _jailButton.OnClick = new ButtonClickedEvent();
-            _jailButton.OnClick.AddListener((Action)JailUnmutePublic);
-            _jailButton.OnMouseOver = new UnityEvent();
-            _jailButton.OnMouseOut = new UnityEvent();
+    private static GameObject CreateHudButton(
+        HudManager hud,
+        Transform root,
+        string diagnosticName,
+        string objectName,
+        string iconResource,
+        Action onClick,
+        Action? onMouseOver,
+        bool hideTooltipOnMouseOut,
+        out PassiveButton button,
+        out SpriteRenderer icon,
+        out SpriteRenderer[]? renderers)
+    {
+        GameObject? created = null;
+        try
+        {
+            _lastUpdateStep = $"buttons.{diagnosticName}.template";
+            var template = hud.MapButton;
+            if (template == null || template.gameObject == null)
+                throw new InvalidOperationException($"HUD MapButton template unavailable while creating {diagnosticName}");
+
+            _lastUpdateStep = $"buttons.{diagnosticName}.clone";
+            created = Object.Instantiate(template.gameObject, root);
+            if (created == null)
+                throw new InvalidOperationException($"HUD MapButton clone failed while creating {diagnosticName}");
+
+            created.name = objectName;
+            created.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+
+            _lastUpdateStep = $"buttons.{diagnosticName}.clear-background";
+            ClearButtonBG(created);
+            _lastUpdateStep = $"buttons.{diagnosticName}.icon";
+            icon = CreateIconChild(created, iconResource);
+
+            _lastUpdateStep = $"buttons.{diagnosticName}.component";
+            button = created.GetComponent<PassiveButton>();
+            if (button == null)
+                throw new InvalidOperationException($"HUD MapButton clone has no PassiveButton while creating {diagnosticName}");
+
+            _lastUpdateStep = $"buttons.{diagnosticName}.events";
+            button.OnClick = new ButtonClickedEvent();
+            button.OnClick.AddListener(onClick);
+            button.OnMouseOver = new UnityEvent();
+            if (onMouseOver != null)
+                button.OnMouseOver.AddListener(onMouseOver);
+            button.OnMouseOut = new UnityEvent();
+            if (hideTooltipOnMouseOut)
+                button.OnMouseOut.AddListener((Action)HideTooltips);
+
+            _lastUpdateStep = $"buttons.{diagnosticName}.sorting";
+            renderers = null;
+            KeepButtonOnTop(created, ref renderers);
+            return created;
+        }
+        catch
+        {
+            // Publish the static object/button references only after this helper returns. If the
+            // source hierarchy is transiently invalid, remove the incomplete clone and retry next
+            // frame instead of permanently keeping a button without icons or click handlers.
+            if (created != null)
+            {
+                try { Object.Destroy(created); }
+                catch { }
+            }
+            throw;
         }
     }
     private static void EnsureTooltips(HudManager hud)
@@ -537,15 +689,154 @@ public static class VoiceChatHudState
     }
     internal static void ApplyMicState()
     {
+        ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
+    }
+
+    /// <summary>
+    /// Applies transmit policy without requiring any HUD object. A valid live PlayerControl remains
+    /// the most authoritative source. During scene reconstruction, the room snapshot (or its last
+    /// trusted local entry) preserves role/death state while the freshly-resolved phase is applied.
+    /// If neither exists in Tasks/Meeting/Exile, fail closed until identity is trustworthy again.
+    /// This only mutes capture; speaker playback and peer signaling remain available for listen-only
+    /// users, including clients with no microphone or denied microphone permission.
+    /// </summary>
+    internal static void ApplyAudioPolicy(VoiceGameStateSnapshot? snapshot)
+    {
+        try
+        {
+            ApplyAudioPolicyCore(snapshot);
+        }
+        catch (Exception ex)
+        {
+            // A mod callback or a Unity object invalidated mid-read must not abort the room update.
+            // Fail closed only for gameplay role/policy phases; speaker playback remains untouched.
+            var phase = snapshot?.Phase ?? VoiceGamePhase.Unknown;
+            var pushToTalkMuted = false;
+            try
+            {
+                pushToTalkMuted = VoiceSettings.Instance?.MicMode.Value == VoiceMicMode.PushToTalk
+                                  && !_pushToTalkHeld;
+            }
+            catch { }
+            VoiceChatRoom.Current?.SetMute(CombineTransmitMute(
+                _speakerMuted,
+                _micMuted,
+                pushToTalkMuted,
+                ShouldFailClosedWithoutLocalIdentity(phase),
+                policyMuted: false));
+            if (DateTime.UtcNow >= _nextAudioPolicyErrorLogUtc)
+            {
+                _nextAudioPolicyErrorLogUtc = DateTime.UtcNow.AddSeconds(2);
+                try
+                {
+                    VoiceDiagnostics.Log(
+                        "voice.audio-policy.error",
+                        $"phase={phase} errorType={ex.GetType().Name} action={(ShouldFailClosedWithoutLocalIdentity(phase) ? "mute-capture" : "preserve-manual-policy")}");
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static void ApplyAudioPolicyCore(VoiceGameStateSnapshot? snapshot)
+    {
         var settings = VoiceSettings.Instance;
         bool radioTransmit   = IsInTeamRadioMode();
         bool pushToTalkMode  = settings?.MicMode.Value == VoiceMicMode.PushToTalk;
         if (pushToTalkMode && _micMuted) _micMuted = false;
         bool pushToTalkMuted = pushToTalkMode && !_pushToTalkHeld && !radioTransmit;
-        bool roleMuted       = VoiceRoleMuteState.IsLocalVoiceBlocked(VoiceSceneState.ResolvePhase());
-        bool policyMuted     = IsLocalRoomPolicyVoiceBlocked(VoiceSceneState.ResolvePhase());
-        VoiceChatRoom.Current?.SetMute(_speakerMuted || _micMuted || pushToTalkMuted || roleMuted || policyMuted);
+        var resolvedPhase = VoiceSceneState.ResolvePhase();
+        var phase = resolvedPhase == VoiceGamePhase.Unknown && snapshot != null
+            ? snapshot.Phase
+            : resolvedPhase;
+
+        bool liveLocalReady = false;
+        bool roleMuted;
+        bool localDead;
+        PlayerControl? liveLocal = null;
+        try
+        {
+            liveLocal = PlayerControl.LocalPlayer;
+            liveLocalReady = liveLocal != null && liveLocal.Data != null;
+        }
+        catch { liveLocalReady = false; }
+
+        if (liveLocalReady)
+        {
+            roleMuted = VoiceRoleMuteState.IsLocalVoiceBlocked(phase);
+            localDead = VoiceRoleMuteState.IsVoiceDead(liveLocal);
+            if (snapshot != null
+                && snapshot.LiveLocalPlayerResolved
+                && snapshot.TryGetLocalPlayer(out var currentLocal)
+                && currentLocal.IsLocal
+                && currentLocal.PlayerId == liveLocal!.PlayerId)
+                _lastTrustedLocalAudioState = currentLocal;
+        }
+        else
+        {
+            VoicePlayerSnapshot? trusted = null;
+            if (snapshot != null
+                && (snapshot.LiveLocalPlayerResolved || snapshot.RoutingRosterRetained)
+                && snapshot.TryGetLocalPlayer(out var snapshotLocal)
+                && snapshotLocal.IsLocal
+                && !snapshotLocal.Disconnected)
+            {
+                trusted = snapshotLocal;
+                _lastTrustedLocalAudioState = snapshotLocal;
+            }
+            else if (_lastTrustedLocalAudioState.HasValue)
+            {
+                trusted = _lastTrustedLocalAudioState.Value;
+            }
+
+            if (trusted.HasValue)
+            {
+                var local = trusted.Value;
+                roleMuted = IsSnapshotRoleVoiceBlocked(local, phase);
+                localDead = local.IsDead;
+            }
+            else
+            {
+                // An unresolved gameplay identity must not accidentally clear a role or host-policy
+                // mute. Lobby/Intro/EndGame are global voice phases and have no such restriction.
+                roleMuted = ShouldFailClosedWithoutLocalIdentity(phase);
+                localDead = false;
+            }
+        }
+
+        bool policyMuted = IsLocalRoomPolicyVoiceBlocked(phase, localDead);
+        VoiceChatRoom.Current?.SetMute(CombineTransmitMute(
+            _speakerMuted,
+            _micMuted,
+            pushToTalkMuted,
+            roleMuted,
+            policyMuted));
     }
+
+    private static bool IsSnapshotRoleVoiceBlocked(VoicePlayerSnapshot local, VoiceGamePhase phase)
+    {
+        if (VoiceModRegistry.TryGetGlobalGate(VoiceModBridge.ToApiPhase(phase), out _))
+            return true;
+        if (VoiceSceneState.IsMeetingVoicePhase(phase))
+            return VoiceRoleMuteState.IsMeetingVoiceBlocked(local, phase);
+        if (VoiceSceneState.IsTaskVoicePhase(phase))
+            return VoiceRoleMuteState.IsTaskVoiceBlocked(local);
+        return false;
+    }
+
+    internal static bool ShouldFailClosedWithoutLocalIdentity(VoiceGamePhase phase)
+        => VoiceSceneState.IsMeetingVoicePhase(phase) || VoiceSceneState.IsTaskVoicePhase(phase);
+
+    internal static bool CombineTransmitMute(
+        bool speakerMuted,
+        bool manualMuted,
+        bool pushToTalkMuted,
+        bool roleMuted,
+        bool policyMuted)
+        => speakerMuted || manualMuted || pushToTalkMuted || roleMuted || policyMuted;
+
+    internal static void ResetAudioPolicyCache()
+        => _lastTrustedLocalAudioState = null;
 
     internal static void ApplySpeakerState()
     {
@@ -704,20 +995,29 @@ public static class VoiceChatHudState
     }
     private static void DestroyButtons()
     {
-        if (_micButtonObj  != null) { Object.Destroy(_micButtonObj);  _micButtonObj  = null; }
-        if (_spkButtonObj  != null) { Object.Destroy(_spkButtonObj);  _spkButtonObj  = null; }
-        if (_jailButtonObj != null) { Object.Destroy(_jailButtonObj); _jailButtonObj = null; }
+        BestEffortDestroy(ref _micButtonObj);
+        BestEffortDestroy(ref _spkButtonObj);
+        BestEffortDestroy(ref _jailButtonObj);
         _micButton   = null; _spkButton   = null; _jailButton  = null;
     }
 
     private static void DestroyTooltips()
     {
-        if (_micTooltip != null) { Object.Destroy(_micTooltip); _micTooltip = null; }
-        if (_spkTooltip != null) { Object.Destroy(_spkTooltip); _spkTooltip = null; }
+        BestEffortDestroy(ref _micTooltip);
+        BestEffortDestroy(ref _spkTooltip);
         _micTooltipTmp = null; _spkTooltipTmp = null;
         // Drop the cached child-component arrays so a re-created tooltip re-caches fresh references.
         _micTooltipRenderers = null; _spkTooltipRenderers = null;
         _micTooltipTmps = null; _spkTooltipTmps = null;
+    }
+
+    private static void BestEffortDestroy(ref GameObject? obj)
+    {
+        var current = obj;
+        obj = null;
+        if (current == null) return;
+        try { Object.Destroy(current); }
+        catch { /* stale IL2CPP wrapper; clearing our reference is the recovery */ }
     }
 
     // Transient on-screen banner shown on the VC overlay layer (same surface as the mic/speaker
@@ -1001,6 +1301,9 @@ public static class VoiceChatHudState
     {
         foreach (var sr in obj.GetComponentsInChildren<SpriteRenderer>(true))
         {
+            // A source HUD hierarchy can contain a destroyed component during the first lobby
+            // frame or scene teardown. Unity preserves a null slot in this component array.
+            if (sr == null) continue;
             sr.sprite = null;
             sr.color = Color.clear;
         }

@@ -1,187 +1,171 @@
-#if ANDROID || WINDOWS
+#if ANDROID
 using System;
 using System.Threading;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
-using Interstellar.VoiceChat;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
-/// Android audio output backend.
-///
-/// Mirrors Nebula's NoSVCRoom.cs exactly:
-///
-///   var audioSource = ModSingleton&lt;ResidentBehaviour&gt;.Instance.gameObject.AddComponent&lt;AudioSource&gt;();
-///   audioSource.MarkDontUnload();
-///   var speaker = new ManualSpeaker(() => { if (audioSource) GameObject.Destroy(audioSource); });
-///   AudioClip myClip = AudioClip.Create("VCAudio", (int)(sampleRate * 0.5f), 2, sampleRate, true,
-///       (AudioClip.PCMReaderCallback)(ary => speaker.Read(ary)));
-///   audioSource.clip = myClip;
-///   audioSource.loop = true;
-///   audioSource.Play();
-///
-/// Nebula's ManualSpeaker.Read(ary) is driven by Unity's audio thread via PCMReaderCallback.
-/// In Nebula, ManualSpeaker internally calls _endpoint.Read() (the Interstellar audio graph
-/// endpoint) to pull rendered PCM through the full volume/pan/effects routing graph.
-///
-/// We replicate this exactly: PCMReaderCallback calls _endpoint.Read() directly,
-/// pulling audio through the full AudioManager routing graph (volume, stereo pan,
-/// ghost reverb, radio filter, etc.) — not from a separate ring buffer.
-///
-/// This is the key fix: previously WriteMono() bypassed the graph entirely.
-/// Now the PCMReaderCallback IS the graph's consumer, just like Nebula's ManualSpeaker.
+/// Unity playback surface for the Android pc-mobile engine. Unity pulls interleaved stereo
+/// directly from Rust; no legacy managed voice graph or external backend is involved.
 /// </summary>
-internal sealed class AndroidSpeaker : IDisposable
-{
-    // Match Nebula: (int)(interstellarRoom.SampleRate * 0.5f) samples, 2 channels
-    private const int   SampleRate = 48000;
-    private const int   Channels   = 2;
-    private const float ClipSecs   = 0.5f;
-
-    private readonly AudioSource   _source;
-    private readonly AudioClip     _clip;
-    private readonly ManualSpeaker _speaker;
-    private readonly float[]       _readBuf;
-    private int _readCallbacks;
-
-    public bool IsPlaying => _source != null && _source.isPlaying;
-    public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
-
-    /// <summary>
-    /// Create the speaker. The <paramref name="speaker"/> is Interstellar's manual
-    /// speaker endpoint. Unity pulls PCM from it in the AudioClip reader callback.
-    /// </summary>
-    public AndroidSpeaker(ManualSpeaker speaker)
-    {
-        _speaker = speaker ?? throw new ArgumentNullException(nameof(speaker));
-
-        var host = VoiceChatPluginMain.ResidentObject
-            ?? throw new InvalidOperationException("[VC] ResidentObject is null");
-
-        int clipSamples = (int)(SampleRate * ClipSecs); // Nebula: sampleRate * 0.5f
-        _readBuf = new float[clipSamples * Channels];
-
-        // Add AudioSource to ResidentObject — Nebula: ResidentBehaviour.gameObject.AddComponent<AudioSource>()
-        _source = host.AddComponent<AudioSource>();
-        // Nebula: audioSource.MarkDontUnload()
-        _source.hideFlags  |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
-        _source.spatialBlend = 0f; // 2D
-        _source.volume       = 1f;
-
-        // Nebula: AudioClip.Create("VCAudio", (int)(sampleRate * 0.5f), 2, sampleRate, true,
-        //             (PCMReaderCallback)(ary => speaker.Read(ary)))
-        _clip = AudioClip.Create(
-            "VCAudio",
-            clipSamples,
-            Channels,
-            SampleRate,
-            true,
-            (AudioClip.PCMReaderCallback)(ary => Read(ary)));
-
-        _source.clip = _clip;
-        _source.loop = true;
-        _source.Play();
-
-        VoiceDiagnostics.DebugInfo("[VC] Android speaker initialised (Nebula pattern, graph-driven).");
-    }
-
-    // ── PCMReaderCallback — called by Unity audio thread ────────────────────
-    // Mirrors Nebula's ManualSpeaker.Read(ary): pulls audio from Interstellar.
-
-    private int _readErrors;
-    private float[] _scratch = Array.Empty<float>();
-    private void Read(Il2CppStructArray<float> data)
-    {
-        Interlocked.Increment(ref _readCallbacks);
-        int n = data.Length;
-        if (_scratch.Length != n) _scratch = new float[n];
-        try { _speaker.Read(_scratch); }
-        catch (Exception)
-        {
-            Array.Clear(_scratch, 0, n);
-            if (Interlocked.Increment(ref _readErrors) == 1)
-                VoiceDiagnostics.DebugWarning("[VC] Android speaker read error; emitting silence");
-        }
-        for (int i = 0; i < n; i++) data[i] = _scratch[i];
-    }
-
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
-    public void Dispose()
-    {
-        _source.Stop();
-        // Nebula: if (audioSource) GameObject.Destroy(audioSource)
-        if (_source != null) UnityEngine.Object.Destroy(_source);
-        if (_clip != null) UnityEngine.Object.Destroy(_clip); // clip holds a this-capturing PCMReaderCallback (ML2)
-        VoiceDiagnostics.DebugInfo("[VC] Android speaker disposed.");
-    }
-}
-
-internal sealed class AndroidSampleProviderSpeaker : IDisposable
+internal sealed class AndroidEnginePcmSpeaker : IDisposable
 {
     private const int SampleRate = 48000;
     private const int Channels = 2;
+    private const int HealthCheckIntervalMs = 500;
+    private const int CallbackStallTimeoutMs = 3_000;
+    private const int InitialRetryDelayMs = 250;
+    private const int MaxRetryDelayMs = 10_000;
     private readonly AudioSource _source;
     private readonly AudioClip _clip;
-    private readonly BclVoiceMixer _mixer;
+    private readonly MobileVoiceClient _voice;
     private int _readCallbacks;
+    private int _readErrors;
+    private int _recoveryAttempt;
+    private long _lastReadMs;
+    private long _nextHealthCheckMs;
+    private long _nextRecoveryMs;
+    private volatile bool _disposed;
 
     public bool IsPlaying => _source != null && _source.isPlaying;
     public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
 
-    public AndroidSampleProviderSpeaker(BclVoiceMixer mixer)
+    public AndroidEnginePcmSpeaker(MobileVoiceClient voice)
     {
-        _mixer = mixer ?? throw new ArgumentNullException(nameof(mixer));
+        _voice = voice ?? throw new ArgumentNullException(nameof(voice));
 
         var host = VoiceChatPluginMain.ResidentObject
             ?? throw new InvalidOperationException("[VC] ResidentObject is null");
 
-        int clipSamples = SampleRate / 2;
-
+        var clipSamples = SampleRate / 2;
         _source = host.AddComponent<AudioSource>();
         _source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
         _source.spatialBlend = 0f;
         _source.volume = 1f;
 
         _clip = AudioClip.Create(
-            "VCBclAudio",
+            "VCPcMobile",
             clipSamples,
             Channels,
             SampleRate,
             true,
-            (AudioClip.PCMReaderCallback)(ary => Read(ary)));
+            (AudioClip.PCMReaderCallback)Read);
 
         _source.clip = _clip;
         _source.loop = true;
         _source.Play();
+        _lastReadMs = Environment.TickCount64;
 
-        VoiceDiagnostics.DebugInfo($"[VC] Android BCL speaker initialised ({SampleRate} Hz, {Channels} ch, managed mixer).");
+        VoiceDiagnostics.DebugInfo($"[VC] Android pc-mobile speaker initialised ({SampleRate} Hz, {Channels} ch).");
     }
 
-    private int _readErrors;
     private float[] _scratch = Array.Empty<float>();
+
     private void Read(Il2CppStructArray<float> data)
     {
         Interlocked.Increment(ref _readCallbacks);
-        int n = data.Length;
-        if (_scratch.Length != n) _scratch = new float[n];
-        try { _mixer.Read(_scratch); }
-        catch (Exception)
+        Volatile.Write(ref _lastReadMs, Environment.TickCount64);
+        Interlocked.Exchange(ref _recoveryAttempt, 0);
+        Volatile.Write(ref _nextRecoveryMs, 0);
+        var count = data.Length;
+        if (_scratch.Length != count) _scratch = new float[count];
+        if (_disposed)
         {
-            Array.Clear(_scratch, 0, n);
-            if (Interlocked.Increment(ref _readErrors) == 1)
-                VoiceDiagnostics.DebugWarning("[VC] Android BCL speaker read error; emitting silence");
+            Array.Clear(_scratch, 0, count);
         }
-        for (int i = 0; i < n; i++) data[i] = _scratch[i];
+        else
+        {
+            try { _voice.ReadPlayback(_scratch); }
+            catch (Exception ex)
+            {
+                Array.Clear(_scratch, 0, count);
+                if (Interlocked.Increment(ref _readErrors) == 1)
+                    VoiceDiagnostics.DebugWarning($"[VC] Android pc-mobile speaker read failed; emitting silence: {ex.Message}");
+            }
+        }
+        for (var i = 0; i < count; i++) data[i] = _scratch[i];
+    }
+
+    /// <summary>
+    /// Revalidates Unity playback on the main thread. Android may stop an AudioSource when audio
+    /// focus is lost, the app is suspended, or the output route changes. Recovery continues with
+    /// capped backoff and also detects a source that claims to play while PCM callbacks are stalled.
+    /// </summary>
+    public bool Tick()
+    {
+        if (_disposed || _source == null) return false;
+
+        var now = Environment.TickCount64;
+        if (now < _nextHealthCheckMs) return IsPlaying;
+        _nextHealthCheckMs = now + HealthCheckIntervalMs;
+
+        bool focused;
+        try { focused = Application.isFocused; }
+        catch { focused = true; }
+
+        bool playing;
+        try { playing = _source.isPlaying; }
+        catch { playing = false; }
+
+        // Do not fight Android while it deliberately owns audio focus. A focused Tick after resume
+        // observes the stale callback timestamp and immediately rebuilds the source/clip binding.
+        if (!focused) return playing;
+
+        var callbackAgeMs = Math.Max(0, now - Volatile.Read(ref _lastReadMs));
+        if (playing && callbackAgeMs < CallbackStallTimeoutMs) return true;
+        if (now < _nextRecoveryMs) return false;
+
+        var reason = playing ? $"callback-stall-{callbackAgeMs}ms" : "source-stopped";
+        return RestartPlayback(now, reason);
+    }
+
+    private bool RestartPlayback(long now, string reason)
+    {
+        var attempt = Math.Min(Interlocked.Increment(ref _recoveryAttempt), 30);
+        try
+        {
+            _source.Stop();
+            _source.clip = null;
+            _source.clip = _clip;
+            _source.loop = true;
+            _source.Play();
+            if (_source.isPlaying)
+            {
+                // Allow the audio thread a full stall window to deliver its first callback. The
+                // callback resets the retry state; if it never arrives, subsequent stop/play
+                // attempts back off instead of churning the Unity output route every three seconds.
+                var retryDelayMs = AndroidMicrophone.RecoveryDelayMilliseconds(
+                    attempt, InitialRetryDelayMs, MaxRetryDelayMs, CallbackStallTimeoutMs);
+                Volatile.Write(ref _lastReadMs, now);
+                Volatile.Write(ref _nextRecoveryMs, now + retryDelayMs);
+                VoiceDiagnostics.Log("voice.unity.speaker.restart",
+                    $"state=play-issued reason={reason} attempt={attempt} retryAfterMs={retryDelayMs}");
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("voice.unity.speaker.restart",
+                $"state=play-failed reason={reason} attempt={attempt} error=\"{ex.Message.Replace('"', '\'')}\"");
+        }
+
+        var delayMs = AndroidMicrophone.RecoveryDelayMilliseconds(attempt, InitialRetryDelayMs, MaxRetryDelayMs);
+        _nextRecoveryMs = now + delayMs;
+        VoiceDiagnostics.Log("voice.unity.speaker.restart",
+            $"state=retry-scheduled reason={reason} attempt={attempt} delayMs={delayMs}");
+        return false;
     }
 
     public void Dispose()
     {
-        _source.Stop();
-        if (_source != null) UnityEngine.Object.Destroy(_source);
-        if (_clip != null) UnityEngine.Object.Destroy(_clip); // clip holds a this-capturing PCMReaderCallback (ML1)
-        VoiceDiagnostics.DebugInfo("[VC] Android BCL speaker disposed.");
+        if (_disposed) return;
+        _disposed = true;
+        try { _source.Stop(); } catch { }
+        try { if (_source != null) UnityEngine.Object.Destroy(_source); } catch { }
+        try { if (_clip != null) UnityEngine.Object.Destroy(_clip); } catch { }
+        VoiceDiagnostics.DebugInfo("[VC] Android pc-mobile speaker disposed.");
     }
 }
 #endif

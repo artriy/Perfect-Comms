@@ -1,0 +1,24 @@
+[package]
+name = "pc-mobile"
+version = "0.1.0"
+edition = "2021"
+description = "PerfectComms Android C-ABI shim over the shared voice core (pc_capture lib)."
+license = "MIT"
+
+# cdylib: built as libpc_mobile.so for Android (via cargo-ndk) and P/Invoked from the C#
+# IL2CPP plugin. Reuses the exact desktop core so there is one WebRTC/Opus/DSP/mixer stack.
+[lib]
+name = "pc_mobile"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+pc-capture = { path = "../pc-capture" }
+
+[profile.release]
+# Default unwind (NOT abort) so the FFI boundary can catch_unwind and never unwind a Rust
+# panic into the C# host process.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

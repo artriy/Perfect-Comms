@@ -18,7 +18,12 @@ If you already have BepInEx 6 (Unity IL2CPP) set up, just drop the plugin in:
 BepInEx/plugins/PerfectComms.dll
 ```
 
-Use `PerfectComms.dll` for Windows and `PerfectCommsAndroid.dll` for Android.
+Use `PerfectComms.dll` for Windows. Android packagers use `PerfectCommsAndroid.dll` **and must
+merge** [`release-assets/android/AndroidManifest.xml`](../release-assets/android/AndroidManifest.xml)
+into the final APK manifest before signing and installing it. That fragment declares
+`android.permission.RECORD_AUDIO`; placing the XML beside the DLL does not modify an existing APK.
+Android will still ask the player for the runtime microphone permission. A player who denies it can
+continue in receive-only mode.
 
 ## Verify it loaded
 
@@ -41,6 +46,9 @@ Perfect Comms detects supported mods (like TOU-Mira) at runtime and activates th
 
 - **No voice HUD:** confirm `PerfectComms.dll` is in `BepInEx/plugins` and the BepInEx console shows it loading.
 - **Can't hear anyone:** check your mic/speaker device in the local settings, and that you are in a Perfect Comms lobby with other compatible clients.
+- **Android mic never starts:** confirm the final APK manifest contains
+  `android.permission.RECORD_AUDIO`, then grant microphone permission in Android settings. The DLL
+  cannot add a permission to an APK after it has been signed.
 - **Installing alongside a role mod:** Perfect Comms coexists with mods that use MiraAPI/Reactor (such as TOU-Mira) in the same `BepInEx/plugins` folder. Let that mod provide its own MiraAPI/Reactor; do not add duplicates.
 
 See also: [Host Settings](Host-Settings) - [Controls](Controls)

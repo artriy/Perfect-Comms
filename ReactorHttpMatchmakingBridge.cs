@@ -22,16 +22,30 @@ internal static class GameStartManagerModdedRegionPatch
 
 internal static class ReactorHttpMatchmakingBridge
 {
-    private static readonly FieldInfo? HostPublicButtonField = ResolveField("HostPublicButton");
-    private static readonly FieldInfo? HostPrivateButtonField = ResolveField("HostPrivateButton");
+    private static readonly MemberInfo? HostPublicButtonMember = ResolveMember("HostPublicButton");
+    private static readonly MemberInfo? HostPrivateButtonMember = ResolveMember("HostPrivateButton");
     private static string? _lastWarning;
 
-    private static FieldInfo? ResolveField(string name)
+    private static MemberInfo? ResolveMember(string name)
     {
-        var field = AccessTools.Field(typeof(GameStartManager), name);
-        if (field == null)
+        // Il2CppInterop exposes generated game fields as managed properties,
+        // while older Mono/game assemblies expose them as fields. Support both
+        // shapes so a game/runtime update does not silently remove the toggle.
+        MemberInfo? member = AccessTools.Property(typeof(GameStartManager), name)
+                             ?? (MemberInfo?)AccessTools.Field(typeof(GameStartManager), name);
+        if (member == null)
             WarnOnce($"GameStartManager.{name} not found (game update?); public-lobby toggle disabled");
-        return field;
+        return member;
+    }
+
+    private static PassiveButton? ReadButton(GameStartManager manager, MemberInfo? member)
+    {
+        return member switch
+        {
+            PropertyInfo property => property.GetValue(manager) as PassiveButton,
+            FieldInfo field => field.GetValue(manager) as PassiveButton,
+            _ => null,
+        };
     }
 
     internal static bool IsKnownModdedRegion()
@@ -69,10 +83,10 @@ internal static class ReactorHttpMatchmakingBridge
     {
         try
         {
-            if (HostPublicButtonField?.GetValue(manager) is PassiveButton publicButton)
+            if (ReadButton(manager, HostPublicButtonMember) is { } publicButton)
                 publicButton.enabled = true;
 
-            if (HostPrivateButtonField?.GetValue(manager) is not PassiveButton privateButton) return;
+            if (ReadButton(manager, HostPrivateButtonMember) is not { } privateButton) return;
 
             privateButton.enabled = true;
             privateButton.OnClick = new ButtonClickedEvent();

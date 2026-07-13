@@ -316,7 +316,7 @@ internal static class VoiceAudioOcclusion
             return;
         }
         if (VoiceDiagnostics.IsEnabled)
-            VoiceDiagnostics.Log("bcl.occlusion.warm",
+            VoiceDiagnostics.Log("voice.occlusion.warm",
                 $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} doors={_closedDoorPositions.Count} shipId={id}");
     }
 

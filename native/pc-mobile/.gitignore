@@ -1,0 +1,4 @@
+/target
+/jniLibs
+# Cargo.lock is committed: pc-mobile ships as a cdylib (libpc_mobile.so), so its dependency
+# tree must be pinned for reproducible interop/codec behavior, same as pc-capture.

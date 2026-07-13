@@ -73,6 +73,9 @@ internal static class VoiceHudWarnings
             return $"caller has the floor ({secs}s)";
         }
 
+        if (room.VoiceTransportInitializing)
+            return "voice connecting";
+
         if (!room.UsingMicrophone && !room.Mute)
             return "mic unavailable";
 

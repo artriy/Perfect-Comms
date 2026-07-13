@@ -1,0 +1,87 @@
+name: Release
+
+# The macOS helper ships ad-hoc codesigned (free, no Apple Developer account).
+# The mod clears the Gatekeeper quarantine and sets the exec bit on the
+# extracted .app at launch, so no Developer ID signing or notarization secrets
+# are required.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
+  helpers:
+    uses: ./.github/workflows/native-helpers.yml
+
+  rtc:
+    uses: ./.github/workflows/rtc-interop.yml
+
+  package:
+    needs: [quality, helpers, rtc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release tag matches source version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
+          plugin_version="$(sed -n 's/.*public const string Version = "\([^"]*\)";.*/\1/p' VoiceChatPluginMain.cs | head -n1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          test -n "$project_version"
+          test "$plugin_version" = "$project_version"
+          test "$tag_version" = "$project_version" || {
+            echo "release tag $GITHUB_REF_NAME does not match source version $project_version" >&2
+            exit 1
+          }
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Collect helpers
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Stage helpers into Libs
+        run: |
+          mkdir -p Libs/pc-capture
+          cp dl/helper-win-x64/pc-capture-win-x64.exe Libs/pc-capture/
+          cp dl/helper-win-x86/pc-capture-win-x86.exe Libs/pc-capture/
+          cp dl/helper-linux-x64/pc-capture-linux-x64 Libs/pc-capture/
+          cp dl/helper-mac/pc-capture-mac.zip Libs/pc-capture/
+      - name: Stage DSP libs into Libs
+        run: |
+          mkdir -p Libs/dsp
+          cp dl/apm-win-x64/webrtc-apm.x64.dll Libs/dsp/
+          cp dl/apm-win-x86/webrtc-apm.x86.dll Libs/dsp/
+          cp dl/apm-linux-x64/libwebrtc-apm.so Libs/dsp/
+          cp dl/apm-mac/libwebrtc-apm.dylib Libs/dsp/
+      - name: Stage Android voice engine into Libs
+        run: |
+          mkdir -p Libs/pc-mobile
+          cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
+          # Android intentionally uses the platform audio path without desktop DSP sidecars.
+      - name: Assemble BepInEx dependency bundle source
+        run: bash scripts/fetch-bepinex.sh "${{ runner.temp }}/bepinex-deps"
+      - name: Package (Release + dependencies)
+        env:
+          PC_DEPENDENCY_SOURCE: ${{ runner.temp }}/bepinex-deps
+        run: bash scripts/package-release.sh Release
+      - name: Package (Android)
+        run: bash scripts/package-release.sh Android
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/PerfectComms+dependencies.zip
+            artifacts/PerfectComms-Release.zip
+            artifacts/PerfectComms-Android.zip
+            artifacts/PerfectComms.dll
+            artifacts/PerfectCommsAndroid.dll

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<!-- The shipped plugin remains net6.0 for BepInEx/Among Us compatibility.
+		     Run tests on the supported SDK/runtime used by CI. -->
+		<TargetFramework>net9.0</TargetFramework>
+		<CheckEolTargetFramework>false</CheckEolTargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
+		<NoWarn>$(NoWarn);CS7022</NoWarn>
+		<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+		<IsTestProject>true</IsTestProject>
+		<NuGetAudit>true</NuGetAudit>
+		<NuGetAuditMode>all</NuGetAuditMode>
+		<NuGetAuditLevel>low</NuGetAuditLevel>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+	</PropertyGroup>
+
+	<!-- Program.cs is a local legacy console harness for the retired managed
+	     backend. Keep it available to developers without compiling it into the
+	     production xUnit gate. -->
+	<ItemGroup>
+		<Compile Remove="Program.cs;HarnessSmokeTests.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+		<PackageReference Include="xunit" Version="2.9.3" />
+		<PackageReference Include="xunit.runner.visualstudio" Version="3.0.2">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+		<ProjectReference Include="..\PerfectComms.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\UnityEngine.CoreModule.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+
+</Project>

@@ -45,10 +45,14 @@ public readonly record struct VoiceRoomSettingsSnapshot(
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
+    // Reserved wire fields retained at the front of the RPC snapshot for mixed-version decoding.
+    // Media is always native-engine + Among Us RPC; these values are deliberately inert.
+    public const int ReservedBackend = 0;
+    public const string ReservedBackendServerUrl = "";
 
     public static VoiceRoomSettingsSnapshot Defaults { get; } = new(
-        (int)VoiceTransportBackend.BetterCrewLink,
-        VoiceEndpointSettings.DefaultBetterCrewLinkServerUrl,
+        ReservedBackend,
+        ReservedBackendServerUrl,
         6f,
         (int)VoiceFalloffMode.Smooth,
         (int)VoiceOcclusionMode.VisionOnly,
@@ -91,15 +95,9 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     {
         var s = VoiceChatGameOptions.GetInstance();
         var role = VoiceRoleIntegrationOptions.GetInstance();
-        var local = VoiceSettings.Instance;
-        var backend = (VoiceTransportBackend)s.VoiceBackend.Value;
-        var endpoint = VoiceEndpointSettings.Resolve(
-            backend,
-            local?.BetterCrewLinkServerUrl.Value,
-            local?.InterstellarServerUrl.Value);
         return new VoiceRoomSettingsSnapshot(
-            (int)endpoint.Backend,
-            endpoint.ServerUrl,
+            ReservedBackend,
+            ReservedBackendServerUrl,
             s.MaxChatDistance.Value,
             s.FalloffMode.Value,
             s.OcclusionMode.Value,
@@ -143,8 +141,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     {
         return this with
         {
-            Backend = Enum.IsDefined(typeof(VoiceTransportBackend), Backend) ? Backend : (int)VoiceTransportBackend.BetterCrewLink,
-            BackendServerUrl = NormalizeBackendServerUrl(Backend, BackendServerUrl),
+            Backend = ReservedBackend,
+            BackendServerUrl = ReservedBackendServerUrl,
             MaxChatDistance = Math.Clamp(MaxChatDistance, MinChatDistance, MaxChatDistanceLimit),
             FalloffMode = Enum.IsDefined(typeof(VoiceFalloffMode), FalloffMode) ? FalloffMode : (int)VoiceFalloffMode.Smooth,
             OcclusionMode = Enum.IsDefined(typeof(VoiceOcclusionMode), OcclusionMode) ? OcclusionMode : (int)VoiceOcclusionMode.VisionOnly,
@@ -153,17 +151,13 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         };
     }
 
-    private static string NormalizeBackendServerUrl(int backend, string? serverUrl)
-    {
-        return backend == (int)VoiceTransportBackend.Interstellar
-            ? VoiceEndpointSettings.NormalizeInterstellarServerUrl(serverUrl)
-            : VoiceEndpointSettings.NormalizeBetterCrewLinkServerUrl(serverUrl);
-    }
 }
 
 internal static class VoiceRoomSettingsState
 {
     private static VoiceRoomSettingsSnapshot? _remoteSnapshot;
+    private static int _sessionGameId;
+    private static bool _sessionConfirmed;
 
     // Fix 4a (frame-cache fallback): FromGameOptions() does ~30 IL2CPP ModdedOption marshals + a
     // 34-field record-struct alloc + a `this with` clamp copy. The voice/HUD update path reads
@@ -204,15 +198,63 @@ internal static class VoiceRoomSettingsState
 
     public static VoiceRoomSettingsSnapshot? RemoteSnapshot => _remoteSnapshot;
 
+    internal static int SessionGameId => _sessionGameId;
+
+    internal static bool SessionConfirmed => _sessionConfirmed;
+
+    internal static void BeginSession(int gameId)
+    {
+        if (gameId == 0) return;
+
+        // An authenticated settings snapshot can beat OnGameJoined while the room is still being
+        // constructed. In that case ApplyRemote(gameId) establishes a provisional scope; the first
+        // matching authoritative join confirms it without throwing away the useful early snapshot.
+        if (!_sessionConfirmed && (_sessionGameId == 0 || _sessionGameId == gameId))
+        {
+            _sessionGameId = gameId;
+            _sessionConfirmed = true;
+            return;
+        }
+
+        // OnGameJoined is a session boundary, not merely a room-code observation. A second
+        // confirmed join can legitimately reuse the same GameId, so stale settings from the prior
+        // connection must not survive just because the numeric room id happens to match.
+        _sessionGameId = gameId;
+        _sessionConfirmed = true;
+        ClearRemote();
+    }
+
     public static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot)
     {
         _remoteSnapshot = snapshot.Clamp();
     }
 
+    internal static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot, int gameId)
+    {
+        // Receiving a snapshot observes a possible session but does not authoritatively confirm a
+        // join. This distinction lets an early snapshot survive the first matching OnGameJoined,
+        // while a later confirmed same-GameId join still clears stale state.
+        if (gameId != 0 && _sessionGameId != gameId)
+        {
+            _sessionGameId = gameId;
+            _sessionConfirmed = false;
+            ClearRemote();
+        }
+        ApplyRemote(snapshot);
+    }
+
     public static void ClearRemote()
     {
         _remoteSnapshot = null;
+        VoiceModRemoteOptionState.Clear();
         // Drop any cached host-options rebuild so the next Current read after a host change is fresh.
         _frameCacheFrame = int.MinValue;
+    }
+
+    internal static void EndSession()
+    {
+        _sessionGameId = 0;
+        _sessionConfirmed = false;
+        ClearRemote();
     }
 }

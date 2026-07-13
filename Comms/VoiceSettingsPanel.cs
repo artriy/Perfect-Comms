@@ -209,6 +209,8 @@ public static class VoiceSettingsPanel
         int sig = entries.Count;
         for (int i = 0; i < entries.Count; i++)
             sig = sig * 31 + entries[i].Key.GetHashCode();
+        sig = sig * 31 + VoiceChatLocalSettings.MicDeviceListVersion;
+        sig = sig * 31 + VoiceChatLocalSettings.SpkDeviceListVersion;
         return sig;
     }
 
@@ -304,8 +306,6 @@ public static class VoiceSettingsPanel
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
         Toggle(defs, "Echo Cancellation", s.EchoCancellationEnabled);
-        Toggle(defs, "Auto Mic Gain", s.AutoMicGain);
-        Toggle(defs, "Use Unity Audio (only use if you have problems)", s.UnityAudio);
         Slider(defs, "Voice Falloff Softness", s.VoiceFalloffSoftness, Pct);
         Section(defs, "STARTUP");
         Toggle(defs, "Start Muted", s.StartMuted);

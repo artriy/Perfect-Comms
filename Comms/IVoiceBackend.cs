@@ -6,11 +6,8 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal interface IVoiceBackend : IDisposable
 {
-    event Action<VoiceBackendCustomMessage>? CustomMessageReceived;
-
     string RoomCode { get; }
     string Region { get; }
-    string ServerUrl { get; }
     bool UsingMicrophone { get; }
     bool UsingSpeaker { get; }
     bool Mute { get; }
@@ -33,13 +30,11 @@ internal interface IVoiceBackend : IDisposable
     void SetMicrophone(string deviceName, float volume);
     void SetSpeaker(string deviceName);
     void UpdateProfile(byte playerId, string playerName);
-    void SendRadioState(byte playerId, VoiceTeamRadioChannel channel);
     void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel);
-    void SendCustomMessage(byte[] payload);
     void Rejoin();
     // Rebuild any pre-built ICE/peer-connection pool after a Nat Fix / TURN setting change, so the next
     // peer-join uses the new policy without generating a DTLS certificate on the main thread. Backends with
-    // no such pool (e.g. Interstellar) implement this as a no-op.
+    // Implementations without a prewarmed ICE pool may implement this as a no-op.
     void RebuildIceConnectionPool();
     void Update(
         VoiceGameStateSnapshot? snapshot,
@@ -75,23 +70,3 @@ internal readonly record struct VoiceCaptureRuntimeOptions(
     bool NoiseSuppressionEnabled,
     bool EchoCancellationEnabled,
     float MicSensitivity);
-
-internal readonly record struct VoiceBackendCustomMessage(
-    byte[] Payload,
-    int SenderClientId,
-    byte SenderPlayerId,
-    string SenderPeerId)
-{
-    public const int UnknownClientId = -1;
-    public const byte UnknownPlayerId = byte.MaxValue;
-
-    public static VoiceBackendCustomMessage Unknown(byte[] payload, string senderPeerId)
-        => new(payload, UnknownClientId, UnknownPlayerId, senderPeerId);
-
-    public VoiceBackendCustomMessage CopyPayload()
-    {
-        var copy = new byte[Payload.Length];
-        Array.Copy(Payload, copy, Payload.Length);
-        return new VoiceBackendCustomMessage(copy, SenderClientId, SenderPlayerId, SenderPeerId);
-    }
-}

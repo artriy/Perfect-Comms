@@ -1,0 +1,22 @@
+name = "perfect-comms-lobbies"
+main = "src/index.js"
+compatibility_date = "2026-05-13"
+
+[vars]
+UPDATE_LATEST_VERSION = "v1.0.1"
+UPDATE_RELEASE_URL = "https://github.com/artriy/Perfect-Comms/releases/tag/v1.0.1"
+UPDATE_RELEASE_FALLBACK_VERSION = "v1.0.1"
+UPDATE_RELEASE_FALLBACK_URL = "https://github.com/artriy/Perfect-Comms/releases/tag/v1.0.1"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "perfect-comms-lobbies"
+database_id = "2ca88954-0aa5-44a6-b1ca-948aa8ec60bc"
+
+[[ratelimits]]
+name = "TURN_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60

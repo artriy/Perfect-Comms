@@ -1,0 +1,413 @@
+name: Native helpers
+
+on:
+  push:
+    branches: [main, feat/crossplatform-capture-sidecar]
+  pull_request:
+    paths:
+      - "Comms/SidecarVoiceClient.cs"
+      - "native/pc-capture/**"
+      - "native/pc-mobile/**"
+      - "native/apm-sys/**"
+      - "native/third_party/webrtc-audio-processing/**"
+      - "scripts/build-apm.sh"
+      - "scripts/build-helpers.sh"
+      - "scripts/build-mac.sh"
+      - "scripts/ci-smoke-helper.sh"
+      - ".github/workflows/native-helpers.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            dest: pc-capture-win-x64.exe
+            artifact: helper-win-x64
+          - target: i686-pc-windows-msvc
+            dest: pc-capture-win-x86.exe
+            artifact: helper-win-x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ilammy/setup-nasm@v1
+      - name: Build helper
+        shell: bash
+        run: bash scripts/build-helpers.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: Libs/pc-capture/${{ matrix.dest }}
+          if-no-files-found: error
+
+  # pc-mobile is a cdylib over pc-capture's lib (the shared voice core for Android). The host
+  # clippy job catches "one shared core" API drift fast; the android job proves the cdylib
+  # actually cross-compiles for the device target (Opus/ring/webrtc all build under the NDK).
+  pc-mobile:
+    runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ilammy/setup-nasm@v1
+      - name: clippy pc-mobile (host)
+        shell: bash
+        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
+
+  pc-mobile-android:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CMAKE_GENERATOR: "Ninja"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27d
+      - name: ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: cross-compile pc-mobile (arm64-v8a)
+        working-directory: native/pc-mobile
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a -o ./jniLibs build --release
+      - name: Verify pc-mobile release ABI
+        run: |
+          mkdir -p Libs/pc-mobile
+          cp native/pc-mobile/jniLibs/arm64-v8a/libpc_mobile.so Libs/pc-mobile/
+          python3 scripts/verify-release-assets.py --root . --configuration Android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-android-arm64
+          path: native/pc-mobile/jniLibs/arm64-v8a/libpc_mobile.so
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    container: rust:1-bullseye
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA dev headers, cmake, nasm
+        run: |
+          apt-get update
+          apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Build helper
+        run: bash scripts/build-helpers.sh x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux-x64
+          path: Libs/pc-capture/pc-capture-linux-x64
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build ad-hoc universal helper
+        run: bash scripts/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          # The helper is signed again after the APM dylib is staged.
+          # Never ship or smoke this base bundle as the release artifact.
+          name: helper-mac-base
+          path: Libs/pc-capture/pc-capture-mac.zip
+          if-no-files-found: error
+
+  smoke:
+    needs: [windows, linux, mac-bundle, apm-build-linux]
+    strategy:
+      matrix:
+        include:
+          - artifact: helper-win-x64
+            os: windows-latest
+            bin: pc-capture-win-x64.exe
+            apm_artifact: apm-win-x64
+          - artifact: helper-win-x86
+            os: windows-latest
+            bin: pc-capture-win-x86.exe
+            apm_artifact: apm-win-x86
+          - artifact: helper-linux-x64
+            os: ubuntu-latest
+            bin: pc-capture-linux-x64
+            apm_artifact: apm-linux-x64
+          - artifact: helper-mac
+            # Smoke the universal app's x86_64 slice on a native Intel runner.
+            os: macos-15-intel
+            bin: pc-capture-mac.zip
+            apm_artifact: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dl
+      - uses: actions/download-artifact@v4
+        if: matrix.apm_artifact != ''
+        with:
+          name: ${{ matrix.apm_artifact }}
+          path: dl
+      - name: Smoke
+        shell: bash
+        run: |
+          if [[ "${{ matrix.bin }}" == *.zip ]]; then
+            cd dl && unzip -o "${{ matrix.bin }}" && cd ..
+            chmod +x dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
+            bash scripts/ci-smoke-helper.sh \
+              dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio --require-dsp
+          else
+            chmod +x "dl/${{ matrix.bin }}" || true
+            bash scripts/ci-smoke-helper.sh "dl/${{ matrix.bin }}" --require-dsp
+          fi
+
+  # ---- webrtc-audio-processing DSP shared library (apm-sys gate) ----
+  # Build the vendored C++ APM as a SHARED lib that exports the webrtc_apm_* C
+  # ABI, then prove apm-sys (libloading) can load it and process a frame.
+  # The two Windows DLLs are cross-built on Linux with the mingw toolchains the
+  # crossfiles reference, then loaded on a real Windows runner. i686 (32-bit
+  # Windows) is the go/no-go gate.
+  apm-build-linux:
+    runs-on: ubuntu-latest
+    container: rust:1-bullseye
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Toolchains (meson, ninja, mingw cross)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config ninja-build python3 python3-pip \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+          # webrtc/abseil need std::thread -> force the POSIX mingw runtime
+          update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-posix || true
+          update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-posix || true
+          update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix || true
+          update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix || true
+          pip3 install meson || pip3 install --break-system-packages meson
+      - name: Build linux-x64 (.so)
+        run: bash scripts/build-apm.sh linux-x64
+      - name: Smoke linux-x64 (apm-sys load + process a frame)
+        run: |
+          APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.so" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+      - name: Build win-x64 (.dll, x86_64-w64-mingw32)
+        run: bash scripts/build-apm.sh win-x64
+      - name: Build win-x86 (.dll, i686-w64-mingw32) [GATE]
+        run: bash scripts/build-apm.sh win-x86
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-linux-x64
+          path: artifacts/apm/libwebrtc-apm.so
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-win-x64
+          path: artifacts/apm/webrtc-apm.x64.dll
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-win-x86
+          path: artifacts/apm/webrtc-apm.x86.dll
+          if-no-files-found: error
+
+  apm-smoke-win-x64:
+    needs: apm-build-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-win-x64
+          path: dl
+      - name: Smoke win-x64 (apm-sys load + process a frame)
+        shell: bash
+        run: |
+          APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x64.dll" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+
+  apm-smoke-win-x86:
+    needs: apm-build-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-win-x86
+          path: dl
+      - name: Smoke win-x86 (32-bit process loads 32-bit DLL) [GATE]
+        shell: bash
+        run: |
+          APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x86.dll" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            --target i686-pc-windows-msvc \
+            -- --ignored loads_and_processes_a_frame
+
+  apm-mac:
+    name: apm-mac-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x86_64
+            target: mac-x64
+            artifact: apm-mac-x64
+            file: libwebrtc-apm.x64.dylib
+          - os: macos-latest
+            arch: arm64
+            target: mac-arm64
+            artifact: apm-mac-arm64
+            file: libwebrtc-apm.arm64.dylib
+    runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: meson + ninja
+        run: brew install meson ninja
+      - name: Build native macOS slice
+        run: bash scripts/build-apm.sh ${{ matrix.target }}
+      - name: Smoke native macOS slice (apm-sys load + process a frame)
+        run: |
+          APM_LIB="$PWD/artifacts/apm/${{ matrix.file }}" \
+            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            -- --ignored loads_and_processes_a_frame
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/apm/${{ matrix.file }}
+          if-no-files-found: error
+
+  apm-mac-universal:
+    needs: apm-mac
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac-x64
+          path: dl/x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac-arm64
+          path: dl/arm64
+      - name: Combine and verify universal macOS APM
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/apm
+          lipo -create -output artifacts/apm/libwebrtc-apm.dylib \
+            dl/x64/libwebrtc-apm.x64.dylib \
+            dl/arm64/libwebrtc-apm.arm64.dylib
+          lipo artifacts/apm/libwebrtc-apm.dylib -verify_arch x86_64 arm64
+          lipo -info artifacts/apm/libwebrtc-apm.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apm-mac
+          path: artifacts/apm/libwebrtc-apm.dylib
+          if-no-files-found: error
+
+  # Assemble exactly what SidecarLauncher extracts at runtime, then apply the
+  # final ad-hoc signature. Copying dylibs into an already-signed .app changes
+  # the signed bundle and can make macOS reject libloading.
+  mac-bundle:
+    needs: [macos, apm-mac-universal]
+    # Sign and smoke the universal bundle's x86_64 slice on Intel.
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: helper-mac-base
+          path: dl/helper
+      - uses: actions/download-artifact@v4
+        with:
+          name: apm-mac
+          path: dl/apm
+      - name: Stage DSP, sign, verify, and smoke final app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle Libs/pc-capture
+          ditto -x -k dl/helper/pc-capture-mac.zip bundle
+          app="$PWD/bundle/PerfectCommsAudio.app"
+          test -x "$app/Contents/MacOS/PerfectCommsAudio"
+          cp dl/apm/libwebrtc-apm.dylib "$app/Contents/MacOS/"
+          chmod 755 "$app/Contents/MacOS/"*.dylib
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          bash scripts/ci-smoke-helper.sh \
+            "$app/Contents/MacOS/PerfectCommsAudio" --require-dsp
+          ditto -c -k --keepParent "$app" Libs/pc-capture/pc-capture-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-mac
+          path: Libs/pc-capture/pc-capture-mac.zip
+          if-no-files-found: error
+
+  # ---- helper-to-helper webrtc loopback (Phase 3 RtcEngine gate) ----
+  # Two in-process RtcEngines cross-feed offer/answer/ICE over their LocalSignal
+  # channels, then one sends an Opus packet and the other's recv() must yield it.
+  # This proves the helper's webrtc-rs peer table end to end without the mod.
+  helper-rtc-loopback-linux:
+    runs-on: ubuntu-latest
+    container: rust:1-bullseye
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA dev headers, cmake, nasm
+        run: |
+          apt-get update
+          apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+
+  helper-rtc-loopback-win:
+    runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
+        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture

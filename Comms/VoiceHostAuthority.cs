@@ -8,12 +8,15 @@ internal readonly record struct VoiceHostSenderIdentity(
     string SenderPeerId,
     string Transport)
 {
+    public const int UnknownClientId = -1;
+    public const byte UnknownPlayerId = byte.MaxValue;
+
     public static VoiceHostSenderIdentity Unknown(string transport)
-        => new(VoiceBackendCustomMessage.UnknownClientId, VoiceBackendCustomMessage.UnknownPlayerId, string.Empty, transport);
+        => new(UnknownClientId, UnknownPlayerId, string.Empty, transport);
 
     public string StableKey
         => SenderClientId >= 0 ? $"client:{SenderClientId}" :
-            SenderPlayerId != VoiceBackendCustomMessage.UnknownPlayerId ? $"player:{SenderPlayerId}" :
+            SenderPlayerId != UnknownPlayerId ? $"player:{SenderPlayerId}" :
             !string.IsNullOrWhiteSpace(SenderPeerId) ? $"peer:{SenderPeerId}" :
             $"unknown:{Transport}";
 
@@ -26,20 +29,8 @@ internal readonly record struct VoiceHostSenderIdentity(
 
 internal static class VoiceHostAuthority
 {
-    public static VoiceHostSenderIdentity FromBackendMessage(VoiceBackendCustomMessage message, string transport)
-        => new(message.SenderClientId, message.SenderPlayerId, message.SenderPeerId, transport);
-
     public static VoiceHostSenderIdentity FromPlayer(PlayerControl? player, string transport)
         => new(ResolveSenderClientId(player), ResolveSenderPlayerId(player), ResolveSenderPeerId(player), transport);
-
-    public static bool IsTrustedHostSender(
-        VoiceBackendCustomMessage message,
-        VoiceGameStateSnapshot? snapshot,
-        string transport,
-        out string reason,
-        out int hostClientId,
-        out byte hostPlayerId)
-        => IsTrustedHostSender(FromBackendMessage(message, transport), snapshot, out reason, out hostClientId, out hostPlayerId);
 
     public static bool IsTrustedHostSender(
         PlayerControl? player,
@@ -63,7 +54,15 @@ internal static class VoiceHostAuthority
     {
         hostClientId = ResolveHostClientId(snapshot);
         hostPlayerId = ResolveHostPlayerId(snapshot, hostClientId);
+        return IsTrustedResolvedHostSender(sender, hostClientId, hostPlayerId, out reason);
+    }
 
+    internal static bool IsTrustedResolvedHostSender(
+        VoiceHostSenderIdentity sender,
+        int hostClientId,
+        byte hostPlayerId,
+        out string reason)
+    {
         if (hostClientId >= 0)
         {
             if (sender.SenderClientId == hostClientId)
@@ -77,24 +76,20 @@ internal static class VoiceHostAuthority
                 reason = "non-host";
                 return false;
             }
+
+            // Host policy is security-sensitive. PlayerId/NetId identifies the dispatched object but
+            // is not authenticated client ownership on every relay. If the sender client cannot be
+            // resolved, fail closed and let the bounded settings-request retry converge once the
+            // PlayerControl ownership mapping is available.
+            reason = "sender-client-unresolved";
+            return false;
         }
 
-        if (hostPlayerId != VoiceBackendCustomMessage.UnknownPlayerId)
-        {
-            if (sender.SenderPlayerId == hostPlayerId)
-            {
-                reason = "host-player";
-                return true;
-            }
-
-            if (sender.SenderPlayerId != VoiceBackendCustomMessage.UnknownPlayerId)
-            {
-                reason = "non-host";
-                return false;
-            }
-        }
-
-        reason = "unknown-sender";
+        // Never infer authority from PlayerId while the live host client is unresolved. During a
+        // reconstruction gap many PlayerControls can also have ClientId -1; treating the first one
+        // as the host let an arbitrary stale/non-host object authorize policy. The request retry
+        // converges once InnerNet's host/client ownership mapping is available.
+        reason = "host-client-unresolved";
         return false;
     }
 
@@ -109,7 +104,7 @@ internal static class VoiceHostAuthority
         if (snapshot?.HostClientId >= 0)
             return snapshot.HostClientId;
 
-        return VoiceBackendCustomMessage.UnknownClientId;
+        return VoiceHostSenderIdentity.UnknownClientId;
     }
 
     // HostId member name varies across Among Us/IL2CPP rebuilds: try candidates, cache the hit, log
@@ -126,7 +121,7 @@ internal static class VoiceHostAuthority
         try
         {
             var client = AmongUsClient.Instance;
-            if (client == null) return VoiceBackendCustomMessage.UnknownClientId;
+            if (client == null) return VoiceHostSenderIdentity.UnknownClientId;
 
             var type = client.GetType();
             if (_cachedHostIdPropertyName != null
@@ -153,7 +148,7 @@ internal static class VoiceHostAuthority
         {
         }
 
-        return VoiceBackendCustomMessage.UnknownClientId;
+        return VoiceHostSenderIdentity.UnknownClientId;
     }
 
     private static bool TryReadHostIdMember(object client, Type type, string name, out int hostId)
@@ -186,6 +181,9 @@ internal static class VoiceHostAuthority
 
     private static byte ResolveHostPlayerId(VoiceGameStateSnapshot? snapshot, int hostClientId)
     {
+        if (hostClientId < 0)
+            return VoiceHostSenderIdentity.UnknownPlayerId;
+
         if (snapshot != null && hostClientId >= 0 && snapshot.TryGetClient(hostClientId, out var host))
             return host.PlayerId;
 
@@ -202,12 +200,12 @@ internal static class VoiceHostAuthority
         {
         }
 
-        return VoiceBackendCustomMessage.UnknownPlayerId;
+        return VoiceHostSenderIdentity.UnknownPlayerId;
     }
 
     private static int ResolveSenderClientId(PlayerControl? player)
     {
-        if (player == null) return VoiceBackendCustomMessage.UnknownClientId;
+        if (player == null) return VoiceHostSenderIdentity.UnknownClientId;
 
         try
         {
@@ -227,18 +225,18 @@ internal static class VoiceHostAuthority
         {
         }
 
-        return VoiceBackendCustomMessage.UnknownClientId;
+        return VoiceHostSenderIdentity.UnknownClientId;
     }
 
     private static byte ResolveSenderPlayerId(PlayerControl? player)
     {
         try
         {
-            return player?.PlayerId ?? VoiceBackendCustomMessage.UnknownPlayerId;
+            return player?.PlayerId ?? VoiceHostSenderIdentity.UnknownPlayerId;
         }
         catch
         {
-            return VoiceBackendCustomMessage.UnknownPlayerId;
+            return VoiceHostSenderIdentity.UnknownPlayerId;
         }
     }
 

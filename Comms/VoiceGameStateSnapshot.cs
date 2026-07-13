@@ -18,7 +18,10 @@ internal sealed record VoiceGameStateSnapshot(
     bool CommsSabotageActive,
     bool MeetingActive,
     int CameraCount,
-    int ClosedDoorCount)
+    int ClosedDoorCount,
+    bool LiveLocalPlayerResolved = true,
+    bool RoutingRosterRetained = false,
+    bool PlayerEnumerationCompleted = true)
 {
     public bool TryGetLocalPlayer(out VoicePlayerSnapshot player)
         => TryGetPlayer(LocalPlayerId, out player);

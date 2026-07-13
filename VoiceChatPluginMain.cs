@@ -14,11 +14,13 @@ using VoiceChatPlugin.VoiceChat;
 namespace VoiceChatPlugin;
 
 [BepInPlugin(Id, "Perfect Comms", Version)]
+#if !ANDROID
 [BepInProcess("Among Us.exe")]
+#endif
 public class VoiceChatPluginMain : BasePlugin
 {
     public const string Id = "com.edgetel.perfectcomms";
-    public const string Version = "3.2.3";
+    public const string Version = "4.0.0";
     public static ManualLogSource Logger { get; private set; } = null!;
     internal static ConfigFile PluginConfig { get; private set; } = null!;
     public Harmony Harmony { get; } = new(Id);
@@ -31,6 +33,22 @@ public class VoiceChatPluginMain : BasePlugin
     static VoiceChatPluginMain()
     {
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutdownVoiceRuntime("process-exit");
+        AppDomain.CurrentDomain.DomainUnload += (_, _) => ShutdownVoiceRuntime("domain-unload");
+    }
+
+    internal static void ShutdownVoiceRuntime(string reason)
+    {
+        try { VoiceLobbyRegistryPublisher.ClearLocalListing(); }
+        catch { /* listing deletion is best-effort and cannot block local audio/process teardown */ }
+        try { VoiceChatRoom.ShutdownCurrentRoom(reason); }
+        catch { /* process/domain shutdown must continue even if the room is already gone */ }
+#if WINDOWS
+        // Room release normally terminates the helper. This remains the final safety boundary for
+        // shutdown while a room is active or if teardown was interrupted by process/domain unload.
+        try { SidecarVoiceHost.Shutdown(reason); }
+        catch { /* the OS will finish teardown; never block the remaining shutdown hooks */ }
+#endif
     }
 
     private static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)

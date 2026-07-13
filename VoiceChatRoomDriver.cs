@@ -10,10 +10,8 @@ internal static class VoiceChatRoomDriver
     private static bool _wasInIntro;
     private static bool _wasInEndGame;
     private static float _roomRetryTimer = 0f;
-    private static float _closeGraceTimer = 0f;
     private static bool _pendingRemap;
     private static int _remapCountdown;
-    private const float TransitionCloseGraceSeconds = 10f;
 
     private static bool IsLocalServer()
     {
@@ -23,21 +21,17 @@ internal static class VoiceChatRoomDriver
 
     private static bool ShouldCloseRoom()
     {
-        if (AmongUsClient.Instance == null) return true;
-        if (IsLocalServer()) return true;
-
-        if (ShipStatus.Instance != null) return false;
-        if (LobbyBehaviour.Instance != null) return false;
-        if (IntroCutscene.Instance != null) return false;
-        if (VoiceSceneState.IsEndGameActive) return false;
-
-        return AmongUsClient.Instance.GameState != InnerNet.InnerNetClient.GameStates.Joined;
+        return VoiceRoomLifetimeGate.IsTerminalCondition(
+            hasAmongUsClient: AmongUsClient.Instance != null,
+            isLocalServer: IsLocalServer(),
+            explicitDisconnectLatched: VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
     }
 
     private static bool ShouldHaveRoom()
     {
         if (AmongUsClient.Instance == null) return false;
         if (IsLocalServer()) return false;
+        if (VoiceRoomLifetimeGate.IsExplicitDisconnectLatched) return false;
 
         if (ShipStatus.Instance != null) return true;
         if (LobbyBehaviour.Instance != null) return true;
@@ -51,42 +45,15 @@ internal static class VoiceChatRoomDriver
     {
         if (ShouldCloseRoom())
         {
-            if (VoiceChatRoom.Current != null && AmongUsClient.Instance != null && !IsLocalServer())
-            {
-                if (_closeGraceTimer <= 0f)
-                {
-                    _closeGraceTimer = TransitionCloseGraceSeconds;
-                    VoiceDiagnostics.DebugInfo("[VC] Room close deferred; likely scene transition.");
-                    VoiceChatRoom.Current.ForceCompatibilityRefresh("close deferred");
-                }
-
-                _closeGraceTimer -= Time.deltaTime;
-                if (_closeGraceTimer > 0f)
-                {
-                    try
-                    {
-                        VoiceChatRoom.Current.Update();
-                    }
-                    catch (Exception ex)
-                    {
-                        VoiceDiagnostics.DebugError("[VC] Room update error during close grace: " + ex);
-                    }
-                    return;
-                }
-            }
-
             if (VoiceChatRoom.Current != null)
-                VoiceChatRoom.CloseCurrentRoom();
+                VoiceChatRoom.CloseCurrentRoom("driver-no-active-session");
             _wasInGame = _wasInIntro = _wasInEndGame = false;
             _roomRetryTimer = 0f;
-            _closeGraceTimer = 0f;
             _pendingRemap = false;
             _remapCountdown = 0;
             VoiceSceneState.Reset();
             return;
         }
-
-        _closeGraceTimer = 0f;
 
         if (VoiceChatRoom.Current == null && ShouldHaveRoom())
         {

@@ -1,0 +1,11 @@
+[package]
+name = "apm-sys"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libloading = "0.8"

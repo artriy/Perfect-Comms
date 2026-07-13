@@ -2,13 +2,48 @@ bin/
 obj/
 *.user
 *.lock.json
+!packages.lock.json
+!PerfectComms.Tests/packages.lock.json
 .vs/
 .idea/
 .DS_Store
 Libs/*.bak.*
-PerfectComms.Tests/
+Libs/pc-capture/
+Libs/dsp/
+Libs/pc-mobile/
+# The xUnit suite is part of the release gate. Keep the old, local-only console
+# harness out of source control; it targets the retired managed voice backend.
+PerfectComms.Tests/Program.cs
+PerfectComms.Tests/HarnessSmokeTests.cs
 scripts/
-cloudflare/
+!scripts/
+scripts/*
+!scripts/live-turn-smoke.py
+!scripts/verify-release-assets.py
+# Track the deployable Cloudflare worker source/config/tests, but never local
+# Wrangler state or installed npm packages. TURN credentials live in bindings,
+# not in these files.
+cloudflare/*
+!cloudflare/perfect-comms-lobbies/
+cloudflare/perfect-comms-lobbies/*
+!cloudflare/perfect-comms-lobbies/src/
+!cloudflare/perfect-comms-lobbies/test/
+!cloudflare/perfect-comms-lobbies/package.json
+!cloudflare/perfect-comms-lobbies/wrangler.toml
+!cloudflare/perfect-comms-lobbies/schema.sql
+cloudflare/perfect-comms-lobbies/src/*
+!cloudflare/perfect-comms-lobbies/src/index.js
+cloudflare/perfect-comms-lobbies/test/*
+!cloudflare/perfect-comms-lobbies/test/index.test.js
+cloudflare/**/.wrangler/
+cloudflare/**/node_modules/
+cloudflare/**/package-lock.json
+!cloudflare/perfect-comms-lobbies/package-lock.json
+cloudflare/**/*.log
 TouMira/
 artifacts/
+build-apm-*/
 PerfectComms.sln
+.superpowers/
+.claude/
+.serena/

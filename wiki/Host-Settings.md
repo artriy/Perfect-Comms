@@ -11,7 +11,7 @@ The host panel is organised into tabs:
 | Tab | Controls |
 | :--- | :--- |
 | **Proximity** | Talk distance, falloff curve, occlusion mode, walls block sound, only-hear-in-sight, camera hearing |
-| **Lobby** | Public voice lobby, voice backend, lobby browser backend |
+| **Lobby** | Public voice lobby and public-lobby directory source |
 | **Vents & Ghosts** | Hear in vent, vent private chat, impostors hear ghosts, comms-sab disables voice, only-ghosts-can-talk, ghosts hear each other, meetings/lobby-only mode |
 | **Team Radio** | Team radio on/off, per-team channels, usable in meetings, usable in tasks |
 | **Mod Behaviour** | Role voice rules from supported mods (see below). Each compatible mod gets its own tab here. |

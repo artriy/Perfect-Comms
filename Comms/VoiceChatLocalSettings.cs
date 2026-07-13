@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -60,14 +62,49 @@ public enum VoiceMicMode
 
 public class VoiceChatLocalSettings
 {
-    private static string[] _micDeviceNames = Array.Empty<string>();
+    private static volatile string[] _micDeviceNames = Array.Empty<string>();
+    private static volatile bool _micNamesFromSidecar;
+    private static int _micDeviceListVersion;
 #if WINDOWS
-    private static string[] _spkDeviceNames = Array.Empty<string>();
+    private static Task? _sidecarProbeTask;
+    private static volatile string[] _spkDeviceNames = Array.Empty<string>();
+    private static volatile bool _spkNamesFromSidecar;
+    private static int _spkDeviceListVersion;
 #endif
 
     public static string[] MicDeviceNames => _micDeviceNames;
+    public static int MicDeviceListVersion => Volatile.Read(ref _micDeviceListVersion);
+
+    public static void SetMicDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    {
+        var arr = new string[names.Count + 1];
+        arr[0] = "Default";
+        for (int i = 0; i < names.Count; i++)
+            arr[i + 1] = names[i];
+        _micDeviceNames = arr;
+        _micNamesFromSidecar = true;
+        Interlocked.Increment(ref _micDeviceListVersion);
+    }
+
+    public static int SpkDeviceListVersion =>
+#if WINDOWS
+        Volatile.Read(ref _spkDeviceListVersion);
+#else
+        0;
+#endif
 #if WINDOWS
     public static string[] SpkDeviceNames => _spkDeviceNames;
+
+    public static void SetSpkDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    {
+        var arr = new string[names.Count + 1];
+        arr[0] = "Default";
+        for (int i = 0; i < names.Count; i++)
+            arr[i + 1] = names[i];
+        _spkDeviceNames = arr;
+        _spkNamesFromSidecar = true;
+        Interlocked.Increment(ref _spkDeviceListVersion);
+    }
 #endif
 
     // ── Settings ──────────────────────────────────────────────────────────────
@@ -78,8 +115,6 @@ public class VoiceChatLocalSettings
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
     public ConfigEntry<bool> EchoCancellationEnabled { get; }
-    public ConfigEntry<bool> AutoMicGain { get; }
-    public ConfigEntry<bool> UnityAudio { get; }
     public ConfigEntry<bool> StartMuted { get; }
     public ConfigEntry<bool> StartDeafened { get; }
     public ConfigEntry<MicDeviceEnum> MicrophoneDeviceIndex { get; }
@@ -102,12 +137,12 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> SpeakingBarY { get; }
     public ConfigEntry<float> OverlayScale { get; }
 
-    // User-facing toggle (default on). When on, the BetterCrewLink backend offers a TURN relay alongside
+    // User-facing toggle (default on). When on, the native WebRTC engine offers a TURN relay alongside
     // STUN so peers that can't establish a direct connection (strict/symmetric NAT, firewalls) still get
-    // audio. Only the peers that actually need it relay; everyone else stays direct. BCL backend only.
+    // audio. Only the peers that actually need it relay; everyone else stays direct.
     public ConfigEntry<bool> NatFix { get; }
 
-    // Wine/Proton (Linux) only. When on, the BCL backend forces TURN-relay-only ICE and adds a TURN-over-TCP
+    // Wine/Proton (Linux) only. When on, the native engine forces TURN-relay-only ICE and adds a TURN-over-TCP
     // candidate, because Wine's local ICE candidate gathering is unreliable and direct/STUN never connect.
     // Ignored on native Windows. Default on.
     public ConfigEntry<bool> WineForceRelay { get; }
@@ -125,10 +160,9 @@ public class VoiceChatLocalSettings
     public ConfigEntry<VoiceLobbyBrowserSource> LobbyBrowserSource { get; }
     public ConfigEntry<string> LobbyRegistryUrl { get; }
     public ConfigEntry<string> BetterCrewLinkServerUrl { get; }
-    public ConfigEntry<string> InterstellarServerUrl { get; }
 
-    // Config-file only (not shown in the in-game menu): the TURN relay used by Nat Fix. Defaults to
-    // BetterCrewLink's public relay; power users can point these at their own coturn server.
+    // Config-file only (not shown in the in-game menu): optional custom TURN credentials for Nat Fix.
+    // Empty values use short-lived managed credentials from the configured Perfect Comms registry.
     public ConfigEntry<string> TurnServerUrl { get; }
     public ConfigEntry<string> TurnUsername { get; }
     public ConfigEntry<string> TurnCredential { get; }
@@ -143,10 +177,6 @@ public class VoiceChatLocalSettings
 
     private bool _correcting;
 
-    private bool _savedNoiseSuppression = true;
-    private bool _savedEchoCancellation = true;
-    private bool _savedAutoMicGain = true;
-    private bool _applyingUnityToggle;
     private bool _applyingDiagnosticsToggle;
 
     // Writes both diagnostics entries under one suppression flag so the pair triggers a single APM rebuild, not two.
@@ -163,23 +193,23 @@ public class VoiceChatLocalSettings
         VoiceChatRoom.Current?.RefreshLocalAudioSettings();
     }
 
-    public string MicrophoneDevice
+    public string MicrophoneDevice => _savedMicDeviceName?.Value ?? "";
+
+    private string MicDeviceNameAtCurrentIndex()
     {
-        get
-        {
-            int idx = (int)MicrophoneDeviceIndex.Value;
-            return idx > 0 && idx < _micDeviceNames.Length ? _micDeviceNames[idx] : "";
-        }
+        var names = _micDeviceNames;
+        int idx = (int)MicrophoneDeviceIndex.Value;
+        return idx > 0 && idx < names.Length ? names[idx] : "";
     }
 
 #if WINDOWS
-    public string SpeakerDevice
+    public string SpeakerDevice => _savedSpkDeviceName?.Value ?? "";
+
+    private string SpkDeviceNameAtCurrentIndex()
     {
-        get
-        {
-            int idx = (int)SpeakerDeviceIndex.Value;
-            return idx > 0 && idx < _spkDeviceNames.Length ? _spkDeviceNames[idx] : "";
-        }
+        var names = _spkDeviceNames;
+        int idx = (int)SpeakerDeviceIndex.Value;
+        return idx > 0 && idx < names.Length ? names[idx] : "";
     }
 #endif
 
@@ -340,24 +370,18 @@ public class VoiceChatLocalSettings
                 new AcceptableValueRange<float>(0.75f, 3.00f)));
 
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
-            new ConfigDescription("Use RNNoise to suppress outgoing microphone background noise."));
+            new ConfigDescription("Use WebRTC noise suppression on outgoing microphone audio while preserving quiet speech."));
 
         EchoCancellationEnabled = config.Bind("Audio", "EchoCancellationEnabled", true,
             new ConfigDescription("Cancel echo/feedback of incoming voice picked up by your microphone."));
-
-        AutoMicGain = config.Bind("Audio", "AutoMicGain", true,
-            new ConfigDescription("Automatically boost quiet microphones toward a consistent speech level before noise suppression and the noise gate."));
-
-        UnityAudio = config.Bind("Audio.Advanced", "UnityAudio", false,
-            new ConfigDescription("Experimental compatibility mode: route microphone capture and speaker playback through Unity's audio instead of BASS. Mainly for running under Wine/CrossOver where the BASS audio stack is unreliable. Rejoin voice after changing. Default off."));
 
         DebugVoiceStats = config.Bind("Debug", "DebugVoiceStats", false,
             new ConfigDescription("Enable Perfect Comms diagnostic files and debug log output."));
 
         SyntheticMicTone = config.Bind("Debug.Advanced", "SyntheticMicTone", false,
-            new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the active voice backend instead of relying on physical microphone audio."));
+            new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the native voice engine instead of relying on physical microphone audio."));
         MicCalibrationDiagnostics = config.Bind("Debug", "MicCalibrationDiagnostics", false,
-            new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for BetterCrewLink."));
+            new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for the native voice engine."));
 
         // Debug toggles always start OFF on every game launch, even if a previous session left one on. They
         // still work when turned on mid-session; they just never persist across a restart, so diagnostic
@@ -381,27 +405,23 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Voice lobby registry endpoint"));
 
         BetterCrewLinkServerUrl = config.Bind("Voice Server", "BetterCrewLinkServerUrl",
-            VoiceEndpointSettings.DefaultBetterCrewLinkServerUrl,
-            new ConfigDescription("BetterCrewLink Socket.IO signaling server URL."));
+            BetterCrewLinkLobbyEndpoint.DefaultServerUrl,
+            new ConfigDescription("Optional BetterCrewLink public-lobby directory endpoint. Voice audio and signaling do not use this service."));
 
         NatFix = config.Bind("Voice Server", "NatFix", true,
-            new ConfigDescription("Route voice through a TURN relay when a direct peer-to-peer connection can't be established (fixes no/garbled audio behind strict or symmetric NATs and firewalls). Only peers that actually need it relay; everyone else stays direct. BetterCrewLink backend only."));
+            new ConfigDescription("Route Perfect Comms WebRTC through TURN when a direct peer-to-peer connection cannot be established. Only peers that need relay use it; everyone else stays direct."));
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
-            "turn:turn.bettercrewl.ink:3478",
-            new ConfigDescription("TURN relay server used by Nat Fix (BetterCrewLink backend). Default is BetterCrewLink's public relay; override with your own coturn server if desired."));
+            "",
+            new ConfigDescription("Optional custom TURN relay for Nat Fix. Leave empty to use the project's managed TURN credentials (fetched at runtime); set your own coturn/TURN server here to override."));
         TurnUsername = config.Bind("Voice Server", "TurnUsername",
-            "M9DRVaByiujoXeuYAAAG",
-            new ConfigDescription("Username for the Nat Fix TURN relay."));
+            "",
+            new ConfigDescription("Username for a custom Nat Fix TURN relay (only used when TurnServerUrl is set)."));
         TurnCredential = config.Bind("Voice Server", "TurnCredential",
-            "TpHR9HQNZ8taxjb3",
-            new ConfigDescription("Credential (password) for the Nat Fix TURN relay."));
-        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", true,
-            new ConfigDescription("Wine/Proton (Linux) only: force TURN-relay-only voice (and add TURN-over-TCP) because Wine's local network/ICE gathering is unreliable, which otherwise leaves you unable to connect to anyone. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
-
-        InterstellarServerUrl = config.Bind("Voice Server", "InterstellarServerUrl",
-            VoiceEndpointSettings.DefaultInterstellarServerUrl,
-            new ConfigDescription("Interstellar voice server URL. FangkuaiYa's public server is the default fallback."));
+            "",
+            new ConfigDescription("Credential (password) for a custom Nat Fix TURN relay (only used when TurnServerUrl is set)."));
+        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", false,
+            new ConfigDescription("Wine/Proton (Linux) only opt-in: force TURN-relay-only voice (and add TURN-over-TCP). Off by default - Wine now uses the same automatic ICE selection as native Windows, using TURN only when direct/STUN fail. Enable only if your Wine setup still cannot connect. Ignored on native Windows. Requires Nat Fix on with valid TURN credentials."));
 
         UpdateNotificationsEnabled = config.Bind("Updates", "NotificationsEnabled", true,
             new ConfigDescription("Show Perfect Comms update notifications on the main menu"));
@@ -456,49 +476,30 @@ public class VoiceChatLocalSettings
 
     public static void RefreshDeviceLists()
     {
-        var mics = new List<string> { "Default" };
-        try
+        if (!_micNamesFromSidecar)
         {
-#if WINDOWS
-            BassRuntime.EnsureConfigured();
-            int count = ManagedBass.Bass.RecordingDeviceCount;
-            for (int i = 0; i < count; i++)
+            var mics = new List<string> { "Default" };
+            try
             {
-                if (!ManagedBass.Bass.RecordGetDeviceInfo(i, out var info) || !info.IsEnabled)
-                    continue;
-                string n = info.Name?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
-                    mics.Add(n);
-            }
-#elif ANDROID
-            foreach (var dev in AndroidMicrophone.GetDeviceNames())
-            {
-                string n = dev?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n))
-                    mics.Add(n);
-            }
+#if ANDROID
+                if (Application.HasUserAuthorization(UserAuthorization.Microphone))
+                {
+                    foreach (var dev in AndroidMicrophone.GetDeviceNames())
+                    {
+                        string n = dev?.Trim() ?? "";
+                        if (!string.IsNullOrEmpty(n))
+                            mics.Add(n);
+                    }
+                }
 #endif
+            }
+            catch { }
+            _micDeviceNames = mics.ToArray();
         }
-        catch { }
-        _micDeviceNames = mics.ToArray();
 
 #if WINDOWS
-        var spks = new List<string> { "Default" };
-        try
-        {
-            BassRuntime.EnsureConfigured();
-            int count = ManagedBass.Bass.DeviceCount;
-            for (int i = 1; i < count; i++)
-            {
-                if (!ManagedBass.Bass.GetDeviceInfo(i, out var info) || !info.IsEnabled)
-                    continue;
-                string n = info.Name?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(n) && !n.Equals("Default", StringComparison.OrdinalIgnoreCase))
-                    spks.Add(n);
-            }
-        }
-        catch { }
-        _spkDeviceNames = spks.ToArray();
+        if (!_spkNamesFromSidecar)
+            _spkDeviceNames = new[] { "Default" };
 #endif
     }
 
@@ -509,10 +510,67 @@ public class VoiceChatLocalSettings
     public static void MaybeRefreshDeviceLists()
     {
         var now = DateTime.UtcNow;
-        if (now < _nextDeviceRefreshUtc) return;
-        _nextDeviceRefreshUtc = now.AddSeconds(2);
-        RefreshDeviceLists();
+        if (now >= _nextDeviceRefreshUtc)
+        {
+            _nextDeviceRefreshUtc = now.AddSeconds(2);
+            RefreshDeviceLists();
+            MaybeProbeSidecarDevices();
+        }
+        VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
+        VoiceSettings.Instance?.ResolveSpkIndexIfListChanged();
     }
+
+    private static void MaybeProbeSidecarDevices()
+    {
+#if WINDOWS
+        if (!SidecarLauncher.IsHelperAvailable()) return;
+        if (_sidecarProbeTask != null && !_sidecarProbeTask.IsCompleted) return;
+        _sidecarProbeTask = Task.Run(() =>
+        {
+            try
+            {
+                var (inputs, outputs) = SidecarLauncher.EnumerateDevices();
+                if (inputs.Count > 0)
+                    SetMicDeviceNamesFromSidecar(inputs);
+                if (outputs.Count > 0)
+                    SetSpkDeviceNamesFromSidecar(outputs);
+            }
+            catch { }
+        });
+#endif
+    }
+
+    private int _lastResolvedMicVersion = -1;
+
+    internal void ResolveMicIndexIfListChanged()
+    {
+        int version = MicDeviceListVersion;
+        if (version == _lastResolvedMicVersion) return;
+        _lastResolvedMicVersion = version;
+        var resolved = ResolveDeviceIndex<MicDeviceEnum>(_savedMicDeviceName.Value, _micDeviceNames, MicrophoneDeviceIndex.Value);
+        if (!string.IsNullOrEmpty(_savedMicDeviceName.Value) && (int)(object)resolved <= 0)
+            return;
+        if (!resolved.Equals(MicrophoneDeviceIndex.Value))
+            MicrophoneDeviceIndex.Value = resolved;
+    }
+
+#if WINDOWS
+    private int _lastResolvedSpkVersion = -1;
+
+    internal void ResolveSpkIndexIfListChanged()
+    {
+        int version = SpkDeviceListVersion;
+        if (version == _lastResolvedSpkVersion) return;
+        _lastResolvedSpkVersion = version;
+        var resolved = ResolveDeviceIndex<SpkDeviceEnum>(_savedSpkDeviceName.Value, _spkDeviceNames, SpeakerDeviceIndex.Value);
+        if (!string.IsNullOrEmpty(_savedSpkDeviceName.Value) && (int)(object)resolved <= 0)
+            return;
+        if (!resolved.Equals(SpeakerDeviceIndex.Value))
+            SpeakerDeviceIndex.Value = resolved;
+    }
+#else
+    internal void ResolveSpkIndexIfListChanged() { }
+#endif
 
     internal void Dispatch(ConfigEntryBase configEntry)
     {
@@ -543,56 +601,30 @@ public class VoiceChatLocalSettings
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
-                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled || configEntry == AutoMicGain ||
+                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled ||
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {
-            if (_applyingUnityToggle || _applyingDiagnosticsToggle) return;
+            if (_applyingDiagnosticsToggle) return;
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
-        }
-        else if (configEntry == UnityAudio)
-        {
-            _applyingUnityToggle = true;
-            try
-            {
-                if (UnityAudio.Value)
-                {
-                    _savedNoiseSuppression = NoiseSuppressionEnabled.Value;
-                    _savedEchoCancellation = EchoCancellationEnabled.Value;
-                    _savedAutoMicGain = AutoMicGain.Value;
-                    NoiseSuppressionEnabled.Value = false;
-                    EchoCancellationEnabled.Value = false;
-                    AutoMicGain.Value = false;
-                }
-                else
-                {
-                    NoiseSuppressionEnabled.Value = _savedNoiseSuppression;
-                    EchoCancellationEnabled.Value = _savedEchoCancellation;
-                    AutoMicGain.Value = _savedAutoMicGain;
-                }
-            }
-            finally { _applyingUnityToggle = false; }
-            var room = VoiceChatRoom.Current;
-            if (room != null)
-            {
-                room.RefreshLocalAudioSettings();
-                room.SetMicrophone(MicrophoneDevice);
-#if WINDOWS
-                room.SetSpeaker(SpeakerDevice);
-#endif
-            }
         }
         else if (configEntry == MicrophoneDeviceIndex)
         {
-            _savedMicDeviceName.Value = MicrophoneDevice;
-            VoiceChatRoom.Current?.SetMicrophone(MicrophoneDevice);
+            var name = MicDeviceNameAtCurrentIndex();
+            bool deviceChanged = !string.Equals(_savedMicDeviceName.Value, name, StringComparison.Ordinal);
+            _savedMicDeviceName.Value = name;
+            if (deviceChanged)
+                VoiceChatRoom.Current?.SetMicrophone(name);
             VoiceChatRoom.Current?.SetMicVolume(MicVolume.Value);
         }
 #if WINDOWS
         else if (configEntry == SpeakerDeviceIndex)
         {
-            _savedSpkDeviceName.Value = SpeakerDevice;
-            VoiceChatRoom.Current?.SetSpeaker(SpeakerDevice);
+            var name = SpkDeviceNameAtCurrentIndex();
+            bool deviceChanged = !string.Equals(_savedSpkDeviceName.Value, name, StringComparison.Ordinal);
+            _savedSpkDeviceName.Value = name;
+            if (deviceChanged)
+                VoiceChatRoom.Current?.SetSpeaker(name);
         }
 #endif
         else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY ||
@@ -632,16 +664,12 @@ public class VoiceChatLocalSettings
         {
             VoiceChatHudState.SetSpeakerMuted(StartDeafened.Value);
         }
-        else if (configEntry == BetterCrewLinkServerUrl || configEntry == InterstellarServerUrl)
-        {
-            VoiceChatRoom.Current?.Rejoin();
-        }
         else if (configEntry == NatFix || configEntry == TurnServerUrl ||
-                 configEntry == TurnUsername || configEntry == TurnCredential)
+                 configEntry == TurnUsername || configEntry == TurnCredential ||
+                 configEntry == WineForceRelay)
         {
-            // Rebuild the BetterCrewLink ICE/peer-connection pool off the main thread so the new Nat Fix /
-            // TURN policy takes effect on the next peer-join without a render-thread DTLS-cert stall. No
-            // rejoin: existing peers keep their connections.
+            // Recreate the native peer generation so the new direct/relay policy takes effect immediately.
+            // This does not leave or rejoin the game lobby.
             VoiceChatRoom.Current?.RebuildIceConnectionPool();
         }
     }
