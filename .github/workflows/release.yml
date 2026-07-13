@@ -27,18 +27,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Verify release tag matches source version
         if: github.ref_type == 'tag'
         shell: bash
         run: |
           set -euo pipefail
           project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
+          assembly_version="$(sed -n 's:.*<AssemblyVersion>\([^<]*\)</AssemblyVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
+          file_version="$(sed -n 's:.*<FileVersion>\([^<]*\)</FileVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
+          informational_version="$(sed -n 's:.*<InformationalVersion>\([^<]*\)</InformationalVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
           plugin_version="$(sed -n 's/.*public const string Version = "\([^"]*\)";.*/\1/p' VoiceChatPluginMain.cs | head -n1)"
           tag_version="${GITHUB_REF_NAME#v}"
-          test -n "$project_version"
-          test "$plugin_version" = "$project_version"
-          test "$tag_version" = "$project_version" || {
-            echo "release tag $GITHUB_REF_NAME does not match source version $project_version" >&2
+          expected_four_part="$project_version.0"
+          if [[ ! "$project_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+             [[ "$plugin_version" != "$project_version" ]] || \
+             [[ "$informational_version" != "$project_version" ]] || \
+             [[ "$assembly_version" != "$expected_four_part" ]] || \
+             [[ "$file_version" != "$expected_four_part" ]] || \
+             [[ "$tag_version" != "$project_version" ]]; then
+            echo "release version mismatch: tag=$tag_version project=$project_version plugin=$plugin_version assembly=$assembly_version file=$file_version informational=$informational_version" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "release tag $GITHUB_REF_NAME does not point to a commit on main" >&2
             exit 1
           }
       - uses: actions/setup-dotnet@v4
@@ -75,10 +89,23 @@ jobs:
         run: bash scripts/package-release.sh Release
       - name: Package (Android)
         run: bash scripts/package-release.sh Android
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PerfectComms-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/PerfectComms+dependencies.zip
+            artifacts/PerfectComms-Release.zip
+            artifacts/PerfectComms-Android.zip
+            artifacts/PerfectComms.dll
+            artifacts/PerfectCommsAndroid.dll
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         with:
+          generate_release_notes: true
           files: |
             artifacts/PerfectComms+dependencies.zip
             artifacts/PerfectComms-Release.zip

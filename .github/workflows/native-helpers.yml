@@ -2,7 +2,7 @@ name: Native helpers
 
 on:
   push:
-    branches: [main, feat/crossplatform-capture-sidecar]
+    branches: [main]
   pull_request:
     paths:
       - "Comms/SidecarVoiceClient.cs"

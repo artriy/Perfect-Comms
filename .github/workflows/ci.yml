@@ -25,6 +25,7 @@ jobs:
           python3 scripts/verify-release-assets.py --self-test
           python3 scripts/verify-release-assets.py --root . --configuration Android --manifest-only
           bash -n scripts/package-release.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/ci-smoke-helper.sh
+          bash scripts/package-release.sh --validate-source
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "9.0.x"

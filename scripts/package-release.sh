@@ -13,17 +13,33 @@ if [[ "$config" == "Android" ]]; then
 fi
 
 source_version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
+assembly_version="$(grep -m1 '<AssemblyVersion>' "$project" | sed -E 's/.*<AssemblyVersion>([^<]+)<\/AssemblyVersion>.*/\1/')"
+file_version="$(grep -m1 '<FileVersion>' "$project" | sed -E 's/.*<FileVersion>([^<]+)<\/FileVersion>.*/\1/')"
+informational_version="$(grep -m1 '<InformationalVersion>' "$project" | sed -E 's/.*<InformationalVersion>([^<]+)<\/InformationalVersion>.*/\1/')"
 plugin_version="$(grep -m1 'public const string Version =' "$root/VoiceChatPluginMain.cs" | sed -E 's/.*Version = "([^"]+)".*/\1/')"
 network_protocol="$(grep -m1 'ProtocolVersion =' "$root/Comms/VoiceProtocol.cs" | sed -E 's/.*ProtocolVersion = ([0-9]+).*/\1/')"
 sidecar_protocol="$(grep -m1 'public const int Proto =' "$root/Comms/SidecarVoiceClient.cs" | sed -E 's/.*Proto = ([0-9]+).*/\1/')"
 native_sidecar_protocol="$(grep -m1 'PROTO_VERSION:' "$root/native/pc-capture/src/proto.rs" | sed -E 's/.*= ([0-9]+).*/\1/')"
-if [[ -z "$source_version" || "$plugin_version" != "$source_version" ]]; then
-	echo "source version mismatch: project=$source_version plugin=$plugin_version" >&2
+expected_four_part="$source_version.0"
+if [[ ! "$source_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+	[[ "$plugin_version" != "$source_version" ]] || \
+	[[ "$informational_version" != "$source_version" ]] || \
+	[[ "$assembly_version" != "$expected_four_part" ]] || \
+	[[ "$file_version" != "$expected_four_part" ]]; then
+	echo "source version mismatch: project=$source_version plugin=$plugin_version assembly=$assembly_version file=$file_version informational=$informational_version" >&2
 	exit 1
 fi
 if [[ -z "$sidecar_protocol" || "$native_sidecar_protocol" != "$sidecar_protocol" ]]; then
 	echo "sidecar source protocol mismatch: managed=$sidecar_protocol native=$native_sidecar_protocol" >&2
 	exit 1
+fi
+if [[ -z "$network_protocol" ]]; then
+	echo "could not read player-to-player voice protocol version" >&2
+	exit 1
+fi
+if [[ "$config" == "--validate-source" ]]; then
+	echo "release.source.ok version=$source_version network_protocol=$network_protocol sidecar_protocol=$sidecar_protocol"
+	exit 0
 fi
 release_dll="$root/artifacts/$release_dll_name"
 

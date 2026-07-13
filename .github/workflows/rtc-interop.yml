@@ -5,7 +5,7 @@ name: RTC shared-core gate
 # desktop-webrtc-rs-to-Android-SIPSorcery bridge.
 on:
   push:
-    branches: [main, feat/crossplatform-capture-sidecar]
+    branches: [main]
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
