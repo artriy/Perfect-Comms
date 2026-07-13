@@ -162,11 +162,11 @@ internal static class SidecarLauncher
     public static (string Resource, string File)[] DspLibsFor(string triple)
         => triple switch
         {
-            "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll"), ("Lib.dsp.df.x64.dll", "df.x64.dll") },
-            "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll"), ("Lib.dsp.df.x86.dll", "df.x86.dll") },
-            "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so"), ("Lib.dsp.libdf.so", "libdf.so") },
-            "x86_64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib"), ("Lib.dsp.libdf.dylib", "libdf.dylib") },
-            "aarch64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib"), ("Lib.dsp.libdf.dylib", "libdf.dylib") },
+            "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll") },
+            "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll") },
+            "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so") },
+            "x86_64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib") },
+            "aarch64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib") },
             _ => Array.Empty<(string, string)>(),
         };
 

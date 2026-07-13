@@ -46,7 +46,7 @@ public sealed class SidecarLauncherCacheTests
         var dsp = NativeLibraryCache.ResolveExtractionPath(
             baseDirectory,
             Triple,
-            "df.x64.dll",
+            "webrtc-apm.x64.dll",
             version);
 
         Assert.StartsWith("bundle-v1-", version, StringComparison.Ordinal);
@@ -54,7 +54,7 @@ public sealed class SidecarLauncherCacheTests
         Assert.Equal(expectedDirectory, Path.GetDirectoryName(helper));
         Assert.Equal(expectedDirectory, Path.GetDirectoryName(dsp));
         Assert.Equal("PerfectCommsAudio.exe", Path.GetFileName(helper));
-        Assert.Equal("df.x64.dll", Path.GetFileName(dsp));
+        Assert.Equal("webrtc-apm.x64.dll", Path.GetFileName(dsp));
     }
 
     [Fact]

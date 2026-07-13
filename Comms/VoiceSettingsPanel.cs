@@ -306,7 +306,6 @@ public static class VoiceSettingsPanel
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
         Toggle(defs, "Echo Cancellation", s.EchoCancellationEnabled);
-        Toggle(defs, "Auto Mic Gain", s.AutoMicGain);
         Slider(defs, "Voice Falloff Softness", s.VoiceFalloffSoftness, Pct);
         Section(defs, "STARTUP");
         Toggle(defs, "Start Muted", s.StartMuted);

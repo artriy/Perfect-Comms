@@ -153,6 +153,12 @@ public class VoiceChatRoom
     private int _closed;
 
     private readonly record struct ClientRosterSignature(int Count, int Xor, long Sum);
+    private enum AuthenticatedRosterCollectionState
+    {
+        Unavailable,
+        Empty,
+        Populated,
+    }
 
     // ======================================================================
     // Factory
@@ -160,13 +166,47 @@ public class VoiceChatRoom
 
     public static VoiceChatRoom Start()
     {
+        VoiceChatRoom room;
         lock (CurrentLifecycleLock)
         {
             var previous = Interlocked.Exchange(ref _current, null);
             previous?.Close("room replaced", clearUi: true);
-            var room = new VoiceChatRoom();
+            room = new VoiceChatRoom();
             Volatile.Write(ref _current, room);
-            return room;
+        }
+        room.TryStartTransportBootstrap("room-start");
+        return room;
+    }
+
+    internal static VoiceChatRoom EnsureStartedForJoinedSession()
+    {
+        VoiceChatRoom room;
+        lock (CurrentLifecycleLock)
+        {
+            room = Current!;
+            if (room == null)
+            {
+                room = new VoiceChatRoom();
+                Volatile.Write(ref _current, room);
+            }
+        }
+        room.TryStartTransportBootstrap("among-us-on-game-joined");
+        return room;
+    }
+
+    private void TryStartTransportBootstrap(string source)
+    {
+        if (_voiceBackend != null || Volatile.Read(ref _closed) != 0)
+            return;
+        try
+        {
+            EnsureVoiceBackend(null, VoiceSettings.Instance);
+            if (_voiceBackend != null)
+                VoiceDiagnostics.Log("transport.bootstrap.early", $"source={source} result=started");
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.DebugError($"[VC] Early transport bootstrap failed source={source}: {ex.Message}");
         }
     }
 
@@ -415,7 +455,8 @@ public class VoiceChatRoom
             // are bounded; EndGame keeps its authenticated roster because it has no world roster.
             if (previousRetainable && CurrentSnapshot != null)
             {
-                if (TryCollectAuthenticatedSnapshotClientIds())
+                var authRosterState = CollectAuthenticatedSnapshotClientIds();
+                if (authRosterState == AuthenticatedRosterCollectionState.Populated)
                 {
                     _authRosterUnavailableSince = -1f;
                     refreshedSnapshot = VoiceSnapshotTransitionMerger.Merge(
@@ -425,6 +466,30 @@ public class VoiceChatRoom
                         _missingSnapshotClientSince,
                         Time.realtimeSinceStartup,
                         TransitionRosterRetentionMaxSeconds);
+                }
+                else if (authRosterState == AuthenticatedRosterCollectionState.Empty)
+                {
+                    var now = Time.realtimeSinceStartup;
+                    _authRosterUnavailableSince = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
+                        refreshedSnapshot.Phase,
+                        CurrentSnapshot.Phase,
+                        _authRosterUnavailableSince,
+                        now);
+                    var gapSeconds = _authRosterUnavailableSince < 0f
+                        ? 0f
+                        : Math.Max(0f, now - _authRosterUnavailableSince);
+                    var wasAlreadyRetained = CurrentSnapshot.RoutingRosterRetained;
+                    refreshedSnapshot = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+                        refreshedSnapshot,
+                        CurrentSnapshot,
+                        gapSeconds,
+                        TransitionRosterRetentionMaxSeconds);
+                    if (!wasAlreadyRetained && refreshedSnapshot.RoutingRosterRetained)
+                    {
+                        VoiceDiagnostics.Log(
+                            "voice.snapshot.auth_roster_empty",
+                            $"phase={refreshedSnapshot.Phase} action=retain-prior players={refreshedSnapshot.Players.Count} gapSeconds={gapSeconds:0.000} gameId={currentGameId}");
+                    }
                 }
                 else if (refreshedSnapshot.Phase == VoiceGamePhase.EndGame
                          || VoiceSnapshotTransitionMerger.IsBoundedAuthGapPhase(refreshedSnapshot.Phase))
@@ -554,28 +619,34 @@ public class VoiceChatRoom
     private bool IsRefreshedSnapshotUsableForRouting(VoiceGameStateSnapshot snapshot)
         => VoiceRoomLifetimeGate.IsSafeForRouting(snapshot);
 
-    private bool TryCollectAuthenticatedSnapshotClientIds()
+    private AuthenticatedRosterCollectionState CollectAuthenticatedSnapshotClientIds()
     {
         _authenticatedSnapshotClientIds.Clear();
         try
         {
             var client = AmongUsClient.Instance;
             if (client == null)
-                return false;
+                return AuthenticatedRosterCollectionState.Unavailable;
 
             if (client.ClientId >= 0)
                 _authenticatedSnapshotClientIds.Add(client.ClientId);
+            var authenticatedRosterEntries = 0;
             foreach (var member in client.allClients)
             {
                 if (member != null && member.Id >= 0)
+                {
+                    authenticatedRosterEntries++;
                     _authenticatedSnapshotClientIds.Add(member.Id);
+                }
             }
-            return true;
+            return authenticatedRosterEntries == 0
+                ? AuthenticatedRosterCollectionState.Empty
+                : AuthenticatedRosterCollectionState.Populated;
         }
         catch
         {
             _authenticatedSnapshotClientIds.Clear();
-            return false;
+            return AuthenticatedRosterCollectionState.Unavailable;
         }
     }
 
@@ -1045,7 +1116,7 @@ public class VoiceChatRoom
     {
         if (Volatile.Read(ref _closed) != 0)
             return;
-        if (snapshot == null || !TryGetVoiceRoomIdentity(snapshot, out var roomCode, out var region))
+        if (!TryGetVoiceRoomIdentity(out var roomCode, out var region))
             return;
 
         bool forceRebuild = _forceBackendRebuild;
@@ -1095,7 +1166,11 @@ public class VoiceChatRoom
         // game-entry frame — the same room-construction lifecycle slot as the backend's WarmOpusCodec. Runs on
         // the Unity main thread (this method already touches VoiceChatHudState below) and is idempotent, so the
         // per-frame EnsureHudButtons path remains the fallback.
-        VoiceChatHudState.Prewarm();
+        try { VoiceChatHudState.Prewarm(); }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.DebugError($"[VC] HUD prewarm failed during transport bootstrap: {ex.Message}");
+        }
         backend.SetMute(Mute);
         backend.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(settings?.MasterVolume.Value ?? 1f));
         backend.SetNoiseGate(
@@ -1112,9 +1187,12 @@ public class VoiceChatRoom
 #else
         backend.SetSpeaker(string.Empty);
 #endif
-        if (snapshot.TryGetLocalPlayer(out var localPlayer))
-            backend.UpdateProfile(snapshot.LocalPlayerId, localPlayer.PlayerName);
-        SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+        if (snapshot != null)
+        {
+            if (snapshot.TryGetLocalPlayer(out var localPlayer))
+                backend.UpdateProfile(snapshot.LocalPlayerId, localPlayer.PlayerName);
+            SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+        }
         _activeRoomCode = roomCode;
         _activeRegion = region;
         _missingPeerRecoveryReadyTime = Time.time + MissingPeerRecoveryGraceSeconds;
@@ -1401,12 +1479,12 @@ public class VoiceChatRoom
             .Where(IsExpectedRemotePlayer)
             .Select(player => $"{player.ClientId}:{LogSafe(player.PlayerName)}"));
 
-    private static bool TryGetVoiceRoomIdentity(VoiceGameStateSnapshot? snapshot, out string roomCode, out string region)
+    private static bool TryGetVoiceRoomIdentity(out string roomCode, out string region)
     {
         roomCode = string.Empty;
         region = "default";
         var client = AmongUsClient.Instance;
-        if (client == null || snapshot == null)
+        if (client == null)
             return false;
 
         try

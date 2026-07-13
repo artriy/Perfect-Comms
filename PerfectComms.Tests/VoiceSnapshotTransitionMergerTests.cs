@@ -210,6 +210,66 @@ public sealed class VoiceSnapshotTransitionMergerTests
     }
 
     [Fact]
+    public void ConfirmedEmptyAuthenticatedRosterBridgesGameplayLeadInToEndGame()
+    {
+        var previous = Snapshot(
+            VoiceGamePhase.Meeting,
+            liveLocal: true,
+            Player(1, 7, isLocal: true),
+            Player(2, 8));
+        var emptyMeeting = Snapshot(VoiceGamePhase.Meeting, liveLocal: false);
+
+        var withinGap = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+            emptyMeeting,
+            previous,
+            authGapSeconds: 0.75f,
+            maxTransitionGapSeconds: 3f);
+        var expired = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+            emptyMeeting,
+            withinGap,
+            authGapSeconds: 3f,
+            maxTransitionGapSeconds: 3f);
+        var endGame = VoiceSnapshotTransitionMerger.RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+            Snapshot(VoiceGamePhase.EndGame, liveLocal: false),
+            withinGap,
+            authGapSeconds: 30f,
+            maxTransitionGapSeconds: 3f);
+
+        Assert.Equal(2, withinGap.Players.Count);
+        Assert.True(withinGap.RoutingRosterRetained);
+        Assert.Empty(expired.Players);
+        Assert.False(expired.RoutingRosterRetained);
+        Assert.Equal(2, endGame.Players.Count);
+        Assert.True(endGame.TryGetClient(8, out _));
+        Assert.True(endGame.RoutingRosterRetained);
+    }
+
+    [Fact]
+    public void ConfirmedEmptyAuthenticatedRosterClockStartsInGameplayAndResetsForEndGame()
+    {
+        var start = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
+            VoiceGamePhase.Meeting,
+            VoiceGamePhase.Meeting,
+            currentStart: -1f,
+            now: 10f);
+        Assert.Equal(10f, start);
+
+        start = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
+            VoiceGamePhase.Meeting,
+            VoiceGamePhase.Meeting,
+            start,
+            now: 11f);
+        Assert.Equal(10f, start);
+
+        start = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
+            VoiceGamePhase.EndGame,
+            VoiceGamePhase.Meeting,
+            start,
+            now: 12f);
+        Assert.Equal(-1f, start);
+    }
+
+    [Fact]
     public void AuthGapClockSpansEndGameUnknownIntroLobbyWithoutResetting()
     {
         var start = VoiceSnapshotTransitionMerger.NextAuthGapStart(

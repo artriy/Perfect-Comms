@@ -178,13 +178,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly HashSet<int> _rpcKnownClients = new();
     private readonly HashSet<int> _rpcPresentScratch = new();
     private readonly List<int> _rpcLeftScratch = new();
+    private bool _rpcRosterGapActive;
 #endif
     private Timer? _syntheticMicTimer;
     private string _lastMicDeviceName = string.Empty;
     private volatile float _micVolume = 1f;
     private float _noiseGateThreshold;
     private float _vadThreshold = 0.004f;
-    private bool _autoMicGain = true;
     private volatile float _localLevel;
     private volatile bool _localSpeaking;
 #if WINDOWS
@@ -899,7 +899,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             : 0;
 #endif
         _captureOptions = options;
-        _autoMicGain = ReadAutoMicGainSetting();
+        // Lifting the signal before suppression also lifts wind and keyboard transients during
+        // speech, so the native capture path deliberately runs without automatic gain.
+        const bool automaticMicGain = false;
 
 #if WINDOWS
         SidecarVoiceLease? captureVoice;
@@ -909,7 +911,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             captureVoice = _voice;
             captureSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
         }
-        captureVoice?.SetDsp(options.EchoCancellationEnabled, _autoMicGain, options.NoiseSuppressionEnabled, true);
+        captureVoice?.SetDsp(options.EchoCancellationEnabled, automaticMicGain, options.NoiseSuppressionEnabled, true);
         captureVoice?.SetSynthetic(options.SyntheticMicToneEnabled);
         captureVoice?.SetInput(_micVolume, _vadThreshold);
         if (restartCapture)
@@ -936,19 +938,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             StartAndroidMicrophone("capture-options");
 #endif
         VoiceDiagnostics.Log("voice.capture-options",
-            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} autoMicGain={_autoMicGain} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
-    }
-
-    private static bool ReadAutoMicGainSetting()
-    {
-        try
-        {
-            return VoiceSettings.Instance?.AutoMicGain.Value ?? true;
-        }
-        catch
-        {
-            return true;
-        }
+            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} automaticMicGain={automaticMicGain} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
     }
 
     public void RebuildCaptureSupervisor()
@@ -1665,7 +1655,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             currentMic,
             currentSpk,
             _captureOptions.EchoCancellationEnabled,
-            _autoMicGain,
+            false,
             _captureOptions.NoiseSuppressionEnabled,
             true,
             _micVolume,
@@ -2162,6 +2152,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
         if (_peerSession == null)
         {
+            _rpcRosterGapActive = false;
 #if WINDOWS
             _rpcTransport = new SidecarVoiceTransport(() => _voice);
 #elif ANDROID
@@ -2191,26 +2182,53 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (AdvancePumpDeadline(nowMs, ref _rpcRosterPollNextMs, RpcRosterPollIntervalMs))
         {
             _rpcPresentScratch.Clear();
+            var authenticatedRosterEntries = 0;
             foreach (var remote in client.allClients)
             {
                 if (remote == null) continue;
                 var id = remote.Id;
-                if (id < 0 || id == localId) continue;
+                if (id < 0) continue;
+                authenticatedRosterEntries++;
+                if (id == localId) continue;
                 _rpcPresentScratch.Add(id);
                 if (_rpcKnownClients.Add(id))
                     _peerSession.OnPlayerJoined(id, nowMs);
             }
 
-            if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
+            // A joined InnerNet roster must contain at least the local client. Among Us briefly
+            // publishes an empty collection between the final meeting frame and EndGame; treating
+            // that impossible snapshot as authoritative used to tear down the healthy mesh.
+            if (authenticatedRosterEntries == 0)
             {
-                _rpcLeftScratch.Clear();
-                foreach (var id in _rpcKnownClients)
-                    if (!_rpcPresentScratch.Contains(id))
-                        _rpcLeftScratch.Add(id);
-                foreach (var id in _rpcLeftScratch)
+                if (!_rpcRosterGapActive)
                 {
-                    _peerSession.OnPlayerLeft(id);
-                    _rpcKnownClients.Remove(id);
+                    _rpcRosterGapActive = true;
+                    VoiceDiagnostics.Log(
+                        "signaling.session.roster-gap",
+                        $"action=retain-known knownPeers={_rpcKnownClients.Count} localClient={localId}");
+                }
+            }
+            else
+            {
+                if (_rpcRosterGapActive)
+                {
+                    _rpcRosterGapActive = false;
+                    VoiceDiagnostics.Log(
+                        "signaling.session.roster-gap",
+                        $"action=recovered authenticatedEntries={authenticatedRosterEntries} knownPeers={_rpcKnownClients.Count} localClient={localId}");
+                }
+
+                if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
+                {
+                    _rpcLeftScratch.Clear();
+                    foreach (var id in _rpcKnownClients)
+                        if (!_rpcPresentScratch.Contains(id))
+                            _rpcLeftScratch.Add(id);
+                    foreach (var id in _rpcLeftScratch)
+                    {
+                        _peerSession.OnPlayerLeft(id);
+                        _rpcKnownClients.Remove(id);
+                    }
                 }
             }
         }
@@ -2323,7 +2341,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
         mv.SetInput(_micVolume, _vadThreshold);
         mv.SetSynthetic(false);
-        // Android intentionally ships without the desktop APM/DeepFilter side libraries.
+        // Android intentionally ships without the desktop WebRTC APM side library.
         mv.SetDsp(false, false, false, false);
         _mobileVoice = mv;
         EnsureMobileSpeaker(mv, nowMs, force: true);
@@ -2351,6 +2369,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _rpcKnownClients.Clear();
         _rpcPresentScratch.Clear();
         _rpcLeftScratch.Clear();
+        _rpcRosterGapActive = false;
         _rpcRosterPollNextMs = 0;
         _rpcSessionTickNextMs = 0;
 
@@ -2920,6 +2939,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _peerSession = null;
         _rpcTransport = null;
         _rpcKnownClients.Clear();
+        _rpcRosterGapActive = false;
 #endif
 #if WINDOWS
         BestEffortDispose("microphone-worker-stop", StopMicrophoneWorkerForDispose);

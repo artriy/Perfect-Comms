@@ -1,6 +1,6 @@
 use crate::audio::{
-    monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, PlaybackProgress,
-    ToneSource,
+    monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, AecTiming,
+    PlaybackProgress, ToneSource,
 };
 use crate::codec::OpusCodec;
 use crate::gamestate::{GameState, LocalState, PeerState};
@@ -56,7 +56,16 @@ impl SessionSupervisor {
 #[derive(Clone)]
 struct PlaybackSupervision {
     progress: Arc<PlaybackProgress>,
+    aec_timing: Arc<AecTiming>,
     session: SessionSupervisor,
+}
+
+#[derive(Clone)]
+struct TelemetrySources {
+    counters: Arc<NativeCounters>,
+    capture_ring: Arc<Mutex<AudioRing>>,
+    playback_ring: Arc<Mutex<PlaybackRing>>,
+    aec_timing: Arc<AecTiming>,
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -507,16 +516,23 @@ struct CaptureProducer {
     lifecycle: ProducerLifecycle,
     ring: Arc<Mutex<AudioRing>>,
     conn: Arc<Mutex<TcpStream>>,
+    aec_timing: Arc<AecTiming>,
     stop: Option<Arc<AtomicBool>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CaptureProducer {
-    fn new(synthetic: bool, ring: Arc<Mutex<AudioRing>>, conn: Arc<Mutex<TcpStream>>) -> Self {
+    fn new(
+        synthetic: bool,
+        ring: Arc<Mutex<AudioRing>>,
+        conn: Arc<Mutex<TcpStream>>,
+        aec_timing: Arc<AecTiming>,
+    ) -> Self {
         Self {
             lifecycle: ProducerLifecycle::new(synthetic),
             ring,
             conn,
+            aec_timing,
             stop: None,
             handle: None,
         }
@@ -597,6 +613,7 @@ impl CaptureProducer {
                 self.ring.clone(),
                 stop.clone(),
                 self.conn.clone(),
+                self.aec_timing.clone(),
             )
         });
         self.stop = Some(stop);
@@ -629,9 +646,7 @@ fn spawn_telemetry_writer(
     mailbox: Arc<TelemetryMailbox>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
-    counters: Arc<NativeCounters>,
-    capture_ring: Arc<Mutex<AudioRing>>,
-    playback_ring: Arc<Mutex<PlaybackRing>>,
+    sources: TelemetrySources,
     supervisor: SessionSupervisor,
 ) -> std::thread::JoinHandle<()> {
     spawn_critical_worker("telemetry", supervisor, move || {
@@ -645,19 +660,36 @@ fn spawn_telemetry_writer(
                 }
             }
             if let Some(levels) = mailbox.take_peers() {
-                counters.peer_level_batches.fetch_add(1, Ordering::Relaxed);
+                sources
+                    .counters
+                    .peer_level_batches
+                    .fetch_add(1, Ordering::Relaxed);
                 let bytes = encode_control(&peer_levels_json(&levels));
                 if write_frame(&conn, &bytes).is_err() {
                     break;
                 }
             }
             if last_stats.elapsed() >= STATS_INTERVAL {
-                let capture_dropped = capture_ring.lock().unwrap().dropped();
+                let capture_dropped = sources.capture_ring.lock().unwrap().dropped();
                 let (playback_len, playback_dropped) = {
-                    let playback = playback_ring.lock().unwrap();
+                    let playback = sources.playback_ring.lock().unwrap();
                     (playback.len() as u64, playback.dropped())
                 };
-                let snapshot = counters.snapshot(capture_dropped, playback_len, playback_dropped);
+                let mut snapshot =
+                    sources
+                        .counters
+                        .snapshot(capture_dropped, playback_len, playback_dropped);
+                let aec = sources.aec_timing.snapshot(monotonic_ns());
+                snapshot.aec_delay_ms = sources.aec_timing.applied_delay_ms().unwrap_or(0);
+                snapshot.aec_measured_delay_ms = aec.measured_delay_ms;
+                snapshot.aec_input_latency_ms = aec.input_latency_ms;
+                snapshot.aec_output_latency_ms = aec.output_latency_ms;
+                snapshot.aec_render_queue_ms = aec.render_queue_ms;
+                snapshot.aec_capture_processing_ms = aec.capture_processing_ms;
+                snapshot.aec_timing_complete = aec.timing_complete;
+                snapshot.aec_render_observations = aec.render_observations;
+                snapshot.aec_invalid_timestamp_samples = aec.invalid_timestamp_samples;
+                snapshot.aec_delay_frames = sources.aec_timing.applied_delay_frames();
                 let bytes = encode_control(&stats_json(&snapshot));
                 if write_frame(&conn, &bytes).is_err() {
                     break;
@@ -674,6 +706,7 @@ fn spawn_real_producer(
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
+    aec_timing: Arc<AecTiming>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         const ESCALATE_AFTER: Duration = Duration::from_secs(10);
@@ -689,6 +722,7 @@ fn spawn_real_producer(
                 ring.clone(),
                 stop.clone(),
                 healthy.clone(),
+                aec_timing.clone(),
             ) {
                 Ok(()) => break,
                 Err(e) => {
@@ -845,6 +879,7 @@ fn ensure_playback(
         let st = out_stop.clone();
         let stats = counters.clone();
         let playback_progress = supervision.progress.clone();
+        let aec_timing = supervision.aec_timing.clone();
         let worker_supervisor = supervision.session.clone();
         supervision.progress.reset();
         st.store(false, Ordering::Release);
@@ -853,7 +888,7 @@ fn ensure_playback(
             .fetch_add(1, Ordering::Relaxed);
         *guard = Some(std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                spawn_cpal_playback(dev, pb, st, stats.clone(), playback_progress)
+                spawn_cpal_playback(dev, pb, st, stats.clone(), playback_progress, aec_timing)
             }));
             match outcome {
                 Ok(Ok(())) => {}
@@ -943,6 +978,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     let out_spawn_ns = Arc::new(AtomicU64::new(0));
     let out_progress = Arc::new(PlaybackProgress::default());
+    let aec_timing = Arc::new(AecTiming::default());
 
     let session_stopping = Arc::new(AtomicBool::new(false));
     let (critical_tx, critical_rx) = std::sync::mpsc::channel::<String>();
@@ -952,6 +988,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     };
     let playback_supervision = PlaybackSupervision {
         progress: out_progress.clone(),
+        aec_timing: aec_timing.clone(),
         session: session_supervisor.clone(),
     };
     let critical_monitor_handle =
@@ -965,7 +1002,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
     let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
     let stop = Arc::new(AtomicBool::new(false));
-    let mut producer = CaptureProducer::new(cfg.synthetic, ring.clone(), conn.clone());
+    let mut producer = CaptureProducer::new(
+        cfg.synthetic,
+        ring.clone(),
+        conn.clone(),
+        aec_timing.clone(),
+    );
     let input = Arc::new(Mutex::new(InputConfig::default()));
     let telemetry = Arc::new(TelemetryMailbox::default());
     let telemetry_stop = Arc::new(AtomicBool::new(false));
@@ -974,9 +1016,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         telemetry.clone(),
         telemetry_stop.clone(),
         conn.clone(),
-        counters.clone(),
-        ring.clone(),
-        playback.clone(),
+        TelemetrySources {
+            counters: counters.clone(),
+            capture_ring: ring.clone(),
+            playback_ring: playback.clone(),
+            aec_timing: aec_timing.clone(),
+        },
         session_supervisor.clone(),
     );
 
@@ -1020,6 +1065,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_input = input.clone();
     let writer_telemetry = telemetry.clone();
     let writer_counters = counters.clone();
+    let writer_aec_timing = aec_timing.clone();
     let writer_handle = spawn_critical_worker("encoder", session_supervisor.clone(), move || {
         let mut encoder = encoder;
         let mut level_cadence = LevelCadence::new(Instant::now());
@@ -1034,7 +1080,13 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     writer_counters
                         .capture_frames
                         .fetch_add(1, Ordering::Relaxed);
-                    writer_dsp.lock().unwrap().capture(&mut f.samples);
+                    let aec = writer_aec_timing.snapshot(monotonic_ns());
+                    let applied_delay_ms = writer_dsp.lock().unwrap().capture_with_stream_delay(
+                        &mut f.samples,
+                        aec.recommended_delay_ms,
+                        aec.timing_complete,
+                    );
+                    writer_aec_timing.note_applied_delay(applied_delay_ms);
                     let input = *writer_input.lock().unwrap();
                     input.apply_gain(&mut f.samples);
                     let pk = peak(&f.samples);
@@ -1080,6 +1132,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let drain_playback_supervision = playback_supervision.clone();
     let drain_telemetry = telemetry.clone();
     let drain_counters = counters.clone();
+    let drain_aec_timing = aec_timing.clone();
     let drain_handle =
         spawn_critical_worker("decoder-mixer", session_supervisor.clone(), move || {
             let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
@@ -1197,11 +1250,20 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         &drain_counters,
                         &drain_playback_supervision,
                     );
-                    drain_playback.lock().unwrap().push(&stereo);
+                    // Feed the reverse stream before making these same samples available to the
+                    // output callback. The queue depth at that point is the render-to-analysis
+                    // component of WebRTC's required stream-delay value.
+                    drain_dsp.lock().unwrap().far_end(&stereo);
+                    let queued_pairs_before_frame = {
+                        let mut playback = drain_playback.lock().unwrap();
+                        let queued = playback.len();
+                        playback.push(&stereo);
+                        queued
+                    };
+                    drain_aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
                     drain_counters
                         .playback_queued_pairs
                         .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
-                    drain_dsp.lock().unwrap().far_end(&stereo);
                 }
 
                 next_tick += frame_dur;
@@ -1872,7 +1934,12 @@ mod tests {
         let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (server, _) = listener.accept().unwrap();
         let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
-        let mut producer = CaptureProducer::new(true, ring.clone(), Arc::new(Mutex::new(server)));
+        let mut producer = CaptureProducer::new(
+            true,
+            ring.clone(),
+            Arc::new(Mutex::new(server)),
+            Arc::new(AecTiming::default()),
+        );
 
         producer.start().unwrap();
         for _ in 0..100 {

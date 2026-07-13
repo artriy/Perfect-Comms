@@ -365,7 +365,6 @@ def assert_mac_bundle(path: Path) -> None:
         "PerfectCommsAudio.app/Contents/Info.plist",
         "PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio",
         "PerfectCommsAudio.app/Contents/MacOS/libwebrtc-apm.dylib",
-        "PerfectCommsAudio.app/Contents/MacOS/libdf.dylib",
     )
     try:
         with zipfile.ZipFile(path) as archive:
@@ -415,17 +414,13 @@ def verify_desktop(root: Path) -> None:
         ("Libs/pc-capture/pc-capture-win-x86.exe", PE_I386),
         ("Libs/dsp/webrtc-apm.x64.dll", PE_AMD64),
         ("Libs/dsp/webrtc-apm.x86.dll", PE_I386),
-        ("Libs/dsp/df.x64.dll", PE_AMD64),
-        ("Libs/dsp/df.x86.dll", PE_I386),
     )
     elf_assets = (
         "Libs/pc-capture/pc-capture-linux-x64",
         "Libs/dsp/libwebrtc-apm.so",
-        "Libs/dsp/libdf.so",
     )
     macho_assets = (
         "Libs/dsp/libwebrtc-apm.dylib",
-        "Libs/dsp/libdf.dylib",
     )
     for relative, machine in pe_assets:
         assert_pe(require_file(root, relative), machine)

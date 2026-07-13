@@ -306,6 +306,16 @@ internal static class VoiceJoinGuard
             // This is a confirmed new network session, unlike stale Joined/scene state that can
             // remain visible while DisconnectInternal is still transitioning away from EndGame.
             VoiceRoomLifetimeGate.ConfirmJoinedSession("among-us-on-game-joined");
+            try
+            {
+                // Begin helper launch and device setup from the authoritative join callback instead
+                // of waiting for the next scene/driver poll and a fully-built PlayerControl roster.
+                VoiceChatRoom.EnsureStartedForJoinedSession();
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.DebugError($"[VC] OnGameJoined voice bootstrap failed: {ex.Message}");
+            }
         }
     }
 }

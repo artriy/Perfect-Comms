@@ -20,9 +20,40 @@ internal static class VoiceSnapshotTransitionMerger
         VoiceGameStateSnapshot previous,
         float authGapSeconds,
         float maxTransitionGapSeconds)
+        => RetainPriorRoutes(
+            refreshed,
+            previous,
+            authGapSeconds,
+            maxTransitionGapSeconds,
+            allowWorldBackedPhase: false);
+
+    /// <summary>
+    /// A successfully enumerated but empty allClients collection is not a valid joined roster: it
+    /// does not even contain the local client. Among Us emits that state just before EndGame. Allow
+    /// the prior same-session routes through that short world-backed lead-in, then keep them for
+    /// EndGame; generic authentication failures remain restricted to safe transition phases.
+    /// </summary>
+    internal static VoiceGameStateSnapshot RetainPriorRoutesDuringEmptyAuthenticatedRosterGap(
+        VoiceGameStateSnapshot refreshed,
+        VoiceGameStateSnapshot previous,
+        float authGapSeconds,
+        float maxTransitionGapSeconds)
+        => RetainPriorRoutes(
+            refreshed,
+            previous,
+            authGapSeconds,
+            maxTransitionGapSeconds,
+            allowWorldBackedPhase: true);
+
+    private static VoiceGameStateSnapshot RetainPriorRoutes(
+        VoiceGameStateSnapshot refreshed,
+        VoiceGameStateSnapshot previous,
+        float authGapSeconds,
+        float maxTransitionGapSeconds,
+        bool allowWorldBackedPhase)
     {
         var endGame = refreshed.Phase == VoiceGamePhase.EndGame;
-        var boundedTransition = IsBoundedAuthGapPhase(refreshed.Phase)
+        var boundedTransition = (allowWorldBackedPhase || IsBoundedAuthGapPhase(refreshed.Phase))
                                 && authGapSeconds >= 0f
                                 && authGapSeconds < maxTransitionGapSeconds;
         if ((!endGame && !boundedTransition) || previous.Players.Count == 0)
@@ -76,6 +107,19 @@ internal static class VoiceSnapshotTransitionMerger
         if (refreshedPhase == VoiceGamePhase.EndGame)
             return -1f;
         if (!IsBoundedAuthGapPhase(refreshedPhase))
+            return -1f;
+        return currentStart < 0f || previousPhase == VoiceGamePhase.EndGame
+            ? now
+            : currentStart;
+    }
+
+    internal static float NextEmptyAuthenticatedRosterGapStart(
+        VoiceGamePhase refreshedPhase,
+        VoiceGamePhase previousPhase,
+        float currentStart,
+        float now)
+    {
+        if (refreshedPhase == VoiceGamePhase.EndGame)
             return -1f;
         return currentStart < 0f || previousPhase == VoiceGamePhase.EndGame
             ? now

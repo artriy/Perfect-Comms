@@ -1,6 +1,3 @@
 [submodule "native/third_party/webrtc-audio-processing"]
 	path = native/third_party/webrtc-audio-processing
 	url = https://github.com/LSXPrime/webrtc-audio-processing
-[submodule "native/third_party/deep-filter"]
-	path = native/third_party/deep-filter
-	url = https://github.com/Rikorose/DeepFilterNet

@@ -11,19 +11,7 @@ runtime for the applicable desktop platform. Their licenses are reproduced or re
 - Build recipe: `Libs/opus-build.md`. The embedded DNN model data is the official Xiph model fetched by the
   pinned `dnn/download_model.sh` hash. Unmodified upstream source.
 
-## DeepFilterNet 3 / libDF (noise suppression)
-
-- Release files: `Libs/dsp/df.x64.dll`, `Libs/dsp/df.x86.dll`, `Libs/dsp/libdf.so`,
-  `Libs/dsp/libdf.dylib`
-- Upstream: https://github.com/Rikorose/DeepFilterNet (commit `d375b2d8309e0935d165700c91da9de862a99c31`)
-- License: dual MIT OR Apache-2.0. Full text in `Libs/df.COPYING`.
-- The default DeepFilterNet 3 model (author: Hendrik Schroeter / Rikorose) is compiled into the cdylib via the
-  `default-model` feature.
-- **Derivative work disclosure:** `libDF/src/capi.rs` was patched so `df_create("")` (empty path) loads the
-  embedded default model via `DfParams::default()`. The patch is documented in `Libs/df-build.md`.
-- Build recipe: `Libs/df-build.md`.
-
-## webrtc-audio-processing (acoustic echo cancellation AEC3 + automatic gain control AGC2 + high-pass filter)
+## webrtc-audio-processing (AEC3 + noise suppression + high-pass filter)
 
 - Release files: `Libs/dsp/webrtc-apm.x64.dll`, `Libs/dsp/webrtc-apm.x86.dll`,
   `Libs/dsp/libwebrtc-apm.so`, `Libs/dsp/libwebrtc-apm.dylib`

@@ -115,7 +115,6 @@ public class VoiceChatLocalSettings
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
     public ConfigEntry<bool> EchoCancellationEnabled { get; }
-    public ConfigEntry<bool> AutoMicGain { get; }
     public ConfigEntry<bool> StartMuted { get; }
     public ConfigEntry<bool> StartDeafened { get; }
     public ConfigEntry<MicDeviceEnum> MicrophoneDeviceIndex { get; }
@@ -371,13 +370,10 @@ public class VoiceChatLocalSettings
                 new AcceptableValueRange<float>(0.75f, 3.00f)));
 
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
-            new ConfigDescription("Use RNNoise to suppress outgoing microphone background noise."));
+            new ConfigDescription("Use WebRTC noise suppression on outgoing microphone audio while preserving quiet speech."));
 
         EchoCancellationEnabled = config.Bind("Audio", "EchoCancellationEnabled", true,
             new ConfigDescription("Cancel echo/feedback of incoming voice picked up by your microphone."));
-
-        AutoMicGain = config.Bind("Audio", "AutoMicGain", true,
-            new ConfigDescription("Automatically boost quiet microphones toward a consistent speech level before noise suppression and the noise gate."));
 
         DebugVoiceStats = config.Bind("Debug", "DebugVoiceStats", false,
             new ConfigDescription("Enable Perfect Comms diagnostic files and debug log output."));
@@ -605,7 +601,7 @@ public class VoiceChatLocalSettings
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
-                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled || configEntry == AutoMicGain ||
+                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled ||
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {

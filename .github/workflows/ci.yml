@@ -58,7 +58,6 @@ jobs:
           cargo fmt --manifest-path native/pc-capture/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/pc-mobile/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/apm-sys/Cargo.toml --all -- --check
-          cargo fmt --manifest-path native/df-sys/Cargo.toml --all -- --check
       - name: Lint desktop shared core
         run: cargo clippy --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
       - name: Lint mobile wrapper
@@ -71,7 +70,6 @@ jobs:
           cargo audit --file native/pc-capture/Cargo.lock
           cargo audit --no-fetch --file native/pc-mobile/Cargo.lock
           cargo audit --no-fetch --file native/apm-sys/Cargo.lock
-          cargo audit --no-fetch --file native/df-sys/Cargo.lock
       - name: Test desktop shared core
         run: cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets
 

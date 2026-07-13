@@ -21,7 +21,7 @@ fn peak(samples: &[f32]) -> f32 {
 fn initial_dsp_config() -> DspConfig {
     #[cfg(target_os = "android")]
     {
-        // Android deliberately uses Unity's capture path without bundled native APM/DF DSP.
+        // Android deliberately uses Unity's capture path without the bundled native APM DSP.
         DspConfig {
             aec: false,
             agc: false,

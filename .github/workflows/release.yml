@@ -62,10 +62,6 @@ jobs:
           cp dl/apm-win-x86/webrtc-apm.x86.dll Libs/dsp/
           cp dl/apm-linux-x64/libwebrtc-apm.so Libs/dsp/
           cp dl/apm-mac/libwebrtc-apm.dylib Libs/dsp/
-          cp dl/df-win-x64/df.x64.dll Libs/dsp/
-          cp dl/df-win-x86/df.x86.dll Libs/dsp/
-          cp dl/df-linux-x64/libdf.so Libs/dsp/
-          cp dl/df-mac/libdf.dylib Libs/dsp/
       - name: Stage Android voice engine into Libs
         run: |
           mkdir -p Libs/pc-mobile

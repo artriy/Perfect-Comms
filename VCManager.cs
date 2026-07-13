@@ -120,6 +120,8 @@ internal class VCManager : MonoBehaviour
         catch (System.Exception ex)
         {
             string step = VoiceChatHudState.LastUpdateStep;
+            string context = VoiceChatHudState.DescribeUpdateContext();
+            VoiceChatHudState.RecoverAfterUpdateFailure();
             // Keep repeated failures quiet, but do not hide a second failure in a different
             // initialization step (for example mic clone then speaker clone) behind the timer.
             if (step == _lastUpdateErrorStep && Time.time - _lastUpdateErrorLogTime < 5f) return;
@@ -127,7 +129,7 @@ internal class VCManager : MonoBehaviour
             _lastUpdateErrorStep = step;
             VoiceDiagnostics.DebugError(
                 $"[VC] HUD update failed scene={_activeSceneName} frame={Time.frameCount} " +
-                $"{VoiceChatHudState.DescribeUpdateContext()}: {ex.GetType().Name}: {ex.Message}");
+                $"{context}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

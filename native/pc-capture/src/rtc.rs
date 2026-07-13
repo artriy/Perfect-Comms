@@ -247,6 +247,7 @@ impl NativeCounters {
             capture_ring_dropped,
             playback_ring_len,
             playback_ring_dropped,
+            ..Default::default()
         }
     }
 }

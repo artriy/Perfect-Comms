@@ -370,6 +370,16 @@ pub struct NativeStatsSnapshot {
     pub mix_peak: f32,
     pub mix_rms: f64,
     pub jitter_idle_ticks: u64,
+    pub aec_delay_ms: u64,
+    pub aec_measured_delay_ms: u64,
+    pub aec_input_latency_ms: u64,
+    pub aec_output_latency_ms: u64,
+    pub aec_render_queue_ms: u64,
+    pub aec_capture_processing_ms: u64,
+    pub aec_timing_complete: bool,
+    pub aec_render_observations: u64,
+    pub aec_invalid_timestamp_samples: u64,
+    pub aec_delay_frames: u64,
     pub game_state_updates: u64,
     pub applied_deaf: bool,
     pub applied_master: f32,
@@ -743,6 +753,15 @@ mod tests {
             mix_nonzero_samples: 8_000,
             mix_peak: 0.5,
             mix_rms: 0.125,
+            aec_delay_ms: 87,
+            aec_measured_delay_ms: 89,
+            aec_input_latency_ms: 12,
+            aec_output_latency_ms: 18,
+            aec_render_queue_ms: 52,
+            aec_capture_processing_ms: 4,
+            aec_timing_complete: true,
+            aec_render_observations: 100,
+            aec_delay_frames: 200,
             game_state_updates: 20,
             applied_deaf: false,
             applied_master: 0.75,
@@ -768,6 +787,15 @@ mod tests {
         assert_eq!(value["mix_silent_rounds"], 1);
         assert_eq!(value["mix_peak"], 0.5);
         assert_eq!(value["mix_rms"], 0.125);
+        assert_eq!(value["aec_delay_ms"], 87);
+        assert_eq!(value["aec_measured_delay_ms"], 89);
+        assert_eq!(value["aec_input_latency_ms"], 12);
+        assert_eq!(value["aec_output_latency_ms"], 18);
+        assert_eq!(value["aec_render_queue_ms"], 52);
+        assert_eq!(value["aec_capture_processing_ms"], 4);
+        assert_eq!(value["aec_timing_complete"], true);
+        assert_eq!(value["aec_render_observations"], 100);
+        assert_eq!(value["aec_delay_frames"], 200);
         assert_eq!(value["game_state_updates"], 20);
         assert_eq!(value["applied_deaf"], false);
         assert_eq!(value["applied_master"], 0.75);

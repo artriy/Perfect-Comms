@@ -7,7 +7,7 @@ Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
 control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
 stdin token auth) to the PerfectComms BepInEx mod.
 
-Also runs DSP (WebRTC-APM AEC/AGC/HPF + DeepFilterNet noise suppression), Opus
+Also runs DSP (WebRTC-APM AEC3/high noise suppression/HPF), Opus
 encode/decode, and the WebRTC (webrtc-rs) peer transport with proximity mixing,
 so mic, peer audio, and playback all live in this helper. Protocol version 7.
 

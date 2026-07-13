@@ -3,7 +3,7 @@ use crate::rtc::NativeCounters;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::input::SyntheticTone as ToneSource;
 pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
@@ -163,6 +163,198 @@ impl PlaybackProgress {
     }
 }
 
+const UNKNOWN_AEC_TIMING_US: u64 = u64::MAX;
+const DEFAULT_AEC_DELAY_MS: i32 = 50;
+const MAX_AEC_DELAY_MS: u64 = 500;
+const MAX_AEC_COMPONENT_US: u64 = MAX_AEC_DELAY_MS * 1_000;
+const AEC_CAPTURE_CALLBACK_STALE_NS: u64 = 250_000_000;
+// Hardware timestamps stop at the DAC/ADC boundaries. Include a small bounded allowance for the
+// acoustic path between the speaker and microphone when a render stream is actually active.
+const AEC_ACOUSTIC_PATH_US: u64 = 3_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AecDelaySnapshot {
+    pub recommended_delay_ms: i32,
+    pub measured_delay_ms: u64,
+    pub input_latency_ms: u64,
+    pub output_latency_ms: u64,
+    pub render_queue_ms: u64,
+    pub capture_processing_ms: u64,
+    pub timing_complete: bool,
+    pub render_observations: u64,
+    pub invalid_timestamp_samples: u64,
+}
+
+/// Lock-free timing shared by the capture, render, playback, encoder, and telemetry threads.
+///
+/// WebRTC defines its stream delay as:
+///   (hardware render - reverse analysis) + (capture processing - hardware capture).
+/// CPAL exposes the hardware-side input/output latency in callback timestamps. The remaining
+/// render queue and capture scheduling components are measured inside the helper.
+pub struct AecTiming {
+    input_latency_us: AtomicU64,
+    output_latency_us: AtomicU64,
+    render_queue_pairs: AtomicU64,
+    capture_callback_ns: AtomicU64,
+    render_observations: AtomicU64,
+    invalid_timestamp_samples: AtomicU64,
+    applied_delay_ms: AtomicU64,
+    applied_delay_frames: AtomicU64,
+}
+
+impl Default for AecTiming {
+    fn default() -> Self {
+        Self {
+            input_latency_us: AtomicU64::new(UNKNOWN_AEC_TIMING_US),
+            output_latency_us: AtomicU64::new(UNKNOWN_AEC_TIMING_US),
+            render_queue_pairs: AtomicU64::new(0),
+            capture_callback_ns: AtomicU64::new(0),
+            render_observations: AtomicU64::new(0),
+            invalid_timestamp_samples: AtomicU64::new(0),
+            applied_delay_ms: AtomicU64::new(UNKNOWN_AEC_TIMING_US),
+            applied_delay_frames: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AecTiming {
+    fn duration_us(duration: Duration) -> u64 {
+        duration.as_micros().min(MAX_AEC_COMPONENT_US as u128) as u64
+    }
+
+    fn observe_latency(target: &AtomicU64, latency: Option<Duration>, invalid: &AtomicU64) {
+        match latency {
+            Some(duration) => target.store(Self::duration_us(duration), Ordering::Release),
+            None => {
+                invalid.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn observe_input_callback(&self, info: &cpal::InputCallbackInfo) {
+        let timestamp = info.timestamp();
+        Self::observe_latency(
+            &self.input_latency_us,
+            timestamp.callback.duration_since(&timestamp.capture),
+            &self.invalid_timestamp_samples,
+        );
+        self.capture_callback_ns
+            .store(monotonic_ns(), Ordering::Release);
+    }
+
+    pub fn observe_output_callback(&self, info: &cpal::OutputCallbackInfo) {
+        let timestamp = info.timestamp();
+        Self::observe_latency(
+            &self.output_latency_us,
+            timestamp.playback.duration_since(&timestamp.callback),
+            &self.invalid_timestamp_samples,
+        );
+    }
+
+    pub fn observe_render_queue_pairs(&self, queued_pairs_before_frame: usize) {
+        self.render_queue_pairs.store(
+            queued_pairs_before_frame.min(u64::MAX as usize) as u64,
+            Ordering::Release,
+        );
+        self.render_observations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_applied_delay(&self, delay_ms: i32) {
+        self.applied_delay_ms.store(
+            delay_ms.clamp(0, MAX_AEC_DELAY_MS as i32) as u64,
+            Ordering::Release,
+        );
+        self.applied_delay_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn applied_delay_ms(&self) -> Option<u64> {
+        let value = self.applied_delay_ms.load(Ordering::Acquire);
+        (value != UNKNOWN_AEC_TIMING_US).then_some(value)
+    }
+
+    pub fn applied_delay_frames(&self) -> u64 {
+        self.applied_delay_frames.load(Ordering::Relaxed)
+    }
+
+    fn component_us(target: &AtomicU64) -> Option<u64> {
+        let value = target.load(Ordering::Acquire);
+        (value != UNKNOWN_AEC_TIMING_US).then_some(value)
+    }
+
+    pub fn snapshot(&self, now_ns: u64) -> AecDelaySnapshot {
+        let input_us = Self::component_us(&self.input_latency_us);
+        let output_us = Self::component_us(&self.output_latency_us);
+        let render_observations = self.render_observations.load(Ordering::Acquire);
+        let render_queue_us = if render_observations == 0 {
+            0
+        } else {
+            self.render_queue_pairs
+                .load(Ordering::Acquire)
+                .saturating_mul(1_000_000)
+                / SAMPLE_RATE as u64
+        };
+
+        let callback_ns = self.capture_callback_ns.load(Ordering::Acquire);
+        let callback_age_ns = now_ns.saturating_sub(callback_ns);
+        let capture_processing_us = if callback_ns != 0
+            && now_ns >= callback_ns
+            && callback_age_ns <= AEC_CAPTURE_CALLBACK_STALE_NS
+        {
+            callback_age_ns / 1_000
+        } else {
+            0
+        };
+
+        let timing_complete = input_us.is_some()
+            && output_us.is_some()
+            && render_observations > 0
+            && callback_ns != 0
+            && callback_age_ns <= AEC_CAPTURE_CALLBACK_STALE_NS;
+        let measured_us = input_us
+            .unwrap_or(0)
+            .saturating_add(output_us.unwrap_or(0))
+            .saturating_add(render_queue_us)
+            .saturating_add(capture_processing_us)
+            .saturating_add(if render_observations > 0 {
+                AEC_ACOUSTIC_PATH_US
+            } else {
+                0
+            });
+        let measured_delay_ms = ((measured_us + 500) / 1_000).min(MAX_AEC_DELAY_MS);
+        let recommended_delay_ms = if timing_complete {
+            measured_delay_ms as i32
+        } else {
+            DEFAULT_AEC_DELAY_MS
+        };
+
+        AecDelaySnapshot {
+            recommended_delay_ms,
+            measured_delay_ms,
+            input_latency_ms: ((input_us.unwrap_or(0) + 500) / 1_000),
+            output_latency_ms: ((output_us.unwrap_or(0) + 500) / 1_000),
+            render_queue_ms: ((render_queue_us + 500) / 1_000),
+            capture_processing_ms: ((capture_processing_us + 500) / 1_000),
+            timing_complete,
+            render_observations,
+            invalid_timestamp_samples: self.invalid_timestamp_samples.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_input_latency_for_test(&self, latency: Duration, callback_ns: u64) {
+        self.input_latency_us
+            .store(Self::duration_us(latency), Ordering::Release);
+        self.capture_callback_ns
+            .store(callback_ns, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn observe_output_latency_for_test(&self, latency: Duration) {
+        self.output_latency_us
+            .store(Self::duration_us(latency), Ordering::Release);
+    }
+}
+
 pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
 }
@@ -209,6 +401,7 @@ pub fn spawn_cpal_capture(
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
+    aec_timing: Arc<AecTiming>,
 ) -> Result<(), String> {
     let device = pick_device(&device_id)?;
     let config = device
@@ -230,7 +423,9 @@ pub fn spawn_cpal_capture(
     let cb_ring = ring.clone();
     let cb_rs = resampler.clone();
     let cb_acc = accumulator.clone();
-    let push = move |data: &[f32]| {
+    let cb_timing = aec_timing.clone();
+    let push = move |data: &[f32], info: &cpal::InputCallbackInfo| {
+        cb_timing.observe_input_callback(info);
         let mono = downmix_to_mono(data, channels);
         let resampled = cb_rs.lock().unwrap().process(&mono);
         let mut clock = now_ns;
@@ -252,27 +447,27 @@ pub fn spawn_cpal_capture(
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &stream_config,
-            move |data: &[f32], _| push(data),
+            move |data: &[f32], info| push(data, info),
             make_err(),
             None,
         ),
         cpal::SampleFormat::I16 => device.build_input_stream(
             &stream_config,
-            move |data: &[i16], _| {
+            move |data: &[i16], info| {
                 let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                push(&f);
+                push(&f, info);
             },
             make_err(),
             None,
         ),
         cpal::SampleFormat::U16 => device.build_input_stream(
             &stream_config,
-            move |data: &[u16], _| {
+            move |data: &[u16], info| {
                 let f: Vec<f32> = data
                     .iter()
                     .map(|&s| (s as f32 - 32768.0) / 32768.0)
                     .collect();
-                push(&f);
+                push(&f, info);
             },
             make_err(),
             None,
@@ -381,6 +576,7 @@ pub fn spawn_cpal_playback(
     stop: Arc<AtomicBool>,
     counters: Arc<NativeCounters>,
     progress: Arc<PlaybackProgress>,
+    aec_timing: Arc<AecTiming>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_output_device(&host, &device_id)?;
@@ -398,8 +594,10 @@ pub fn spawn_cpal_playback(
     let mut pos = 1.0f64;
     let fill_counters = counters.clone();
     let fill_progress = progress.clone();
-    let mut fill = move |out: &mut [f32]| {
+    let fill_timing = aec_timing.clone();
+    let mut fill = move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
         let frames = out.len() / out_channels.max(1);
+        fill_timing.observe_output_callback(info);
         fill_progress.mark_callback();
         fill_counters
             .playback_callbacks
@@ -476,7 +674,7 @@ pub fn spawn_cpal_playback(
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_output_stream(
             &stream_config,
-            move |data: &mut [f32], _| fill(data),
+            move |data: &mut [f32], info| fill(data, info),
             make_err(),
             None,
         ),
@@ -484,9 +682,9 @@ pub fn spawn_cpal_playback(
             let mut scratch: Vec<f32> = Vec::new();
             device.build_output_stream(
                 &stream_config,
-                move |data: &mut [i16], _| {
+                move |data: &mut [i16], info| {
                     scratch.resize(data.len(), 0.0);
-                    fill(&mut scratch);
+                    fill(&mut scratch, info);
                     for (d, &s) in data.iter_mut().zip(scratch.iter()) {
                         *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                     }
@@ -499,9 +697,9 @@ pub fn spawn_cpal_playback(
             let mut scratch: Vec<f32> = Vec::new();
             device.build_output_stream(
                 &stream_config,
-                move |data: &mut [u16], _| {
+                move |data: &mut [u16], info| {
                     scratch.resize(data.len(), 0.0);
-                    fill(&mut scratch);
+                    fill(&mut scratch, info);
                     for (d, &s) in data.iter_mut().zip(scratch.iter()) {
                         *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
                     }
@@ -531,6 +729,60 @@ pub fn spawn_cpal_playback(
 mod tests {
     use super::*;
     use crate::proto::{FRAME_SAMPLES, SAMPLE_RATE};
+
+    #[test]
+    fn aec_timing_combines_hardware_queue_and_processing_delay() {
+        let timing = AecTiming::default();
+        timing.observe_input_latency_for_test(Duration::from_millis(12), 1_000_000_000);
+        timing.observe_output_latency_for_test(Duration::from_millis(18));
+        timing.observe_render_queue_pairs(FRAME_SAMPLES);
+
+        let snapshot = timing.snapshot(1_004_000_000);
+        assert!(snapshot.timing_complete);
+        assert_eq!(snapshot.input_latency_ms, 12);
+        assert_eq!(snapshot.output_latency_ms, 18);
+        assert_eq!(snapshot.render_queue_ms, 20);
+        assert_eq!(snapshot.capture_processing_ms, 4);
+        assert_eq!(snapshot.measured_delay_ms, 57);
+        assert_eq!(snapshot.recommended_delay_ms, 57);
+    }
+
+    #[test]
+    fn aec_timing_uses_safe_startup_delay_until_measurements_are_current() {
+        let timing = AecTiming::default();
+        let startup = timing.snapshot(1_000_000_000);
+        assert!(!startup.timing_complete);
+        assert_eq!(startup.recommended_delay_ms, DEFAULT_AEC_DELAY_MS);
+
+        timing.observe_input_latency_for_test(Duration::from_millis(12), 1_000_000_000);
+        timing.observe_output_latency_for_test(Duration::from_millis(18));
+        timing.observe_render_queue_pairs(FRAME_SAMPLES);
+        let stale = timing.snapshot(1_000_000_000 + AEC_CAPTURE_CALLBACK_STALE_NS + 1);
+        assert!(!stale.timing_complete);
+        assert_eq!(stale.recommended_delay_ms, DEFAULT_AEC_DELAY_MS);
+    }
+
+    #[test]
+    fn aec_timing_clamps_extreme_measurements() {
+        let timing = AecTiming::default();
+        timing.observe_input_latency_for_test(Duration::from_millis(900), 1_000_000_000);
+        timing.observe_output_latency_for_test(Duration::from_millis(900));
+        timing.observe_render_queue_pairs(usize::MAX);
+
+        let snapshot = timing.snapshot(1_001_000_000);
+        assert!(snapshot.timing_complete);
+        assert_eq!(snapshot.measured_delay_ms, MAX_AEC_DELAY_MS);
+        assert_eq!(snapshot.recommended_delay_ms, MAX_AEC_DELAY_MS as i32);
+    }
+
+    #[test]
+    fn aec_timing_tracks_applied_delay_for_diagnostics() {
+        let timing = AecTiming::default();
+        assert_eq!(timing.applied_delay_ms(), None);
+        timing.note_applied_delay(73);
+        assert_eq!(timing.applied_delay_ms(), Some(73));
+        assert_eq!(timing.applied_delay_frames(), 1);
+    }
 
     #[test]
     fn downmix_stereo_averages_channels() {

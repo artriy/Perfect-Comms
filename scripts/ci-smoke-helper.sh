@@ -75,7 +75,7 @@ try:
     assert ready["op"] == "ready", ready
     assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
-    send_control({"op": "set-dsp", "aec": True, "agc": True, "ns": True, "hpf": True})
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True, "hpf": True})
     send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01})
     send_control({"op": "set-synthetic", "enabled": True})
     send_control({"op": "start"})
@@ -92,6 +92,10 @@ try:
             continue
         assert "speaking" in msg, msg
         levels += 1
+
+    # Runtime suppression changes must reconfigure the already-loaded WebRTC APM in place.
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": False, "hpf": True})
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True, "hpf": True})
 
     # A lobby/session stop must leave the process reusable. Only control EOF (or owner exit)
     # owns process lifetime, including the Wine/CrossOver path where guest PIDs are unusable.
@@ -128,7 +132,9 @@ log = stderr.decode("utf-8", errors="replace")
 if failure is not None:
     raise RuntimeError(f"{failure}\nhelper stderr:\n{log}") from failure
 if require_dsp == "--require-dsp":
-    assert "dsp set aec/agc/hpf=true ns=true" in log, \
-        "final helper bundle could not load both DSP libraries:\n" + log
+    assert "dsp set apm=true webrtc-ns=false automatic-gain=false" in log, \
+        "suppression-off toggle did not reconfigure WebRTC APM:\n" + log
+    assert "dsp set apm=true webrtc-ns=true automatic-gain=false" in log, \
+        "final helper bundle could not load and reconfigure WebRTC APM:\n" + log
 print(f"SMOKE_OK {name} stop_reusable=true eof_exit_seconds={disconnected_elapsed:.3f}")
 PY

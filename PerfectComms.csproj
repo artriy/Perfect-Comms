@@ -105,18 +105,6 @@
 		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.dylib" Condition="Exists('Libs\dsp\libwebrtc-apm.dylib')">
 			<LogicalName>Lib.dsp.libwebrtc-apm.dylib</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\df.x64.dll" Condition="Exists('Libs\dsp\df.x64.dll')">
-			<LogicalName>Lib.dsp.df.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\df.x86.dll" Condition="Exists('Libs\dsp\df.x86.dll')">
-			<LogicalName>Lib.dsp.df.x86.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\libdf.so" Condition="Exists('Libs\dsp\libdf.so')">
-			<LogicalName>Lib.dsp.libdf.so</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\libdf.dylib" Condition="Exists('Libs\dsp\libdf.dylib')">
-			<LogicalName>Lib.dsp.libdf.dylib</LogicalName>
-		</EmbeddedResource>
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' == 'Android'">
@@ -138,10 +126,6 @@
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
 		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
 		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.dylib')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.dylib" />
-		<Error Condition="!Exists('Libs\dsp\df.x64.dll')" Text="Missing release DSP: Libs\dsp\df.x64.dll" />
-		<Error Condition="!Exists('Libs\dsp\df.x86.dll')" Text="Missing release DSP: Libs\dsp\df.x86.dll" />
-		<Error Condition="!Exists('Libs\dsp\libdf.so')" Text="Missing release DSP: Libs\dsp\libdf.so" />
-		<Error Condition="!Exists('Libs\dsp\libdf.dylib')" Text="Missing release DSP: Libs\dsp\libdf.dylib" />
 	</Target>
 
 	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="PrepareResources"

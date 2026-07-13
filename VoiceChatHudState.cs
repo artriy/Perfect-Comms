@@ -88,6 +88,15 @@ public static class VoiceChatHudState
 
     internal static string LastUpdateStep => _lastUpdateStep;
 
+    internal static void RecoverAfterUpdateFailure()
+    {
+        // Unity's managed wrapper can remain non-null for one frame after its native GameObject was
+        // destroyed. Drop every cached wrapper so the next HUD update clones fresh scene objects.
+        _cachedMainCamera = null;
+        DestroyButtons();
+        DestroyTooltips();
+    }
+
     public static bool IsMuted        => IsManualMuteActive();
     public static bool IsTeamRadio => IsInTeamRadioMode();
     public static bool IsImpostorRadio => IsTeamRadio;
@@ -986,20 +995,29 @@ public static class VoiceChatHudState
     }
     private static void DestroyButtons()
     {
-        if (_micButtonObj  != null) { Object.Destroy(_micButtonObj);  _micButtonObj  = null; }
-        if (_spkButtonObj  != null) { Object.Destroy(_spkButtonObj);  _spkButtonObj  = null; }
-        if (_jailButtonObj != null) { Object.Destroy(_jailButtonObj); _jailButtonObj = null; }
+        BestEffortDestroy(ref _micButtonObj);
+        BestEffortDestroy(ref _spkButtonObj);
+        BestEffortDestroy(ref _jailButtonObj);
         _micButton   = null; _spkButton   = null; _jailButton  = null;
     }
 
     private static void DestroyTooltips()
     {
-        if (_micTooltip != null) { Object.Destroy(_micTooltip); _micTooltip = null; }
-        if (_spkTooltip != null) { Object.Destroy(_spkTooltip); _spkTooltip = null; }
+        BestEffortDestroy(ref _micTooltip);
+        BestEffortDestroy(ref _spkTooltip);
         _micTooltipTmp = null; _spkTooltipTmp = null;
         // Drop the cached child-component arrays so a re-created tooltip re-caches fresh references.
         _micTooltipRenderers = null; _spkTooltipRenderers = null;
         _micTooltipTmps = null; _spkTooltipTmps = null;
+    }
+
+    private static void BestEffortDestroy(ref GameObject? obj)
+    {
+        var current = obj;
+        obj = null;
+        if (current == null) return;
+        try { Object.Destroy(current); }
+        catch { /* stale IL2CPP wrapper; clearing our reference is the recovery */ }
     }
 
     // Transient on-screen banner shown on the VC overlay layer (same surface as the mic/speaker

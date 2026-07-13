@@ -96,6 +96,13 @@ impl Api {
 
 const RATE: c_int = 48000;
 const FRAME: usize = 960;
+const MAX_STREAM_DELAY_MS: i32 = 500;
+// Chromium's getUserMedia voice pipeline uses WebRTC noise suppression at kHigh.
+const NS_LEVEL_HIGH: c_int = 2;
+
+fn sanitize_stream_delay_ms(delay_ms: i32) -> i32 {
+    delay_ms.clamp(0, MAX_STREAM_DELAY_MS)
+}
 
 pub struct Apm {
     api: Api,
@@ -108,7 +115,13 @@ pub struct Apm {
 unsafe impl Send for Apm {}
 
 impl Apm {
-    pub fn load(lib_path: &str, echo: bool, agc2: bool, hpf: bool) -> Result<Apm, String> {
+    pub fn load(
+        lib_path: &str,
+        echo: bool,
+        noise_suppression: bool,
+        agc2: bool,
+        hpf: bool,
+    ) -> Result<Apm, String> {
         unsafe {
             let api = Api::load(lib_path)?;
             let a = (api.create)();
@@ -127,7 +140,7 @@ impl Apm {
                 chunk,
                 out: vec![0.0; chunk],
             };
-            me.apply(echo, agc2, hpf)?;
+            me.apply(echo, noise_suppression, agc2, hpf)?;
             me.sc = (me.api.sc_create)(RATE, 1);
             if me.sc.is_null() {
                 return Err("stream-config".into());
@@ -136,14 +149,20 @@ impl Apm {
         }
     }
 
-    fn apply(&mut self, echo: bool, agc2: bool, hpf: bool) -> Result<(), String> {
+    fn apply(
+        &mut self,
+        echo: bool,
+        noise_suppression: bool,
+        agc2: bool,
+        hpf: bool,
+    ) -> Result<(), String> {
         unsafe {
             let c = (self.api.config_create)();
             if c.is_null() {
                 return Err("config-create".into());
             }
             (self.api.set_echo)(c, echo as c_int, 0);
-            (self.api.set_ns)(c, 0, 0);
+            (self.api.set_ns)(c, noise_suppression as c_int, NS_LEVEL_HIGH);
             (self.api.set_gc1)(c, 0, 0, 0, 0, 0);
             (self.api.set_gc2)(c, agc2 as c_int);
             (self.api.set_hpf)(c, hpf as c_int);
@@ -160,8 +179,14 @@ impl Apm {
         }
     }
 
-    pub fn set_config(&mut self, echo: bool, agc2: bool, hpf: bool) -> Result<(), String> {
-        self.apply(echo, agc2, hpf)
+    pub fn set_config(
+        &mut self,
+        echo: bool,
+        noise_suppression: bool,
+        agc2: bool,
+        hpf: bool,
+    ) -> Result<(), String> {
+        self.apply(echo, noise_suppression, agc2, hpf)
     }
 
     pub fn chunk(&self) -> usize {
@@ -181,6 +206,15 @@ impl Apm {
     }
 
     pub fn process_capture(&mut self, frame: &mut [f32]) {
+        self.process_capture_with_stream_delay(frame, 0);
+    }
+
+    /// Processes capture audio while supplying the render-to-capture delay required by WebRTC
+    /// APM. A 20 ms PerfectComms frame contains two 10 ms APM chunks, and APM clears its
+    /// `was_stream_delay_set` flag after every ProcessStream call. Set the delay before every
+    /// internal chunk rather than once per PerfectComms frame.
+    pub fn process_capture_with_stream_delay(&mut self, frame: &mut [f32], delay_ms: i32) {
+        let delay_ms = sanitize_stream_delay_ms(delay_ms);
         unsafe {
             let mut off = 0;
             while off + self.chunk <= frame.len() {
@@ -188,6 +222,7 @@ impl Apm {
                 let op = self.out.as_mut_ptr();
                 let ipp = &ip as *const *const f32;
                 let opp = &op as *const *mut f32;
+                (self.api.set_delay)(self.a, delay_ms);
                 (self.api.process)(self.a, ipp, self.sc, self.sc, opp);
                 std::ptr::copy_nonoverlapping(
                     self.out.as_ptr(),
@@ -201,7 +236,7 @@ impl Apm {
 
     pub fn set_stream_delay_ms(&mut self, ms: i32) {
         unsafe {
-            (self.api.set_delay)(self.a, ms.max(0));
+            (self.api.set_delay)(self.a, sanitize_stream_delay_ms(ms));
         }
     }
 }
@@ -221,18 +256,72 @@ impl Drop for Apm {
 
 #[cfg(test)]
 mod tests {
-    use super::Apm;
+    use super::{sanitize_stream_delay_ms, Apm, FRAME};
+
+    #[test]
+    fn stream_delay_is_bounded_to_webrtc_range() {
+        assert_eq!(sanitize_stream_delay_ms(-1), 0);
+        assert_eq!(sanitize_stream_delay_ms(73), 73);
+        assert_eq!(sanitize_stream_delay_ms(900), 500);
+    }
 
     #[test]
     #[ignore]
     fn loads_and_processes_a_frame() {
         let path =
             std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
-        let mut apm = Apm::load(&path, true, true, true).expect("load");
+        let mut apm = Apm::load(&path, true, true, false, true).expect("load");
         let mut frame = vec![0.0f32; 960];
         apm.analyze_reverse(&frame);
-        apm.set_stream_delay_ms(0);
-        apm.process_capture(&mut frame);
+        apm.process_capture_with_stream_delay(&mut frame, 73);
         assert_eq!(frame.len(), 960);
+    }
+
+    #[test]
+    #[ignore]
+    fn high_noise_suppression_attenuates_stationary_noise() {
+        let path =
+            std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
+        let mut bypass = Apm::load(&path, false, false, false, false).expect("load bypass");
+        let mut suppressed = Apm::load(&path, false, true, false, false).expect("load suppressed");
+        let mut random_state = 0x1234_5678u32;
+        let mut bypass_energy = 0.0f64;
+        let mut suppressed_energy = 0.0f64;
+        let mut measured_samples = 0usize;
+
+        for frame_index in 0..200 {
+            let mut input = vec![0.0f32; FRAME];
+            for sample in &mut input {
+                random_state = random_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                let unit = (random_state >> 8) as f32 / 16_777_215.0;
+                *sample = (unit * 2.0 - 1.0) * 0.03;
+            }
+
+            let mut bypass_frame = input.clone();
+            let mut suppressed_frame = input;
+            bypass.process_capture(&mut bypass_frame);
+            suppressed.process_capture(&mut suppressed_frame);
+
+            if frame_index >= 150 {
+                bypass_energy += bypass_frame
+                    .iter()
+                    .map(|sample| f64::from(*sample) * f64::from(*sample))
+                    .sum::<f64>();
+                suppressed_energy += suppressed_frame
+                    .iter()
+                    .map(|sample| f64::from(*sample) * f64::from(*sample))
+                    .sum::<f64>();
+                measured_samples += FRAME;
+            }
+        }
+
+        let bypass_rms = (bypass_energy / measured_samples as f64).sqrt();
+        let suppressed_rms = (suppressed_energy / measured_samples as f64).sqrt();
+        assert!(
+            suppressed_rms < bypass_rms * 0.85,
+            "suppression RMS {suppressed_rms:.6} was not below bypass RMS {bypass_rms:.6}"
+        );
     }
 }
