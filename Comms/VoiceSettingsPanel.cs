@@ -223,6 +223,9 @@ public static class VoiceSettingsPanel
     }
 
     private static Func<float, string> Pct => v => $"<color=#22D3EE>{Mathf.RoundToInt(v * 100f)}%</color>";
+    private static Func<float, string> VolumePct => v => v <= 0.005f
+        ? "<color=#8C9CB2>None</color>"
+        : Pct(v);
     private static Func<float, string> Num2 => v => v.ToString("0.00", CultureInfo.InvariantCulture);
 
     private static void Section(List<Entry> defs, string title)
@@ -302,6 +305,9 @@ public static class VoiceSettingsPanel
         Slider(defs, "Mic Volume", s.MicVolume, Pct);
         Slider(defs, "Mic Sensitivity", s.MicSensitivity, Num2);
         Slider(defs, "Speaker Volume", s.MasterVolume, Pct);
+        Section(defs, "DEAD MEETING MIX");
+        Slider(defs, "Alive Players", s.AlivePlayerVolume, VolumePct);
+        Slider(defs, "Dead Players", s.DeadPlayerVolume, VolumePct);
         Section(defs, "PROCESSING");
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
@@ -356,7 +362,11 @@ public static class VoiceSettingsPanel
             Key = bind.DisplayName,
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.RebindRow(
-                () => bind.CurrentKey, k => bind.Set(k), () => bind.Clear(), () => bind.Modifier, m => bind.SetModifier(m))
+                () => bind.CurrentKey,
+                (key, modifier, match) => bind.SetBinding(key, modifier, match),
+                () => bind.Clear(),
+                () => bind.Modifier,
+                () => bind.ModifierMatch)
                 .Build(pane, bind.DisplayName, paneW, y, RowH)
         });
     }

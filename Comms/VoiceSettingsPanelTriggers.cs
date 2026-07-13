@@ -15,6 +15,8 @@ public static class VoiceSettingsPanelTriggers
     {
         VoiceUiKit.Tick();
 
+        if (VoiceUiKit.RebindRow.ShouldSuppressKeybinds) return;
+
         if (!HudManager.InstanceExists) return;
 
         var chat = HudManager.Instance.Chat;

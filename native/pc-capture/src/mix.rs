@@ -4,8 +4,7 @@ use std::time::{Duration, Instant};
 use crate::gamestate::GameState;
 
 pub const GAIN_GLIDE_K: f32 = 0.002;
-pub const PLAYBACK_MIX_PEAK_CEILING: f32 = 0.92;
-pub const PLAYBACK_MIX_LIMITER_RELEASE_PER_FRAME: f32 = 0.05;
+pub const PLAYBACK_SOFT_LIMIT_START: f32 = 0.92;
 const PAN_FAR_SIDE: f32 = 0.25;
 
 const RADIO_DRIVE: f32 = 2.0;
@@ -51,23 +50,41 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
     (left, right)
 }
 
-fn measure_peak(samples: &[f32]) -> f32 {
-    let mut peak = 0.0f32;
-    for &s in samples {
-        let abs = s.abs();
-        if abs > peak {
-            peak = abs;
-        }
+fn soft_limit_sample(sample: f32) -> f32 {
+    if !sample.is_finite() {
+        return 0.0;
     }
-    peak
+
+    let magnitude = sample.abs();
+    if magnitude <= PLAYBACK_SOFT_LIMIT_START {
+        return sample;
+    }
+
+    // A smooth, monotonic knee protects the output without frame-wide normalization. The old
+    // reciprocal peak limiter reduced every boosted frame back to exactly 0.92, which made the
+    // 100-200% portions of master/per-player volume controls sound identical on hot speech.
+    let headroom = 1.0 - PLAYBACK_SOFT_LIMIT_START;
+    let limited = PLAYBACK_SOFT_LIMIT_START
+        + headroom * ((magnitude - PLAYBACK_SOFT_LIMIT_START) / headroom).tanh();
+    sample.signum() * limited.min(1.0)
 }
 
-fn playback_mix_limiter_gain(peak: f32) -> f32 {
-    if peak <= 0.0 || peak <= PLAYBACK_MIX_PEAK_CEILING {
-        1.0
-    } else {
-        PLAYBACK_MIX_PEAK_CEILING / peak
+fn soft_limit_stereo_pair(left: f32, right: f32) -> (f32, f32) {
+    let left = if left.is_finite() { left } else { 0.0 };
+    let right = if right.is_finite() { right } else { 0.0 };
+    let peak = left.abs().max(right.abs());
+    if peak <= PLAYBACK_SOFT_LIMIT_START {
+        return (left, right);
     }
+
+    // Link both channels to the louder side. Independent soft-clipping narrows hard-panned
+    // voices under boost because the near channel compresses more than the far channel.
+    let limited_peak = soft_limit_sample(peak);
+    let gain = limited_peak / peak;
+    (
+        (left * gain).clamp(-1.0, 1.0),
+        (right * gain).clamp(-1.0, 1.0),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -252,7 +269,6 @@ struct Glide {
 }
 
 pub struct Mixer {
-    limiter_gain: f32,
     glide: HashMap<String, Glide>,
     lp650: Biquad,
     hp650: Biquad,
@@ -276,7 +292,6 @@ impl Default for Mixer {
 impl Mixer {
     pub fn new() -> Mixer {
         Mixer {
-            limiter_gain: 1.0,
             glide: HashMap::new(),
             lp650: Biquad::lowpass(650.0, 0.7),
             hp650: Biquad::highpass(650.0, 0.9),
@@ -420,21 +435,16 @@ impl Mixer {
             }
         }
 
-        let peak = measure_peak(out_stereo);
-        let target_gain = playback_mix_limiter_gain(peak);
-        if target_gain < self.limiter_gain {
-            self.limiter_gain = target_gain;
-        } else {
-            self.limiter_gain =
-                1.0_f32.min(self.limiter_gain + PLAYBACK_MIX_LIMITER_RELEASE_PER_FRAME);
+        let mut sample_index = 0;
+        while sample_index + 1 < out_stereo.len() {
+            let (left, right) =
+                soft_limit_stereo_pair(out_stereo[sample_index], out_stereo[sample_index + 1]);
+            out_stereo[sample_index] = left;
+            out_stereo[sample_index + 1] = right;
+            sample_index += 2;
         }
-        if self.limiter_gain < 1.0 {
-            for s in out_stereo.iter_mut() {
-                *s *= self.limiter_gain;
-            }
-        }
-        for s in out_stereo.iter_mut() {
-            *s = s.clamp(-1.0, 1.0);
+        if sample_index < out_stereo.len() {
+            out_stereo[sample_index] = soft_limit_sample(out_stereo[sample_index]);
         }
 
         self.glide
@@ -650,7 +660,9 @@ fn is_quiet_frame(frame: &[f32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::{OpusCodec, FRAME_SIZE, SAMPLE_RATE};
     use crate::gamestate::{GameState, LocalState, PeerState};
+    use crate::input::InputConfig;
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 1e-5, "expected {b}, got {a}");
@@ -1016,6 +1028,185 @@ mod tests {
         mixer.mix(&per_peer, &gs, &mut out);
         approx(out[0], 0.1 * PAN_FAR_SIDE * 0.5 * 0.5);
         approx(out[1], 0.1 * 0.5 * 0.5);
+    }
+
+    fn mix_first_sample(master: f32, peer_gain: f32, sample: f32) -> f32 {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            master,
+            vec![(
+                "p",
+                PeerState {
+                    gain: peer_gain,
+                    pan: 0.0,
+                    mode: 0,
+                },
+            )],
+        );
+        let mut mixer = Mixer::new();
+        let mono = vec![sample; 960];
+        let per_peer = vec![("p".to_string(), mono.as_slice())];
+        let mut out = vec![0.0; 1920];
+        mixer.mix(&per_peer, &gs, &mut out);
+        out[0]
+    }
+
+    fn mix_left_rms(master: f32, peer_gain: f32, peak: f32) -> f32 {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            master,
+            vec![(
+                "p",
+                PeerState {
+                    gain: peer_gain,
+                    pan: 0.0,
+                    mode: 0,
+                },
+            )],
+        );
+        let mut mixer = Mixer::new();
+        let mono = (0..960)
+            .map(|sample| {
+                let phase = std::f32::consts::TAU * 1_000.0 * sample as f32
+                    / crate::codec::SAMPLE_RATE as f32;
+                peak * phase.sin()
+            })
+            .collect::<Vec<_>>();
+        let per_peer = vec![("p".to_string(), mono.as_slice())];
+        let mut out = vec![0.0; 1920];
+        mixer.mix(&per_peer, &gs, &mut out);
+        (out.iter()
+            .step_by(2)
+            .map(|sample| sample * sample)
+            .sum::<f32>()
+            / 960.0)
+            .sqrt()
+    }
+
+    fn mic_gain_through_codec_and_mixer_rms(input_gain: f32) -> f32 {
+        let input = InputConfig::sanitized(input_gain, 0.004);
+        let mut codec = OpusCodec::new().expect("opus codec init");
+        let state = gs_with(
+            LocalState { deafened: false },
+            1.0,
+            vec![(
+                "mic",
+                PeerState {
+                    gain: 1.0,
+                    pan: 0.0,
+                    mode: 0,
+                },
+            )],
+        );
+        let mut mixer = Mixer::new();
+        let mut energy = 0.0;
+        let mut samples_measured = 0usize;
+
+        for frame in 0..8 {
+            let mut captured = [0.0; FRAME_SIZE];
+            for (sample_index, sample) in captured.iter_mut().enumerate() {
+                let index = frame * FRAME_SIZE + sample_index;
+                let carrier =
+                    (std::f32::consts::TAU * 190.0 * index as f32 / SAMPLE_RATE as f32).sin();
+                let envelope_phase =
+                    std::f32::consts::TAU * 7.0 * index as f32 / SAMPLE_RATE as f32;
+                let envelope = 0.12 + 0.88 * (0.5 + 0.5 * envelope_phase.sin()).powi(4);
+                *sample = 0.7 * envelope * carrier;
+            }
+            input.apply_gain(&mut captured);
+
+            let packet = codec.encode(&captured);
+            assert!(!packet.is_empty());
+            let mut decoded = [0.0; FRAME_SIZE];
+            assert_eq!(codec.decode(&packet, &mut decoded), FRAME_SIZE);
+            if frame < 2 {
+                continue;
+            }
+
+            let per_peer = vec![("mic".to_string(), decoded.as_slice())];
+            let mut output = [0.0; FRAME_SIZE * 2];
+            mixer.mix(&per_peer, &state, &mut output);
+            for sample in output.iter().step_by(2) {
+                energy += sample * sample;
+                samples_measured += 1;
+            }
+        }
+
+        (energy / samples_measured as f32).sqrt()
+    }
+
+    #[test]
+    fn master_boost_remains_audibly_monotonic_above_soft_limit_knee() {
+        let normal = mix_first_sample(1.0, 1.0, PLAYBACK_SOFT_LIMIT_START);
+        let boosted = mix_first_sample(2.0, 1.0, PLAYBACK_SOFT_LIMIT_START);
+        approx(normal, PLAYBACK_SOFT_LIMIT_START);
+        assert!(boosted > normal, "200% master must be louder than 100%");
+        assert!(boosted <= 1.0);
+    }
+
+    #[test]
+    fn per_peer_boost_remains_audibly_monotonic_above_soft_limit_knee() {
+        let normal = mix_first_sample(1.0, 1.0, PLAYBACK_SOFT_LIMIT_START);
+        let boosted = mix_first_sample(1.0, 2.0, PLAYBACK_SOFT_LIMIT_START);
+        assert!(
+            boosted > normal,
+            "200% per-player gain must be louder than 100%"
+        );
+        assert!(boosted <= 1.0);
+    }
+
+    #[test]
+    fn every_master_and_peer_slider_step_increases_hot_signal_rms() {
+        let steps = [1.0, 1.25, 1.5, 1.75, 2.0];
+        let mut previous_master = 0.0;
+        let mut previous_peer = 0.0;
+        for gain in steps {
+            let master_rms = mix_left_rms(gain, 1.0, 0.8);
+            let peer_rms = mix_left_rms(1.0, gain, 0.8);
+            assert!(
+                master_rms > previous_master,
+                "master step {gain} must raise RMS"
+            );
+            assert!(peer_rms > previous_peer, "peer step {gain} must raise RMS");
+            previous_master = master_rms;
+            previous_peer = peer_rms;
+        }
+    }
+
+    #[test]
+    fn every_mic_slider_step_survives_opus_and_receiver_mix() {
+        let mut previous = 0.0;
+        for gain in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let rms = mic_gain_through_codec_and_mixer_rms(gain);
+            assert!(
+                rms > previous,
+                "mic step {gain} must raise decoded/mixed RMS: previous={previous}, current={rms}"
+            );
+            previous = rms;
+        }
+    }
+
+    #[test]
+    fn linked_soft_limiter_preserves_boosted_stereo_pan_ratio() {
+        let (left, right) = soft_limit_stereo_pair(0.5, 2.0);
+        assert!(right > PLAYBACK_SOFT_LIMIT_START);
+        approx(right / left, 4.0);
+    }
+
+    #[test]
+    fn maximum_composed_gain_stays_finite_and_bounded() {
+        let output = mix_first_sample(2.0, 4.0, 0.8);
+        assert!(output.is_finite());
+        assert!((-1.0..=1.0).contains(&output));
+    }
+
+    #[test]
+    fn soft_limiter_is_finite_bounded_and_preserves_quiet_samples() {
+        approx(soft_limit_sample(0.5), 0.5);
+        approx(soft_limit_sample(-0.5), -0.5);
+        assert_eq!(soft_limit_sample(f32::NAN), 0.0);
+        assert!((-1.0..=1.0).contains(&soft_limit_sample(100.0)));
+        assert!((-1.0..=1.0).contains(&soft_limit_sample(-100.0)));
     }
 
     #[test]

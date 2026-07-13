@@ -1120,8 +1120,8 @@ public static class VoiceChatHudState
             : pushToTalkMode ? "Push To Talk"
             : "Active";
         string muteKey  = VoiceChatKeybinds.ToggleMute.Label;
-        string radioKey = VoiceChatKeybinds.TeamRadio.CurrentKey.ToString();
-        string cycleKey = VoiceChatKeybinds.CycleTeamRadioChannel.CurrentKey.ToString();
+        string radioKey = VoiceChatKeybinds.TeamRadio.Label;
+        string cycleKey = VoiceChatKeybinds.CycleTeamRadioChannel.Label;
         string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
 
         _micTooltipTmp.text =

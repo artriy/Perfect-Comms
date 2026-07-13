@@ -37,6 +37,8 @@ internal static class SidecarProtocol
     private const int MaxPeerIdChars = 32;
     private const float DefaultInputGain = 1f;
     private const float DefaultVadThreshold = 0.004f;
+    private const float MaxMasterGain = 2f;
+    private const float MaxPeerGain = 4f;
 
     public static byte[] EncodeFrame(byte type, byte[] payload)
     {
@@ -104,6 +106,15 @@ internal static class SidecarProtocol
     internal static float NormalizeVadThreshold(float threshold)
         => float.IsFinite(threshold) ? Math.Clamp(threshold, 0.0001f, 1f) : DefaultVadThreshold;
 
+    internal static float NormalizeMasterGain(float gain)
+        => float.IsFinite(gain) ? Math.Clamp(gain, 0f, MaxMasterGain) : 1f;
+
+    internal static float NormalizePeerGain(float gain)
+        => float.IsFinite(gain) ? Math.Clamp(gain, 0f, MaxPeerGain) : 0f;
+
+    internal static float NormalizePan(float pan)
+        => float.IsFinite(pan) ? Math.Clamp(pan, -1f, 1f) : 0f;
+
     public static byte[] AddPeerFrame(string peerId, bool isOfferer, bool relayOnly, int generation)
     {
         if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
@@ -165,6 +176,7 @@ internal static class SidecarProtocol
         float master,
         IReadOnlyList<GameStatePeerInput> peers)
     {
+        master = NormalizeMasterGain(master);
         using var stream = new System.IO.MemoryStream();
         using (var w = new Utf8JsonWriter(stream))
         {
@@ -178,8 +190,8 @@ internal static class SidecarProtocol
                 var p = peers[i];
                 w.WriteStartObject();
                 w.WriteString("id", p.Id);
-                w.WriteNumber("gain", p.Gain);
-                w.WriteNumber("pan", p.Pan);
+                w.WriteNumber("gain", NormalizePeerGain(p.Gain));
+                w.WriteNumber("pan", NormalizePan(p.Pan));
                 w.WriteNumber("mode", p.Mode);
                 w.WriteEndObject();
             }

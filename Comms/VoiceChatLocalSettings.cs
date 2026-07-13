@@ -111,6 +111,8 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> MicVolume { get; }
     public ConfigEntry<float> MicSensitivity { get; }
     public ConfigEntry<float> MasterVolume { get; }
+    public ConfigEntry<float> AlivePlayerVolume { get; }
+    public ConfigEntry<float> DeadPlayerVolume { get; }
     public ConfigEntry<float> VoiceFalloffSoftness { get; }
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
@@ -229,6 +231,16 @@ public class VoiceChatLocalSettings
         MasterVolume = config.Bind("Audio", "MasterVolume", 1f,
             new ConfigDescription("Master output volume",
                 new AcceptableValueRange<float>(0.1f, 2f)));
+
+        AlivePlayerVolume = config.Bind("Audio", "AlivePlayerVolume", 1f,
+            new ConfigDescription(
+                "Local playback volume for alive players while you are dead in a meeting. 0 mutes alive players only for you.",
+                new AcceptableValueRange<float>(0f, 2f)));
+
+        DeadPlayerVolume = config.Bind("Audio", "DeadPlayerVolume", 1f,
+            new ConfigDescription(
+                "Local playback volume for dead players while you are dead in a meeting. 0 mutes dead players only for you.",
+                new AcceptableValueRange<float>(0f, 2f)));
 
         VoiceFalloffSoftness = config.Bind("Audio", "VoiceFalloffSoftness", 0.30f,
             new ConfigDescription(

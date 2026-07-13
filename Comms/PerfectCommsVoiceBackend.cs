@@ -2811,6 +2811,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         var localPlayer = snapshot.TryGetLocalPlayer(out var local) ? local : (VoicePlayerSnapshot?)null;
         var listenerPos = localPlayer?.Position;
+        var localSettings = VoiceSettings.Instance;
+        bool deadMeetingMixActive = VoiceVolumeMath.ShouldApplyDeadMeetingMix(
+            snapshot.MeetingActive,
+            localPlayer?.IsDead == true);
+        float alivePlayerVolume = localSettings?.AlivePlayerVolume.Value ?? 1f;
+        float deadPlayerVolume = localSettings?.DeadPlayerVolume.Value ?? 1f;
 
         long proxTicks = VoiceFrameProfiler.Begin();
         SnapshotPeersInto(_updatePeerScratch);
@@ -2868,9 +2874,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)
             {
-                float gain = result.Audible
-                    ? Math.Clamp(result.NormalVolume + result.GhostVolume + result.RadioVolume, 0f, 1f) * peer.ClientVolume
-                    : 0f;
+                float groupVolume = VoiceVolumeMath.SelectGroupVolume(
+                    deadMeetingMixActive,
+                    target?.IsDead,
+                    alivePlayerVolume,
+                    deadPlayerVolume);
+                float gain = VoiceVolumeMath.ResolvePeerGain(result, peer.ClientVolume, groupVolume);
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
                     peer.ClientId.ToString(CultureInfo.InvariantCulture),
                     gain, result.Pan, (int)result.FilterMode));
@@ -3606,10 +3615,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             : string.Join("|", peers.Select(peer =>
             {
                 var route = peer.CurrentRoute;
-                var gain = route.Audible
-                    ? Math.Clamp(route.NormalVolume + route.GhostVolume + route.RadioVolume, 0f, 1f) * peer.ClientVolume
-                    : 0f;
-                return $"{peer.ClientId}:gain={gain:0.000},pan={route.Pan:0.000},mode={(int)route.FilterMode},clientVol={peer.ClientVolume:0.000},reason={route.Reason}";
+                var target = snapshot == null ? null : FindTarget(snapshot, peer);
+                var local = snapshot != null && snapshot.TryGetLocalPlayer(out var localPlayer)
+                    ? localPlayer
+                    : (VoicePlayerSnapshot?)null;
+                bool deadMeetingMix = snapshot != null && VoiceVolumeMath.ShouldApplyDeadMeetingMix(
+                    snapshot.MeetingActive,
+                    local?.IsDead == true);
+                var settings = VoiceSettings.Instance;
+                float groupVolume = VoiceVolumeMath.SelectGroupVolume(
+                    deadMeetingMix,
+                    target?.IsDead,
+                    settings?.AlivePlayerVolume.Value ?? 1f,
+                    settings?.DeadPlayerVolume.Value ?? 1f);
+                var gain = VoiceVolumeMath.ResolvePeerGain(route, peer.ClientVolume, groupVolume);
+                return $"{peer.ClientId}:gain={gain:0.000},pan={route.Pan:0.000},mode={(int)route.FilterMode},clientVol={peer.ClientVolume:0.000},groupVol={groupVolume:0.000},targetDead={target?.IsDead.ToString() ?? "unknown"},deadMeetingMix={deadMeetingMix},reason={route.Reason}";
             }));
         var rpcDiagnosticsText = "rpcState=unsupported";
 #if WINDOWS || ANDROID

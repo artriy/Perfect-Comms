@@ -4,15 +4,17 @@ Defaults below. Every key is rebindable in **Voice Settings** (open with `F10`).
 
 | Action | Key | | Action | Key |
 | :--- | :---: | :--- | :--- | :---: |
-| Open voice menu | `F10` | | Toggle speaker | `N` |
-| Open host voice settings | `F11` | | Player volumes | `B` |
-| Mute / unmute mic | `M` | | Cycle team radio channel | `G` |
+| Open voice menu | `F10` | | Toggle speaker | `Shift+N` |
+| Open host voice settings | `F11` | | Player volumes | `Shift+B` |
+| Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
 | Team radio (hold) | `V` | | Refresh voice (host) | `F8` |
 
 ## Notes
 
 - **Open voice menu (`F10`)** is also reachable from the Options menu. This is where you set your mic/speaker device, push-to-talk vs open mic, noise suppression, and HUD layout.
+- **Exact modifier bindings** are supported. Press and release `Left Shift`, `Right Ctrl`, or a similar modifier to bind it by itself, or hold that exact key and press another key to create a chord such as `Left Shift+F`. If a plain key or modifier overlaps one of its chords, the chord wins.
+- **Dead meeting mix** is local-only. While you are dead in a meeting, the Audio tab can independently boost, reduce, or mute alive and dead players for you; it has no effect outside that situation.
 - **Host voice settings (`F11`)** opens only for the lobby host, from the game-settings console. See [Host Settings](Host-Settings).
 - **Push to talk (`C`)** works when open-mic is off. Hold to transmit.
 - **Team radio (`V`)** is held to talk on your team channel (when team radio is enabled by the host and your role qualifies). **Cycle (`G`)** switches between channels you can use.

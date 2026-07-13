@@ -94,7 +94,7 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Action | Key | | Action | Key |
 | :--- | :---: | :--- | :--- | :---: |
 | Open voice menu | `F10` | | Toggle speaker | `Shift+N` |
-| Open host voice settings | `F11` | | Player volumes | `B` |
+| Open host voice settings | `F11` | | Player volumes | `Shift+B` |
 | Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
 | Team radio (hold) | `V` | | Refresh voice (host) | `F8` |

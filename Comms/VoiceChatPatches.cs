@@ -31,16 +31,22 @@ public static class VoiceChatPatches
     [HarmonyPostfix, HarmonyPatch(typeof(KeyboardJoystick), nameof(KeyboardJoystick.Update))]
     static void KeyboardUpdate_Post()
     {
-        VoiceChatKeybinds.ToggleMute.FireIfPressed();
-        VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
-        VoiceChatKeybinds.VolumeMenu.FireIfPressed();
-        VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
-        VoiceChatKeybinds.HostVoiceRefresh.FireIfPressed();
-        VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
-        VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
-
         try
         {
+            if (VoiceUiKit.RebindRow.ShouldSuppressKeybinds)
+            {
+                ReleaseHeldInputsForRebind();
+                return;
+            }
+
+            VoiceChatKeybinds.ToggleMute.FireIfPressed();
+            VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
+            VoiceChatKeybinds.VolumeMenu.FireIfPressed();
+            VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
+            VoiceChatKeybinds.HostVoiceRefresh.FireIfPressed();
+            VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
+            VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
+
             bool canUseRadio = VoiceChatHudState.CanUseTeamRadioInput();
             bool held = false;
             bool down = false;
@@ -78,6 +84,15 @@ public static class VoiceChatPatches
                 VoiceDiagnostics.DebugError($"[VC] keyboard radio/PTT update failed: {ex.Message}");
             }
         }
+    }
+
+    private static void ReleaseHeldInputsForRebind()
+    {
+        bool radioWasHeld = _radioInputHeld;
+        _radioInputHeld = false;
+        _pushToTalkInputHeld = false;
+        VoiceChatHudState.UpdateTeamRadioHold(false, false, radioWasHeld);
+        VoiceChatHudState.UpdatePushToTalkHeld(false);
     }
 
     internal static bool ShouldIgnoreToggleKeybinds()

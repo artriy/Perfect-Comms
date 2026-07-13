@@ -1089,10 +1089,10 @@ internal static class VoiceUiKit
     public sealed class RebindRow : Row
     {
         private readonly Func<KeyCode> _get;
-        private readonly Action<KeyCode> _set;
+        private readonly Action<KeyCode, KeyCode, VoiceModifierMatch> _set;
         private readonly Action _clear;
         private readonly Func<KeyCode>? _getMod;
-        private readonly Action<KeyCode>? _setMod;
+        private readonly Func<VoiceModifierMatch>? _getModMatch;
         private Image _btn = null!;
         private RectTransform _btnRt = null!;
         private TextMeshProUGUI _label = null!;
@@ -1103,18 +1103,48 @@ internal static class VoiceUiKit
         private float _capLeft;
         private bool _capturing;
         private bool _armed;
+        private KeyCode _pendingModifier;
         private static RebindRow? _active;
+        private static int _lastConsumedInputFrame = -1;
+        private static KeyCode _suppressUntilPrimaryReleased;
+        private static KeyCode _suppressUntilModifierReleased;
 
         private const float CapW = 170f;
         private const float NormalBtnW = 185f;
         private const float CapBtnW = 150f;
 
-        public RebindRow(Func<KeyCode> get, Action<KeyCode> set, Action clear, Func<KeyCode>? getMod = null, Action<KeyCode>? setMod = null)
-        { _get = get; _set = set; _clear = clear; _getMod = getMod; _setMod = setMod; }
+        public RebindRow(
+            Func<KeyCode> get,
+            Action<KeyCode, KeyCode, VoiceModifierMatch> set,
+            Action clear,
+            Func<KeyCode>? getMod = null,
+            Func<VoiceModifierMatch>? getModMatch = null)
+        {
+            _get = get;
+            _set = set;
+            _clear = clear;
+            _getMod = getMod;
+            _getModMatch = getModMatch;
+        }
 
         protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - NormalBtnW);
 
         public static bool IsCapturing => _active != null;
+        public static bool ShouldSuppressKeybinds
+        {
+            get
+            {
+                if (_active != null || _lastConsumedInputFrame == Time.frameCount) return true;
+                if (_suppressUntilPrimaryReleased == KeyCode.None
+                    && _suppressUntilModifierReleased == KeyCode.None) return false;
+                if (IsHeld(_suppressUntilPrimaryReleased)
+                    || IsHeld(_suppressUntilModifierReleased)) return true;
+
+                _suppressUntilPrimaryReleased = KeyCode.None;
+                _suppressUntilModifierReleased = KeyCode.None;
+                return false;
+            }
+        }
         public static void CancelCapture()
         {
             if (_active != null) { _active.EndCapture(); }
@@ -1196,19 +1226,31 @@ internal static class VoiceUiKit
         {
             if (_capturing)
             {
-                _label.text = _armed
-                    ? "<color=#22D3EE>Press any key...</color>"
-                    : "<color=#8C9CB2>Release to bind...</color>";
+                _label.text = !_armed
+                    ? "<color=#8C9CB2>Release to bind...</color>"
+                    : _pendingModifier != KeyCode.None
+                        ? $"<color=#22D3EE>{VoiceKeybind.FormatKey(_pendingModifier)} + key, or release</color>"
+                        : "<color=#22D3EE>Press any key...</color>";
                 return;
             }
             var mod = _getMod?.Invoke() ?? KeyCode.None;
-            _label.text = mod == KeyCode.None ? KeyName(_get()) : ModName(mod) + "+" + KeyName(_get());
+            var key = _get();
+            if (key == KeyCode.None)
+                _label.text = "<color=#607282>None</color>";
+            else if (mod == KeyCode.None)
+                _label.text = VoiceKeybind.FormatKey(key);
+            else
+                _label.text = VoiceKeybind.FormatModifier(
+                    mod,
+                    _getModMatch?.Invoke() ?? VoiceModifierMatch.EitherSide)
+                    + "+" + VoiceKeybind.FormatKey(key);
         }
 
         private void EndCapture()
         {
             _capturing = false;
             _armed = false;
+            _pendingModifier = KeyCode.None;
             if (_active == this) _active = null;
             SetCapLayout(false);
             RefreshLabel();
@@ -1222,6 +1264,7 @@ internal static class VoiceUiKit
                 if (_active != null && _active != this) _active.EndCapture();
                 _capturing = true;
                 _armed = false;
+                _pendingModifier = KeyCode.None;
                 _active = this;
                 SetCapLayout(true);
                 RefreshLabel();
@@ -1245,45 +1288,90 @@ internal static class VoiceUiKit
                 return;
             }
 
-            if (Input.GetKeyDown(KeyCode.Escape)) { EndCapture(); return; }
-            if (Input.GetKeyDown(KeyCode.Delete) || Input.GetKeyDown(KeyCode.Backspace))
-            { _clear(); EndCapture(); return; }
+            if (Input.GetKeyDown(KeyCode.Escape))
+            { ConsumeCaptureInput(KeyCode.Escape); EndCapture(); return; }
+            if (Input.GetKeyDown(KeyCode.Delete))
+            { _clear(); ConsumeCaptureInput(KeyCode.Delete); EndCapture(); return; }
+            if (Input.GetKeyDown(KeyCode.Backspace))
+            { _clear(); ConsumeCaptureInput(KeyCode.Backspace); EndCapture(); return; }
 
             for (int m = 0; m <= 6; m++)
             {
                 if (!Input.GetMouseButtonDown(m)) continue;
-                if (Contains(_clearBtn.GetComponent<RectTransform>())) { _clear(); EndCapture(); return; }
-                if (Contains(_cancelBtn.GetComponent<RectTransform>())) { EndCapture(); return; }
-                _setMod?.Invoke(HeldModifier()); _set(MouseToKey(m)); EndCapture(); return;
+                if (Contains(_clearBtn.GetComponent<RectTransform>())) { _clear(); ConsumeCaptureInput(MouseToKey(m)); EndCapture(); return; }
+                if (Contains(_cancelBtn.GetComponent<RectTransform>())) { ConsumeCaptureInput(MouseToKey(m)); EndCapture(); return; }
+                Commit(MouseToKey(m), PendingOrHeldModifier());
+                return;
+            }
+
+            if (_pendingModifier == KeyCode.None)
+            {
+                var pressedModifier = PressedModifier();
+                if (pressedModifier != KeyCode.None)
+                {
+                    _pendingModifier = pressedModifier;
+                    RefreshLabel();
+                }
             }
 
             foreach (var kc in _keyCandidates)
             {
                 if (kc == KeyCode.Escape || kc == KeyCode.Delete || kc == KeyCode.Backspace) continue;
                 if (IsModifierKey(kc)) continue;
-                if (Input.GetKeyDown(kc)) { _setMod?.Invoke(HeldModifier()); _set(kc); EndCapture(); return; }
+                if (Input.GetKeyDown(kc)) { Commit(kc, PendingOrHeldModifier()); return; }
+            }
+
+            if (_pendingModifier != KeyCode.None && Input.GetKeyUp(_pendingModifier))
+            {
+                Commit(_pendingModifier, KeyCode.None);
             }
         }
 
-        private static bool IsModifierKey(KeyCode k) =>
-            k == KeyCode.LeftShift || k == KeyCode.RightShift
-            || k == KeyCode.LeftControl || k == KeyCode.RightControl
-            || k == KeyCode.LeftAlt || k == KeyCode.RightAlt;
-
-        private static KeyCode HeldModifier()
+        private void Commit(KeyCode key, KeyCode modifier)
         {
-            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) return KeyCode.LeftShift;
-            if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) return KeyCode.LeftControl;
-            if (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) return KeyCode.LeftAlt;
+            _set(key, modifier, VoiceModifierMatch.Exact);
+            ConsumeCaptureInput(key, modifier);
+            EndCapture();
+        }
+
+        private KeyCode PendingOrHeldModifier()
+            => _pendingModifier != KeyCode.None ? _pendingModifier : HeldModifier();
+
+        private static void ConsumeCaptureInput(
+            KeyCode primary = KeyCode.None,
+            KeyCode modifier = KeyCode.None)
+        {
+            _lastConsumedInputFrame = Time.frameCount;
+            _suppressUntilPrimaryReleased = primary;
+            _suppressUntilModifierReleased = modifier;
+        }
+
+        private static bool IsHeld(KeyCode key)
+            => key != KeyCode.None && Input.GetKey(key);
+
+        private static bool IsModifierKey(KeyCode k) => VoiceKeybind.IsModifierKey(k);
+
+        private static KeyCode PressedModifier()
+        {
+            foreach (var modifier in _modifierCandidates)
+                if (Input.GetKeyDown(modifier)) return modifier;
             return KeyCode.None;
         }
 
-        private static string ModName(KeyCode k) => k switch
+        private static KeyCode HeldModifier()
         {
-            KeyCode.LeftShift or KeyCode.RightShift => "Shift",
-            KeyCode.LeftControl or KeyCode.RightControl => "Ctrl",
-            KeyCode.LeftAlt or KeyCode.RightAlt => "Alt",
-            _ => k.ToString()
+            foreach (var modifier in _modifierCandidates)
+                if (Input.GetKey(modifier)) return modifier;
+            return KeyCode.None;
+        }
+
+        private static readonly KeyCode[] _modifierCandidates =
+        {
+            KeyCode.LeftShift, KeyCode.RightShift,
+            KeyCode.LeftControl, KeyCode.RightControl,
+            KeyCode.LeftAlt, KeyCode.RightAlt, KeyCode.AltGr,
+            KeyCode.LeftCommand, KeyCode.RightCommand,
+            KeyCode.LeftWindows, KeyCode.RightWindows,
         };
 
         private static KeyCode MouseToKey(int m) => m switch
@@ -1297,22 +1385,6 @@ internal static class VoiceUiKit
             6 => KeyCode.Mouse6,
             _ => KeyCode.None
         };
-
-        private static string KeyName(KeyCode k)
-        {
-            if (k == KeyCode.None) return "<color=#607282>None</color>";
-            return k switch
-            {
-                KeyCode.Mouse0 => "MB1",
-                KeyCode.Mouse1 => "MB2",
-                KeyCode.Mouse2 => "MB3",
-                KeyCode.Mouse3 => "MB4",
-                KeyCode.Mouse4 => "MB5",
-                KeyCode.Mouse5 => "MB6",
-                KeyCode.Mouse6 => "MB7",
-                _ => k.ToString()
-            };
-        }
 
         private static readonly KeyCode[] _keyCandidates = BuildKeyCandidates();
         private static KeyCode[] BuildKeyCandidates()
