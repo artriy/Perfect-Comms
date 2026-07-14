@@ -84,12 +84,12 @@ public static class PingTrackerPatch
     // Extra vertical-stack pitch added ONLY when the name sits ABOVE the icon (Top), so an above-name never
     // collides with the slot above it (the default SlotHeight is tuned for names BELOW the icon).
     private const float TopNameExtraPitch = 0.30f;
-    private const float BottomNameLift = 0.12f;
     private const float RingScale   = 0.48f;
     private const float StaleSlotTimeoutSeconds = 2f;
-    private const float BackdropPad = 0.12f;
+    // BetterCrewLink-style panel: tight, flat padding rather than the old wide shadow halo.
+    private const float BackdropPad = 0.05f;
     private const float NameGap = 0.10f;
-    private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.6f);
+    private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.5f);
     // Manual-layout mode: viewport placement + edge clamping, mirroring the voice buttons.
     private const float ManualViewportDepth   = 10f;
     private const float ManualViewportPadding = 0.015f;
@@ -104,16 +104,20 @@ public static class PingTrackerPatch
     private const float              ColorPrewarmInterval = 0.25f; // warm one uncached avatar colour per quarter-second
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
-    private static bool              _layoutAnchoredBottom;
     private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopRight;
     private static bool              _manualLayout;
     private static float             _manualX = 0.5f;
     private static float             _manualY = 0.85f;
+    private static SpeakingBarNamePosition _configuredNamePosition = SpeakingBarNamePosition.Auto;
     private static SpeakingBarNamePosition _namePosition = SpeakingBarNamePosition.Bottom;
     private static bool              _backdropEnabled;
     private static float             _barScale = 1f;
     private static bool              _fixedAllPlayers;
+    private static bool              _showFake15Players;
     private static readonly HashSet<byte> _publiclyDead = new();
+    private static VoiceGamePhase _previousPublicDeathPhase = VoiceGamePhase.Menu;
+    private static bool _previousPublicDeathMeetingActive;
+    private static bool _publicDeathPublicationPending;
     private static readonly List<byte> _fixedRoster = new();
     private static readonly HashSet<byte> _fixedRosterSet = new();
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
@@ -129,6 +133,16 @@ public static class PingTrackerPatch
     private static bool _layoutDirty;
     // Set when the slot set or an icon changes; gates the expensive per-slot sorting re-stamp.
     private static bool _sortingDirty;
+    private static readonly IComparer<byte> PublicRosterComparer = new PublicRosterIdComparer();
+    private const byte PreviewPlayerIdStart = 240;
+    private const int PreviewPlayerCount = 15;
+    private const int PreviewGhostStartIndex = 10;
+    private static readonly string[] PreviewPlayerNames =
+    {
+        "Player 01", "Player 02", "Player 03", "Player 04", "Player 05",
+        "Player 06", "Player 07", "Player 08", "Player 09", "Player 10",
+        "Ghost 11", "Ghost 12", "Ghost 13", "Ghost 14", "Ghost 15",
+    };
 
     public static void ApplySpeakingBarPosition(SpeakingBarPosition pos)
     {
@@ -138,7 +152,7 @@ public static class PingTrackerPatch
         if (_manualLayout) return;
 
         _layoutVertical       = IsVerticalPreset(pos);
-        _layoutAnchoredBottom = IsBottomAnchoredPreset(pos);
+        _namePosition         = ResolveNamePosition();
         if (_barAspect == null) return;
         _barAspect.enabled = true;
         ApplyPositionToAspect(_barAspect, pos);
@@ -157,21 +171,22 @@ public static class PingTrackerPatch
         _manualLayout = settings.SpeakingBarManualLayout.Value;
         _manualX      = settings.SpeakingBarX.Value;
         _manualY      = settings.SpeakingBarY.Value;
-        _namePosition = settings.SpeakingBarNamePosition.Value;
+        _configuredNamePosition = settings.SpeakingBarNamePosition.Value;
         _backdropEnabled = settings.SpeakingBarBackdrop.Value;
-        _barScale     = Mathf.Clamp(settings.SpeakingBarScale.Value, 0.5f, 2.0f);
+        _barScale     = Mathf.Clamp(settings.SpeakingBarScale.Value,
+            SpeakingBarScalePolicy.MinimumUserScale,
+            SpeakingBarScalePolicy.MaximumUserScale);
         _fixedAllPlayers = settings.SpeakingBarFixedAllPlayers.Value;
+        _showFake15Players = settings.ShowFake15Players.Value;
 
         if (_manualLayout)
         {
             _layoutVertical       = settings.SpeakingBarLayout.Value == VoiceControlsLayout.Vertical;
-            _layoutAnchoredBottom = false;
             if (_barAspect != null) _barAspect.enabled = false;
         }
         else
         {
             _layoutVertical       = IsVerticalPreset(_barPosition);
-            _layoutAnchoredBottom = IsBottomAnchoredPreset(_barPosition);
             // Drop any auto-fit shrink applied while manual mode was active.
             ApplyRootScale();
             if (_barAspect != null)
@@ -182,18 +197,27 @@ public static class PingTrackerPatch
             }
         }
 
+        _namePosition = ResolveNamePosition();
+
         _layoutDirty = true;
         LayoutSlotsIfDirty();
     }
 
     private static void ApplyRootScale()
     {
-        if (_barRoot != null) _barRoot.transform.localScale = Vector3.one * _barScale;
+        if (_barRoot != null)
+            _barRoot.transform.localScale = Vector3.one * SpeakingBarScalePolicy.ToRenderedScale(_barScale);
     }
 
     public static void ClearSpeakingBarSlots()
     {
-        if (_slots.Count == 0) return;
+        if (_slots.Count == 0)
+        {
+            _slotOrder.Clear();
+            if (_backdropSR != null) _backdropSR.enabled = false;
+            if (_barRoot != null) _barRoot.SetActive(false);
+            return;
+        }
         foreach (var kv in _slots)
         {
             var slot = kv.Value;
@@ -203,6 +227,8 @@ public static class PingTrackerPatch
         }
         _slots.Clear();
         _slotOrder.Clear();
+        if (_backdropSR != null) _backdropSR.enabled = false;
+        if (_barRoot != null) _barRoot.SetActive(false);
         _layoutDirty = true;
         _sortingDirty = true;
     }
@@ -210,18 +236,102 @@ public static class PingTrackerPatch
     private static void UpdatePubliclyDead(VoiceGameStateSnapshot? snapshot)
     {
         if (snapshot == null) return;
-        if (snapshot.Phase is VoiceGamePhase.Lobby or VoiceGamePhase.Menu)
+
+        bool reset = SpeakingBarRosterPolicy.IsPublicDeathResetPhase(snapshot.Phase);
+        bool publish = SpeakingBarRosterPolicy.IsPublicDeathPublicationBoundary(
+            _previousPublicDeathPhase,
+            _previousPublicDeathMeetingActive,
+            snapshot.Phase,
+            snapshot.MeetingActive);
+
+        _previousPublicDeathPhase = snapshot.Phase;
+        _previousPublicDeathMeetingActive = snapshot.MeetingActive;
+        if (reset)
         {
-            _publiclyDead.Clear();
+            _publicDeathPublicationPending = false;
+            if (_publiclyDead.Count == 0) return;
+            ApplyPublishedDeaths(new HashSet<byte>());
             return;
         }
-        if (snapshot.MeetingActive || snapshot.Phase is VoiceGamePhase.Meeting or VoiceGamePhase.Exile)
-        {
-            foreach (var p in snapshot.Players)
-                if (p.IsDead)
-                    _publiclyDead.Add(p.PlayerId);
-        }
+        if (publish)
+            _publicDeathPublicationPending = true;
+        if (!_publicDeathPublicationPending) return;
+        if (!SpeakingBarRosterPolicy.CanPublishFromSnapshot(
+                snapshot.PlayerEnumerationCompleted,
+                snapshot.RoutingRosterRetained))
+            return;
+
+        _publicDeathPublicationPending = false;
+
+        // Roster work happens only on a public boundary, never on every task frame.
+        var next = new HashSet<byte>();
+        foreach (var player in snapshot.Players)
+            if (player.IsDead)
+                next.Add(player.PlayerId);
+        ApplyPublishedDeaths(next);
     }
+
+    private static void ApplyPublishedDeaths(HashSet<byte> next)
+    {
+        if (_publiclyDead.SetEquals(next)) return;
+
+        _publiclyDead.Clear();
+        foreach (byte id in next)
+            _publiclyDead.Add(id);
+
+        // A public boundary may move several existing slots at once. Keep both modes stable
+        // during tasks, then apply the alive-first grouping as one meeting/exile update.
+        _fixedRoster.Sort(PublicRosterComparer);
+        _slotOrder.Sort(PublicRosterComparer);
+        _layoutDirty = true;
+    }
+
+    private static void ResetPublicDeathState()
+    {
+        _publiclyDead.Clear();
+        _previousPublicDeathPhase = VoiceGamePhase.Menu;
+        _previousPublicDeathMeetingActive = false;
+        _publicDeathPublicationPending = false;
+    }
+
+    private static SpeakingBarNamePosition ResolveNamePosition()
+    {
+        if (_configuredNamePosition != SpeakingBarNamePosition.Auto)
+            return _configuredNamePosition;
+
+        if (!_manualLayout)
+            return SpeakingBarLayoutPolicy.RecommendedNamePositionFor(_barPosition);
+
+        // Manual mode points labels into the screen from the nearest edge. Horizontal-edge
+        // ties win at corners so left/right placements stay compact beside vertical columns.
+        float leftRightDistance = Mathf.Min(_manualX, 1f - _manualX);
+        float topBottomDistance = Mathf.Min(_manualY, 1f - _manualY);
+        if (leftRightDistance > 0.33f && topBottomDistance > 0.33f)
+            return _layoutVertical ? SpeakingBarNamePosition.Right : SpeakingBarNamePosition.Bottom;
+        if (leftRightDistance <= topBottomDistance)
+            return _manualX <= 0.5f ? SpeakingBarNamePosition.Right : SpeakingBarNamePosition.Left;
+
+        return _manualY >= 0.5f ? SpeakingBarNamePosition.Bottom : SpeakingBarNamePosition.Top;
+    }
+
+    private static bool IsPreviewPlayerId(byte playerId)
+        => playerId >= PreviewPlayerIdStart && playerId < PreviewPlayerIdStart + PreviewPlayerCount;
+
+    private static int PreviewIndex(byte playerId)
+        => playerId - PreviewPlayerIdStart;
+
+    private static bool IsPreviewGhost(byte playerId)
+        => IsPreviewPlayerId(playerId) && PreviewIndex(playerId) >= PreviewGhostStartIndex;
+
+    private static float PreviewVoiceLevel(int previewIndex)
+        => previewIndex switch
+        {
+            0 => 0.86f,
+            4 => 0.58f,
+            9 => 0.74f,
+            12 => 0.92f,
+            _ => 0f,
+        };
 
     private static bool IsFixedEligible(VoicePlayerSnapshot p)
         // IsVisible is derived from the transient Unity GameObject state, which commonly flips while
@@ -239,7 +349,7 @@ public static class PingTrackerPatch
             if (_fixedRosterSet.Add(p.PlayerId))
                 _fixedRoster.Add(p.PlayerId);
         }
-        _fixedRoster.Sort();
+        _fixedRoster.Sort(PublicRosterComparer);
 
         foreach (byte id in _fixedRoster)
         {
@@ -271,6 +381,7 @@ public static class PingTrackerPatch
                 {
                     CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(existing.IconGO, player, id);
                     existing.CosmeticsComplete = true;
+                    existing.GhostAlphaIcon = null;
                     _layoutDirty = true;
                     _sortingDirty = true;
                 }
@@ -295,11 +406,22 @@ public static class PingTrackerPatch
 
     private static void ApplyFixedRosterOrder()
     {
-        bool changed = _slotOrder.Count != _fixedRoster.Count;
+        int desiredCount = 0;
+        foreach (byte id in _fixedRoster)
+            if (_slots.ContainsKey(id))
+                desiredCount++;
+
+        bool changed = _slotOrder.Count != desiredCount;
         if (!changed)
         {
-            for (int i = 0; i < _fixedRoster.Count; i++)
-                if (_slotOrder[i] != _fixedRoster[i]) { changed = true; break; }
+            int orderIndex = 0;
+            foreach (byte id in _fixedRoster)
+            {
+                if (!_slots.ContainsKey(id)) continue;
+                if (_slotOrder[orderIndex++] == id) continue;
+                changed = true;
+                break;
+            }
         }
         if (!changed) return;
 
@@ -310,11 +432,11 @@ public static class PingTrackerPatch
         _layoutDirty = true;
     }
 
-    private static void ApplyFixedGhostAlpha(VoiceGameStateSnapshot snapshot)
+    private static void ApplyPublicGhostAlpha()
     {
         foreach (var kv in _slots)
         {
-            bool ghost = snapshot.TryGetPlayer(kv.Key, out var p) && p.IsDead && _publiclyDead.Contains(kv.Key);
+            bool ghost = _showFake15Players ? IsPreviewGhost(kv.Key) : _publiclyDead.Contains(kv.Key);
             float target = ghost ? 0.45f : 1f;
             var slot = kv.Value;
             if (slot.IconGO == null)
@@ -342,18 +464,7 @@ public static class PingTrackerPatch
     }
 
     private static bool IsVerticalPreset(SpeakingBarPosition pos)
-        => pos is SpeakingBarPosition.TopLeft
-            or SpeakingBarPosition.TopRight
-            or SpeakingBarPosition.BottomLeft
-            or SpeakingBarPosition.BottomRight
-            or SpeakingBarPosition.MiddleLeft
-            or SpeakingBarPosition.MiddleRight;
-
-    private static bool IsBottomAnchoredPreset(SpeakingBarPosition pos)
-        => pos is SpeakingBarPosition.BottomLeft
-            or SpeakingBarPosition.BottomMiddle
-            or SpeakingBarPosition.BottomRight;
-
+        => SpeakingBarLayoutPolicy.OrientationFor(pos) == VoiceControlsLayout.Vertical;
 
     static void Postfix(PingTracker __instance)
     {
@@ -439,6 +550,19 @@ public static class PingTrackerPatch
                 }
             }
 
+            UpdatePubliclyDead(snapshot);
+            if (_showFake15Players)
+            {
+                // Keep the real meeting indicators live, but replace only the local speaking bar.
+                // Preview slots never enter the privacy, transport, roster, or audio paths.
+                if (MeetingHud.Instance == null)
+                    MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
+                _playerLookup.Clear();
+                RenderFakePreview(__instance);
+                VoiceFrameProfiler.End("overlay.pingtracker", overlayTicks);
+                return;
+            }
+
             // Rebuild the FindPlayer lookup only when it will actually be read this frame — i.e. when
             // someone is speaking (the active-speaker loop calls FindPlayer/GetFingerprint) or slots are
             // still fading out. When the overlay is idle (nobody speaking, no slots), skip the per-frame
@@ -451,7 +575,6 @@ public static class PingTrackerPatch
             if (MeetingHud.Instance == null)
                 MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
 
-            UpdatePubliclyDead(snapshot);
             // Fixed all-players is a roster: show real identities, never live disguises (a meeting forces this too).
             CrewmateAvatarRenderer.PreferRealIdentity = _fixedAllPlayers;
             bool fixedActive = _fixedAllPlayers && snapshot != null;
@@ -530,6 +653,7 @@ public static class PingTrackerPatch
                             // The player's cosmetics finished loading — attach them in place (no destroy/recreate pop).
                             CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(slot.IconGO, player, id);
                             slot.CosmeticsComplete = true;
+                            slot.GhostAlphaIcon = null;
                             _layoutDirty = true;
                             _sortingDirty = true;
                         }
@@ -569,7 +693,6 @@ public static class PingTrackerPatch
                         _fadedSlotIds.Add(kv.Key);
                 foreach (var id in _fadedSlotIds) RemoveSlot(id);
                 ApplyFixedRosterOrder();
-                ApplyFixedGhostAlpha(snapshot!);
             }
             else
             {
@@ -578,7 +701,10 @@ public static class PingTrackerPatch
                     if ((!kv.Value.IsSpeaking && kv.Value.Visibility <= 0.01f) || ShouldForceRemoveSlot(kv.Key, kv.Value))
                         _fadedSlotIds.Add(kv.Key);
                 foreach (var id in _fadedSlotIds) RemoveSlot(id);
+                ApplyDynamicRosterOrder();
             }
+
+            ApplyPublicGhostAlpha();
 
             LayoutSlotsIfDirty();
 
@@ -590,6 +716,96 @@ public static class PingTrackerPatch
             LogOverlayError("PingTracker overlay update", ex);
         }
         VoiceFrameProfiler.End("overlay.pingtracker", overlayTicks);
+    }
+
+    private static void RenderFakePreview(PingTracker? template)
+    {
+        if (_barRoot == null) return;
+
+        _activeSpeakerIds.Clear();
+        _activeSpeakerLevels.Clear();
+        _activeSpeakerNames.Clear();
+        EnsureFakePreviewSlots();
+        _barRoot.SetActive(true);
+
+        foreach (var kv in _slots)
+        {
+            int previewIndex = PreviewIndex(kv.Key);
+            float level = PreviewVoiceLevel(previewIndex);
+            kv.Value.IsSpeaking = level > 0f;
+            kv.Value.TargetLevel = level;
+            if (level > 0f)
+                kv.Value.LastActiveTime = Time.time;
+        }
+
+        UpdateSlotRings();
+        ApplyPublicGhostAlpha();
+        LayoutSlotsIfDirty();
+        KeepSpeakingBarOnTop(template);
+    }
+
+    private static void EnsureFakePreviewSlots()
+    {
+        _fadedSlotIds.Clear();
+        foreach (byte id in _slots.Keys)
+            if (!IsPreviewPlayerId(id))
+                _fadedSlotIds.Add(id);
+        foreach (byte id in _fadedSlotIds)
+            RemoveSlot(id);
+
+        for (int i = 0; i < PreviewPlayerCount; i++)
+        {
+            byte id = (byte)(PreviewPlayerIdStart + i);
+            if (!_slots.TryGetValue(id, out var slot)
+                || slot.RingGO == null
+                || slot.RingRenderer == null
+                || slot.LabelTMP == null)
+            {
+                if (slot != null)
+                    RemoveSlot(id);
+                AddPreviewSlot(id, i);
+                continue;
+            }
+
+            // Palette assets can be transiently unavailable while scenes change. Keep the
+            // ring/name slot and retry just the optional body instead of rebuilding everything.
+            if (slot.IconGO == null
+                && CrewmateAvatarRenderer.TryCreatePreview(i, _barRoot!.transform, out var iconGO))
+            {
+                slot.IconGO = iconGO;
+                _layoutDirty = true;
+                _sortingDirty = true;
+            }
+        }
+
+        bool orderChanged = _slotOrder.Count != PreviewPlayerCount;
+        if (!orderChanged)
+        {
+            for (int i = 0; i < PreviewPlayerCount; i++)
+            {
+                if (_slotOrder[i] == PreviewPlayerIdStart + i) continue;
+                orderChanged = true;
+                break;
+            }
+        }
+
+        if (!orderChanged) return;
+        _slotOrder.Clear();
+        for (int i = 0; i < PreviewPlayerCount; i++)
+        {
+            byte id = (byte)(PreviewPlayerIdStart + i);
+            if (_slots.ContainsKey(id))
+                _slotOrder.Add(id);
+        }
+        _layoutDirty = true;
+    }
+
+    private static void ApplyDynamicRosterOrder()
+    {
+        // Slot/public-state changes already mark layout dirty. Avoid a per-frame copy/sort
+        // while the dynamic bar is merely animating voice visibility.
+        if (!_layoutDirty || _slotOrder.Count <= 1) return;
+        _slotOrder.Sort(PublicRosterComparer);
     }
 
     private static float _lastOverlayErrorLog = -999f;
@@ -633,20 +849,22 @@ public static class PingTrackerPatch
             _manualLayout = settings.SpeakingBarManualLayout.Value;
             _manualX      = settings.SpeakingBarX.Value;
             _manualY      = settings.SpeakingBarY.Value;
-            _namePosition = settings.SpeakingBarNamePosition.Value;
+            _configuredNamePosition = settings.SpeakingBarNamePosition.Value;
             _backdropEnabled = settings.SpeakingBarBackdrop.Value;
-            _barScale     = Mathf.Clamp(settings.SpeakingBarScale.Value, 0.5f, 2.0f);
+            _barScale     = Mathf.Clamp(settings.SpeakingBarScale.Value,
+                SpeakingBarScalePolicy.MinimumUserScale,
+                SpeakingBarScalePolicy.MaximumUserScale);
             _fixedAllPlayers = settings.SpeakingBarFixedAllPlayers.Value;
+            _showFake15Players = settings.ShowFake15Players.Value;
             if (_manualLayout)
             {
                 _layoutVertical       = settings.SpeakingBarLayout.Value == VoiceControlsLayout.Vertical;
-                _layoutAnchoredBottom = false;
             }
             else
             {
                 _layoutVertical       = IsVerticalPreset(_barPosition);
-                _layoutAnchoredBottom = IsBottomAnchoredPreset(_barPosition);
             }
+            _namePosition = ResolveNamePosition();
         }
 
         ApplyRootScale();
@@ -795,7 +1013,7 @@ public static class PingTrackerPatch
         if (sizeY > allowed) scale = Mathf.Min(scale, allowed / sizeY);
 
         if (scale < 0.999f)
-            _barRoot.transform.localScale = Vector3.one * scale * _barScale;
+            _barRoot.transform.localScale = Vector3.one * scale * SpeakingBarScalePolicy.ToRenderedScale(_barScale);
     }
 
     // Generalizes VoiceChatHudState.ClampVoiceButtonViewportPositions from the 3 fixed
@@ -846,8 +1064,21 @@ public static class PingTrackerPatch
                 var lp = slot.LabelTMP.transform.position;
                 float lhw = slot.LabelWidth * 0.5f * rootScale;
                 float lhh = slot.LabelHeight * 0.5f * rootScale;
-                AccumulateBox(cam, lp.x, lp.y, lhw, lhh, depthZ, ref minX, ref maxX, ref minY, ref maxY, ref any);
+                float labelCenterX = _namePosition switch
+                {
+                    SpeakingBarNamePosition.Left => lp.x - lhw,
+                    SpeakingBarNamePosition.Right => lp.x + lhw,
+                    _ => lp.x,
+                };
+                AccumulateBox(cam, labelCenterX, lp.y, lhw, lhh, depthZ,
+                    ref minX, ref maxX, ref minY, ref maxY, ref any);
             }
+        }
+        if (_backdropEnabled && _backdropSR != null && _backdropSR.enabled)
+        {
+            var bounds = _backdropSR.bounds;
+            AccumulateBox(cam, bounds.center.x, bounds.center.y, bounds.extents.x, bounds.extents.y,
+                bounds.center.z, ref minX, ref maxX, ref minY, ref maxY, ref any);
         }
         return any;
     }
@@ -987,6 +1218,7 @@ public static class PingTrackerPatch
         tmp.fontSize           = LabelSize;
         tmp.alignment          = TextAlignmentOptions.Center;
         tmp.enableWordWrapping = false;
+        tmp.overflowMode       = TextOverflowModes.Ellipsis;
         tmp.sortingLayerID     = SortingLayer.NameToID(VCSorting.Layer);
         tmp.sortingOrder       = VCSorting.Text;
         tmp.color              = Color.white;
@@ -999,6 +1231,51 @@ public static class PingTrackerPatch
             slot.LabelTMP.text = fallbackName;
         VCOverlayCamera.EnsureOnTop(labelGO);
         VoiceFrameProfiler.End("overlay.labelcreate", labelTicks);
+        _slots[playerId] = slot;
+        _slotOrder.Add(playerId);
+        _layoutDirty = true;
+        _sortingDirty = true;
+    }
+
+    private static void AddPreviewSlot(byte playerId, int previewIndex)
+    {
+        if (_barRoot == null) return;
+
+        float voiceLevel = PreviewVoiceLevel(previewIndex);
+        var slot = new SpeakerSlot
+        {
+            Level = voiceLevel,
+            TargetLevel = voiceLevel,
+            SmoothedLevel = VoiceLevelVisual.NormalizeVoiceLevel(voiceLevel),
+            Visibility = voiceLevel > 0f ? 1f : 0f,
+            IsSpeaking = voiceLevel > 0f,
+            LastActiveTime = Time.time,
+            LastPlayerSeenTime = Time.time,
+            CosmeticsComplete = true,
+        };
+
+        if (CrewmateAvatarRenderer.TryCreatePreview(previewIndex, _barRoot.transform, out var iconGO))
+            slot.IconGO = iconGO;
+
+        CreateRing(playerId, slot);
+
+        var labelGO = new GameObject("VC_PreviewLabel");
+        labelGO.transform.SetParent(_barRoot.transform, false);
+        var tmp = labelGO.AddComponent<TextMeshPro>();
+        tmp.text = PreviewPlayerNames[previewIndex];
+        tmp.fontSize = LabelSize;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.enableWordWrapping = false;
+        tmp.overflowMode = TextOverflowModes.Ellipsis;
+        tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+        tmp.sortingOrder = VCSorting.Text;
+        tmp.color = Color.white;
+        tmp.alpha = 1f;
+        tmp.rectTransform.sizeDelta = new Vector2(1.4f, 0.45f);
+        slot.LabelTMP = tmp;
+        slot.LabelMeasurePending = true;
+        VCOverlayCamera.EnsureOnTop(labelGO);
+
         _slots[playerId] = slot;
         _slotOrder.Add(playerId);
         _layoutDirty = true;
@@ -1168,7 +1445,6 @@ public static class PingTrackerPatch
             _vanillaNameStyleVersion++;
         }
 
-        float maxVis = 0f;
         foreach (var kv in _slots)
         {
             var slot = kv.Value;
@@ -1190,6 +1466,10 @@ public static class PingTrackerPatch
                     !float.IsNaN(h) && !float.IsInfinity(h) && h >= 0f)
                 {
                     slot.LabelMeasurePending = false;
+                    // The visible TMP rect ellipsizes long names; layout must use the same cap so
+                    // one pathological name cannot stretch every row/column off-screen.
+                    w = Mathf.Min(w, slot.LabelTMP.rectTransform.sizeDelta.x);
+                    h = Mathf.Min(h, slot.LabelTMP.rectTransform.sizeDelta.y);
                     if (Mathf.Abs(w - slot.LabelWidth) > 0.01f || Mathf.Abs(h - slot.LabelHeight) > 0.01f)
                     {
                         slot.LabelWidth = w;
@@ -1212,18 +1492,13 @@ public static class PingTrackerPatch
             slot.RingRenderer.color = color;
             slot.RingGO.transform.localScale = Vector3.one * RingScale;
             slot.RingRenderer.enabled = slot.Visibility > 0.01f;
-            maxVis = Mathf.Max(maxVis, slot.Visibility);
         }
 
         if (_backdropSR != null)
         {
-            _backdropSR.enabled = _backdropEnabled;
-            if (_backdropEnabled)
-            {
-                var c = BackdropColor;
-                c.a *= maxVis;
-                _backdropSR.color = c;
-            }
+            _backdropSR.enabled = _backdropEnabled && _slots.Count > 0;
+            if (_backdropSR.enabled)
+                _backdropSR.color = BackdropColor;
         }
     }
 
@@ -1241,89 +1516,124 @@ public static class PingTrackerPatch
     private static void LayoutSlots()
     {
         _layoutDirty = false;
+        int count = 0;
+        float crossPitch = SlotWidth;
+        foreach (byte id in _slotOrder)
+        {
+            if (!_slots.TryGetValue(id, out var slot)) continue;
+            crossPitch = Mathf.Max(crossPitch, RequiredSlotPitch(slot));
+            count++;
+        }
+        if (count == 0) return;
+
+        float primaryPitch = _namePosition == SpeakingBarNamePosition.Top
+            ? SlotHeight + TopNameExtraPitch
+            : SlotHeight;
+        int safeCapacity = _layoutVertical
+            ? MaxSlotsPerColumn(primaryPitch, count)
+            : MaxSlotsPerRow(crossPitch, count);
+        int lineCount = SpeakingBarLayoutPolicy.GetLineCount(count, safeCapacity);
+        var primaryDirection = ActivePrimaryDirection();
+        var overflowDirection = ActiveOverflowDirection();
+        float cMinX = 0f, cMaxX = 0f, cMinY = 0f, cMaxY = 0f;
+        bool any = false;
+        int layoutIndex = 0;
+
+        foreach (byte id in _slotOrder)
+        {
+            if (!_slots.TryGetValue(id, out var slot)) continue;
+            var placement = SpeakingBarLayoutPolicy.GetPlacement(layoutIndex, count, lineCount);
+            float x;
+            float y;
+            if (_layoutVertical)
+            {
+                float overflowSign = overflowDirection == SpeakingBarLayoutDirection.Left ? -1f : 1f;
+                float primarySign = primaryDirection == SpeakingBarLayoutDirection.Up ? 1f : -1f;
+                x = ShouldCenterOverflowLines()
+                    ? (placement.LineIndex - (lineCount - 1) * 0.5f) * crossPitch
+                    : placement.LineIndex * crossPitch * overflowSign;
+                float indexOffset = placement.IndexInLine;
+                if (ShouldCenterVerticalLines())
+                    indexOffset -= (placement.LineSize - 1) * 0.5f;
+                y = indexOffset * primaryPitch * primarySign;
+            }
+            else
+            {
+                float overflowSign = overflowDirection == SpeakingBarLayoutDirection.Up ? 1f : -1f;
+                x = (placement.IndexInLine - (placement.LineSize - 1) * 0.5f) * crossPitch;
+                y = ShouldCenterOverflowLines()
+                    ? ((lineCount - 1) * 0.5f - placement.LineIndex) * primaryPitch
+                    : placement.LineIndex * primaryPitch * overflowSign;
+            }
+
+            PositionSlot(slot, x, y, ref cMinX, ref cMaxX, ref cMinY, ref cMaxY, ref any);
+            layoutIndex++;
+        }
+
+        if (any)
+            UpdateBackdrop(cMinX, cMaxX, cMinY, cMaxY);
+    }
+
+    private static SpeakingBarLayoutDirection ActivePrimaryDirection()
+    {
+        if (!_manualLayout)
+            return SpeakingBarLayoutPolicy.PrimaryDirectionFor(_barPosition);
+        if (!_layoutVertical)
+            return SpeakingBarLayoutDirection.Right;
+        return _manualY < 0.5f ? SpeakingBarLayoutDirection.Up : SpeakingBarLayoutDirection.Down;
+    }
+
+    private static SpeakingBarLayoutDirection ActiveOverflowDirection()
+    {
+        if (!_manualLayout)
+            return SpeakingBarLayoutPolicy.OverflowDirectionFor(_barPosition);
         if (_layoutVertical)
+            return _manualX <= 0.5f ? SpeakingBarLayoutDirection.Right : SpeakingBarLayoutDirection.Left;
+        return _manualY < 0.5f ? SpeakingBarLayoutDirection.Up : SpeakingBarLayoutDirection.Down;
+    }
+
+    private static bool ShouldCenterVerticalLines()
+    {
+        if (!_manualLayout)
+            return _barPosition is SpeakingBarPosition.MiddleLeft or SpeakingBarPosition.MiddleRight;
+        return _manualY > 0.33f && _manualY < 0.67f;
+    }
+
+    private static bool ShouldCenterOverflowLines()
+    {
+        if (!_manualLayout) return false;
+        return _layoutVertical
+            ? _manualX > 0.33f && _manualX < 0.67f
+            : _manualY > 0.33f && _manualY < 0.67f;
+    }
+
+    private static void PositionSlot(
+        SpeakerSlot slot,
+        float x,
+        float y,
+        ref float minX,
+        ref float maxX,
+        ref float minY,
+        ref float maxY,
+        ref bool any)
+    {
+        if (slot.IconGO != null)
+            slot.IconGO.transform.localPosition = new Vector3(x, y, -100f);
+        if (slot.RingGO != null)
+            slot.RingGO.transform.localPosition = new Vector3(x, y, -101f);
+        if (slot.LabelTMP != null)
+            ApplyLabelPlacement(slot.LabelTMP, x, y, y - LabelOffset);
+
+        GetSlotXExtents(slot, x, out float sxMin, out float sxMax);
+        GetSlotYExtents(slot, y, out float syMin, out float syMax);
+        if (!any)
         {
-            bool topNames = _namePosition == SpeakingBarNamePosition.Top;
-            float pitch = topNames ? SlotHeight + TopNameExtraPitch : SlotHeight;
-            float cMinX = 0f, cMaxX = 0f, cMinY = 0f, cMaxY = 0f;
-            int i = 0;
-            foreach (var id in _slotOrder)
-            {
-                if (!_slots.TryGetValue(id, out var slot)) continue;
-                float y = _layoutAnchoredBottom ? i * pitch + BottomNameLift : -i * pitch;
-                float labelY = y - LabelOffset;
-                if (slot.IconGO   != null)
-                    slot.IconGO.transform.localPosition  = new Vector3(0f, y, -100f);
-                if (slot.RingGO   != null)
-                    slot.RingGO.transform.localPosition  = new Vector3(0f, y, -101f);
-                if (slot.LabelTMP != null)
-                    ApplyLabelPlacement(slot.LabelTMP, 0f, y, labelY);
-                GetSlotXExtents(slot, 0f, out float sxMin, out float sxMax);
-                GetSlotYExtents(slot, y, out float syMin, out float syMax);
-                if (i == 0) { cMinX = sxMin; cMaxX = sxMax; cMinY = syMin; cMaxY = syMax; }
-                else
-                {
-                    cMinX = Mathf.Min(cMinX, sxMin); cMaxX = Mathf.Max(cMaxX, sxMax);
-                    cMinY = Mathf.Min(cMinY, syMin); cMaxY = Mathf.Max(cMaxY, syMax);
-                }
-                i++;
-            }
-            if (i > 0)
-                UpdateBackdrop(cMinX, cMaxX, cMinY, cMaxY);
+            minX = sxMin; maxX = sxMax; minY = syMin; maxY = syMax;
+            any = true;
+            return;
         }
-        else
-        {
-            float slotPitch = SlotWidth;
-            int count = 0;
-            foreach (var id in _slotOrder)
-                if (_slots.TryGetValue(id, out var s))
-                {
-                    slotPitch = Mathf.Max(slotPitch, RequiredSlotPitch(s));
-                    count++;
-                }
-            int perRow = MaxSlotsPerRow(slotPitch, count);
-            float rowPitch = _namePosition == SpeakingBarNamePosition.Top
-                ? SlotHeight + TopNameExtraPitch : SlotHeight;
-            float baseY = _layoutAnchoredBottom ? BottomNameLift : 0f;
-            float cMinX = 0f, cMaxX = 0f, cMinY = 0f, cMaxY = 0f;
-            int i = 0;
-            foreach (var id in _slotOrder)
-            {
-                if (!_slots.TryGetValue(id, out var slot)) continue;
-                int row = i / perRow;
-                int col = i % perRow;
-                int rowCount = Mathf.Min(perRow, count - row * perRow);
-                float rowOffset = (rowCount - 1) * slotPitch * 0.5f;
-                float x = col * slotPitch - rowOffset;
-                float iconY = baseY + (_layoutAnchoredBottom ? row * rowPitch : -row * rowPitch);
-                float labelY = iconY - LabelOffset;
-                if (slot.IconGO   != null)
-                    slot.IconGO.transform.localPosition  = new Vector3(x, iconY, -100f);
-                if (slot.RingGO   != null)
-                    slot.RingGO.transform.localPosition  = new Vector3(x, iconY, -101f);
-                if (slot.LabelTMP != null)
-                    ApplyLabelPlacement(slot.LabelTMP, x, iconY, labelY);
-                GetSlotXExtents(slot, x, out float sxMin, out float sxMax);
-                GetSlotYExtents(slot, iconY, out float syMin, out float syMax);
-                if (i == 0) { cMinX = sxMin; cMaxX = sxMax; cMinY = syMin; cMaxY = syMax; }
-                else
-                {
-                    cMinX = Mathf.Min(cMinX, sxMin); cMaxX = Mathf.Max(cMaxX, sxMax);
-                    cMinY = Mathf.Min(cMinY, syMin); cMaxY = Mathf.Max(cMaxY, syMax);
-                }
-                i++;
-            }
-            if (i > 0)
-            {
-                if (_namePosition is SpeakingBarNamePosition.Top or SpeakingBarNamePosition.Bottom)
-                {
-                    float half = Mathf.Max(-cMinX, cMaxX);
-                    cMinX = -half;
-                    cMaxX = half;
-                }
-                UpdateBackdrop(cMinX, cMaxX, cMinY, cMaxY);
-            }
-        }
+        minX = Mathf.Min(minX, sxMin); maxX = Mathf.Max(maxX, sxMax);
+        minY = Mathf.Min(minY, syMin); maxY = Mathf.Max(maxY, syMax);
     }
 
     private static int MaxSlotsPerRow(float slotPitch, int count)
@@ -1332,8 +1642,19 @@ public static class PingTrackerPatch
         var cam = Camera.main;
         if (cam == null || !cam.orthographic || slotPitch <= 0.0001f) return count;
         float worldWidth = 2f * cam.orthographicSize * cam.aspect * (1f - 2f * ManualViewportPadding);
-        float localWidth = worldWidth / Mathf.Max(_barScale, 0.0001f);
-        int fit = Mathf.FloorToInt(localWidth / slotPitch);
+        float localWidth = worldWidth / Mathf.Max(SpeakingBarScalePolicy.ToRenderedScale(_barScale), 0.0001f);
+        int fit = Mathf.FloorToInt(Mathf.Max(0f, localWidth - BackdropPad * 2f) / slotPitch);
+        return Mathf.Clamp(fit, 1, count);
+    }
+
+    private static int MaxSlotsPerColumn(float slotPitch, int count)
+    {
+        if (count <= 1) return 1;
+        var cam = Camera.main;
+        if (cam == null || !cam.orthographic || slotPitch <= 0.0001f) return count;
+        float worldHeight = 2f * cam.orthographicSize * (1f - 2f * ManualViewportPadding);
+        float localHeight = worldHeight / Mathf.Max(SpeakingBarScalePolicy.ToRenderedScale(_barScale), 0.0001f);
+        int fit = Mathf.FloorToInt(Mathf.Max(0f, localHeight - BackdropPad * 2f) / slotPitch);
         return Mathf.Clamp(fit, 1, count);
     }
 
@@ -1404,8 +1725,8 @@ public static class PingTrackerPatch
         if (_backdropSprite != null) return _backdropSprite;
 
         const int size = 64;
-        const float radius = 12f;
-        const float feather = 1.5f;
+        const float radius = 4f;
+        const float feather = 1f;
 
         var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
         var pixels = new Color32[size * size];
@@ -1424,7 +1745,7 @@ public static class PingTrackerPatch
         tex.SetPixels32(pixels);
         tex.Apply();
         _backdropSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 64f, 0,
-            SpriteMeshType.FullRect, new Vector4(16f, 16f, 16f, 16f));
+            SpriteMeshType.FullRect, new Vector4(8f, 8f, 8f, 8f));
         _backdropSprite.hideFlags |= HideFlags.HideAndDontSave;
         return _backdropSprite;
     }
@@ -1472,6 +1793,7 @@ public static class PingTrackerPatch
         _activeSpeakerIds.Clear();
         _activeSpeakerLevels.Clear();
         _fadedSlotIds.Clear();
+        ResetPublicDeathState();
         VoiceOverlayState.InvalidateCache();
         VoiceIdentityPrivacyRuntime.Reset();
         DestroySpeakingBarSlots();
@@ -1502,6 +1824,7 @@ public static class PingTrackerPatch
             _activeSpeakerLevels.Clear();
             _fadedSlotIds.Clear();
             _playerLookup.Clear();
+            ResetPublicDeathState();
             VoiceOverlayState.InvalidateCache();
             VoiceIdentityPrivacyRuntime.Reset();
             VoiceVolumeMenu.ForceClose();
@@ -1695,6 +2018,12 @@ public static class PingTrackerPatch
     // ── Data types ─────────────────────────────────────────────────────────────
     private readonly record struct OutfitFingerprint(
         int OutfitTypeId, int ColorId, string HatId, string SkinId, string VisorId, string PlayerName, bool Concealed);
+
+    private sealed class PublicRosterIdComparer : IComparer<byte>
+    {
+        public int Compare(byte left, byte right)
+            => SpeakingBarRosterPolicy.ComparePlayerIds(left, right, _publiclyDead);
+    }
 
     private class SpeakerSlot
     {

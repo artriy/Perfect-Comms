@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using BepInEx.Configuration;
@@ -46,6 +47,9 @@ public enum SpeakingBarNamePosition
     Top    = 1,
     Left   = 2,
     Right  = 3,
+    // Keep the four explicit positions at their legacy numeric values so existing
+    // config files continue to represent a user override. Auto is the v4 default.
+    Auto   = 4,
 }
 
 public enum JailUnmuteButtonPlacement
@@ -139,6 +143,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<bool> SpeakingBarBackdrop { get; }
     public ConfigEntry<float> SpeakingBarScale { get; }
     public ConfigEntry<bool> SpeakingBarFixedAllPlayers { get; }
+    public ConfigEntry<bool> ShowFake15Players { get; }
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
     public ConfigEntry<JailUnmuteButtonPlacement> JailUnmuteButtonPlacement { get; }
     public ConfigEntry<float> SpeakingBarX { get; }
@@ -178,6 +183,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<string> UpdateNotificationUrl { get; }
 
     private readonly ConfigFile _config;
+    private readonly ConfigEntry<int> _speakingBarSettingsVersion;
     private readonly ConfigEntry<string> _savedMicDeviceName;
 #if WINDOWS
     private readonly ConfigEntry<string> _savedSpkDeviceName;
@@ -224,6 +230,11 @@ public class VoiceChatLocalSettings
     public VoiceChatLocalSettings(ConfigFile config)
     {
         _config = config;
+        string existingConfigText = ReadExistingConfigText(config.ConfigFilePath);
+        bool hadLegacySpeakingBarScale = SpeakingBarScalePolicy.ConfigTextContainsSetting(
+            existingConfigText,
+            "UI",
+            "SpeakingBarScale");
         RefreshDeviceLists();
 
         MicVolume = config.Bind("Audio", "MicVolume", 1f,
@@ -374,16 +385,21 @@ public class VoiceChatLocalSettings
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Horizontal,
             new ConfigDescription("Speaking bar icon direction."));
 
-        SpeakingBarNamePosition = config.Bind("UI", "SpeakingBarNamePosition",
-            VoiceChatPlugin.VoiceChat.SpeakingBarNamePosition.Bottom,
-            new ConfigDescription("Where the player name sits relative to its speaking-bar icon."));
+        _speakingBarSettingsVersion = config.Bind("UI.Internal", "SpeakingBarSettingsVersion", 0,
+            new ConfigDescription("Internal migration version for speaking-bar appearance settings."));
 
-        SpeakingBarBackdrop = config.Bind("UI", "SpeakingBarBackdrop", false,
+        SpeakingBarNamePosition = config.Bind("UI", "SpeakingBarNamePosition",
+            VoiceChatPlugin.VoiceChat.SpeakingBarNamePosition.Auto,
+            new ConfigDescription("Where the player name sits relative to its speaking-bar icon. Auto keeps names inside the screen based on the bar position."));
+
+        SpeakingBarBackdrop = config.Bind("UI", "SpeakingBarBackdrop", true,
             new ConfigDescription("Show a translucent dark backdrop behind the speaking bar."));
 
         SpeakingBarScale = config.Bind("UI", "SpeakingBarScale", 1.0f,
-            new ConfigDescription("Changes the size of the speaking bar, including its player icons and names.",
-                new AcceptableValueRange<float>(0.5f, 2.0f)));
+            new ConfigDescription("Changes the size of the speaking bar, including its player icons and names. In v4, 100% is the same rendered size as 90% in earlier versions.",
+                new AcceptableValueRange<float>(
+                    SpeakingBarScalePolicy.MinimumUserScale,
+                    SpeakingBarScalePolicy.MaximumUserScale)));
 
         SpeakingBarFixedAllPlayers = config.Bind("UI", "SpeakingBarFixedAllPlayers", false,
             new ConfigDescription("Keeps a stable speaking-bar slot for every connected player, including across meeting transitions, instead of showing only current speakers."));
@@ -412,6 +428,8 @@ public class VoiceChatLocalSettings
 
         SyntheticMicTone = config.Bind("Debug.Advanced", "SyntheticMicTone", false,
             new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the native voice engine instead of relying on physical microphone audio."));
+        ShowFake15Players = config.Bind("Debug.Advanced", "ShowFake15Players", false,
+            new ConfigDescription("Show a 15-player fake roster in the speaking bar for layout testing."));
         MicCalibrationDiagnostics = config.Bind("Debug", "MicCalibrationDiagnostics", false,
             new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for the native voice engine."));
 
@@ -465,7 +483,57 @@ public class VoiceChatLocalSettings
         PerPlayerVolumes = config.Bind("Audio", "PerPlayerVolumes", "",
             "Saved per-player voice volumes keyed by player name");
 
+        // Run after every entry is bound so the single migration save writes a
+        // complete config file and cannot disturb still-unbound legacy entries.
+        ApplySpeakingBarV4Migration(hadLegacySpeakingBarScale);
+
         VoiceDiagnostics.SetEnabled(DebugVoiceStats.Value);
+    }
+
+    private static string ReadExistingConfigText(string? configPath)
+    {
+        try
+        {
+            return !string.IsNullOrWhiteSpace(configPath) && File.Exists(configPath)
+                ? File.ReadAllText(configPath)
+                : string.Empty;
+        }
+        catch
+        {
+            // A missing/unreadable snapshot must not prevent settings from loading.
+            // The new defaults still apply; only legacy scale preservation is skipped.
+            return string.Empty;
+        }
+    }
+
+    private void ApplySpeakingBarV4Migration(bool hadLegacySpeakingBarScale)
+    {
+        SpeakingBarV4MigrationPlan plan = SpeakingBarScalePolicy.PlanV4Migration(
+            _speakingBarSettingsVersion.Value,
+            hadLegacySpeakingBarScale,
+            SpeakingBarScale.Value,
+            SpeakingBarBackdrop.Value,
+            SpeakingBarNamePosition.Value);
+        if (!plan.ShouldApply)
+            return;
+
+        // Commit the four related values together. Otherwise SaveOnConfigSet could
+        // persist the converted scale before the version marker and a crash during
+        // startup would apply the conversion a second time on the next launch.
+        bool saveOnConfigSet = _config.SaveOnConfigSet;
+        try
+        {
+            _config.SaveOnConfigSet = false;
+            SpeakingBarScale.Value = plan.Scale;
+            SpeakingBarBackdrop.Value = plan.Backdrop;
+            SpeakingBarNamePosition.Value = plan.NamePosition;
+            _speakingBarSettingsVersion.Value = plan.TargetVersion;
+        }
+        finally
+        {
+            _config.SaveOnConfigSet = saveOnConfigSet;
+        }
+        _config.Save();
     }
 
     // Subscribe AFTER construction (so the ctor's own initial .Value assignments don't dispatch). A single
@@ -667,15 +735,16 @@ public class VoiceChatLocalSettings
         else if (configEntry == SpeakingBarPosition)
         {
             PingTrackerPatch.ApplySpeakingBarPosition(SpeakingBarPosition.Value);
+            PingTrackerPatch.ApplySpeakingBarLayoutSettings();
         }
         else if (configEntry == SpeakingBarManualLayout || configEntry == SpeakingBarX ||
                  configEntry == SpeakingBarY || configEntry == SpeakingBarLayout ||
-                 configEntry == SpeakingBarNamePosition || configEntry == SpeakingBarBackdrop ||
-                 configEntry == SpeakingBarScale)
+                 configEntry == SpeakingBarBackdrop || configEntry == SpeakingBarScale)
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();
         }
-        else if (configEntry == SpeakingBarFixedAllPlayers)
+        else if (configEntry == SpeakingBarNamePosition ||
+                 configEntry == SpeakingBarFixedAllPlayers || configEntry == ShowFake15Players)
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();
             PingTrackerPatch.ClearSpeakingBarSlots();

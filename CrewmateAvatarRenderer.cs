@@ -140,6 +140,66 @@ internal static class CrewmateAvatarRenderer
         return true;
     }
 
+    /// <summary>
+    /// Creates a body-only crewmate for local speaking-bar layout previews. The preview index maps
+    /// deterministically onto the currently registered palette and never reads or caches player,
+    /// outfit, network, or voice state.
+    /// </summary>
+    internal static bool TryCreatePreview(int previewIndex, Transform parent, out GameObject? iconGO)
+    {
+        iconGO = null;
+        if (parent == null || !TryGetPreviewColorId(previewIndex, out int colorId)) return false;
+
+        GameObject? root = null;
+        try
+        {
+            var baseSprite = GetBaseSprite(colorId);
+            if (baseSprite == null) return false;
+
+            root = new GameObject($"VC_SpriteIcon_Preview_{previewIndex}");
+            root.transform.SetParent(parent, false);
+            root.transform.localScale = Vector3.one * RootScale;
+            root.transform.localPosition = Vector3.zero;
+
+            AddSprite(
+                root.transform,
+                "VC_Body_Base",
+                baseSprite,
+                Vector3.zero,
+                Quaternion.identity,
+                Vector3.one * BodyScale,
+                Color.white,
+                BodyOrder);
+            ApplySorting(root);
+            VCOverlayCamera.EnsureOnTop(root);
+            iconGO = root;
+            return true;
+        }
+        catch
+        {
+            // A preview is optional UI. A palette/scene transition must not break the live overlay.
+            if (root != null) Object.Destroy(root);
+            return false;
+        }
+    }
+
+    private static bool TryGetPreviewColorId(int previewIndex, out int colorId)
+    {
+        colorId = 0;
+        try
+        {
+            int count = Math.Min(Palette.PlayerColors.Length, Palette.ShadowColors.Length);
+            if (count <= 0) return false;
+            colorId = previewIndex % count;
+            if (colorId < 0) colorId += count;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     // Rebuilds a speaker's avatar from the outfit captured while in-game. Used on the end-game results screen,
     // where there is no live PlayerControl to read cosmetics from. Returns false if the player was never cached
     // (e.g. never spoke during the game) — the caller then falls back to a ring + name slot.

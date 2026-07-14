@@ -424,6 +424,38 @@ public static class VoiceSettingsPanel
         });
     }
 
+    private static void SpeakingBarNamePositionStep(List<Entry> defs, VoiceChatLocalSettings settings)
+    {
+        // Auto was appended to the persisted enum to preserve the legacy 0-3 values,
+        // but it belongs first in the user-facing stepper because it is the v4 default.
+        var order = new[]
+        {
+            SpeakingBarNamePosition.Auto,
+            SpeakingBarNamePosition.Bottom,
+            SpeakingBarNamePosition.Top,
+            SpeakingBarNamePosition.Left,
+            SpeakingBarNamePosition.Right,
+        };
+        var labels = new[] { "Auto", "Bottom", "Top", "Left", "Right" };
+
+        defs.Add(new Entry
+        {
+            Key = "Speaking Bar Name Position",
+            Visible = Always,
+            Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
+                () => Array.IndexOf(order, settings.SpeakingBarNamePosition.Value) switch
+                {
+                    < 0 => 0,
+                    var index => index,
+                },
+                i => settings.SpeakingBarNamePosition.Value = order[Mathf.Clamp(i, 0, order.Length - 1)],
+                () => order.Length,
+                i => labels[Mathf.Clamp(i, 0, labels.Length - 1)])
+                .Build(pane, "Speaking Bar Name Position", paneW, y, RowH,
+                    SettingHelp(settings.SpeakingBarNamePosition))
+        });
+    }
+
     private static void ToggleMixSettings(MixSettingsExpansion expansion)
     {
         bool opening = _expandedMixSettings != expansion;
@@ -479,19 +511,19 @@ public static class VoiceSettingsPanel
 
         Section(defs, "SPEAKING BAR");
         Toggle(defs, "Fixed All Players", s.SpeakingBarFixedAllPlayers);
-        Slider(defs, "Speaking Bar Scale", s.SpeakingBarScale, Num2);
         EnumStep(defs, "Speaking Bar Position", s.SpeakingBarPosition, new[]
         {
             "Top Left", "Top Middle", "Top Right", "Bottom Left", "Bottom Middle", "Bottom Right",
             "Middle Left", "Middle Right"
         });
-        EnumStep(defs, "Speaking Bar Name Pos", s.SpeakingBarNamePosition, new[] { "Bottom", "Top", "Left", "Right" });
+        SpeakingBarNamePositionStep(defs, s);
+        Slider(defs, "Speaking Bar Scale", s.SpeakingBarScale, Pct);
+        Toggle(defs, "Speaking Bar Backdrop", s.SpeakingBarBackdrop);
         Toggle(defs, "Speaking Bar Manual Layout", s.SpeakingBarManualLayout);
         EnumStep(defs, "Speaking Bar Layout", s.SpeakingBarLayout, new[] { "Vertical", "Horizontal" },
             () => s.SpeakingBarManualLayout.Value);
         Slider(defs, "Speaking Bar X", s.SpeakingBarX, Pct, () => s.SpeakingBarManualLayout.Value);
         Slider(defs, "Speaking Bar Y", s.SpeakingBarY, Pct, () => s.SpeakingBarManualLayout.Value);
-        Toggle(defs, "Speaking Bar Backdrop", s.SpeakingBarBackdrop);
 
         Section(defs, "MEETING OVERLAY");
         Toggle(defs, "Meeting Speaking Overlay", s.MeetingSpeakingOverlay);
@@ -503,6 +535,7 @@ public static class VoiceSettingsPanel
     private static void BuildAdvanced(List<Entry> defs, VoiceChatLocalSettings s)
     {
         Toggle(defs, "Nat Fix", s.NatFix);
+        Toggle(defs, "Show Fake 15 Players", s.ShowFake15Players);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,
             v => s.ApplyDiagnosticsToggle(v),
