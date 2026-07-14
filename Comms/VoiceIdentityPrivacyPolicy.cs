@@ -3,6 +3,101 @@ using System.Collections.Generic;
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
+/// Identity-bearing overlays have two materially different presentation domains. During tasks,
+/// live disguises and concealments may hide or alias a transport speaker. Meetings, exile, and
+/// results screens already publish stable player identities, so carrying task-world presentation
+/// state into those phases creates a negative-evidence role tell instead of protecting identity.
+/// </summary>
+internal enum VoiceIdentityPrivacyDomain
+{
+    Neutral,
+    TaskWorld,
+    PublicIdentity,
+}
+
+/// <summary>Pure phase policy shared by the runtime and regression tests.</summary>
+internal static class VoiceIdentityPrivacyPhasePolicy
+{
+    internal static VoiceIdentityPrivacyDomain DomainFor(VoiceGamePhase phase)
+        => phase switch
+        {
+            VoiceGamePhase.Tasks => VoiceIdentityPrivacyDomain.TaskWorld,
+            VoiceGamePhase.Meeting or VoiceGamePhase.Exile or VoiceGamePhase.EndGame
+                => VoiceIdentityPrivacyDomain.PublicIdentity,
+            _ => VoiceIdentityPrivacyDomain.Neutral,
+        };
+
+    /// <summary>
+    /// Built-in reflection reads describe the live task-world appearance. Public-identity phases
+    /// present the real transport source instead; explicit mod API rules still run separately.
+    /// </summary>
+    internal static bool UsesBuiltInAppearancePrivacy(VoiceGamePhase phase)
+        => DomainFor(phase) == VoiceIdentityPrivacyDomain.TaskWorld;
+
+    /// <summary>
+    /// Every known phase change is a trusted identity epoch and therefore an implicit quiet edge.
+    /// Built-in presentation happens to share a public domain across meeting/exile/results, but
+    /// explicit mod API rules receive the exact phase and may legitimately change at those edges.
+    /// Unknown is ignored so a transient observation cannot discard a valid transition gate.
+    /// </summary>
+    internal static bool ShouldResetTransitionState(
+        VoiceGamePhase previousPhase,
+        VoiceGamePhase currentPhase)
+        => previousPhase != VoiceGamePhase.Unknown
+           && currentPhase != VoiceGamePhase.Unknown
+           && previousPhase != currentPhase;
+
+    /// <summary>
+    /// A public phase may use the stable authenticated roster or an already-public UI slot when the
+    /// live PlayerControl collection is briefly rebuilding. Task-world identity never gets this
+    /// fallback because its current concealment state must be inspected before attribution.
+    /// </summary>
+    internal static bool CanPresentStablePublicIdentity(
+        VoiceGamePhase phase,
+        bool authenticatedRosterContainsSource,
+        bool publicSurfaceContainsSource)
+        => DomainFor(phase) == VoiceIdentityPrivacyDomain.PublicIdentity
+           && (authenticatedRosterContainsSource || publicSurfaceContainsSource);
+}
+
+/// <summary>Pure cache-key comparison so same-frame phase/game transitions are regression-tested.</summary>
+internal static class VoiceIdentityPrivacyFrameCachePolicy
+{
+    internal static bool CanReuse(
+        int cachedFrame,
+        VoiceGamePhase cachedPhase,
+        int cachedGameId,
+        int currentFrame,
+        VoiceGamePhase currentPhase,
+        int currentGameId)
+        => cachedFrame == currentFrame
+           && cachedPhase == currentPhase
+           && cachedGameId == currentGameId;
+}
+
+/// <summary>
+/// Tracks the last authoritative phase while ignoring transient Unknown observations. Runtime uses
+/// this epoch to decide when every per-source transition gate must be rebased.
+/// </summary>
+internal sealed class VoiceIdentityPrivacyPhaseEpoch
+{
+    internal VoiceGamePhase LastKnownPhase { get; private set; } = VoiceGamePhase.Unknown;
+
+    internal bool Advance(VoiceGamePhase currentPhase)
+    {
+        bool shouldReset = VoiceIdentityPrivacyPhasePolicy.ShouldResetTransitionState(
+            LastKnownPhase,
+            currentPhase);
+        if (currentPhase != VoiceGamePhase.Unknown)
+            LastKnownPhase = currentPhase;
+        return shouldReset;
+    }
+
+    internal void Reset()
+        => LastKnownPhase = VoiceGamePhase.Unknown;
+}
+
+/// <summary>
 /// Pure allow-list for concealment modifiers that are safe to present as a known alias. Runtime
 /// reflection must verify every active ConcealedModifier against this policy; seeing one known
 /// alias is not enough when multiple concealments are stacked.
@@ -102,6 +197,14 @@ internal readonly record struct VoiceIdentityPrivacyResolution(
 internal static class VoiceIdentityPrivacyPolicy
 {
     /// <summary>
+    /// Unknown evidence is fail-private for the current frame, but it is not a trustworthy baseline
+    /// for a continuous-speech transition gate. This commonly occurs while scene-owned controls are
+    /// rebuilt between Tasks and Meeting.
+    /// </summary>
+    internal static bool IsProvisional(VoiceIdentityPrivacyEvidence evidence)
+        => !evidence.ViewerStateKnown || !evidence.SourceStateKnown;
+
+    /// <summary>
     /// Privacy precedence is: hard viewer hide, source hide/unresolved alias, viewer dim,
     /// resolved alias, normal. Unknown viewer state hides all; unknown source state hides that
     /// source. An alias-to-self is normalized to Normal.
@@ -189,6 +292,36 @@ internal sealed class VoiceIdentityPrivacyTransitionGate
     internal bool HasAcceptedResolution => _hasAcceptedResolution;
     internal bool IsQuarantined => _isQuarantined;
     internal VoiceIdentityPrivacyResolution AcceptedResolution => _acceptedResolution;
+
+    /// <summary>
+    /// Presents provisional fail-private evidence without accepting it as transition history. Once
+    /// the scene lookup recovers, the known candidate may be shown immediately even if speech never
+    /// went quiet.
+    /// </summary>
+    internal VoiceIdentityPrivacyTransition Observe(
+        VoiceIdentityPrivacyResolution candidate,
+        bool isSpeaking,
+        bool isProvisional)
+    {
+        if (!isProvisional)
+            return Advance(candidate, isSpeaking);
+
+        if (!_hasAcceptedResolution)
+            return new VoiceIdentityPrivacyTransition(candidate, false);
+
+        // Provisional evidence may hide more for this frame, never less. In particular, preserve a
+        // viewer-wide HideAll that was already accepted or made sticky by an authoritative change.
+        var effective = VoiceIdentityPrivacyPolicy.Quarantine(_acceptedResolution, candidate);
+        if (_quarantineHideAll
+            && effective.Decision != VoiceIdentityPrivacyDecision.HideAllForViewer)
+        {
+            effective = new VoiceIdentityPrivacyResolution(
+                candidate.SourcePlayerId,
+                VoiceIdentityPrivacyDecision.HideAllForViewer,
+                null);
+        }
+        return new VoiceIdentityPrivacyTransition(effective, _isQuarantined);
+    }
 
     internal VoiceIdentityPrivacyTransition Advance(
         VoiceIdentityPrivacyResolution candidate,

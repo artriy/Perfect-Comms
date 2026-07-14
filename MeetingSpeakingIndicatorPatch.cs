@@ -110,7 +110,8 @@ public static class MeetingSpeakingIndicatorPatch
             return;
         }
 
-        var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
+        var privacyPhase = VoiceSceneState.ResolvePhase();
+        var privacy = VoiceIdentityPrivacyRuntime.Current(overlay, privacyPhase);
         if (privacy.HideAllForViewer || privacy.DimAll)
         {
             DisableAll();
@@ -157,7 +158,7 @@ public static class MeetingSpeakingIndicatorPatch
                                   && VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(pid);
             if (!isTalking && !snapForPrivacy && visual?.Visibility > 0.01f)
             {
-                var current = VoiceIdentityPrivacyRuntime.Peek(pid);
+                var current = VoiceIdentityPrivacyRuntime.Peek(pid, privacyPhase);
                 snapForPrivacy = !current.HasConcretePresentation
                                  || current.PresentationPlayerId != pid;
             }

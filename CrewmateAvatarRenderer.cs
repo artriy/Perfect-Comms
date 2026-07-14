@@ -77,6 +77,9 @@ internal static class CrewmateAvatarRenderer
     }
     private static readonly Dictionary<byte, CachedOutfit> OutfitCache = new();
 
+    internal static bool HasCachedIdentity(byte playerId)
+        => OutfitCache.ContainsKey(playerId);
+
     // Set per-frame by the speaking-bar overlay. True when the bar is a roster (fixed all-players mode), where
     // the avatar should show each player's real identity, never their live in-world disguise -- same rule as a
     // meeting. A meeting is always treated as real-identity regardless of this flag.

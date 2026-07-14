@@ -55,7 +55,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 | Mod | Voice behavior |
 | :--- | :--- |
-| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing and concealment-safe speaker UI for Eclipsal, Grenadier, Hypnotist, disguise, and camouflage effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
+| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing for Eclipsal, Grenadier, and Hypnotist effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
 
 <br>
 
@@ -99,22 +99,15 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
 | Team radio (hold) | `V` | | Refresh voice (host) | `F8` |
 | Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
+| Toggle open mic / push to talk | Unbound | | | |
 
 <br>
-
-Each alive/dead hold binding has its own settings button in **Voice Settings → Keybinds** for independently choosing the temporary alive-player and dead-player levels. Releasing the binding restores the normal mix.
 
 ## Install
 
 1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or grab **`PerfectComms+dependencies.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) which already bundles it.
 2. Drop `PerfectComms.dll` into `BepInEx/plugins`.
 3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
-
-Android APK packagers must also merge
-[`release-assets/android/AndroidManifest.xml`](release-assets/android/AndroidManifest.xml) into the
-final APK manifest before signing. This declares `android.permission.RECORD_AUDIO`; copying the DLL
-or manifest fragment beside an already-built APK cannot add that permission. Denying the runtime
-permission keeps receive-only voice available.
 
 ```text
 BepInEx/

@@ -37,6 +37,9 @@ internal static class VoiceModRegistry
         _rules.Count > 0 || _channels.Count > 0 || _origins.Count > 0 || _globalGates.Count > 0
         || _overlayViewerRules.Count > 0 || _overlaySpeakerRules.Count > 0;
 
+    internal static bool HasOverlayViewerRules => _overlayViewerRules.Count > 0;
+    internal static bool HasOverlaySpeakerRules => _overlaySpeakerRules.Count > 0;
+
     // ---- Registration (called from PerfectCommsApi) ----
 
     internal static void AddRule(string modId, Func<VoiceRuleContext, VoiceRuleResult> rule)

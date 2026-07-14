@@ -394,11 +394,13 @@ public static class PingTrackerPatch
             }
             long privacyTicks = VoiceFrameProfiler.Begin();
             var overlay = VoiceOverlayState.Current(room);
-            var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
+            var privacyPhase = VoiceSceneState.ResolvePhase();
+            var privacy = VoiceIdentityPrivacyRuntime.Current(overlay, privacyPhase);
             VoiceFrameProfiler.End("overlay.privacy", privacyTicks);
             _activeSpeakerIds.Clear();
             _activeSpeakerLevels.Clear();
             _activeSpeakerNames.Clear();
+            var snapshot = room?.CurrentSnapshot;
 
             var presentedSpeakers = privacy.Speakers;
             for (int i = 0; i < presentedSpeakers.Count; i++)
@@ -417,8 +419,16 @@ public static class PingTrackerPatch
                 {
                     _activeSpeakerNames[presentationId] = presentationPlayer.Data.PlayerName;
                 }
-                else
+                else if (snapshot != null
+                         && snapshot.TryGetPlayer(presentationId, out var presentationSnapshot)
+                         && !string.IsNullOrWhiteSpace(presentationSnapshot.PlayerName))
                 {
+                    _activeSpeakerNames[presentationId] = presentationSnapshot.PlayerName;
+                }
+                else if (presentationId == speaker.SourcePlayerId)
+                {
+                    // A normal source may use its authenticated voice-profile name while its live
+                    // control is rebuilding. Never copy the source name onto a distinct alias slot.
                     var remotes = overlay.RemotePlayers;
                     for (int j = 0; j < remotes.Count; j++)
                     {
@@ -441,7 +451,6 @@ public static class PingTrackerPatch
             if (MeetingHud.Instance == null)
                 MeetingSpeakingIndicatorPatch.UpdateIndicators(overlay);
 
-            var snapshot = room?.CurrentSnapshot;
             UpdatePubliclyDead(snapshot);
             // Fixed all-players is a roster: show real identities, never live disguises (a meeting forces this too).
             CrewmateAvatarRenderer.PreferRealIdentity = _fixedAllPlayers;
@@ -461,7 +470,7 @@ public static class PingTrackerPatch
                 _fadedSlotIds.Clear();
                 foreach (var kv in _slots)
                 {
-                    var resolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key);
+                    var resolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key, privacyPhase);
                     if (VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(kv.Key)
                         || !resolution.HasConcretePresentation
                         || resolution.PresentationPlayerId != kv.Key)
@@ -534,7 +543,7 @@ public static class PingTrackerPatch
             {
                 foreach (var kv in _slots)
                 {
-                    var currentResolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key);
+                    var currentResolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key, privacyPhase);
                     bool slotIdentityBecamePrivate = !_activeSpeakerIds.Contains(kv.Key)
                                                      && (!currentResolution.HasConcretePresentation
                                                          || currentResolution.PresentationPlayerId != kv.Key);

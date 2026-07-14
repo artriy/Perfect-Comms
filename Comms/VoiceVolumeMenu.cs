@@ -39,8 +39,10 @@ public static class VoiceVolumeMenu
 
     public static void Show()
     {
+        var privacyPhase = VoiceSceneState.ResolvePhase();
         var privacy = VoiceIdentityPrivacyRuntime.Current(
-            VoiceOverlayState.Current(VoiceChatRoom.Current));
+            VoiceOverlayState.Current(VoiceChatRoom.Current),
+            privacyPhase);
         if (privacy.HideAllForViewer || privacy.DimAll)
             return;
 
@@ -160,8 +162,10 @@ public static class VoiceVolumeMenu
         if (_shell.Root == null) { Destroy(); return; }
         if (!_shown) return;
 
+        var privacyPhase = VoiceSceneState.ResolvePhase();
         var privacy = VoiceIdentityPrivacyRuntime.Current(
-            VoiceOverlayState.Current(VoiceChatRoom.Current));
+            VoiceOverlayState.Current(VoiceChatRoom.Current),
+            privacyPhase);
         if (privacy.HideAllForViewer || privacy.DimAll)
         {
             Hide();
@@ -187,17 +191,17 @@ public static class VoiceVolumeMenu
         HandleScroll();
         HandleInput();
 
-        FeedMeters();
+        FeedMeters(privacy, privacyPhase);
         for (int i = 0; i < _rows.Count; i++) _rows[i].Tick(dt);
 
         if (_activeRow == null && Time.frameCount % 30 == 0) RefreshRosterIfChanged();
     }
 
-    private static void FeedMeters()
+    private static void FeedMeters(
+        VoiceIdentityPrivacyFrame privacy,
+        VoiceGamePhase privacyPhase)
     {
         if (_rows.Count == 0) return;
-        var overlay = VoiceOverlayState.Current(VoiceChatRoom.Current);
-        var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
         if (privacy.HideAllForViewer || privacy.DimAll)
         {
             for (int i = 0; i < _rows.Count; i++)
@@ -233,7 +237,7 @@ public static class VoiceVolumeMenu
             bool snapForPrivacy = VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(row.PlayerId);
             if (!snapForPrivacy && row.HasVisibleMeter)
             {
-                var current = VoiceIdentityPrivacyRuntime.Peek(row.PlayerId);
+                var current = VoiceIdentityPrivacyRuntime.Peek(row.PlayerId, privacyPhase);
                 snapForPrivacy = !current.HasConcretePresentation
                                  || current.PresentationPlayerId != row.PlayerId;
             }

@@ -86,7 +86,9 @@ internal static class VoiceIdentityPrivacyRuntime
     private static readonly Dictionary<byte, PlayerControl> PlayerLookup = new();
     private static readonly Dictionary<byte, int> PlayerInstanceIds = new();
     private static readonly Dictionary<byte, VoiceIdentityPrivacyTransitionGate> TransitionGates = new();
+    private static readonly Dictionary<byte, VoiceIdentityPrivacyResolution> CandidateResolutions = new();
     private static readonly Dictionary<byte, VoiceIdentityPrivacyResolution> FrameResolutions = new();
+    private static readonly HashSet<byte> ProvisionalSources = new();
     private static readonly Dictionary<byte, byte> LastPresentedBySource = new();
     private static readonly Dictionary<byte, float> SilentPresentationRetainUntil = new();
     private static readonly HashSet<byte> SnapPresentationIds = new();
@@ -107,30 +109,42 @@ internal static class VoiceIdentityPrivacyRuntime
     private static PropertyInfo? _activeModifiersProperty;
     private static FieldInfo? _activeModifiersField;
     private static int _cachedFrame = -1;
+    private static VoiceGamePhase _cachedPhase = VoiceGamePhase.Unknown;
+    private static int _cachedGameId = int.MinValue;
     private static readonly VoiceIdentityPrivacyFrame CachedPrivacyFrame =
         new(PresentedSpeakers, false, false);
     private static ViewerEvidence _viewerEvidence = ViewerEvidence.KnownNormal;
     private static int _lifecycleGameId = int.MinValue;
-    private static VoiceGamePhase _lifecyclePhase = VoiceGamePhase.Unknown;
+    private static readonly VoiceIdentityPrivacyPhaseEpoch LifecyclePhaseEpoch = new();
     private static bool _sourceRequestedHideAll;
 
-    internal static VoiceIdentityPrivacyFrame Current(VoiceOverlayState overlay)
+    internal static VoiceIdentityPrivacyFrame Current(
+        VoiceOverlayState overlay,
+        VoiceGamePhase phase)
     {
         int frame = Time.frameCount;
-        if (_cachedFrame == frame)
+        int gameId = AmongUsClient.Instance?.GameId ?? 0;
+        if (VoiceIdentityPrivacyFrameCachePolicy.CanReuse(
+                _cachedFrame,
+                _cachedPhase,
+                _cachedGameId,
+                frame,
+                phase,
+                gameId))
             return CachedPrivacyFrame;
-
-        _cachedFrame = frame;
-        RebuildPlayerLookup();
-        ResetForLifecycleIfNeeded();
-        _viewerEvidence = ReadViewerEvidence();
 
         PresentedSpeakers.Clear();
         PresentationIndex.Clear();
+        CandidateResolutions.Clear();
         FrameResolutions.Clear();
+        ProvisionalSources.Clear();
         ActiveSources.Clear();
         SnapPresentationIds.Clear();
         _sourceRequestedHideAll = false;
+
+        ResetForLifecycleIfNeeded(phase, gameId);
+        RebuildPlayerLookup();
+        _viewerEvidence = ReadViewerEvidence(phase);
 
         var remotes = overlay.RemotePlayers;
         for (int i = 0; i < remotes.Count; i++)
@@ -139,12 +153,18 @@ internal static class VoiceIdentityPrivacyRuntime
             if (!remote.IsSpeaking || !remote.IsAudible || remote.PlayerId == byte.MaxValue)
                 continue;
 
-            AddSpeakingSource(remote.PlayerId, remote.Level);
+            AddSpeakingSource(remote.PlayerId, remote.Level, phase);
         }
 
         var local = PlayerControl.LocalPlayer;
-        if (local != null && overlay.Local.IsSpeaking && local.PlayerId != byte.MaxValue)
-            AddSpeakingSource(local.PlayerId, overlay.Local.Level);
+        if (overlay.Local.IsSpeaking)
+        {
+            byte localPlayerId = local != null
+                ? local.PlayerId
+                : VoiceChatRoom.Current?.CurrentSnapshot?.LocalPlayerId ?? byte.MaxValue;
+            if (localPlayerId != byte.MaxValue)
+                AddSpeakingSource(localPlayerId, overlay.Local.Level, phase);
+        }
 
         // Keep the last visible presentation just beyond every UI's release animation. During this
         // bounded quiet tail we continue accepting policy changes and snap the old presentation if
@@ -167,8 +187,11 @@ internal static class VoiceIdentityPrivacyRuntime
             {
                 // A source that was already hidden has no visible provenance to retain, but its gate
                 // still needs the quiet edge so the next utterance can adopt the current policy.
-                var candidate = ResolveCandidate(sourceId);
-                GetTransitionGate(sourceId).Advance(candidate, isSpeaking: false);
+                var candidate = ResolveCandidate(sourceId, phase);
+                GetTransitionGate(sourceId).Observe(
+                    candidate,
+                    isSpeaking: false,
+                    isProvisional: ProvisionalSources.Contains(sourceId));
             }
         }
 
@@ -190,8 +213,11 @@ internal static class VoiceIdentityPrivacyRuntime
                 continue;
             }
 
-            var candidate = ResolveCandidate(sourceId);
-            GetTransitionGate(sourceId).Advance(candidate, isSpeaking: false);
+            var candidate = ResolveCandidate(sourceId, phase);
+            GetTransitionGate(sourceId).Observe(
+                candidate,
+                isSpeaking: false,
+                isProvisional: ProvisionalSources.Contains(sourceId));
             if (!candidate.HasConcretePresentation
                 || candidate.PresentationPlayerId != previousPresentationId)
             {
@@ -228,6 +254,12 @@ internal static class VoiceIdentityPrivacyRuntime
         bool hideAll = !_viewerEvidence.Known || _viewerEvidence.HideAll || _sourceRequestedHideAll;
         bool dimAll = _viewerEvidence.Known && !hideAll && _viewerEvidence.DimAll;
         CachedPrivacyFrame.Update(PresentedSpeakers, hideAll, dimAll);
+        // Commit the cache key only after a complete projection. If a soft-dependency callback throws
+        // unexpectedly outside its fail-private wrapper, a later consumer in this frame must retry
+        // instead of receiving a partially rebuilt frame.
+        _cachedFrame = frame;
+        _cachedPhase = phase;
+        _cachedGameId = gameId;
         return CachedPrivacyFrame;
     }
 
@@ -235,15 +267,32 @@ internal static class VoiceIdentityPrivacyRuntime
     /// Resolves current policy without changing the quiet-edge gate. Used to remove a stale dynamic
     /// slot as soon as its player becomes concealed, even if that player is currently silent.
     /// </summary>
-    internal static VoiceIdentityPrivacyResolution Peek(byte sourcePlayerId)
+    internal static VoiceIdentityPrivacyResolution Peek(
+        byte sourcePlayerId,
+        VoiceGamePhase phase)
     {
-        if (_cachedFrame != Time.frameCount)
+        int gameId = AmongUsClient.Instance?.GameId ?? 0;
+        if (!VoiceIdentityPrivacyFrameCachePolicy.CanReuse(
+                _cachedFrame,
+                _cachedPhase,
+                _cachedGameId,
+                Time.frameCount,
+                phase,
+                gameId))
         {
+            ResetForLifecycleIfNeeded(phase, gameId);
             RebuildPlayerLookup();
-            ResetForLifecycleIfNeeded();
-            _viewerEvidence = ReadViewerEvidence();
+            _viewerEvidence = ReadViewerEvidence(phase);
+            // Peek may run before the frame's full projection. Never reuse a source result collected
+            // under an earlier frame or exact phase, but leave _cachedFrame untouched so Current
+            // still performs the complete rebuild when its overlay is available.
+            CandidateResolutions.Clear();
+            FrameResolutions.Clear();
+            ProvisionalSources.Clear();
         }
-        return ResolveCandidate(sourcePlayerId);
+        if (FrameResolutions.TryGetValue(sourcePlayerId, out var effective))
+            return effective;
+        return ResolveCandidate(sourcePlayerId, phase);
     }
 
     /// <summary>
@@ -263,14 +312,18 @@ internal static class VoiceIdentityPrivacyRuntime
     internal static void Reset()
     {
         _cachedFrame = -1;
+        _cachedPhase = VoiceGamePhase.Unknown;
+        _cachedGameId = int.MinValue;
         CachedPrivacyFrame.Update(PresentedSpeakers, false, false);
         _viewerEvidence = ViewerEvidence.KnownNormal;
         _lifecycleGameId = int.MinValue;
-        _lifecyclePhase = VoiceGamePhase.Unknown;
+        LifecyclePhaseEpoch.Reset();
         _sourceRequestedHideAll = false;
         PresentedSpeakers.Clear();
         PresentationIndex.Clear();
+        CandidateResolutions.Clear();
         FrameResolutions.Clear();
+        ProvisionalSources.Clear();
         LastPresentedBySource.Clear();
         SilentPresentationRetainUntil.Clear();
         SnapPresentationIds.Clear();
@@ -283,20 +336,24 @@ internal static class VoiceIdentityPrivacyRuntime
         StalePlayerIdScratch.Clear();
     }
 
-    private static void AddSpeakingSource(byte sourcePlayerId, float level)
+    private static void AddSpeakingSource(
+        byte sourcePlayerId,
+        float level,
+        VoiceGamePhase phase)
     {
         if (!ActiveSources.Add(sourcePlayerId))
             return;
 
         SilentPresentationRetainUntil.Remove(sourcePlayerId);
 
-        var candidate = ResolveCandidate(sourcePlayerId);
+        var candidate = ResolveCandidate(sourcePlayerId, phase);
         var gate = GetTransitionGate(sourcePlayerId);
+        bool isProvisional = ProvisionalSources.Contains(sourcePlayerId);
         // A source that was quiet last frame may safely adopt its latest disguise/concealment before
         // this utterance begins. Only changes while continuously speaking require quarantine.
         if (!PreviousActiveSources.Contains(sourcePlayerId))
-            gate.Advance(candidate, isSpeaking: false);
-        var transition = gate.Advance(candidate, isSpeaking: true);
+            gate.Observe(candidate, isSpeaking: false, isProvisional);
+        var transition = gate.Observe(candidate, isSpeaking: true, isProvisional);
         var resolution = transition.EffectiveResolution;
         if (resolution.Decision == VoiceIdentityPrivacyDecision.HideAllForViewer)
             _sourceRequestedHideAll = true;
@@ -342,9 +399,11 @@ internal static class VoiceIdentityPrivacyRuntime
         return gate;
     }
 
-    private static VoiceIdentityPrivacyResolution ResolveCandidate(byte sourcePlayerId)
+    private static VoiceIdentityPrivacyResolution ResolveCandidate(
+        byte sourcePlayerId,
+        VoiceGamePhase phase)
     {
-        if (FrameResolutions.TryGetValue(sourcePlayerId, out var cached))
+        if (CandidateResolutions.TryGetValue(sourcePlayerId, out var cached))
             return cached;
 
         var evidence = new VoiceIdentityPrivacyEvidence(
@@ -355,26 +414,48 @@ internal static class VoiceIdentityPrivacyRuntime
 
         if (!PlayerLookup.TryGetValue(sourcePlayerId, out var source) || source == null || source.Data == null)
         {
-            // EndGame has no live PlayerControl collection. The results overlay intentionally uses the
-            // stable identity cached during gameplay; absence here is expected, not an unknown effect.
-            if (VoiceSceneState.ResolvePhase() == VoiceGamePhase.EndGame)
+            // Meeting/exile scene transitions can temporarily rebuild AllPlayerControls while the
+            // authenticated routing snapshot and public card still identify this audible source. Do
+            // not seed HideSource into the freshly reset gate in that gap: it would suppress the ring
+            // until the speaker pauses. Third-party source rules still fail private because they need
+            // a live PlayerControl callback context.
+            if (HasStablePublicIdentity(sourcePlayerId, phase)
+                && !VoiceModRegistry.HasOverlaySpeakerRules)
             {
                 evidence = evidence with { SourceStateKnown = true };
-                return VoiceIdentityPrivacyPolicy.Resolve(sourcePlayerId, evidence);
+                return ResolveAndCacheCandidate(
+                    sourcePlayerId,
+                    evidence);
             }
-            return VoiceIdentityPrivacyPolicy.Resolve(sourcePlayerId, evidence);
+            return ResolveAndCacheCandidate(
+                sourcePlayerId,
+                evidence);
         }
 
-        bool sourceKnown = TryReadSourceEvidence(source, out bool hideSource, out bool aliasActive, out byte? aliasPlayerId);
+        bool sourceKnown = true;
+        bool hideSource = false;
+        bool aliasActive = false;
+        byte? aliasPlayerId = null;
+        if (VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
+        {
+            sourceKnown = TryReadSourceEvidence(
+                source,
+                phase,
+                out hideSource,
+                out aliasActive,
+                out aliasPlayerId);
+        }
         bool builtInAliasUnresolved = aliasActive && !aliasPlayerId.HasValue;
 
         var local = PlayerControl.LocalPlayer;
-        var external = VoiceModRegistry.ResolveOverlaySpeakerPrivacy(
-            local,
-            source,
-            VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase()),
-            local != null && VoiceRoleMuteState.IsVoiceDead(local),
-            VoiceRoleMuteState.IsVoiceDead(source));
+        var external = VoiceModRegistry.HasOverlaySpeakerRules
+            ? VoiceModRegistry.ResolveOverlaySpeakerPrivacy(
+                local,
+                source,
+                VoiceModBridge.ToApiPhase(phase),
+                local != null && VoiceRoleMuteState.IsVoiceDead(local),
+                VoiceRoleMuteState.IsVoiceDead(source))
+            : VoiceOverlaySpeakerResult.Pass;
         switch (external.Verdict)
         {
             case VoiceOverlaySpeakerVerdict.HideAll:
@@ -387,7 +468,7 @@ internal static class VoiceIdentityPrivacyRuntime
                 aliasActive = true;
                 if (builtInAliasUnresolved
                     || external.AliasPlayerId is not { } externalAlias
-                    || !IsSafeAliasTarget(externalAlias)
+                    || !IsSafeAliasTarget(externalAlias, phase)
                     || (aliasPlayerId.HasValue && aliasPlayerId.Value != externalAlias))
                 {
                     aliasPlayerId = null;
@@ -406,63 +487,77 @@ internal static class VoiceIdentityPrivacyRuntime
             AliasActive = aliasActive,
             AliasPlayerId = aliasPlayerId,
         };
-        return VoiceIdentityPrivacyPolicy.Resolve(sourcePlayerId, evidence);
+        return ResolveAndCacheCandidate(
+            sourcePlayerId,
+            evidence);
     }
 
-    private static ViewerEvidence ReadViewerEvidence()
+    private static ViewerEvidence ReadViewerEvidence(VoiceGamePhase phase)
     {
         var local = PlayerControl.LocalPlayer;
-        var phase = VoiceSceneState.ResolvePhase();
-        if (local == null || phase is VoiceGamePhase.Menu or VoiceGamePhase.Lobby or VoiceGamePhase.EndGame)
+        if (phase is VoiceGamePhase.Menu or VoiceGamePhase.Lobby or VoiceGamePhase.EndGame)
             return ViewerEvidence.KnownNormal;
+        if (local == null)
+        {
+            bool mustInspectViewer =
+                VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase)
+                || VoiceModRegistry.HasOverlayViewerRules
+                || VoiceModRegistry.HasOverlaySpeakerRules;
+            return mustInspectViewer
+                ? new ViewerEvidence(false, false, false)
+                : ViewerEvidence.KnownNormal;
+        }
 
         bool known = true;
         bool hideAll = false;
         bool dimAll = false;
 
-        known &= TryHasModifier(local, HerbalistConfusedName, out bool herbalistConfused);
-        hideAll |= herbalistConfused;
-
-        known &= TryGetNamedModifier(local, HypnotisedName, out var hypnotised);
-        if (hypnotised != null)
+        if (VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
         {
-            if (TryReadBool(hypnotised, "HysteriaActive", out bool hysteriaActive))
-                hideAll |= hysteriaActive;
+            known &= TryHasModifier(local, HerbalistConfusedName, out bool herbalistConfused);
+            hideAll |= herbalistConfused;
+
+            known &= TryGetNamedModifier(local, HypnotisedName, out var hypnotised);
+            if (hypnotised != null)
+            {
+                if (TryReadBool(hypnotised, "HysteriaActive", out bool hysteriaActive))
+                    hideAll |= hysteriaActive;
+                else
+                    known = false;
+            }
+
+            known &= TryHasModifier(local, EclipsalBlindName, out bool eclipsalBlind);
+            hideAll |= eclipsalBlind;
+
+            known &= TryHasModifier(local, GrenadierFlashName, out bool grenadierFlash);
+            if (grenadierFlash)
+            {
+                // TouMira fully blinds living non-impostors but only dims impostor-aligned/dead viewers.
+                // Dim is still treated as non-attributing in speaker-only mode; fixed/static UI may dim.
+                if (!VoiceRoleMuteState.IsVoiceDead(local) && !VoiceRoleMuteState.IsVoiceImpostor(local))
+                    hideAll = true;
+                else
+                    dimAll = true;
+            }
+
+            known &= TryHasModifier(local, HnsGlobalCamouflageName, out bool hnsGlobalCamouflage);
+            hideAll |= hnsGlobalCamouflage;
+
+            if (TryReadOutfitType(local, out int localOutfitType))
+            {
+                // Mushroom Mix-Up is a viewer-wide random identity scramble.
+                hideAll |= localOutfitType == 3;
+            }
+            else
+            {
+                known = false;
+            }
+
+            if (TryReadStaticBool("TownOfUs.Patches.HudManagerPatches", "CamouflageCommsEnabled", out bool commsCamo))
+                hideAll |= commsCamo;
             else
                 known = false;
         }
-
-        known &= TryHasModifier(local, EclipsalBlindName, out bool eclipsalBlind);
-        hideAll |= eclipsalBlind;
-
-        known &= TryHasModifier(local, GrenadierFlashName, out bool grenadierFlash);
-        if (grenadierFlash && MeetingHud.Instance == null)
-        {
-            // TouMira fully blinds living non-impostors but only dims impostor-aligned/dead viewers.
-            // Dim is still treated as non-attributing in speaker-only mode; fixed/static UI may dim.
-            if (!VoiceRoleMuteState.IsVoiceDead(local) && !VoiceRoleMuteState.IsVoiceImpostor(local))
-                hideAll = true;
-            else
-                dimAll = true;
-        }
-
-        known &= TryHasModifier(local, HnsGlobalCamouflageName, out bool hnsGlobalCamouflage);
-        hideAll |= hnsGlobalCamouflage;
-
-        if (TryReadOutfitType(local, out int localOutfitType))
-        {
-            // Mushroom Mix-Up is a viewer-wide random identity scramble.
-            hideAll |= localOutfitType == 3;
-        }
-        else
-        {
-            known = false;
-        }
-
-        if (TryReadStaticBool("TownOfUs.Patches.HudManagerPatches", "CamouflageCommsEnabled", out bool commsCamo))
-            hideAll |= commsCamo;
-        else
-            known = false;
 
         var external = VoiceModRegistry.ResolveOverlayViewerPrivacy(
             local,
@@ -483,6 +578,7 @@ internal static class VoiceIdentityPrivacyRuntime
 
     private static bool TryReadSourceEvidence(
         PlayerControl source,
+        VoiceGamePhase phase,
         out bool hideSource,
         out bool aliasActive,
         out byte? aliasPlayerId)
@@ -581,7 +677,7 @@ internal static class VoiceIdentityPrivacyRuntime
             return true;
         }
 
-        if (VoiceSceneState.IsTaskVoicePhase(VoiceSceneState.ResolvePhase()))
+        if (VoiceSceneState.IsTaskVoicePhase(phase))
         {
             try
             {
@@ -599,7 +695,7 @@ internal static class VoiceIdentityPrivacyRuntime
 
         if (aliasActive)
         {
-            if (aliasPlayerId is not { } targetId || !IsSafeAliasTarget(targetId))
+            if (aliasPlayerId is not { } targetId || !IsSafeAliasTarget(targetId, phase))
                 aliasPlayerId = null;
         }
 
@@ -788,16 +884,29 @@ internal static class VoiceIdentityPrivacyRuntime
         }
     }
 
-    private static bool IsSafeAliasTarget(byte targetId)
+    private static bool IsSafeAliasTarget(byte targetId, VoiceGamePhase phase)
     {
-        if (targetId == byte.MaxValue
-            || !PlayerLookup.TryGetValue(targetId, out var target)
-            || target == null
-            || target.Data == null
-            || target.Data.Disconnected)
-        {
+        if (targetId == byte.MaxValue)
             return false;
+
+        if (!PlayerLookup.TryGetValue(targetId, out var target)
+            || target == null
+            || target.Data == null)
+        {
+            // Public aliases point at an already-published identity slot. During Meeting/Exile scene
+            // rebuilds the target control may be absent for a frame even though the authenticated
+            // roster/card remains authoritative. Tasks never get this fallback.
+            return HasStablePublicIdentity(targetId, phase);
         }
+
+        if (target.Data.Disconnected)
+            return false;
+
+        // A meeting/public-results slot already exposes this player's stable identity. An explicit
+        // third-party rule may still alias to that slot, but task-world camouflage on the target must
+        // not make an otherwise valid public slot fail closed.
+        if (!VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
+            return true;
 
         try
         {
@@ -831,20 +940,75 @@ internal static class VoiceIdentityPrivacyRuntime
         if (!TryReadBodyAlpha(target, out float bodyAlpha) || bodyAlpha < 0.95f)
             return false;
 
-        if (VoiceSceneState.IsTaskVoicePhase(VoiceSceneState.ResolvePhase()))
+        try
         {
-            try
-            {
-                if (!target.Visible || target.shouldAppearInvisible)
-                    return false;
-            }
-            catch
-            {
+            if (!target.Visible || target.shouldAppearInvisible)
                 return false;
-            }
+        }
+        catch
+        {
+            return false;
         }
 
         return true;
+    }
+
+    private static VoiceIdentityPrivacyResolution ResolveAndCacheCandidate(
+        byte sourcePlayerId,
+        VoiceIdentityPrivacyEvidence evidence)
+    {
+        if (VoiceIdentityPrivacyPolicy.IsProvisional(evidence))
+            ProvisionalSources.Add(sourcePlayerId);
+        else
+            ProvisionalSources.Remove(sourcePlayerId);
+
+        var resolution = VoiceIdentityPrivacyPolicy.Resolve(sourcePlayerId, evidence);
+        CandidateResolutions[sourcePlayerId] = resolution;
+        return resolution;
+    }
+
+    private static bool HasStablePublicIdentity(byte sourcePlayerId, VoiceGamePhase phase)
+    {
+        bool authenticatedRosterContainsSource = false;
+        var snapshot = VoiceChatRoom.Current?.CurrentSnapshot;
+        if (snapshot != null
+            && snapshot.TryGetPlayer(sourcePlayerId, out var player)
+            && !player.Disconnected
+            && !player.IsDummy
+            && player.ClientId >= 0)
+        {
+            authenticatedRosterContainsSource = true;
+        }
+
+        bool publicSurfaceContainsSource = MeetingHasPublicSlot(sourcePlayerId)
+                                           || (phase == VoiceGamePhase.EndGame
+                                               && global::VoiceChatPlugin.CrewmateAvatarRenderer.HasCachedIdentity(
+                                                   sourcePlayerId));
+        return VoiceIdentityPrivacyPhasePolicy.CanPresentStablePublicIdentity(
+            phase,
+            authenticatedRosterContainsSource,
+            publicSurfaceContainsSource);
+    }
+
+    private static bool MeetingHasPublicSlot(byte sourcePlayerId)
+    {
+        try
+        {
+            var states = MeetingHud.Instance?.playerStates;
+            if (states == null) return false;
+            foreach (var state in states)
+            {
+                if (state != null && state.TargetPlayerId == sourcePlayerId)
+                    return true;
+            }
+        }
+        catch
+        {
+            // A meeting card collection may be rebuilding at the same transition edge. The retained
+            // authenticated snapshot above remains the preferred source; otherwise fail private.
+        }
+
+        return false;
     }
 
     private static bool TryReadAlias(PlayerControl source, string modifierName, out bool active, out byte? targetId)
@@ -1119,33 +1283,51 @@ internal static class VoiceIdentityPrivacyRuntime
     private static void ResetSourceState(byte playerId)
     {
         TransitionGates.Remove(playerId);
+        CandidateResolutions.Remove(playerId);
         FrameResolutions.Remove(playerId);
+        ProvisionalSources.Remove(playerId);
         LastPresentedBySource.Remove(playerId);
         SilentPresentationRetainUntil.Remove(playerId);
         ActiveSources.Remove(playerId);
         PreviousActiveSources.Remove(playerId);
     }
 
-    private static void ResetForLifecycleIfNeeded()
+    private static void ResetForLifecycleIfNeeded(VoiceGamePhase phase, int gameId)
     {
-        int gameId = AmongUsClient.Instance?.GameId ?? 0;
-        var phase = VoiceSceneState.ResolvePhase();
         bool newGame = gameId != 0 && gameId != _lifecycleGameId;
-        bool returnedToLobby = phase == VoiceGamePhase.Lobby && _lifecyclePhase != VoiceGamePhase.Lobby;
-        bool returnedToMenu = phase == VoiceGamePhase.Menu && _lifecyclePhase != VoiceGamePhase.Menu;
-        if (newGame || returnedToLobby || returnedToMenu)
+        if (newGame)
+            LifecyclePhaseEpoch.Reset();
+        var previousPhase = LifecyclePhaseEpoch.LastKnownPhase;
+        bool returnedToLobby = phase == VoiceGamePhase.Lobby && previousPhase != VoiceGamePhase.Lobby;
+        bool returnedToMenu = phase == VoiceGamePhase.Menu && previousPhase != VoiceGamePhase.Menu;
+        bool privacyPhaseChanged = LifecyclePhaseEpoch.Advance(phase);
+        if (newGame || returnedToLobby || returnedToMenu || privacyPhaseChanged)
         {
-            TransitionGates.Clear();
-            LastPresentedBySource.Clear();
-            SilentPresentationRetainUntil.Clear();
-            SnapPresentationIds.Clear();
-            PreviousActiveSources.Clear();
-            PlayerInstanceIds.Clear();
-            _sourceRequestedHideAll = false;
+            ResetPresentationTransitionState();
+            if (newGame || returnedToLobby || returnedToMenu)
+                PlayerInstanceIds.Clear();
         }
 
         _lifecycleGameId = gameId;
-        _lifecyclePhase = phase;
+    }
+
+    private static void ResetPresentationTransitionState()
+    {
+        // Remove any prior-phase alias/identity immediately instead of letting its release animation
+        // survive into a phase with different built-in or external presentation rules.
+        foreach (byte presentationId in LastPresentedBySource.Values)
+            SnapPresentationIds.Add(presentationId);
+
+        TransitionGates.Clear();
+        CandidateResolutions.Clear();
+        FrameResolutions.Clear();
+        ProvisionalSources.Clear();
+        LastPresentedBySource.Clear();
+        SilentPresentationRetainUntil.Clear();
+        ActiveSources.Clear();
+        PreviousActiveSources.Clear();
+        SilentSourceScratch.Clear();
+        _sourceRequestedHideAll = false;
     }
 
     private readonly record struct ViewerEvidence(bool Known, bool HideAll, bool DimAll)

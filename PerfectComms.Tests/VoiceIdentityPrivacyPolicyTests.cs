@@ -25,6 +25,197 @@ public sealed class VoiceIdentityPrivacyPolicyTests
         Assert.True(result.HasConcretePresentation);
     }
 
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Unknown, false)]
+    [InlineData((int)VoiceGamePhase.Menu, false)]
+    [InlineData((int)VoiceGamePhase.Lobby, false)]
+    [InlineData((int)VoiceGamePhase.Intro, false)]
+    [InlineData((int)VoiceGamePhase.Tasks, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, false)]
+    [InlineData((int)VoiceGamePhase.Exile, false)]
+    [InlineData((int)VoiceGamePhase.EndGame, false)]
+    public void BuiltInAppearancePrivacyAppliesOnlyDuringTasks(int phaseValue, bool expected)
+    {
+        var phase = (VoiceGamePhase)phaseValue;
+
+        Assert.Equal(
+            expected,
+            VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase));
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Meeting)]
+    [InlineData((int)VoiceGamePhase.Exile)]
+    [InlineData((int)VoiceGamePhase.EndGame)]
+    public void PublicIdentityPhasesShareThePublicIdentityDomain(int phaseValue)
+    {
+        var domain = VoiceIdentityPrivacyPhasePolicy.DomainFor((VoiceGamePhase)phaseValue);
+
+        Assert.Equal(VoiceIdentityPrivacyDomain.PublicIdentity, domain);
+        Assert.NotEqual(
+            VoiceIdentityPrivacyPhasePolicy.DomainFor(VoiceGamePhase.Tasks),
+            domain);
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Meeting, (int)VoiceGamePhase.Exile, true)]
+    [InlineData((int)VoiceGamePhase.Exile, (int)VoiceGamePhase.Meeting, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, (int)VoiceGamePhase.Meeting, false)]
+    [InlineData((int)VoiceGamePhase.Tasks, (int)VoiceGamePhase.Meeting, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, (int)VoiceGamePhase.Tasks, true)]
+    [InlineData((int)VoiceGamePhase.Tasks, (int)VoiceGamePhase.EndGame, true)]
+    [InlineData((int)VoiceGamePhase.Unknown, (int)VoiceGamePhase.Tasks, false)]
+    [InlineData((int)VoiceGamePhase.Unknown, (int)VoiceGamePhase.Meeting, false)]
+    [InlineData((int)VoiceGamePhase.Unknown, (int)VoiceGamePhase.EndGame, false)]
+    [InlineData((int)VoiceGamePhase.Tasks, (int)VoiceGamePhase.Unknown, false)]
+    [InlineData((int)VoiceGamePhase.Meeting, (int)VoiceGamePhase.Unknown, false)]
+    public void TransitionStateResetsAcrossEveryKnownExactPhaseChange(
+        int previousValue,
+        int currentValue,
+        bool expected)
+    {
+        var previous = (VoiceGamePhase)previousValue;
+        var current = (VoiceGamePhase)currentValue;
+
+        Assert.Equal(
+            expected,
+            VoiceIdentityPrivacyPhasePolicy.ShouldResetTransitionState(previous, current));
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Tasks, true, true, false)]
+    [InlineData((int)VoiceGamePhase.Meeting, true, false, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, true, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, false, false)]
+    [InlineData((int)VoiceGamePhase.Exile, true, false, true)]
+    [InlineData((int)VoiceGamePhase.EndGame, false, true, true)]
+    [InlineData((int)VoiceGamePhase.EndGame, false, false, false)]
+    [InlineData((int)VoiceGamePhase.Unknown, true, true, false)]
+    public void StableRosterFallbackIsRestrictedToPublicIdentityPhases(
+        int phaseValue,
+        bool authenticatedRosterContainsSource,
+        bool publicSurfaceContainsSource,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VoiceIdentityPrivacyPhasePolicy.CanPresentStablePublicIdentity(
+                (VoiceGamePhase)phaseValue,
+                authenticatedRosterContainsSource,
+                publicSurfaceContainsSource));
+    }
+
+    [Theory]
+    [InlineData(100, (int)VoiceGamePhase.Tasks, 42, 100, (int)VoiceGamePhase.Tasks, 42, true)]
+    [InlineData(100, (int)VoiceGamePhase.Tasks, 42, 100, (int)VoiceGamePhase.Meeting, 42, false)]
+    [InlineData(100, (int)VoiceGamePhase.Meeting, 42, 100, (int)VoiceGamePhase.Meeting, 43, false)]
+    [InlineData(100, (int)VoiceGamePhase.Meeting, 42, 101, (int)VoiceGamePhase.Meeting, 42, false)]
+    public void FrameCacheRequiresTheSameFrameExactPhaseAndGame(
+        int cachedFrame,
+        int cachedPhaseValue,
+        int cachedGameId,
+        int currentFrame,
+        int currentPhaseValue,
+        int currentGameId,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VoiceIdentityPrivacyFrameCachePolicy.CanReuse(
+                cachedFrame,
+                (VoiceGamePhase)cachedPhaseValue,
+                cachedGameId,
+                currentFrame,
+                (VoiceGamePhase)currentPhaseValue,
+                currentGameId));
+    }
+
+    [Fact]
+    public void ProvisionalFailureDoesNotPoisonContinuousSpeechGate()
+    {
+        var gate = new VoiceIdentityPrivacyTransitionGate();
+        var provisionalEvidence = new VoiceIdentityPrivacyEvidence(
+            ViewerStateKnown: true,
+            SourceStateKnown: false);
+        var provisional = VoiceIdentityPrivacyPolicy.Resolve(3, provisionalEvidence);
+
+        var hiddenFrame = gate.Observe(
+            provisional,
+            isSpeaking: true,
+            isProvisional: VoiceIdentityPrivacyPolicy.IsProvisional(provisionalEvidence));
+
+        Assert.Equal(VoiceIdentityPrivacyDecision.HideSource, hiddenFrame.EffectiveResolution.Decision);
+        Assert.False(gate.HasAcceptedResolution);
+
+        var known = ResolveNormal(3);
+        var recovered = gate.Observe(known, isSpeaking: true, isProvisional: false);
+        Assert.Equal(known, recovered.EffectiveResolution);
+        Assert.False(recovered.IsQuarantined);
+        Assert.True(gate.HasAcceptedResolution);
+    }
+
+    [Fact]
+    public void ProvisionalFailureCannotWeakenStickyHideAll()
+    {
+        var gate = new VoiceIdentityPrivacyTransitionGate();
+        var normal = ResolveNormal(3);
+        var hideAll = VoiceIdentityPrivacyPolicy.Resolve(
+            3,
+            new VoiceIdentityPrivacyEvidence(
+                ViewerStateKnown: true,
+                SourceStateKnown: true,
+                HideAllForViewer: true));
+        var provisionalHideSource = VoiceIdentityPrivacyPolicy.Resolve(
+            3,
+            new VoiceIdentityPrivacyEvidence(
+                ViewerStateKnown: true,
+                SourceStateKnown: false));
+
+        gate.Advance(normal, isSpeaking: true);
+        Assert.Equal(
+            VoiceIdentityPrivacyDecision.HideAllForViewer,
+            gate.Advance(hideAll, isSpeaking: true).EffectiveResolution.Decision);
+        var provisional = gate.Observe(
+            provisionalHideSource,
+            isSpeaking: true,
+            isProvisional: true);
+
+        Assert.Equal(
+            VoiceIdentityPrivacyDecision.HideAllForViewer,
+            provisional.EffectiveResolution.Decision);
+        Assert.True(gate.IsQuarantined);
+    }
+
+    [Fact]
+    public void PhaseEpochPreservesKnownBaselineAcrossTransientUnknown()
+    {
+        var epoch = new VoiceIdentityPrivacyPhaseEpoch();
+
+        Assert.False(epoch.Advance(VoiceGamePhase.Tasks));
+        Assert.False(epoch.Advance(VoiceGamePhase.Unknown));
+        Assert.Equal(VoiceGamePhase.Tasks, epoch.LastKnownPhase);
+        Assert.True(epoch.Advance(VoiceGamePhase.Meeting));
+        Assert.Equal(VoiceGamePhase.Meeting, epoch.LastKnownPhase);
+    }
+
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, false)]
+    public void UnknownViewerOrSourceEvidenceIsProvisional(
+        bool viewerStateKnown,
+        bool sourceStateKnown,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VoiceIdentityPrivacyPolicy.IsProvisional(
+                new VoiceIdentityPrivacyEvidence(
+                    ViewerStateKnown: viewerStateKnown,
+                    SourceStateKnown: sourceStateKnown)));
+    }
+
     [Fact]
     public void HardViewerHideHasHighestPrecedence()
     {
@@ -246,6 +437,44 @@ public sealed class VoiceIdentityPrivacyPolicyTests
     }
 
     [Fact]
+    public void EnteringPublicIdentityDomainRebasesHiddenSpeakerWithoutQuietEdge()
+    {
+        var gate = new VoiceIdentityPrivacyTransitionGate();
+        var hidden = ResolveHidden(3);
+        var normal = ResolveNormal(3);
+
+        Assert.Equal(hidden, gate.Advance(hidden, isSpeaking: true).EffectiveResolution);
+        Assert.True(VoiceIdentityPrivacyPhasePolicy.ShouldResetTransitionState(
+            VoiceGamePhase.Tasks,
+            VoiceGamePhase.Meeting));
+
+        gate.Reset();
+        var inMeeting = gate.Advance(normal, isSpeaking: true);
+
+        Assert.Equal(normal, inMeeting.EffectiveResolution);
+        Assert.False(inMeeting.IsQuarantined);
+    }
+
+    [Fact]
+    public void ReturningToTasksRebasesConcealedSpeakerWithoutQuietEdge()
+    {
+        var gate = new VoiceIdentityPrivacyTransitionGate();
+        var normal = ResolveNormal(3);
+        var hidden = ResolveHidden(3);
+
+        Assert.Equal(normal, gate.Advance(normal, isSpeaking: true).EffectiveResolution);
+        Assert.True(VoiceIdentityPrivacyPhasePolicy.ShouldResetTransitionState(
+            VoiceGamePhase.Meeting,
+            VoiceGamePhase.Tasks));
+
+        gate.Reset();
+        var inTasks = gate.Advance(hidden, isSpeaking: true);
+
+        Assert.Equal(hidden, inTasks.EffectiveResolution);
+        Assert.False(inTasks.IsQuarantined);
+    }
+
+    [Fact]
     public void AliasAndTargetNormalPresentationCollide()
     {
         var alias = ResolveAlias(3, 9);
@@ -370,4 +599,12 @@ public sealed class VoiceIdentityPrivacyPolicyTests
                 SourceStateKnown: true,
                 AliasActive: true,
                 AliasPlayerId: aliasPlayerId));
+
+    private static VoiceIdentityPrivacyResolution ResolveHidden(byte sourcePlayerId)
+        => VoiceIdentityPrivacyPolicy.Resolve(
+            sourcePlayerId,
+            new VoiceIdentityPrivacyEvidence(
+                ViewerStateKnown: true,
+                SourceStateKnown: true,
+                HideSource: true));
 }

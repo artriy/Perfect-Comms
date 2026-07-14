@@ -16,6 +16,105 @@ public sealed class VoiceModRegistryOverlayPrivacyTests : IDisposable
     }
 
     [Fact]
+    public void ExplicitViewerRuleReceivesMeetingAndCanHideAll()
+    {
+        VoicePhaseKind? observedPhase = null;
+        RegisterViewer(context =>
+        {
+            observedPhase = context.Phase;
+            return context.Phase == VoicePhaseKind.Meeting
+                ? VoiceOverlayViewerResult.HideAll
+                : VoiceOverlayViewerResult.Pass;
+        });
+
+        Assert.Equal(
+            VoiceOverlayViewerResult.HideAll,
+            ResolveViewer(VoicePhaseKind.Meeting));
+        Assert.Equal<VoicePhaseKind?>(VoicePhaseKind.Meeting, observedPhase);
+    }
+
+    [Fact]
+    public void ExplicitSpeakerRuleReceivesMeetingAndCanHideSource()
+    {
+        VoicePhaseKind? observedPhase = null;
+        RegisterSpeaker(context =>
+        {
+            observedPhase = context.Phase;
+            return context.Phase == VoicePhaseKind.Meeting
+                ? VoiceOverlaySpeakerResult.HideSource
+                : VoiceOverlaySpeakerResult.Pass;
+        });
+
+        Assert.Equal(
+            VoiceOverlaySpeakerResult.HideSource,
+            ResolveSpeaker(VoicePhaseKind.Meeting));
+        Assert.Equal<VoicePhaseKind?>(VoicePhaseKind.Meeting, observedPhase);
+    }
+
+    [Fact]
+    public void ExplicitSpeakerRuleReceivesMeetingAndCanAlias()
+    {
+        VoicePhaseKind? observedPhase = null;
+        RegisterSpeaker(context =>
+        {
+            observedPhase = context.Phase;
+            return context.Phase == VoicePhaseKind.Meeting
+                ? VoiceOverlaySpeakerResult.Alias(9)
+                : VoiceOverlaySpeakerResult.Pass;
+        });
+
+        Assert.Equal(
+            VoiceOverlaySpeakerResult.Alias(9),
+            ResolveSpeaker(VoicePhaseKind.Meeting));
+        Assert.Equal<VoicePhaseKind?>(VoicePhaseKind.Meeting, observedPhase);
+    }
+
+    [Fact]
+    public void ExactPhaseRuleCanChangeImmediatelyFromMeetingToExile()
+    {
+        Assert.Equal(VoicePhaseKind.Meeting, VoiceModBridge.ToApiPhase(VoiceGamePhase.Meeting));
+        Assert.Equal(VoicePhaseKind.Exile, VoiceModBridge.ToApiPhase(VoiceGamePhase.Exile));
+        RegisterSpeaker(context => context.Phase switch
+        {
+            VoicePhaseKind.Meeting => VoiceOverlaySpeakerResult.Alias(9),
+            VoicePhaseKind.Exile => VoiceOverlaySpeakerResult.HideSource,
+            _ => VoiceOverlaySpeakerResult.Pass,
+        });
+
+        var meetingVerdict = ResolveSpeaker(VoicePhaseKind.Meeting);
+        var exileVerdict = ResolveSpeaker(VoicePhaseKind.Exile);
+        Assert.Equal(VoiceOverlaySpeakerResult.Alias(9), meetingVerdict);
+        Assert.Equal(VoiceOverlaySpeakerResult.HideSource, exileVerdict);
+
+        var gate = new VoiceIdentityPrivacyTransitionGate();
+        var meetingResolution = VoiceIdentityPrivacyPolicy.Resolve(
+            3,
+            new VoiceIdentityPrivacyEvidence(
+                ViewerStateKnown: true,
+                SourceStateKnown: true,
+                AliasActive: true,
+                AliasPlayerId: meetingVerdict.AliasPlayerId));
+        Assert.Equal(
+            VoiceIdentityPrivacyDecision.Alias,
+            gate.Advance(meetingResolution, isSpeaking: true).EffectiveResolution.Decision);
+
+        var epoch = new VoiceIdentityPrivacyPhaseEpoch();
+        Assert.False(epoch.Advance(VoiceGamePhase.Meeting));
+        if (epoch.Advance(VoiceGamePhase.Exile))
+            gate.Reset();
+        var exileResolution = VoiceIdentityPrivacyPolicy.Resolve(
+            3,
+            new VoiceIdentityPrivacyEvidence(
+                ViewerStateKnown: true,
+                SourceStateKnown: true,
+                HideSource: exileVerdict == VoiceOverlaySpeakerResult.HideSource));
+        var transitioned = gate.Advance(exileResolution, isSpeaking: true);
+
+        Assert.Equal(VoiceIdentityPrivacyDecision.HideSource, transitioned.EffectiveResolution.Decision);
+        Assert.False(transitioned.IsQuarantined);
+    }
+
+    [Fact]
     public void ViewerRulesComposeToMostRestrictiveVerdict()
     {
         RegisterViewer(_ => VoiceOverlayViewerResult.Pass);
@@ -186,24 +285,37 @@ public sealed class VoiceModRegistryOverlayPrivacyTests : IDisposable
     private VoiceOverlayViewerResult ResolveViewer()
         => VoiceModRegistry.ResolveOverlayViewerPrivacy(_viewerContext);
 
+    private static VoiceOverlayViewerResult ResolveViewer(VoicePhaseKind phase)
+        => VoiceModRegistry.ResolveOverlayViewerPrivacy(FakeViewerContext(phase));
+
     private VoiceOverlaySpeakerResult ResolveSpeaker()
         => VoiceModRegistry.ResolveOverlaySpeakerPrivacy(_speakerContext);
 
-    private static VoiceOverlayViewerContext FakeViewerContext()
-        => CreateViewerContext(FakePlayer());
+    private static VoiceOverlaySpeakerResult ResolveSpeaker(VoicePhaseKind phase)
+        => VoiceModRegistry.ResolveOverlaySpeakerPrivacy(FakeSpeakerContext(phase));
 
-    private static VoiceOverlaySpeakerContext FakeSpeakerContext()
-        => CreateSpeakerContext(FakePlayer(), FakePlayer());
+    private static VoiceOverlayViewerContext FakeViewerContext(
+        VoicePhaseKind phase = VoicePhaseKind.Tasks)
+        => CreateViewerContext(FakePlayer(), phase);
 
-    private static VoiceOverlayViewerContext CreateViewerContext(object? viewer)
+    private static VoiceOverlaySpeakerContext FakeSpeakerContext(
+        VoicePhaseKind phase = VoicePhaseKind.Tasks)
+        => CreateSpeakerContext(FakePlayer(), FakePlayer(), phase);
+
+    private static VoiceOverlayViewerContext CreateViewerContext(
+        object? viewer,
+        VoicePhaseKind phase = VoicePhaseKind.Tasks)
         => (VoiceOverlayViewerContext)Activator.CreateInstance(
             typeof(VoiceOverlayViewerContext),
-            new[] { viewer, VoicePhaseKind.Tasks, false })!;
+            new[] { viewer, phase, false })!;
 
-    private static VoiceOverlaySpeakerContext CreateSpeakerContext(object? viewer, object? speaker)
+    private static VoiceOverlaySpeakerContext CreateSpeakerContext(
+        object? viewer,
+        object? speaker,
+        VoicePhaseKind phase = VoicePhaseKind.Tasks)
         => (VoiceOverlaySpeakerContext)Activator.CreateInstance(
             typeof(VoiceOverlaySpeakerContext),
-            new[] { viewer, speaker, VoicePhaseKind.Tasks, false, false })!;
+            new[] { viewer, speaker, phase, false, false })!;
 
     private static object FakePlayer()
     {
