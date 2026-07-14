@@ -1459,14 +1459,14 @@ internal static class VoiceUiKit
             _avatarGlow.rectTransform.sizeDelta = new Vector2(avatarD + 22f, avatarD + 22f);
             _avatarGlow.rectTransform.anchoredPosition = new Vector2(avatarCx, 0f);
 
-            _glowColor = CrewmateAvatarRenderer.GetPaletteColor(_pc);
+            _glowColor = CrewmateAvatarRenderer.GetStableIdentityPaletteColor(_pc);
 
             var avatarRt = Rect("Avatar", Root);
             avatarRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
             avatarRt.sizeDelta = new Vector2(avatarD, avatarD);
             avatarRt.anchoredPosition = new Vector2(avatarCx, 0f);
             var avatarImg = avatarRt.gameObject.AddComponent<Image>();
-            var body = CrewmateAvatarRenderer.GetBodySpriteFor(_pc);
+            var body = CrewmateAvatarRenderer.GetStableIdentityBodySpriteFor(_pc);
             if (body != null)
             {
                 avatarImg.sprite = body;
@@ -1638,6 +1638,24 @@ internal static class VoiceUiKit
         {
             _meterTarget = Mathf.Sqrt(Mathf.Clamp01(level));
             _meterSpeaking = speaking;
+        }
+
+        public bool HasVisibleMeter => _meterSpeaking || _meterTarget > 0.001f || _meterDisplay > 0.001f;
+
+        /// <summary>
+        /// Privacy transitions must not use the normal release animation: even a short decaying
+        /// meter would identify the speaker that just became concealed or was remapped.
+        /// </summary>
+        public void ClearLevelImmediately()
+        {
+            _meterTarget = 0f;
+            _meterDisplay = 0f;
+            _meterSpeaking = false;
+            _meterFill.sizeDelta = new Vector2(0f, 6f);
+            _meterFillImg.color = MeterGreen;
+            var glow = _glowColor;
+            glow.a = 0f;
+            _avatarGlow.color = glow;
         }
 
         public override void OnMouseDown()

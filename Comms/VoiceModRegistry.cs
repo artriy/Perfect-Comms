@@ -7,9 +7,9 @@ namespace VoiceChatPlugin.VoiceChat;
 
 // Internal registry behind PerfectCommsApi. Holds every third-party registration keyed by
 // mod id and exposes fail-closed query helpers the engine wire-in points call. Every external
-// callback is wrapped in try/catch: a throwing mod yields the neutral result (Pass / null /
-// option default) and never breaks the voice frame. Mirrors the per-player fail-closed
-// convention already used in VoiceRoleMuteState.
+// callback is wrapped in try/catch: audio callbacks yield their neutral result (Pass / null /
+// option default), while identity-bearing overlay callbacks fail private. No third-party
+// exception may break the voice frame.
 internal static class VoiceModRegistry
 {
     private sealed record GlobalGate(string ModId, VoicePhaseKind Phase, Func<bool> IsActive, string Reason);
@@ -18,6 +18,8 @@ internal static class VoiceModRegistry
     private static readonly Dictionary<string, List<Func<VoiceRuleContext, VoiceChannelResult?>>> _channels = new();
     private static readonly Dictionary<string, List<Func<PlayerControl, VoiceListenerResult?>>> _origins = new();
     private static readonly Dictionary<string, List<Func<PlayerControl, bool>>> _listenerFilters = new();
+    private static readonly Dictionary<string, List<Func<VoiceOverlayViewerContext, VoiceOverlayViewerResult>>> _overlayViewerRules = new();
+    private static readonly Dictionary<string, List<Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult>>> _overlaySpeakerRules = new();
     private static readonly List<GlobalGate> _globalGates = new();
 
     // Tabs in registration order; options grouped per mod id.
@@ -32,7 +34,8 @@ internal static class VoiceModRegistry
     private static readonly Dictionary<string, int> _enumValues = new();
 
     internal static bool HasAnyRegistrations =>
-        _rules.Count > 0 || _channels.Count > 0 || _origins.Count > 0 || _globalGates.Count > 0;
+        _rules.Count > 0 || _channels.Count > 0 || _origins.Count > 0 || _globalGates.Count > 0
+        || _overlayViewerRules.Count > 0 || _overlaySpeakerRules.Count > 0;
 
     // ---- Registration (called from PerfectCommsApi) ----
 
@@ -64,6 +67,22 @@ internal static class VoiceModRegistry
     {
         if (string.IsNullOrEmpty(modId) || shouldMuffle == null) return;
         Add(_listenerFilters, modId, shouldMuffle);
+    }
+
+    internal static void AddOverlayViewerRule(
+        string modId,
+        Func<VoiceOverlayViewerContext, VoiceOverlayViewerResult> rule)
+    {
+        if (string.IsNullOrEmpty(modId) || rule == null) return;
+        Add(_overlayViewerRules, modId, rule);
+    }
+
+    internal static void AddOverlaySpeakerRule(
+        string modId,
+        Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult> rule)
+    {
+        if (string.IsNullOrEmpty(modId) || rule == null) return;
+        Add(_overlaySpeakerRules, modId, rule);
     }
 
     internal static void AddHostOption(string modId, VoiceHostOption option)
@@ -99,6 +118,8 @@ internal static class VoiceModRegistry
         _channels.Remove(modId);
         _origins.Remove(modId);
         _listenerFilters.Remove(modId);
+        _overlayViewerRules.Remove(modId);
+        _overlaySpeakerRules.Remove(modId);
         _boolOptions.Remove(modId);
         _enumOptions.Remove(modId);
         _globalGates.RemoveAll(g => g.ModId == modId);
@@ -116,6 +137,146 @@ internal static class VoiceModRegistry
     }
 
     // ---- Engine queries (fail-closed) ----
+
+    /// <summary>
+    /// Restrictively composes all viewer-wide overlay rules. Missing viewer state and callback
+    /// failures hide every identity-bearing indicator.
+    /// </summary>
+    internal static VoiceOverlayViewerResult ResolveOverlayViewerPrivacy(
+        PlayerControl? viewer,
+        VoicePhaseKind phase,
+        bool isDead)
+    {
+        if (IsMissingPlayer(viewer)) return VoiceOverlayViewerResult.HideAll;
+        // This is the normal built-in-only path. Do not allocate a callback context every rendered
+        // frame when no third-party mod registered an overlay rule.
+        if (_overlayViewerRules.Count == 0) return VoiceOverlayViewerResult.Pass;
+        return ResolveOverlayViewerPrivacy(new VoiceOverlayViewerContext(viewer!, phase, isDead));
+    }
+
+    internal static VoiceOverlayViewerResult ResolveOverlayViewerPrivacy(
+        VoiceOverlayViewerContext context)
+    {
+        if (context == null || IsMissingPlayer(context.Viewer))
+            return VoiceOverlayViewerResult.HideAll;
+        if (_overlayViewerRules.Count == 0)
+            return VoiceOverlayViewerResult.Pass;
+
+        var effective = VoiceOverlayViewerResult.Pass;
+        foreach (var pair in _overlayViewerRules)
+        {
+            var scopedContext = MakeOverlayViewerContext(pair.Key, context);
+            var list = pair.Value;
+            for (int i = 0; i < list.Count; i++)
+            {
+                VoiceOverlayViewerResult result;
+                try { result = list[i](scopedContext); }
+                catch { result = VoiceOverlayViewerResult.HideAll; }
+
+                switch (result.Verdict)
+                {
+                    case VoiceOverlayViewerVerdict.Pass:
+                        break;
+                    case VoiceOverlayViewerVerdict.DimAll:
+                        effective = VoiceOverlayViewerResult.DimAll;
+                        break;
+                    case VoiceOverlayViewerVerdict.HideAll:
+                    default:
+                        return VoiceOverlayViewerResult.HideAll;
+                }
+            }
+        }
+        return effective;
+    }
+
+    /// <summary>
+    /// Restrictively composes all source-specific overlay rules. Missing viewer state hides all;
+    /// missing speaker state, callback failures, invalid aliases, and alias conflicts hide source.
+    /// </summary>
+    internal static VoiceOverlaySpeakerResult ResolveOverlaySpeakerPrivacy(
+        PlayerControl? viewer,
+        PlayerControl? speaker,
+        VoicePhaseKind phase,
+        bool viewerIsDead,
+        bool speakerIsDead)
+    {
+        if (IsMissingPlayer(viewer)) return VoiceOverlaySpeakerResult.HideAll;
+        if (IsMissingPlayer(speaker)) return VoiceOverlaySpeakerResult.HideSource;
+        // Avoid one context allocation per active speaker per frame in the common no-extension case.
+        if (_overlaySpeakerRules.Count == 0) return VoiceOverlaySpeakerResult.Pass;
+        return ResolveOverlaySpeakerPrivacy(new VoiceOverlaySpeakerContext(
+            viewer!,
+            speaker!,
+            phase,
+            viewerIsDead,
+            speakerIsDead));
+    }
+
+    internal static VoiceOverlaySpeakerResult ResolveOverlaySpeakerPrivacy(
+        VoiceOverlaySpeakerContext context)
+    {
+        if (context == null || IsMissingPlayer(context.Viewer))
+            return VoiceOverlaySpeakerResult.HideAll;
+        if (IsMissingPlayer(context.Speaker))
+            return VoiceOverlaySpeakerResult.HideSource;
+        if (_overlaySpeakerRules.Count == 0)
+            return VoiceOverlaySpeakerResult.Pass;
+
+        var effectiveVerdict = VoiceOverlaySpeakerVerdict.Pass;
+        byte? aliasPlayerId = null;
+
+        foreach (var pair in _overlaySpeakerRules)
+        {
+            var scopedContext = MakeOverlaySpeakerContext(pair.Key, context);
+            var list = pair.Value;
+            for (int i = 0; i < list.Count; i++)
+            {
+                VoiceOverlaySpeakerResult result;
+                try { result = list[i](scopedContext); }
+                catch { result = VoiceOverlaySpeakerResult.HideSource; }
+
+                switch (result.Verdict)
+                {
+                    case VoiceOverlaySpeakerVerdict.Pass:
+                        break;
+                    case VoiceOverlaySpeakerVerdict.HideAll:
+                        return VoiceOverlaySpeakerResult.HideAll;
+                    case VoiceOverlaySpeakerVerdict.HideSource:
+                        effectiveVerdict = VoiceOverlaySpeakerVerdict.HideSource;
+                        aliasPlayerId = null;
+                        break;
+                    case VoiceOverlaySpeakerVerdict.Alias:
+                        if (effectiveVerdict == VoiceOverlaySpeakerVerdict.HideSource)
+                            break;
+                        if (result.AliasPlayerId is not { } candidate
+                            || candidate == byte.MaxValue
+                            || (aliasPlayerId.HasValue && aliasPlayerId.Value != candidate))
+                        {
+                            effectiveVerdict = VoiceOverlaySpeakerVerdict.HideSource;
+                            aliasPlayerId = null;
+                        }
+                        else
+                        {
+                            effectiveVerdict = VoiceOverlaySpeakerVerdict.Alias;
+                            aliasPlayerId = candidate;
+                        }
+                        break;
+                    default:
+                        effectiveVerdict = VoiceOverlaySpeakerVerdict.HideSource;
+                        aliasPlayerId = null;
+                        break;
+                }
+            }
+        }
+
+        return effectiveVerdict switch
+        {
+            VoiceOverlaySpeakerVerdict.Alias when aliasPlayerId.HasValue
+                => VoiceOverlaySpeakerResult.Alias(aliasPlayerId.Value),
+            VoiceOverlaySpeakerVerdict.HideSource => VoiceOverlaySpeakerResult.HideSource,
+            _ => VoiceOverlaySpeakerResult.Pass,
+        };
+    }
 
     // Phase-scoped global gate (e.g. system-wide jam). Returns true + reason when active.
     // Also used for the LOCAL transmit gate ("am I muted right now?").
@@ -363,6 +524,9 @@ internal static class VoiceModRegistry
 
     // ---- internals ----
 
+    private static bool IsMissingPlayer(PlayerControl? player)
+        => player is null || player == null;
+
     private static VoiceChannelResult? Eval(Func<VoiceRuleContext, VoiceChannelResult?> func,
         string modId, PlayerControl player, VoicePhaseKind phase, bool isLocal, bool isDead)
     {
@@ -374,6 +538,24 @@ internal static class VoiceModRegistry
     // mod's id, so a mod reads its own options without repeating its id.
     private static VoiceRuleContext MakeContext(string modId, PlayerControl player, VoicePhaseKind phase, bool isLocal, bool isDead)
         => new(player, phase, isLocal, isDead)
+        {
+            GetOption = key => GetBoolValue(Compose(modId, key)),
+            GetEnumOption = key => GetEnumValue(Compose(modId, key)),
+        };
+
+    private static VoiceOverlayViewerContext MakeOverlayViewerContext(
+        string modId,
+        VoiceOverlayViewerContext context)
+        => context with
+        {
+            GetOption = key => GetBoolValue(Compose(modId, key)),
+            GetEnumOption = key => GetEnumValue(Compose(modId, key)),
+        };
+
+    private static VoiceOverlaySpeakerContext MakeOverlaySpeakerContext(
+        string modId,
+        VoiceOverlaySpeakerContext context)
+        => context with
         {
             GetOption = key => GetBoolValue(Compose(modId, key)),
             GetEnumOption = key => GetEnumValue(Compose(modId, key)),

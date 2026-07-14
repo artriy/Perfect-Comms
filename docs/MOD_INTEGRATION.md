@@ -37,12 +37,13 @@ public class MyModPlugin : BasePlugin
 | **Gate** | Mute / muffle a player or the whole lobby | [Gate](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration-Gate) |
 | **Channel** | Players hear each other beyond proximity (team / private / directed) | [Channels](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration-Channels) |
 | **Listener Origin** | Relocate where the local player hears from | [Listener Origin](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration-Listener-Origin) |
+| **Overlay Privacy** | Hide, dim, or safely alias identity-bearing speaking indicators | [API reference](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration-API-Reference) |
 | **Host Options + Tab** | Host-synced toggles and your own settings tab | [Host Options](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration-Host-Options) |
 
 ## Contract
 
-- Callbacks run ~20×/second - keep them cheap and allocation-light.
-- Callbacks must not throw; if they do, they fail closed (treated as no-opinion).
+- Audio callbacks run about 20 times/second; overlay-privacy callbacks run at most once per rendered frame. Keep both cheap and allocation-light.
+- Callbacks must not throw. Audio callbacks fall back to no-opinion; identity-bearing overlay callbacks fail private.
 - Return `Pass` / `null` when your role does not apply.
 - `Unregister(modId)` on unload.
 

@@ -110,19 +110,26 @@ public static class MeetingSpeakingIndicatorPatch
             return;
         }
 
-        _speakingLevels.Clear();
-        var remotes = overlay.RemotePlayers;
-        for (int i = 0; i < remotes.Count; i++)
+        var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
+        if (privacy.HideAllForViewer || privacy.DimAll)
         {
-            var remote = remotes[i];
-            if (remote.IsSpeaking && remote.IsAudible)
-                _speakingLevels[remote.PlayerId] = remote.Level;
+            DisableAll();
+            if (logNow)
+                LogHud("hud.meeting.update", $"privacy-hidden calls={Take(ref _updateCalls)} {DescribeHudRoot(meetingHud)}");
+            return;
         }
 
-        if (PlayerControl.LocalPlayer != null && overlay.Local.IsSpeaking)
+        _speakingLevels.Clear();
+        var speakers = privacy.Speakers;
+        for (int i = 0; i < speakers.Count; i++)
         {
-            byte lid = PlayerControl.LocalPlayer.PlayerId;
-            if (lid != byte.MaxValue) _speakingLevels[lid] = overlay.Local.Level;
+            var speaker = speakers[i];
+            byte presentationId = speaker.PresentationPlayerId;
+            if (!_speakingLevels.TryGetValue(presentationId, out float existingLevel)
+                || speaker.Level > existingLevel)
+            {
+                _speakingLevels[presentationId] = speaker.Level;
+            }
         }
 
         // Fix 4-HUD-a(i): on idle meeting frames (nobody speaking AND no card still fading out) skip the
@@ -145,7 +152,31 @@ public static class MeetingSpeakingIndicatorPatch
 
             byte pid       = state.TargetPlayerId;
             bool isTalking = _speakingLevels.TryGetValue(pid, out float level);
-            var visual = GetVisualState(pid);
+            _visualStates.TryGetValue(pid, out var visual);
+            bool snapForPrivacy = !isTalking
+                                  && VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(pid);
+            if (!isTalking && !snapForPrivacy && visual?.Visibility > 0.01f)
+            {
+                var current = VoiceIdentityPrivacyRuntime.Peek(pid);
+                snapForPrivacy = !current.HasConcretePresentation
+                                 || current.PresentationPlayerId != pid;
+            }
+
+            if (snapForPrivacy)
+            {
+                if (visual != null)
+                {
+                    visual.TargetLevel = 0f;
+                    visual.SmoothedLevel = 0f;
+                    visual.Visibility = 0f;
+                }
+                if (_cardGlows.TryGetValue(pid, out var staleGlow) && staleGlow != null)
+                    staleGlow.enabled = false;
+                ClearBuiltInHighlight(state);
+                continue;
+            }
+
+            visual ??= GetVisualState(pid);
             visual.TargetLevel = isTalking ? level : 0f;
             visual.SmoothedLevel = VoiceLevelVisual.SmoothLevel(visual.SmoothedLevel, visual.TargetLevel, Time.deltaTime);
             visual.Visibility = VoiceLevelVisual.StepVisibility(visual.Visibility, isTalking, Time.deltaTime);

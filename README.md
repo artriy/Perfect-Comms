@@ -55,7 +55,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 | Mod | Voice behavior |
 | :--- | :--- |
-| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing for Eclipsal, Grenadier, and Hypnotist effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
+| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing and concealment-safe speaker UI for Eclipsal, Grenadier, Hypnotist, disguise, and camouflage effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
 
 <br>
 

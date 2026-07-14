@@ -224,7 +224,10 @@ public static class PingTrackerPatch
     }
 
     private static bool IsFixedEligible(VoicePlayerSnapshot p)
-        => !p.Disconnected && !p.IsDummy && p.ClientId >= 0 && p.IsVisible;
+        // IsVisible is derived from the transient Unity GameObject state, which commonly flips while
+        // MeetingHud/exile UI takes ownership of the scene.  Fixed All Players is a connected-client
+        // roster, so world-render visibility must never remove a legitimate slot.
+        => !p.Disconnected && !p.IsDummy && p.ClientId >= 0;
 
     private static void EnsureFixedRosterSlots(VoiceGameStateSnapshot snapshot)
     {
@@ -243,9 +246,17 @@ public static class PingTrackerPatch
             var player = FindPlayer(id);
             if (_slots.TryGetValue(id, out var existing))
             {
-                if (existing.IconGO == null)
+                // A retained transition snapshot can briefly outlive the world PlayerControl while
+                // MeetingHud/exile objects are being swapped. Preserve the already-correct slot rather
+                // than fingerprinting null as default and flashing a rebuilt "?" identity.
+                if (player == null)
+                    continue;
+
+                if (existing.IconGO == null || existing.RingGO == null || existing.RingRenderer == null || existing.LabelTMP == null)
                 {
-                    TryCreateSlotIcon(id, existing);
+                    RemoveSlot(id);
+                    AddSlot(id, 0f);
+                    continue;
                 }
                 else if (existing.Fingerprint != GetFingerprint(id))
                 {
@@ -271,6 +282,8 @@ public static class PingTrackerPatch
                 }
                 continue;
             }
+            if (player == null)
+                continue;
             AddSlot(id, 0f);
             if (_slots.TryGetValue(id, out var slot) && !_activeSpeakerIds.Contains(id))
             {
@@ -380,29 +393,37 @@ public static class PingTrackerPatch
                 VoiceFrameProfiler.End("overlay.prewarm", pwTicks);
             }
             var overlay = VoiceOverlayState.Current(room);
+            var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
             _activeSpeakerIds.Clear();
             _activeSpeakerLevels.Clear();
             _activeSpeakerNames.Clear();
 
-            var remotes = overlay.RemotePlayers;
-            for (int i = 0; i < remotes.Count; i++)
+            var presentedSpeakers = privacy.Speakers;
+            for (int i = 0; i < presentedSpeakers.Count; i++)
             {
-                var remote = remotes[i];
-                if (remote.IsSpeaking && remote.IsAudible)
+                var speaker = presentedSpeakers[i];
+                byte presentationId = speaker.PresentationPlayerId;
+                _activeSpeakerIds.Add(presentationId);
+                if (!_activeSpeakerLevels.TryGetValue(presentationId, out float existingLevel)
+                    || speaker.Level > existingLevel)
                 {
-                    _activeSpeakerIds.Add(remote.PlayerId);
-                    _activeSpeakerLevels[remote.PlayerId] = remote.Level;
-                    _activeSpeakerNames[remote.PlayerId] = remote.PlayerName;
+                    _activeSpeakerLevels[presentationId] = speaker.Level;
                 }
-            }
 
-            if (PlayerControl.LocalPlayer && overlay.Local.IsSpeaking)
-            {
-                byte lid = PlayerControl.LocalPlayer.PlayerId;
-                if (lid != byte.MaxValue)
+                if (VoiceIdentityPrivacyRuntime.TryFindPlayer(presentationId, out var presentationPlayer)
+                    && presentationPlayer.Data != null)
                 {
-                    _activeSpeakerIds.Add(lid);
-                    _activeSpeakerLevels[lid] = overlay.Local.Level;
+                    _activeSpeakerNames[presentationId] = presentationPlayer.Data.PlayerName;
+                }
+                else
+                {
+                    var remotes = overlay.RemotePlayers;
+                    for (int j = 0; j < remotes.Count; j++)
+                    {
+                        if (remotes[j].PlayerId != speaker.SourcePlayerId) continue;
+                        _activeSpeakerNames[presentationId] = remotes[j].PlayerName;
+                        break;
+                    }
                 }
             }
 
@@ -422,12 +443,29 @@ public static class PingTrackerPatch
             UpdatePubliclyDead(snapshot);
             // Fixed all-players is a roster: show real identities, never live disguises (a meeting forces this too).
             CrewmateAvatarRenderer.PreferRealIdentity = _fixedAllPlayers;
-            bool fixedActive = _fixedAllPlayers && snapshot != null && MeetingHud.Instance == null;
+            bool fixedActive = _fixedAllPlayers && snapshot != null;
 
             foreach (var kv in _slots)
             {
                 kv.Value.IsSpeaking = false;
                 kv.Value.TargetLevel = 0f;
+            }
+
+            if (!fixedActive && _slots.Count > 0)
+            {
+                // A dynamic slot from the previous utterance must disappear immediately when its
+                // source becomes hidden or is now presented as an alias. Letting it fade would leave
+                // a short-lived real-identity breadcrumb during the concealment transition.
+                _fadedSlotIds.Clear();
+                foreach (var kv in _slots)
+                {
+                    var resolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key);
+                    if (VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(kv.Key)
+                        || !resolution.HasConcretePresentation
+                        || resolution.PresentationPlayerId != kv.Key)
+                        _fadedSlotIds.Add(kv.Key);
+                }
+                foreach (byte id in _fadedSlotIds) RemoveSlot(id);
             }
 
             if (fixedActive)
@@ -490,6 +528,24 @@ public static class PingTrackerPatch
                 AddSlot(id, level);
             }
 
+            if (fixedActive)
+            {
+                foreach (var kv in _slots)
+                {
+                    var currentResolution = VoiceIdentityPrivacyRuntime.Peek(kv.Key);
+                    bool slotIdentityBecamePrivate = !_activeSpeakerIds.Contains(kv.Key)
+                                                     && (!currentResolution.HasConcretePresentation
+                                                         || currentResolution.PresentationPlayerId != kv.Key);
+                    if (privacy.HideAllForViewer
+                        || privacy.DimAll
+                        || VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(kv.Key)
+                        || slotIdentityBecamePrivate)
+                    {
+                        SnapSlotRing(kv.Value);
+                    }
+                }
+            }
+
             if (_slots.Count > 0 && !_barRoot.activeSelf) _barRoot.SetActive(true);
 
             UpdateSlotRings();
@@ -537,6 +593,11 @@ public static class PingTrackerPatch
     private static void EnsureBar(PingTracker? template)
     {
         if (_barRoot != null) return;
+
+        // If a meeting-owned parent was destroyed, Unity destroys the visual children while the
+        // managed slot dictionary survives. Drop those dead references before constructing a new root.
+        if (_slots.Count > 0)
+            DestroySpeakingBarSlots();
 
         _barRoot   = new GameObject("VC_SpeakingBar");
         _barRoot.transform.SetParent(ResolveOverlayRoot(template), false);
@@ -1151,6 +1212,17 @@ public static class PingTrackerPatch
         }
     }
 
+    private static void SnapSlotRing(SpeakerSlot slot)
+    {
+        slot.IsSpeaking = false;
+        slot.Level = 0f;
+        slot.TargetLevel = 0f;
+        slot.SmoothedLevel = 0f;
+        slot.Visibility = 0f;
+        if (slot.RingRenderer != null)
+            slot.RingRenderer.enabled = false;
+    }
+
     private static void LayoutSlots()
     {
         _layoutDirty = false;
@@ -1386,6 +1458,7 @@ public static class PingTrackerPatch
         _activeSpeakerLevels.Clear();
         _fadedSlotIds.Clear();
         VoiceOverlayState.InvalidateCache();
+        VoiceIdentityPrivacyRuntime.Reset();
         DestroySpeakingBarSlots();
         _layoutDirty = false;
         if (_barRoot != null)
@@ -1415,6 +1488,7 @@ public static class PingTrackerPatch
             _fadedSlotIds.Clear();
             _playerLookup.Clear();
             VoiceOverlayState.InvalidateCache();
+            VoiceIdentityPrivacyRuntime.Reset();
             VoiceVolumeMenu.ForceClose();
             CrewmateAvatarRenderer.ClearCache();
             _layoutDirty = false;
@@ -1451,14 +1525,15 @@ public static class PingTrackerPatch
         var pc = FindPlayer(playerId);
         if (pc?.Data == null) return default;
         var outfit = GetDisplayOutfit(pc);
+        bool stableIdentity = _fixedAllPlayers || MeetingHud.Instance != null;
         return new OutfitFingerprint(
-            GetDisplayOutfitId(pc),
+            stableIdentity ? 0 : GetDisplayOutfitId(pc),
             GetPlayerColorId(pc),
             outfit.HatId,
             outfit.SkinId,
             outfit.VisorId,
             outfit.PlayerName,
-            CrewmateAvatarRenderer.IsConcealed(pc));
+            !stableIdentity && CrewmateAvatarRenderer.IsConcealed(pc));
     }
 
     // Color-blind fingerprint compare: true when at most the body ColorId differs. Lets the consumer
@@ -1531,6 +1606,7 @@ public static class PingTrackerPatch
 
     private static int GetDisplayOutfitId(PlayerControl pc)
     {
+        if (_fixedAllPlayers || MeetingHud.Instance != null) return 0;
         try
         {
             return (int)pc.CurrentOutfitType;
@@ -1545,7 +1621,8 @@ public static class PingTrackerPatch
     {
         if (player?.Data == null) return "?";
         // Hide name of a concealed (camo/mixed-up/swooped) speaker so the overlay can't identify them.
-        if (CrewmateAvatarRenderer.IsConcealed(player)) return string.Empty;
+        if (!_fixedAllPlayers && MeetingHud.Instance == null && CrewmateAvatarRenderer.IsConcealed(player))
+            return string.Empty;
         try
         {
             var name = GetDisplayOutfit(player).PlayerName;

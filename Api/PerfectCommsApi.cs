@@ -6,9 +6,11 @@ namespace PerfectComms.Api;
 
 // Public mod-integration surface for Perfect Comms. A third-party role mod references
 // PerfectComms.dll as a SOFT dependency, registers rules in its Load(), and ships its own
-// DLL. Perfect Comms references nothing of the mod. All callbacks run locally on every
-// client (~20x/sec inside the snapshot build) and MUST be cheap, allocation-light, and
-// throw-free; the registry wraps every call in try/catch and fails closed.
+// DLL. Perfect Comms references nothing of the mod. All callbacks run locally and MUST be
+// cheap, allocation-light, and throw-free. Audio-routing callbacks run at snapshot cadence
+// (~20x/sec); overlay-privacy callbacks run at most once per rendered frame so concealment
+// cannot leave a visual breadcrumb. The registry wraps every call in try/catch. Audio callbacks
+// fall back to their neutral result, while identity-bearing overlay callbacks fail private.
 //
 // See docs/MOD_API_PLAN.md and the GitHub wiki for the full guide.
 
@@ -104,6 +106,74 @@ public sealed record VoiceListenerResult(
 /// </summary>
 public sealed record VoiceListenerFilterResult(bool Muffle);
 
+/// <summary>Viewer-wide privacy verdict for identity-bearing voice overlays.</summary>
+public enum VoiceOverlayViewerVerdict
+{
+    /// <summary>No opinion; allow other rules or the normal overlay policy to decide.</summary>
+    Pass,
+    /// <summary>Keep the overlay visible, but remove/dim identity-bearing presentation.</summary>
+    DimAll,
+    /// <summary>Hide every identity-bearing voice indicator for this viewer.</summary>
+    HideAll,
+}
+
+/// <summary>Result of a viewer-wide overlay privacy rule.</summary>
+public readonly record struct VoiceOverlayViewerResult(VoiceOverlayViewerVerdict Verdict)
+{
+    public static readonly VoiceOverlayViewerResult Pass = new(VoiceOverlayViewerVerdict.Pass);
+    public static readonly VoiceOverlayViewerResult DimAll = new(VoiceOverlayViewerVerdict.DimAll);
+    public static readonly VoiceOverlayViewerResult HideAll = new(VoiceOverlayViewerVerdict.HideAll);
+}
+
+/// <summary>Source-specific privacy verdict for an identity-bearing voice indicator.</summary>
+public enum VoiceOverlaySpeakerVerdict
+{
+    /// <summary>No opinion; present the transport speaker normally.</summary>
+    Pass,
+    /// <summary>Attribute activity to another player instead of the transport source.</summary>
+    Alias,
+    /// <summary>Hide this transport source's identity-bearing indicator.</summary>
+    HideSource,
+    /// <summary>Hide every identity-bearing voice indicator for this viewer.</summary>
+    HideAll,
+}
+
+/// <summary>Result of a source-specific overlay privacy rule.</summary>
+public readonly record struct VoiceOverlaySpeakerResult(
+    VoiceOverlaySpeakerVerdict Verdict,
+    byte? AliasPlayerId = null)
+{
+    public static readonly VoiceOverlaySpeakerResult Pass = new(VoiceOverlaySpeakerVerdict.Pass);
+    public static readonly VoiceOverlaySpeakerResult HideSource = new(VoiceOverlaySpeakerVerdict.HideSource);
+    public static readonly VoiceOverlaySpeakerResult HideAll = new(VoiceOverlaySpeakerVerdict.HideAll);
+
+    /// <summary>Attribute the source's activity to <paramref name="targetPlayerId"/>.</summary>
+    public static VoiceOverlaySpeakerResult Alias(byte targetPlayerId)
+        => new(VoiceOverlaySpeakerVerdict.Alias, targetPlayerId);
+}
+
+/// <summary>Inputs handed to a viewer-wide overlay privacy callback.</summary>
+public sealed record VoiceOverlayViewerContext(
+    PlayerControl Viewer,
+    VoicePhaseKind Phase,
+    bool IsDead)
+{
+    public Func<string, bool> GetOption { get; init; } = _ => false;
+    public Func<string, int> GetEnumOption { get; init; } = _ => 0;
+}
+
+/// <summary>Inputs handed to a source-specific overlay privacy callback.</summary>
+public sealed record VoiceOverlaySpeakerContext(
+    PlayerControl Viewer,
+    PlayerControl Speaker,
+    VoicePhaseKind Phase,
+    bool ViewerIsDead,
+    bool SpeakerIsDead)
+{
+    public Func<string, bool> GetOption { get; init; } = _ => false;
+    public Func<string, int> GetEnumOption { get; init; } = _ => 0;
+}
+
 /// <summary>Declarative host toggle. Stored/synced as "modId.Key".</summary>
 public sealed record VoiceHostOption(string Key, string Label, bool Default);
 
@@ -112,7 +182,7 @@ public sealed record VoiceHostEnumOption(string Key, string Label, int Default, 
 
 public static class PerfectCommsApi
 {
-    public const string ApiVersion = "1.0";
+    public const string ApiVersion = "1.1";
     public const string PluginId = "com.edgetel.perfectcomms";
 
     // ---- Primitive 1: Gate (mute / muffle) ----
@@ -157,6 +227,27 @@ public static class PerfectCommsApi
     /// <summary>Register a host-panel tab for this mod. Options registered under the same id render inside it.</summary>
     public static void RegisterModTab(string modId, string tabLabel)
         => VoiceModRegistry.AddTab(modId, tabLabel);
+
+    // ---- Primitive 6: Identity-bearing overlay privacy ----
+
+    /// <summary>
+    /// Register a viewer-wide overlay privacy rule. Results compose restrictively across all
+    /// registrations: HideAll wins over DimAll, which wins over Pass. A throw fails to HideAll.
+    /// </summary>
+    public static void RegisterOverlayViewerRule(
+        string modId,
+        Func<VoiceOverlayViewerContext, VoiceOverlayViewerResult> rule)
+        => VoiceModRegistry.AddOverlayViewerRule(modId, rule);
+
+    /// <summary>
+    /// Register a per-speaker overlay privacy rule. Results compose restrictively across all
+    /// registrations: HideAll, HideSource, Alias, then Pass. Conflicting aliases and throws fail
+    /// to HideSource.
+    /// </summary>
+    public static void RegisterOverlaySpeakerRule(
+        string modId,
+        Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult> rule)
+        => VoiceModRegistry.AddOverlaySpeakerRule(modId, rule);
 
     // ---- Cleanup ----
 

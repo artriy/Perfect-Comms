@@ -39,6 +39,11 @@ public static class VoiceVolumeMenu
 
     public static void Show()
     {
+        var privacy = VoiceIdentityPrivacyRuntime.Current(
+            VoiceOverlayState.Current(VoiceChatRoom.Current));
+        if (privacy.HideAllForViewer || privacy.DimAll)
+            return;
+
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
 
@@ -155,6 +160,14 @@ public static class VoiceVolumeMenu
         if (_shell.Root == null) { Destroy(); return; }
         if (!_shown) return;
 
+        var privacy = VoiceIdentityPrivacyRuntime.Current(
+            VoiceOverlayState.Current(VoiceChatRoom.Current));
+        if (privacy.HideAllForViewer || privacy.DimAll)
+        {
+            Hide();
+            return;
+        }
+
         if (Input.GetKeyDown(KeyCode.Escape))
         {
             VoiceUiKit.SwallowClick();
@@ -184,23 +197,51 @@ public static class VoiceVolumeMenu
     {
         if (_rows.Count == 0) return;
         var overlay = VoiceOverlayState.Current(VoiceChatRoom.Current);
-        var remotes = overlay.RemotePlayers;
+        var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
+        if (privacy.HideAllForViewer || privacy.DimAll)
+        {
+            for (int i = 0; i < _rows.Count; i++)
+                _rows[i].ClearLevelImmediately();
+            return;
+        }
+
+        var speakers = privacy.Speakers;
         for (int i = 0; i < _rows.Count; i++)
         {
             var row = _rows[i];
             float level = 0f;
             bool speaking = false;
-            for (int j = 0; j < remotes.Count; j++)
+            for (int j = 0; j < speakers.Count; j++)
             {
-                var r = remotes[j];
-                if (r.PlayerId == row.PlayerId)
+                var speaker = speakers[j];
+                if (speaker.PresentationPlayerId == row.PlayerId)
                 {
-                    level = r.Level;
-                    speaking = r.IsSpeaking;
+                    level = speaker.Level;
+                    speaking = true;
                     break;
                 }
             }
-            row.SetLevel(level, speaking);
+            if (speaking)
+            {
+                row.SetLevel(level, true);
+                continue;
+            }
+
+            // Preserve the ordinary release animation when a speaker merely stops talking. If a
+            // visible identity became concealed or was remapped, snap the stale meter off instead.
+            // A currently active alias collision is protected by the speaking branch above.
+            bool snapForPrivacy = VoiceIdentityPrivacyRuntime.ShouldSnapPresentation(row.PlayerId);
+            if (!snapForPrivacy && row.HasVisibleMeter)
+            {
+                var current = VoiceIdentityPrivacyRuntime.Peek(row.PlayerId);
+                snapForPrivacy = !current.HasConcretePresentation
+                                 || current.PresentationPlayerId != row.PlayerId;
+            }
+
+            if (snapForPrivacy)
+                row.ClearLevelImmediately();
+            else
+                row.SetLevel(0f, false);
         }
     }
 

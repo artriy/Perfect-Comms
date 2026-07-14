@@ -56,10 +56,20 @@ internal static class CrewmateAvatarRenderer
         public readonly int ColorId;
         public readonly bool IsRainbow;
         public readonly bool Concealed;
+        public readonly bool CosmeticsResolved;
         public readonly List<CachedCosmeticLayer> Layers;
-        public CachedOutfit(int colorId, bool isRainbow, bool concealed, List<CachedCosmeticLayer> layers)
+        public CachedOutfit(
+            int colorId,
+            bool isRainbow,
+            bool concealed,
+            bool cosmeticsResolved,
+            List<CachedCosmeticLayer> layers)
         {
-            ColorId = colorId; IsRainbow = isRainbow; Concealed = concealed; Layers = layers;
+            ColorId = colorId;
+            IsRainbow = isRainbow;
+            Concealed = concealed;
+            CosmeticsResolved = cosmeticsResolved;
+            Layers = layers;
         }
     }
     private static readonly Dictionary<byte, CachedOutfit> OutfitCache = new();
@@ -70,6 +80,12 @@ internal static class CrewmateAvatarRenderer
     internal static bool PreferRealIdentity;
 
     private static bool ShowRealIdentity => PreferRealIdentity || MeetingHud.Instance != null;
+
+    // Fixed-roster and meeting surfaces deliberately render the stable default identity. Concealment
+    // still participates in the separate speaking-attribution privacy policy, but must never mutate a
+    // fixed avatar into a grey/live-disguise icon.
+    private static bool RenderAsConcealed(PlayerControl pc)
+        => !ShowRealIdentity && IsConcealed(pc);
 
     // True when the player's live outfit is a disguise (morph/shapeshift/mimic) that differs from their real
     // default outfit. Used to suppress the live (disguised) cosmetics when the bar should show real identity.
@@ -91,7 +107,7 @@ internal static class CrewmateAvatarRenderer
         if (pc?.Data == null || parent == null) return false;
 
         // Concealed players render as a neutral grey body with no rainbow/cosmetics.
-        bool concealed = IsConcealed(pc);
+        bool concealed = RenderAsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
         bool isRainbow = !concealed && IsRainbowColorId(colorId);
         var baseSprite = concealed
@@ -215,7 +231,16 @@ internal static class CrewmateAvatarRenderer
         try
         {
             if (pc?.Data == null) return false;
-            if (IsConcealed(pc)) return true;
+            if (RenderAsConcealed(pc)) return true;
+            // A fixed/meeting avatar must not mistake the fully-loaded *disguise* cosmetics for
+            // the real outfit being ready. Use only a complete cache captured while undisguised;
+            // otherwise keep retrying so the real cosmetics attach as soon as the disguise ends.
+            if (ShowRealIdentity && IsDisguised(pc))
+            {
+                return OutfitCache.TryGetValue(pc.PlayerId, out var cached)
+                       && !cached.Concealed
+                       && cached.CosmeticsResolved;
+            }
             var c = pc.cosmetics;
             if (c == null) return false;
             var outfit = GetDisplayOutfit(pc);
@@ -328,7 +353,7 @@ internal static class CrewmateAvatarRenderer
         if (iconRoot == null || pc?.Data == null) return;
         RemoveCosmeticLayers(iconRoot);
         var capturedLayers = new List<CachedCosmeticLayer>();
-        if (!IsConcealed(pc))
+        if (!RenderAsConcealed(pc))
             TryAddOutfitCosmetics(iconRoot.transform, pc, capturedLayers);
         CacheOutfit(playerId, pc, capturedLayers);
         ApplySorting(iconRoot);
@@ -343,12 +368,16 @@ internal static class CrewmateAvatarRenderer
     {
         // Never overwrite the cache with a disguise; keep the last real outfit so a meeting/roster can rebuild it.
         if (IsDisguised(pc)) return;
+        // A stable-identity surface may be rendering DefaultOutfit while the live player is otherwise
+        // invisible/anonymous. Do not poison the end-game/stable cache with that live concealment state.
+        if (ShowRealIdentity && IsConcealed(pc)) return;
         bool concealed = IsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
         OutfitCache[playerId] = new CachedOutfit(
             colorId,
             !concealed && IsRainbowColorId(colorId),
             concealed,
+            concealed || OutfitCosmeticsResolved(pc),
             concealed ? new List<CachedCosmeticLayer>() : layers);
     }
 
@@ -402,7 +431,7 @@ internal static class CrewmateAvatarRenderer
     internal static Color GetPaletteColor(PlayerControl? pc)
     {
         if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
-        if (IsConcealed(pc)) return (Color)ConcealedColor;
+        if (RenderAsConcealed(pc)) return (Color)ConcealedColor;
         // A Rainbow-colored player's palette swatch is solid black (the body only LOOKS rainbow because Town of Us
         // rewrites its material every frame). Return the SAME animated color the body icon shows this frame so the
         // ring/glow + meeting highlight cycle rainbow in lockstep instead of rendering a dead black blob.
@@ -411,11 +440,36 @@ internal static class CrewmateAvatarRenderer
         return (Color)Palette.PlayerColors[ClampColorId(GetPlayerColorId(pc))];
     }
 
+    /// <summary>
+    /// Settings rosters pair this swatch with the player's real name, so they must always use the
+    /// stable default identity. Reading the live Morph/Mimic/Swoop appearance here would itself be
+    /// an identity leak even when every speaking meter is correctly hidden.
+    /// </summary>
+    internal static Color GetStableIdentityPaletteColor(PlayerControl? pc)
+    {
+        if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f);
+        int colorId;
+        try { colorId = ClampColorId(pc.Data.DefaultOutfit.ColorId); }
+        catch { colorId = 0; }
+        if (IsRainbowColorIdCached(colorId))
+            return (Color)RainbowBodyColor(GetRainbowFrameIndex(Time.time));
+        return (Color)Palette.PlayerColors[colorId];
+    }
+
     internal static Sprite? GetBodySpriteFor(PlayerControl? pc)
     {
         if (pc?.Data == null) return null;
-        if (IsConcealed(pc)) return GetConcealedBaseSprite();
+        if (RenderAsConcealed(pc)) return GetConcealedBaseSprite();
         int colorId = ClampColorId(GetPlayerColorId(pc));
+        return IsRainbowColorIdCached(colorId) ? GetRainbowBaseSprite(0) : GetBaseSprite(colorId);
+    }
+
+    internal static Sprite? GetStableIdentityBodySpriteFor(PlayerControl? pc)
+    {
+        if (pc?.Data == null) return null;
+        int colorId;
+        try { colorId = ClampColorId(pc.Data.DefaultOutfit.ColorId); }
+        catch { colorId = 0; }
         return IsRainbowColorIdCached(colorId) ? GetRainbowBaseSprite(0) : GetBaseSprite(colorId);
     }
 
@@ -424,7 +478,7 @@ internal static class CrewmateAvatarRenderer
     // change (which never fires for a fixed Rainbow color id), so it consults this to recompute rainbow rings live.
     internal static bool IsRainbowPlayer(PlayerControl? pc)
     {
-        if (pc?.Data == null || IsConcealed(pc)) return false;
+        if (pc?.Data == null || RenderAsConcealed(pc)) return false;
         try { return IsRainbowColorIdCached(ClampColorId(GetPlayerColorId(pc))); }
         catch { return false; }
     }
@@ -447,8 +501,8 @@ internal static class CrewmateAvatarRenderer
     // type 0 is additionally treated as concealed when its outfit looks camouflaged (HNS global camo stamps the
     // name "???"; Venerer camo empties all cosmetics and blanks the name). A normal type-0 player keeps a real
     // (non-empty) name, so is never falsely concealed.
-    // Comms sabotage hides everyone in the bar (you can't ID who is talking while comms is down). This outranks
-    // the meeting real-identity reveal, so a meeting called while comms is still active stays grey.
+    // Comms sabotage participates in speaking-attribution privacy. Dynamic speaker icons may still use this
+    // neutral fallback, while fixed-roster and meeting surfaces retain their stable real identities with rings off.
     private static bool CommsConcealmentActive()
     {
         try
@@ -783,7 +837,8 @@ internal static class CrewmateAvatarRenderer
     {
         try
         {
-            // Meeting or fixed-roster bar shows real identity (concealed players still gray via IsConcealed).
+            // Meeting or fixed-roster bar shows the stable real identity. Speaking-attribution privacy is
+            // enforced separately, so keeping this avatar stable cannot light a concealed player's ring.
             if (ShowRealIdentity) return pc.Data.DefaultOutfit;
             return pc.CurrentOutfit ?? pc.Data.DefaultOutfit;
         }

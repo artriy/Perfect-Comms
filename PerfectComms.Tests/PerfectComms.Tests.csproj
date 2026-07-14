@@ -36,6 +36,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<Reference Include="Assembly-CSharp">
+			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\Assembly-CSharp.dll</HintPath>
+		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
 			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\UnityEngine.CoreModule.dll</HintPath>
 		</Reference>
