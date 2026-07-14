@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
+using UnityEngine.UI;
 using Object = UnityEngine.Object;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -22,6 +23,8 @@ public static class VoiceSettingsPanel
     private const float DeviceRowH = 142f;
     private const float HeaderH = 42f;
     private const float TopPad = 12f;
+    private const float SmoothScrollRate = 18f;
+    private const float ScrollbarMinThumbHeight = 30f;
 
     private static readonly string[] Categories =
         { "AUDIO", "DEVICES", "KEYBINDS", "HUD", "ADVANCED" };
@@ -31,12 +34,22 @@ public static class VoiceSettingsPanel
     private static readonly List<VoiceUiKit.Row> _rows = new();
     private static VoiceUiKit.Row? _activeRow;
     private static float _scroll;
+    private static float _scrollTarget;
     private static float _contentHeight;
     private static float _animT;
     private static int _visSignature = int.MinValue;
     private static MixSettingsExpansion _expandedMixSettings;
     private static bool _rebuildRequested;
     private static bool _revealExpandedMix;
+    private static RectTransform? _scrollbarRoot;
+    private static RectTransform? _scrollbarThumb;
+    private static Image? _scrollbarTrackImage;
+    private static Image? _scrollbarThumbImage;
+    private static bool _scrollbarDragging;
+    private static float _scrollbarDragOffset;
+    private static SpeakingBarLivePreview? _livePreview;
+    private static bool _livePreviewUnavailable;
+    private static float _livePreviewProgress;
 
     private static bool ShellAlive => _shell != null && _shell.Root != null;
     private static bool _shown;
@@ -67,11 +80,22 @@ public static class VoiceSettingsPanel
         _shell.Group.alpha = 1f;
         _shell.Group.interactable = true;
         _shell.Group.blocksRaycasts = true;
-        _shell.RootRect.localScale = Vector3.one * PanelScale;
         _scroll = 0f;
+        _scrollTarget = 0f;
+        CancelScrollbarDrag();
         _shell.PaneRoot.anchoredPosition = Vector2.zero;
         _animT = 0f;
         _shown = true;
+
+        bool previewEnabled = VoiceSettings.Instance.SpeakingBarLivePreview.Value;
+        _livePreviewProgress = previewEnabled ? 1f : 0f;
+        if (previewEnabled)
+        {
+            _livePreviewUnavailable = false;
+            EnsureLivePreview();
+        }
+        ApplyPanelPresentation();
+        UpdateLivePreview(0f);
 
         if (!rebuilt) RebuildRows(true);
 
@@ -90,7 +114,55 @@ public static class VoiceSettingsPanel
             _revealExpandedMix = false;
             RebuildRows(true);
         };
+        BuildScrollbar();
         RebuildRows(true);
+    }
+
+    private static void BuildScrollbar()
+    {
+        if (_shell == null) return;
+
+        _scrollbarRoot = VoiceUiKit.Rect("SettingsScrollbar", _shell.PaneClip);
+        _scrollbarRoot.Anchor(new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(0.5f, 0.5f));
+        _scrollbarRoot.sizeDelta = new Vector2(18f, -16f);
+        _scrollbarRoot.anchoredPosition = new Vector2(-9f, 0f);
+
+        _scrollbarTrackImage = VoiceUiKit.Panel(
+            "ScrollbarTrack",
+            _scrollbarRoot,
+            new Color32(26, 39, 55, 205),
+            rounded: true,
+            soft: true);
+        _scrollbarTrackImage.rectTransform.Anchor(
+            new Vector2(0.5f, 0f),
+            new Vector2(0.5f, 1f),
+            new Vector2(0.5f, 0.5f));
+        _scrollbarTrackImage.rectTransform.sizeDelta = new Vector2(4f, -4f);
+        _scrollbarTrackImage.rectTransform.anchoredPosition = Vector2.zero;
+
+        _scrollbarThumb = VoiceUiKit.Rect("ScrollbarThumbHit", _scrollbarRoot);
+        _scrollbarThumb.Anchor(
+            new Vector2(0.5f, 1f),
+            new Vector2(0.5f, 1f),
+            new Vector2(0.5f, 1f));
+        _scrollbarThumb.sizeDelta = new Vector2(18f, ScrollbarMinThumbHeight);
+        _scrollbarThumb.anchoredPosition = Vector2.zero;
+
+        _scrollbarThumbImage = VoiceUiKit.Panel(
+            "ScrollbarThumb",
+            _scrollbarThumb,
+            VoiceUiKit.TextMuted,
+            rounded: true,
+            soft: true);
+        _scrollbarThumbImage.rectTransform.Anchor(
+            new Vector2(0.5f, 0f),
+            new Vector2(0.5f, 1f),
+            new Vector2(0.5f, 0.5f));
+        _scrollbarThumbImage.rectTransform.sizeDelta = new Vector2(7f, -2f);
+        _scrollbarThumbImage.rectTransform.anchoredPosition = Vector2.zero;
+
+        _scrollbarRoot.SetAsLastSibling();
+        UpdateScrollbarVisual();
     }
 
     public static void Hide()
@@ -99,9 +171,11 @@ public static class VoiceSettingsPanel
         _expandedMixSettings = MixSettingsExpansion.None;
         _rebuildRequested = false;
         _revealExpandedMix = false;
+        CancelScrollbarDrag();
         _shown = false;
         _animT = 0f;
         _activeRow = null;
+        _livePreview?.Suspend();
         if (_shell != null && _shell.Root != null)
         {
             _shell.Group.alpha = 0f;
@@ -125,6 +199,12 @@ public static class VoiceSettingsPanel
     private static void Destroy()
     {
         VoiceUiKit.RebindRow.CancelCapture();
+        CancelScrollbarDrag();
+        if (_livePreview != null)
+        {
+            _livePreview.Dispose();
+            _livePreview = null;
+        }
         if (_shell != null)
         {
             if (_shell.Root != null) Object.Destroy(_shell.Root);
@@ -134,17 +214,26 @@ public static class VoiceSettingsPanel
         _rows.Clear();
         _activeRow = null;
         _scroll = 0f;
+        _scrollTarget = 0f;
+        _contentHeight = 0f;
         _shown = false;
         _visSignature = int.MinValue;
         _expandedMixSettings = MixSettingsExpansion.None;
         _rebuildRequested = false;
         _revealExpandedMix = false;
+        _scrollbarRoot = null;
+        _scrollbarThumb = null;
+        _scrollbarTrackImage = null;
+        _scrollbarThumbImage = null;
+        _livePreviewUnavailable = false;
+        _livePreviewProgress = 0f;
     }
 
     private static void RebuildRows(bool resetScroll)
     {
         if (_shell == null) return;
         VoiceUiKit.RebindRow.CancelCapture();
+        CancelScrollbarDrag();
         for (int i = _shell.PaneRoot.childCount - 1; i >= 0; i--)
             Object.Destroy(_shell.PaneRoot.GetChild(i).gameObject);
         _rows.Clear();
@@ -249,20 +338,29 @@ public static class VoiceSettingsPanel
 
     private static void ApplyScroll(bool reset)
     {
-        float viewH = _shell!.PaneHeight - 24f;
-        float maxScroll = Mathf.Max(0f, _contentHeight - viewH);
-        _scroll = reset ? 0f : Mathf.Clamp(_scroll, 0f, maxScroll);
-        _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        float maxScroll = MaxScroll();
+        if (reset)
+        {
+            _scroll = 0f;
+            _scrollTarget = 0f;
+        }
+        else
+        {
+            _scroll = Mathf.Clamp(_scroll, 0f, maxScroll);
+            _scrollTarget = Mathf.Clamp(_scrollTarget, 0f, maxScroll);
+        }
+        _shell!.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        UpdateScrollbarVisual();
     }
 
     private static void RevealContentBottom(float contentBottom)
     {
         if (_shell == null) return;
-        float viewH = _shell.PaneHeight - 24f;
-        float maxScroll = Mathf.Max(0f, _contentHeight - viewH);
-        float requiredScroll = -viewH + 12f - contentBottom;
-        _scroll = Mathf.Clamp(Mathf.Max(_scroll, requiredScroll), 0f, maxScroll);
-        _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        float maxScroll = MaxScroll();
+        float requiredScroll = -ViewHeight() + 12f - contentBottom;
+        _scrollTarget = Mathf.Clamp(Mathf.Max(_scrollTarget, requiredScroll), 0f, maxScroll);
+        _scroll = Mathf.Clamp(_scroll, 0f, maxScroll);
+        UpdateScrollbarVisual();
     }
 
     private static Func<float, string> Pct => v => $"<color=#22D3EE>{Mathf.RoundToInt(v * 100f)}%</color>";
@@ -510,17 +608,23 @@ public static class VoiceSettingsPanel
         Slider(defs, "Button Scale", s.OverlayScale, Num2);
 
         Section(defs, "SPEAKING BAR");
-        Toggle(defs, "Fixed All Players", s.SpeakingBarFixedAllPlayers);
+        Toggle(defs, "Show All Players", s.SpeakingBarFixedAllPlayers);
+        Toggle(defs, "Live Preview", s.SpeakingBarLivePreview);
         EnumStep(defs, "Speaking Bar Position", s.SpeakingBarPosition, new[]
         {
             "Top Left", "Top Middle", "Top Right", "Bottom Left", "Bottom Middle", "Bottom Right",
             "Middle Left", "Middle Right"
         });
+        EnumStep(defs, "Side Layout", s.SpeakingBarSideLayout, new[] { "Single Lane", "Wrapped" },
+            () => !s.SpeakingBarManualLayout.Value &&
+                  SpeakingBarLayoutPolicy.IsSidePreset(s.SpeakingBarPosition.Value));
         SpeakingBarNamePositionStep(defs, s);
         Slider(defs, "Speaking Bar Scale", s.SpeakingBarScale, Pct);
         Toggle(defs, "Speaking Bar Backdrop", s.SpeakingBarBackdrop);
         Toggle(defs, "Speaking Bar Manual Layout", s.SpeakingBarManualLayout);
         EnumStep(defs, "Speaking Bar Layout", s.SpeakingBarLayout, new[] { "Vertical", "Horizontal" },
+            () => s.SpeakingBarManualLayout.Value);
+        EnumStep(defs, "Avatar Facing", s.SpeakingBarAvatarFacing, new[] { "Right", "Left" },
             () => s.SpeakingBarManualLayout.Value);
         Slider(defs, "Speaking Bar X", s.SpeakingBarX, Pct, () => s.SpeakingBarManualLayout.Value);
         Slider(defs, "Speaking Bar Y", s.SpeakingBarY, Pct, () => s.SpeakingBarManualLayout.Value);
@@ -566,18 +670,18 @@ public static class VoiceSettingsPanel
             return;
         }
 
-        float dt = Time.deltaTime;
+        float dt = Mathf.Max(0f, Time.unscaledDeltaTime);
+        UpdateLivePreview(dt);
         if (_animT < 1f)
-        {
             _animT = Mathf.Min(1f, _animT + dt / 0.22f);
-            ApplyOpenAnim();
-        }
+        ApplyPanelPresentation();
 
         _shell.TickHeader();
-        if (_shell == null) return;
+        if (_shell == null || !_shown) return;
         _rail!.Tick();
-        HandleScroll();
-        HandleInput();
+        bool scrollbarOwnsPointer = HandleScrollInput();
+        UpdateSmoothScroll(dt);
+        HandleInput(scrollbarOwnsPointer);
         for (int i = 0; i < _rows.Count; i++) _rows[i].Tick(dt);
 
         if (_rebuildRequested)
@@ -598,32 +702,269 @@ public static class VoiceSettingsPanel
         RebuildRows(false);
     }
 
-    private static void ApplyOpenAnim()
+    private static void EnsureLivePreview()
     {
-        if (_shell == null) return;
-        float t = _animT;
-        const float c1 = 1.70158f;
-        const float c3 = c1 + 1f;
-        float eased = 1f + c3 * (t - 1f) * (t - 1f) * (t - 1f) + c1 * (t - 1f) * (t - 1f);
-        float scale = Mathf.LerpUnclamped(0.6f, 1f, eased) * PanelScale;
-        _shell.RootRect.localScale = new Vector3(scale, scale, 1f);
-        _shell.Group.alpha = Mathf.Clamp01(t / 0.6f);
+        if (_livePreview != null || _livePreviewUnavailable || _shell == null) return;
+        try
+        {
+            _livePreview = new SpeakingBarLivePreview(_shell.RootRect);
+        }
+        catch (Exception ex)
+        {
+            // A constructor that fails midway cannot return an instance for Dispose(). Roll
+            // back any partially-created card directly from the shell hierarchy.
+            for (int i = _shell.RootRect.childCount - 1; i >= 0; i--)
+            {
+                var child = _shell.RootRect.GetChild(i);
+                if (child.name == "VC_SpeakingBarLivePreview")
+                {
+                    child.gameObject.SetActive(false);
+                    Object.Destroy(child.gameObject);
+                }
+            }
+            _livePreviewUnavailable = true;
+            global::VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning(
+                "[PC-UI] Could not build speaking-bar live preview: " + ex.Message);
+        }
     }
 
-    private static void HandleScroll()
+    private static void UpdateLivePreview(float unscaledDeltaTime)
+    {
+        var settings = VoiceSettings.Instance;
+        if (settings == null) return;
+
+        bool enabled = settings.SpeakingBarLivePreview.Value;
+        if (!enabled && _livePreviewUnavailable)
+            _livePreviewUnavailable = false;
+        _livePreviewProgress = SpeakingBarLivePreviewTransitionPolicy.Advance(
+            _livePreviewProgress,
+            enabled,
+            unscaledDeltaTime);
+
+        bool shouldRender = _shown && (enabled || _livePreviewProgress > 0.001f);
+        if (shouldRender) EnsureLivePreview();
+        if (_livePreview == null)
+        {
+            if (_livePreviewUnavailable) _livePreviewProgress = 0f;
+            return;
+        }
+        var preview = _livePreview;
+
+        try
+        {
+            var transition = SpeakingBarLivePreviewTransitionPolicy.Resolve(_livePreviewProgress);
+            preview.SetPresentation(transition.Reveal, shouldRender);
+            if (shouldRender)
+                preview.Tick(settings, unscaledDeltaTime);
+            if (preview.IsUnavailable)
+            {
+                preview.Dispose();
+                _livePreview = null;
+                _livePreviewUnavailable = true;
+                _livePreviewProgress = 0f;
+                return;
+            }
+            preview.SetPresentation(transition.Reveal, shouldRender);
+        }
+        catch (Exception ex)
+        {
+            // The preview is optional editor UI. A broken scene asset or graphics resource
+            // must not trap the user in a frame-by-frame exception before they can turn it off.
+            global::VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning(
+                "[PC-UI] Speaking-bar live preview was disabled after an error: " + ex.Message);
+            try { preview.Dispose(); }
+            catch
+            {
+                try { preview.Suspend(); }
+                catch { }
+            }
+            _livePreview = null;
+            _livePreviewUnavailable = true;
+            _livePreviewProgress = 0f;
+        }
+    }
+
+    private static void ApplyPanelPresentation()
     {
         if (_shell == null) return;
-        float viewH = _shell.PaneHeight - 24f;
-        float maxScroll = Mathf.Max(0f, _contentHeight - viewH);
-        if (maxScroll <= 0f) return;
-        if (!VoiceUiKit.Contains(_shell.PaneClip)) return;
-        float dy = Input.mouseScrollDelta.y;
-        if (dy > -0.01f && dy < 0.01f) return;
-        _scroll = Mathf.Clamp(_scroll - dy * RowH, 0f, maxScroll);
+
+        var workspace = CurrentPreviewWorkspace();
+        float move = SpeakingBarLivePreviewTransitionPolicy.Resolve(_livePreviewProgress).Move;
+        float targetScale = Mathf.Lerp(PanelScale, workspace.Scale, move);
+        float appearScale = VoiceUiKit.AppearScale(_animT);
+        if (move > 0.001f)
+            appearScale = Mathf.Min(1f, appearScale);
+        float actualScale = targetScale * appearScale;
+        _shell.RootRect.localScale = new Vector3(actualScale, actualScale, 1f);
+        _shell.Group.alpha = Mathf.Clamp01(_animT / 0.6f);
+
+        float addedWidth = SpeakingBarLivePreviewWorkspacePolicy.Gap +
+            SpeakingBarLivePreviewWorkspacePolicy.PreviewWidth;
+        float desiredOffset = -addedWidth * 0.5f * actualScale * move;
+        _shell.SetLayoutOffset(new Vector2(desiredOffset, 0f));
+    }
+
+    private static SpeakingBarPreviewWorkspace CurrentPreviewWorkspace()
+    {
+        Rect rect = VoiceUiKit.CanvasRect.rect;
+        float width = rect.width > 1f ? rect.width : Mathf.Max(1f, Screen.width);
+        float height = rect.height > 1f ? rect.height : Mathf.Max(1f, Screen.height);
+        return SpeakingBarLivePreviewWorkspacePolicy.Compute(width, height);
+    }
+
+    private static float ViewHeight()
+        => _shell != null ? _shell.PaneHeight - 24f : 0f;
+
+    private static float MaxScroll()
+        => VoiceSettingsScrollPolicy.MaxScroll(_contentHeight, ViewHeight());
+
+    private static bool HandleScrollInput()
+    {
+        if (_shell == null || _scrollbarRoot == null || !_scrollbarRoot.gameObject.activeSelf)
+        {
+            CancelScrollbarDrag();
+            return false;
+        }
+
+        if (_scrollbarDragging)
+        {
+            if (!Input.GetMouseButton(0))
+            {
+                CancelScrollbarDrag();
+                return false;
+            }
+            if (TryGetScrollbarPointerFromTop(out float pointerFromTop))
+                SetScrollFromThumbTop(pointerFromTop - _scrollbarDragOffset, snap: true);
+            return true;
+        }
+
+        bool inputBusy = _activeRow != null || VoiceUiKit.RebindRow.IsCapturing;
+        if (inputBusy)
+            _scrollTarget = _scroll;
+        if (!inputBusy && Input.GetMouseButtonDown(0) && VoiceUiKit.Contains(_scrollbarRoot))
+        {
+            if (!TryGetScrollbarPointerFromTop(out float pointerFromTop)) return true;
+            float thumbTop = _scrollbarThumb != null ? -_scrollbarThumb.anchoredPosition.y : 0f;
+            if (_scrollbarThumb != null && VoiceUiKit.Contains(_scrollbarThumb))
+            {
+                _scrollbarDragging = true;
+                _scrollbarDragOffset = pointerFromTop - thumbTop;
+            }
+            else
+            {
+                float thumbHeight = _scrollbarThumb != null
+                    ? _scrollbarThumb.rect.height
+                    : ScrollbarMinThumbHeight;
+                SetScrollFromThumbTop(pointerFromTop - thumbHeight * 0.5f, snap: false);
+            }
+            return true;
+        }
+
+        if (!inputBusy && VoiceUiKit.Contains(_shell.PaneClip))
+        {
+            if (Input.GetMouseButtonDown(0))
+                _scrollTarget = _scroll;
+            float delta = Input.mouseScrollDelta.y;
+            if (Mathf.Abs(delta) > 0.01f)
+                _scrollTarget = Mathf.Clamp(_scrollTarget - delta * RowH, 0f, MaxScroll());
+        }
+        return false;
+    }
+
+    private static bool TryGetScrollbarPointerFromTop(out float pointerFromTop)
+    {
+        pointerFromTop = 0f;
+        if (_scrollbarRoot == null || !VoiceUiKit.LocalPoint(_scrollbarRoot, out var local))
+            return false;
+        pointerFromTop = _scrollbarRoot.rect.yMax - local.y;
+        return true;
+    }
+
+    private static void SetScrollFromThumbTop(float thumbTop, bool snap)
+    {
+        if (_scrollbarRoot == null || _scrollbarThumb == null) return;
+        _scrollTarget = VoiceSettingsScrollPolicy.ScrollFromThumbTop(
+            thumbTop,
+            MaxScroll(),
+            _scrollbarRoot.rect.height,
+            _scrollbarThumb.rect.height);
+        if (!snap) return;
+        _scroll = _scrollTarget;
+        if (_shell != null)
+            _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        UpdateScrollbarVisual();
+    }
+
+    private static void UpdateSmoothScroll(float unscaledDeltaTime)
+    {
+        if (_shell == null) return;
+        float maxScroll = MaxScroll();
+        _scrollTarget = VoiceSettingsScrollPolicy.Clamp(_scrollTarget, maxScroll);
+        _scroll = VoiceSettingsScrollPolicy.Clamp(_scroll, maxScroll);
+
+        if (!_scrollbarDragging)
+            _scroll = VoiceSettingsScrollPolicy.Advance(
+                _scroll,
+                _scrollTarget,
+                SmoothScrollRate,
+                unscaledDeltaTime);
+
         _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        UpdateScrollbarVisual();
     }
 
-    private static void HandleInput()
+    private static void UpdateScrollbarVisual()
+    {
+        if (_scrollbarRoot == null || _scrollbarThumb == null) return;
+        float maxScroll = MaxScroll();
+        bool visible = maxScroll > 0.5f;
+        if (_scrollbarRoot.gameObject.activeSelf != visible)
+            _scrollbarRoot.gameObject.SetActive(visible);
+        if (!visible)
+        {
+            CancelScrollbarDrag();
+            return;
+        }
+
+        float trackHeight = Mathf.Max(1f, _scrollbarRoot.rect.height);
+        float viewHeight = Mathf.Max(1f, ViewHeight());
+        float thumbHeight = VoiceSettingsScrollPolicy.ThumbHeight(
+            trackHeight,
+            viewHeight,
+            _contentHeight,
+            ScrollbarMinThumbHeight);
+        _scrollbarThumb.sizeDelta = new Vector2(18f, thumbHeight);
+        float thumbTop = VoiceSettingsScrollPolicy.ThumbTopFromScroll(
+            _scroll,
+            maxScroll,
+            trackHeight,
+            thumbHeight);
+        _scrollbarThumb.anchoredPosition = new Vector2(0f, -thumbTop);
+
+        bool hover = VoiceUiKit.Contains(_scrollbarThumb) || VoiceUiKit.Contains(_scrollbarRoot);
+        if (_scrollbarThumbImage != null)
+        {
+            Color target = _scrollbarDragging
+                ? VoiceUiKit.Accent
+                : hover ? VoiceUiKit.TextPrimary : VoiceUiKit.TextMuted;
+            _scrollbarThumbImage.color = Color.Lerp(_scrollbarThumbImage.color, target, 0.24f);
+        }
+        if (_scrollbarTrackImage != null)
+        {
+            Color target = hover
+                ? new Color32(38, 58, 78, 225)
+                : new Color32(26, 39, 55, 205);
+            _scrollbarTrackImage.color = Color.Lerp(_scrollbarTrackImage.color, target, 0.20f);
+        }
+    }
+
+    private static void CancelScrollbarDrag()
+    {
+        _scrollbarDragging = false;
+        _scrollbarDragOffset = 0f;
+    }
+
+    private static void HandleInput(bool pointerConsumed)
     {
         if (!Input.GetMouseButton(0))
         {
@@ -632,6 +973,7 @@ public static class VoiceSettingsPanel
         }
         if (Input.GetMouseButtonDown(0))
         {
+            if (pointerConsumed) return;
             if (_shell == null || !VoiceUiKit.Contains(_shell.PaneClip)) return;
             for (int i = 0; i < _rows.Count; i++) _rows[i].OnMouseDown();
             _activeRow = FindDragging();

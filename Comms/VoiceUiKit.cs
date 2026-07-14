@@ -507,6 +507,8 @@ internal static class VoiceUiKit
         private readonly Action _onClose;
         private bool _dragging;
         private Vector2 _dragOffset;
+        private Vector2 _userPosition;
+        private Vector2 _layoutOffset;
 
         public PanelShell(string objName, string title, float w, float h, Action onClose, bool rail = true, bool backdrop = true)
         {
@@ -517,7 +519,9 @@ internal static class VoiceUiKit
             RootRect = Root.GetComponent<RectTransform>();
             RootRect.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
             RootRect.sizeDelta = new Vector2(w, h);
-            RootRect.anchoredPosition = Vector2.zero;
+            _userPosition = Vector2.zero;
+            _layoutOffset = Vector2.zero;
+            ApplyRootPosition();
 
             Group = Root.AddComponent<CanvasGroup>();
 
@@ -668,18 +672,33 @@ internal static class VoiceUiKit
                 if (Contains(HeaderRect) && LocalPoint(CanvasRect, out var lp))
                 {
                     _dragging = true;
-                    _dragOffset = RootRect.anchoredPosition - lp;
+                    _dragOffset = _userPosition - lp;
                 }
             }
             else if (Input.GetMouseButton(0) && _dragging)
             {
                 if (LocalPoint(CanvasRect, out var lp))
-                    RootRect.anchoredPosition = lp + _dragOffset;
+                {
+                    _userPosition = lp + _dragOffset;
+                    ApplyRootPosition();
+                }
             }
             else
             {
                 _dragging = false;
             }
+        }
+
+        public void SetLayoutOffset(Vector2 offset)
+        {
+            _layoutOffset = offset;
+            ApplyRootPosition();
+        }
+
+        private void ApplyRootPosition()
+        {
+            if (RootRect != null)
+                RootRect.anchoredPosition = _userPosition + _layoutOffset;
         }
     }
 

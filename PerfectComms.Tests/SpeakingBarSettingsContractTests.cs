@@ -14,6 +14,26 @@ public sealed class SpeakingBarSettingsContractTests
     }
 
     [Fact]
+    public void ManualAvatarFacingHasStableConfigValues()
+    {
+        Assert.Equal(0, (int)SpeakingBarAvatarFacing.Right);
+        Assert.Equal(1, (int)SpeakingBarAvatarFacing.Left);
+    }
+
+    [Fact]
+    public void SideLayoutHasStableConfigValues()
+    {
+        Assert.Equal(0, (int)SpeakingBarSideLayout.SingleLane);
+        Assert.Equal(1, (int)SpeakingBarSideLayout.Wrapped);
+    }
+
+    [Fact]
+    public void LivePreviewIsOptInByDefault()
+    {
+        Assert.False(VoiceChatLocalSettings.SpeakingBarLivePreviewDefault);
+    }
+
+    [Fact]
     public void V4OneHundredPercentUsesLegacyNinetyPercentRenderedSize()
     {
         Assert.Equal(0.90f, SpeakingBarScalePolicy.ToRenderedScale(1.00f), 4);

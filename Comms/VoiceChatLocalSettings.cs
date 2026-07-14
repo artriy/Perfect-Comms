@@ -52,6 +52,18 @@ public enum SpeakingBarNamePosition
     Auto   = 4,
 }
 
+public enum SpeakingBarAvatarFacing
+{
+    Right = 0,
+    Left  = 1,
+}
+
+public enum SpeakingBarSideLayout
+{
+    SingleLane = 0,
+    Wrapped    = 1,
+}
+
 public enum JailUnmuteButtonPlacement
 {
     VoiceHud = 0,
@@ -66,6 +78,8 @@ public enum VoiceMicMode
 
 public class VoiceChatLocalSettings
 {
+    internal const bool SpeakingBarLivePreviewDefault = false;
+
     private static volatile string[] _micDeviceNames = Array.Empty<string>();
     private static volatile bool _micNamesFromSidecar;
     private static int _micDeviceListVersion;
@@ -137,12 +151,15 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> ButtonPositionY { get; }
     public ConfigEntry<VoiceControlsLayout> VoiceControlsLayout { get; }
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
+    public ConfigEntry<SpeakingBarSideLayout> SpeakingBarSideLayout { get; }
     public ConfigEntry<VoiceControlsLayout> SpeakingBarLayout { get; }
     public ConfigEntry<SpeakingBarNamePosition> SpeakingBarNamePosition { get; }
+    public ConfigEntry<SpeakingBarAvatarFacing> SpeakingBarAvatarFacing { get; }
     public ConfigEntry<bool> SpeakingBarManualLayout { get; }
     public ConfigEntry<bool> SpeakingBarBackdrop { get; }
     public ConfigEntry<float> SpeakingBarScale { get; }
     public ConfigEntry<bool> SpeakingBarFixedAllPlayers { get; }
+    public ConfigEntry<bool> SpeakingBarLivePreview { get; }
     public ConfigEntry<bool> ShowFake15Players { get; }
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
     public ConfigEntry<JailUnmuteButtonPlacement> JailUnmuteButtonPlacement { get; }
@@ -370,6 +387,10 @@ public class VoiceChatLocalSettings
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
             new ConfigDescription("Chooses the speaking bar's screen preset while manual layout is disabled."));
 
+        SpeakingBarSideLayout = config.Bind("UI", "SpeakingBarSideLayout",
+            VoiceChatPlugin.VoiceChat.SpeakingBarSideLayout.SingleLane,
+            new ConfigDescription("Chooses whether left/right speaking-bar presets use one vertical lane or wrap into additional columns. Top Middle and Bottom Middle always wrap."));
+
         SpeakingBarManualLayout = config.Bind("UI", "SpeakingBarManualLayout", false,
             new ConfigDescription("Use the sliders and layout below instead of the position preset."));
 
@@ -384,6 +405,10 @@ public class VoiceChatLocalSettings
         SpeakingBarLayout = config.Bind("UI", "SpeakingBarLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Horizontal,
             new ConfigDescription("Speaking bar icon direction."));
+
+        SpeakingBarAvatarFacing = config.Bind("UI", "SpeakingBarAvatarFacing",
+            VoiceChatPlugin.VoiceChat.SpeakingBarAvatarFacing.Right,
+            new ConfigDescription("Chooses whether speaking-bar avatars face left or right while manual layout is enabled."));
 
         _speakingBarSettingsVersion = config.Bind("UI.Internal", "SpeakingBarSettingsVersion", 0,
             new ConfigDescription("Internal migration version for speaking-bar appearance settings."));
@@ -403,6 +428,9 @@ public class VoiceChatLocalSettings
 
         SpeakingBarFixedAllPlayers = config.Bind("UI", "SpeakingBarFixedAllPlayers", false,
             new ConfigDescription("Keeps a stable speaking-bar slot for every connected player, including across meeting transitions, instead of showing only current speakers."));
+
+        SpeakingBarLivePreview = config.Bind("UI", "SpeakingBarLivePreview", SpeakingBarLivePreviewDefault,
+            new ConfigDescription("Moves the local settings panel aside and shows an isolated, realistic 15-player live preview of the speaking bar."));
 
         JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
             VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
@@ -674,6 +702,10 @@ public class VoiceChatLocalSettings
 
     internal void Dispatch(ConfigEntryBase configEntry)
     {
+        // The editor preview polls this value while the local panel is open. It must never
+        // clear, rebuild, or otherwise mutate the real in-game speaking bar.
+        if (configEntry == SpeakingBarLivePreview) return;
+
         if (configEntry == MicVolume)
         {
             VoiceChatRoom.Current?.SetMicVolume(MicVolume.Value);
@@ -739,6 +771,8 @@ public class VoiceChatLocalSettings
         }
         else if (configEntry == SpeakingBarManualLayout || configEntry == SpeakingBarX ||
                  configEntry == SpeakingBarY || configEntry == SpeakingBarLayout ||
+                 configEntry == SpeakingBarAvatarFacing ||
+                 configEntry == SpeakingBarSideLayout ||
                  configEntry == SpeakingBarBackdrop || configEntry == SpeakingBarScale)
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();

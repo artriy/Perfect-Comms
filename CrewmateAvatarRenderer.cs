@@ -146,9 +146,28 @@ internal static class CrewmateAvatarRenderer
     /// outfit, network, or voice state.
     /// </summary>
     internal static bool TryCreatePreview(int previewIndex, Transform parent, out GameObject? iconGO)
+        => TryCreatePreview(
+            previewIndex,
+            parent,
+            VCOverlayCamera.OverlayLayer,
+            attachToOverlayCamera: true,
+            out iconGO);
+
+    /// <summary>
+    /// Creates the same deterministic preview avatar on a caller-owned rendering layer.
+    /// Settings previews use this overload so constructing an avatar does not create, sync,
+    /// or share the real speaking-overlay camera.
+    /// </summary>
+    internal static bool TryCreatePreview(
+        int previewIndex,
+        Transform parent,
+        int targetLayer,
+        bool attachToOverlayCamera,
+        out GameObject? iconGO)
     {
         iconGO = null;
-        if (parent == null || !TryGetPreviewColorId(previewIndex, out int colorId)) return false;
+        if (parent == null || (uint)targetLayer > 31u ||
+            !TryGetPreviewColorId(previewIndex, out int colorId)) return false;
 
         GameObject? root = null;
         try
@@ -171,7 +190,10 @@ internal static class CrewmateAvatarRenderer
                 Color.white,
                 BodyOrder);
             ApplySorting(root);
-            VCOverlayCamera.EnsureOnTop(root);
+            if (attachToOverlayCamera)
+                VCOverlayCamera.EnsureOnTop(root);
+            else
+                SetLayerRecursive(root.transform, targetLayer);
             iconGO = root;
             return true;
         }
@@ -181,6 +203,13 @@ internal static class CrewmateAvatarRenderer
             if (root != null) Object.Destroy(root);
             return false;
         }
+    }
+
+    private static void SetLayerRecursive(Transform root, int layer)
+    {
+        root.gameObject.layer = layer;
+        for (int i = 0; i < root.childCount; i++)
+            SetLayerRecursive(root.GetChild(i), layer);
     }
 
     private static bool TryGetPreviewColorId(int previewIndex, out int colorId)

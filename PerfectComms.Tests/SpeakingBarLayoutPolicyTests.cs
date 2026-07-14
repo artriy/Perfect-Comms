@@ -44,6 +44,77 @@ public sealed class SpeakingBarLayoutPolicyTests
         Assert.Equal(overflowDirection, SpeakingBarLayoutPolicy.OverflowDirectionFor(position));
     }
 
+    [Theory]
+    [InlineData((int)SpeakingBarPosition.TopLeft, true)]
+    [InlineData((int)SpeakingBarPosition.TopMiddle, false)]
+    [InlineData((int)SpeakingBarPosition.TopRight, true)]
+    [InlineData((int)SpeakingBarPosition.MiddleLeft, true)]
+    [InlineData((int)SpeakingBarPosition.MiddleRight, true)]
+    [InlineData((int)SpeakingBarPosition.BottomLeft, true)]
+    [InlineData((int)SpeakingBarPosition.BottomMiddle, false)]
+    [InlineData((int)SpeakingBarPosition.BottomRight, true)]
+    public void SidePresetClassificationIsStable(int positionValue, bool sidePreset)
+    {
+        Assert.Equal(sidePreset,
+            SpeakingBarLayoutPolicy.IsSidePreset((SpeakingBarPosition)positionValue));
+    }
+
+    [Theory]
+    [InlineData((int)SpeakingBarPosition.TopLeft, (int)SpeakingBarSideLayout.SingleLane, true)]
+    [InlineData((int)SpeakingBarPosition.TopLeft, (int)SpeakingBarSideLayout.Wrapped, false)]
+    [InlineData((int)SpeakingBarPosition.MiddleRight, (int)SpeakingBarSideLayout.SingleLane, true)]
+    [InlineData((int)SpeakingBarPosition.BottomRight, (int)SpeakingBarSideLayout.Wrapped, false)]
+    [InlineData((int)SpeakingBarPosition.TopMiddle, (int)SpeakingBarSideLayout.SingleLane, false)]
+    [InlineData((int)SpeakingBarPosition.BottomMiddle, (int)SpeakingBarSideLayout.SingleLane, false)]
+    public void SideLayoutChoiceControlsOnlySidePresetWrapping(
+        int positionValue,
+        int sideLayoutValue,
+        bool singleLane)
+    {
+        Assert.Equal(singleLane, SpeakingBarLayoutPolicy.UsesSingleVerticalLaneFor(
+            (SpeakingBarPosition)positionValue,
+            (SpeakingBarSideLayout)sideLayoutValue));
+    }
+
+    [Theory]
+    [InlineData((int)SpeakingBarPosition.TopLeft, false)]
+    [InlineData((int)SpeakingBarPosition.TopMiddle, false)]
+    [InlineData((int)SpeakingBarPosition.TopRight, true)]
+    [InlineData((int)SpeakingBarPosition.MiddleLeft, false)]
+    [InlineData((int)SpeakingBarPosition.MiddleRight, true)]
+    [InlineData((int)SpeakingBarPosition.BottomLeft, false)]
+    [InlineData((int)SpeakingBarPosition.BottomMiddle, false)]
+    [InlineData((int)SpeakingBarPosition.BottomRight, true)]
+    public void RightSidePresetsFaceAvatarsTowardTheScreen(int positionValue, bool facesLeft)
+    {
+        Assert.Equal(facesLeft,
+            SpeakingBarLayoutPolicy.AvatarFacesLeftFor((SpeakingBarPosition)positionValue));
+    }
+
+    [Theory]
+    [InlineData((int)SpeakingBarAvatarFacing.Right, false)]
+    [InlineData((int)SpeakingBarAvatarFacing.Left, true)]
+    public void ManualLayoutUsesTheSavedAvatarFacingChoice(int facingValue, bool facesLeft)
+    {
+        Assert.Equal(facesLeft, SpeakingBarLayoutPolicy.ResolveAvatarFacesLeft(
+            manualLayout: true,
+            SpeakingBarPosition.TopRight,
+            (SpeakingBarAvatarFacing)facingValue));
+    }
+
+    [Fact]
+    public void PresetLayoutIgnoresTheSavedManualAvatarFacingChoice()
+    {
+        Assert.True(SpeakingBarLayoutPolicy.ResolveAvatarFacesLeft(
+            manualLayout: false,
+            SpeakingBarPosition.TopRight,
+            SpeakingBarAvatarFacing.Right));
+        Assert.False(SpeakingBarLayoutPolicy.ResolveAvatarFacesLeft(
+            manualLayout: false,
+            SpeakingBarPosition.TopLeft,
+            SpeakingBarAvatarFacing.Left));
+    }
+
     [Fact]
     public void PreferredCapacityStartsBalancedWrappingAtTenPlayers()
     {
@@ -89,6 +160,125 @@ public sealed class SpeakingBarLayoutPolicyTests
         Assert.Equal(3, SpeakingBarLayoutPolicy.GetLineCount(3, safeCapacity: 0));
     }
 
+    [Fact]
+    public void TwoDimensionalSolverKeepsBalancedNineItemLimitWhenItFits()
+    {
+        var solution = Solve(itemCount: 15, vertical: false, availableWidth: 8f, availableHeight: 2f);
+
+        Assert.Equal(2, solution.LineCount);
+        Assert.Equal(8, solution.MaxItemsInLine);
+        Assert.Equal(8f, solution.ContentWidth);
+        Assert.Equal(2f, solution.ContentHeight);
+        Assert.Equal(1f, solution.EffectiveScale);
+        Assert.True(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverAddsRowsBeforeShrinkingRequestedScale()
+    {
+        var solution = Solve(itemCount: 15, vertical: false, availableWidth: 5f, availableHeight: 3f);
+
+        Assert.Equal(3, solution.LineCount);
+        Assert.Equal(5, solution.MaxItemsInLine);
+        Assert.Equal(5f, solution.ContentWidth);
+        Assert.Equal(3f, solution.ContentHeight);
+        Assert.Equal(1f, solution.EffectiveScale);
+        Assert.True(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverAddsColumnsBeforeShrinkingRequestedScale()
+    {
+        var solution = Solve(itemCount: 15, vertical: true, availableWidth: 3f, availableHeight: 5f);
+
+        Assert.Equal(3, solution.LineCount);
+        Assert.Equal(5, solution.MaxItemsInLine);
+        Assert.Equal(3f, solution.ContentWidth);
+        Assert.Equal(5f, solution.ContentHeight);
+        Assert.Equal(1f, solution.EffectiveScale);
+        Assert.True(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverMaximizesScaleWhenNoLayoutFitsRequestedScale()
+    {
+        var solution = Solve(itemCount: 15, vertical: false, availableWidth: 3f, availableHeight: 3f);
+
+        Assert.Equal(4, solution.LineCount);
+        Assert.Equal(4, solution.MaxItemsInLine);
+        Assert.Equal(4f, solution.ContentWidth);
+        Assert.Equal(4f, solution.ContentHeight);
+        Assert.Equal(0.75f, solution.EffectiveScale);
+        Assert.False(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverTestsRequestedRenderedScaleBeforeAddingLines()
+    {
+        var solution = Solve(
+            itemCount: 15,
+            vertical: false,
+            availableWidth: 4f,
+            availableHeight: 1f,
+            requestedScale: 0.5f);
+
+        Assert.Equal(2, solution.LineCount);
+        Assert.Equal(0.5f, solution.EffectiveScale);
+        Assert.True(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverSupportsAConfigurableMaximumItemsPerLine()
+    {
+        var solution = SpeakingBarLayoutPolicy.SolveTwoDimensional(
+            itemCount: 4,
+            vertical: true,
+            itemWidth: 1f,
+            itemHeight: 1f,
+            horizontalPitch: 1f,
+            verticalPitch: 1f,
+            availableWidth: 4f,
+            availableHeight: 4f,
+            requestedScale: 1f,
+            maxItemsPerLine: 1);
+
+        Assert.Equal(4, solution.LineCount);
+        Assert.Equal(1, solution.MaxItemsInLine);
+        Assert.True(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void RequiredSingleLaneShrinksInsteadOfAddingASecondColumn()
+    {
+        var solution = SpeakingBarLayoutPolicy.SolveTwoDimensional(
+            itemCount: 15,
+            vertical: true,
+            itemWidth: 1f,
+            itemHeight: 1f,
+            horizontalPitch: 1f,
+            verticalPitch: 1f,
+            availableWidth: 4f,
+            availableHeight: 5f,
+            requestedScale: 1f,
+            maxItemsPerLine: 15,
+            requiredLineCount: 1);
+
+        Assert.Equal(1, solution.LineCount);
+        Assert.Equal(15, solution.MaxItemsInLine);
+        Assert.Equal(1f / 3f, solution.EffectiveScale, 4);
+        Assert.False(solution.FitsRequestedScale);
+    }
+
+    [Fact]
+    public void TwoDimensionalSolverBreaksEqualScaleTiesWithFewerLines()
+    {
+        var solution = Solve(itemCount: 2, vertical: false, availableWidth: 1f, availableHeight: 1f);
+
+        Assert.Equal(1, solution.LineCount);
+        Assert.Equal(0.5f, solution.EffectiveScale);
+        Assert.False(solution.FitsRequestedScale);
+    }
+
     private static int[] LineSizes(int itemCount, int safeCapacity = int.MaxValue)
     {
         int lineCount = SpeakingBarLayoutPolicy.GetLineCount(itemCount, safeCapacity);
@@ -97,4 +287,22 @@ public sealed class SpeakingBarLayoutPolicyTests
             sizes[lineIndex] = SpeakingBarLayoutPolicy.GetLineSize(itemCount, lineCount, lineIndex);
         return sizes;
     }
+
+    private static SpeakingBarLayoutSolution Solve(
+        int itemCount,
+        bool vertical,
+        float availableWidth,
+        float availableHeight,
+        float requestedScale = 1f)
+        => SpeakingBarLayoutPolicy.SolveTwoDimensional(
+            itemCount,
+            vertical,
+            itemWidth: 1f,
+            itemHeight: 1f,
+            horizontalPitch: 1f,
+            verticalPitch: 1f,
+            availableWidth,
+            availableHeight,
+            requestedScale,
+            maxItemsPerLine: SpeakingBarLayoutPolicy.PreferredMaxItemsPerLine);
 }
