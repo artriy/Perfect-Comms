@@ -222,6 +222,9 @@ impl Apm {
                 let op = self.out.as_mut_ptr();
                 let ipp = &ip as *const *const f32;
                 let opp = &op as *const *mut f32;
+                // The second capture chunk is 10 ms newer, but its corresponding render chunk is
+                // also 10 ms deeper in the same analyzed/output frame. Those offsets cancel, so
+                // WebRTC receives the same end-to-end stream delay for both chunks.
                 (self.api.set_delay)(self.a, delay_ms);
                 (self.api.process)(self.a, ipp, self.sc, self.sc, opp);
                 std::ptr::copy_nonoverlapping(

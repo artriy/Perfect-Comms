@@ -392,8 +392,10 @@ public static class PingTrackerPatch
                 CrewmateAvatarRenderer.PrewarmNextColor();
                 VoiceFrameProfiler.End("overlay.prewarm", pwTicks);
             }
+            long privacyTicks = VoiceFrameProfiler.Begin();
             var overlay = VoiceOverlayState.Current(room);
             var privacy = VoiceIdentityPrivacyRuntime.Current(overlay);
+            VoiceFrameProfiler.End("overlay.privacy", privacyTicks);
             _activeSpeakerIds.Clear();
             _activeSpeakerLevels.Clear();
             _activeSpeakerNames.Clear();
@@ -964,8 +966,11 @@ public static class PingTrackerPatch
 
         TryCreateSlotIcon(playerId, slot);
 
+        long ringTicks = VoiceFrameProfiler.Begin();
         CreateRing(playerId, slot);
+        VoiceFrameProfiler.End("overlay.ringcreate", ringTicks);
 
+        long labelTicks = VoiceFrameProfiler.Begin();
         var labelGO = new GameObject("VC_Label");
         labelGO.transform.SetParent(_barRoot.transform, false);
         var tmp = labelGO.AddComponent<TextMeshPro>();
@@ -984,6 +989,7 @@ public static class PingTrackerPatch
         if (player == null && _activeSpeakerNames.TryGetValue(playerId, out var fallbackName) && !string.IsNullOrWhiteSpace(fallbackName))
             slot.LabelTMP.text = fallbackName;
         VCOverlayCamera.EnsureOnTop(labelGO);
+        VoiceFrameProfiler.End("overlay.labelcreate", labelTicks);
         _slots[playerId] = slot;
         _slotOrder.Add(playerId);
         _layoutDirty = true;

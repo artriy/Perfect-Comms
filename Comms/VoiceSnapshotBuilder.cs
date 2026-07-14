@@ -13,8 +13,11 @@ internal static class VoiceSnapshotBuilder
 
     public static VoiceGameStateSnapshot Build(bool commsSabotageActive)
     {
+        long roleTicks = VoiceFrameProfiler.Begin();
         VoiceRoleMuteState.Update();
+        VoiceFrameProfiler.End("snapshot.roles", roleTicks);
 
+        long sceneTicks = VoiceFrameProfiler.Begin();
         var local = PlayerControl.LocalPlayer;
         byte localPlayerId = local != null ? local.PlayerId : byte.MaxValue;
         int localClientId = AmongUsClient.Instance != null ? AmongUsClient.Instance.ClientId : -1;
@@ -63,7 +66,9 @@ internal static class VoiceSnapshotBuilder
                     : VoiceControlHearingMode.ExternalAdditive;
             }
         }
+        VoiceFrameProfiler.End("snapshot.scene", sceneTicks);
 
+        long playerTicks = VoiceFrameProfiler.Begin();
         var players = new List<VoicePlayerSnapshot>(16);
         bool playerEnumerationCompleted = true;
         try
@@ -142,8 +147,10 @@ internal static class VoiceSnapshotBuilder
         }
 
         ApplyLoverPairingFallback(players);
+        VoiceFrameProfiler.End("snapshot.players", playerTicks);
 
-        return new VoiceGameStateSnapshot(
+        long finalizeTicks = VoiceFrameProfiler.Begin();
+        var snapshot = new VoiceGameStateSnapshot(
             phase,
             mapId,
             localClientId,
@@ -162,6 +169,8 @@ internal static class VoiceSnapshotBuilder
             liveLocalPlayerResolved,
             RoutingRosterRetained: false,
             PlayerEnumerationCompleted: playerEnumerationCompleted);
+        VoiceFrameProfiler.End("snapshot.finalize", finalizeTicks);
+        return snapshot;
     }
 
     private static bool IsLiveLocalPlayerResolved(PlayerControl? local, int localClientId)

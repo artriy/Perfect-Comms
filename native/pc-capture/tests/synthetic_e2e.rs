@@ -191,6 +191,59 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
         "capture stop/lobby transition must not terminate the helper"
     );
 
+    client
+        .write_all(&encode_control(r#"{"op":"start"}"#))
+        .unwrap();
+    let mut got_second_generation = false;
+    let mut got_extended_stats = false;
+    let mut got_level_after_restart = false;
+    let restart_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < restart_deadline
+        && (!got_second_generation || !got_extended_stats || !got_level_after_restart)
+    {
+        match read_frame(&mut reader) {
+            Ok(Frame::Control(body)) => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    continue;
+                };
+                match value["op"].as_str() {
+                    Some("media-state") => {
+                        if value["direction"] == "capture"
+                            && value["stream_generation"] == 2
+                            && value["running"] == true
+                        {
+                            got_second_generation = true;
+                        }
+                    }
+                    Some("stats") => {
+                        if value["diagnostics"]["schema"] == 1
+                            && value["diagnostics"]["capture"]["stream_generation"] == 2
+                            && value["diagnostics"]["capture"]["running"] == true
+                        {
+                            got_extended_stats = true;
+                        }
+                    }
+                    Some("level") => got_level_after_restart = true,
+                    _ => {}
+                }
+            }
+            Ok(Frame::Audio) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        got_second_generation,
+        "restart did not acknowledge generation 2"
+    );
+    assert!(
+        got_extended_stats,
+        "restart did not emit schema-1 capture stats"
+    );
+    assert!(
+        got_level_after_restart,
+        "restart did not resume capture levels"
+    );
+
     let disconnected_at = Instant::now();
     drop(reader);
     drop(client);

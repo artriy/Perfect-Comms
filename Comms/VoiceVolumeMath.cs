@@ -2,28 +2,65 @@ using System;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+internal enum VoiceAliveDeadMixFocus
+{
+    Neutral = 0,
+    Alive = 1,
+    Dead = 2,
+}
+
+internal readonly record struct VoiceAliveDeadMixProfile(
+    float AliveVolume,
+    float DeadVolume);
+
 internal static class VoiceVolumeMath
 {
     internal const float MaxUserVolume = 2f;
     internal const float MaxComposedPeerGain = MaxUserVolume * MaxUserVolume;
+    internal const float DefaultLouderVolume = 2f;
+    internal const float DefaultQuieterVolume = 0.5f;
+
+    internal static readonly VoiceAliveDeadMixProfile DefaultAliveFocusProfile =
+        new(DefaultLouderVolume, DefaultQuieterVolume);
+    internal static readonly VoiceAliveDeadMixProfile DefaultDeadFocusProfile =
+        new(DefaultQuieterVolume, DefaultLouderVolume);
 
     internal static float NormalizeUserVolume(float volume)
         => float.IsFinite(volume) ? Math.Clamp(volume, 0f, MaxUserVolume) : 1f;
 
-    internal static bool ShouldApplyDeadMeetingMix(bool meetingActive, bool localPlayerIsDead)
-        => meetingActive && localPlayerIsDead;
-
     internal static float SelectGroupVolume(
-        bool deadMeetingMixActive,
+        VoiceAliveDeadMixFocus focus,
         bool? targetIsDead,
-        float alivePlayerVolume,
-        float deadPlayerVolume)
+        VoiceAliveDeadMixProfile aliveFocusProfile,
+        VoiceAliveDeadMixProfile deadFocusProfile)
     {
-        if (!deadMeetingMixActive || !targetIsDead.HasValue)
+        if ((focus != VoiceAliveDeadMixFocus.Alive && focus != VoiceAliveDeadMixFocus.Dead)
+            || !targetIsDead.HasValue)
             return 1f;
 
-        return NormalizeUserVolume(targetIsDead.Value ? deadPlayerVolume : alivePlayerVolume);
+        VoiceAliveDeadMixProfile profile = focus switch
+        {
+            VoiceAliveDeadMixFocus.Alive => aliveFocusProfile,
+            VoiceAliveDeadMixFocus.Dead => deadFocusProfile,
+            _ => default,
+        };
+        return NormalizeUserVolume(targetIsDead.Value
+            ? profile.DeadVolume
+            : profile.AliveVolume);
     }
+
+    /// <summary>
+    /// The focus exists only while exactly one action is held. Releasing both immediately returns
+    /// to neutral; holding both is also neutral so overlapping bindings cannot produce an arbitrary winner.
+    /// </summary>
+    internal static VoiceAliveDeadMixFocus ResolveAliveDeadMixFocus(
+        bool aliveLouderHeld,
+        bool deadLouderHeld)
+        => aliveLouderHeld == deadLouderHeld
+            ? VoiceAliveDeadMixFocus.Neutral
+            : aliveLouderHeld
+                ? VoiceAliveDeadMixFocus.Alive
+                : VoiceAliveDeadMixFocus.Dead;
 
     internal static float ResolvePeerGain(
         VoiceProximityResult route,

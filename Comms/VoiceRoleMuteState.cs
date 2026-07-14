@@ -53,6 +53,7 @@ internal static partial class VoiceRoleMuteState
     private static bool _supportedModTypesResolved;
     private static int _resolvedGameId = int.MinValue;
     private static VoiceGamePhase _resolvedPhase = VoiceGamePhase.Unknown;
+    private static int _resolvedAssemblyGeneration = -1;
     private static float _nextRoleStateRefreshTime;
     private static bool _wasInMeeting;
     private static DateTime _nextJailVoiceGateLogUtc = DateTime.MinValue;

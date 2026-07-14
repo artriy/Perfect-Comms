@@ -8,26 +8,94 @@ public sealed class VoiceVolumeMathTests
             VoiceProximityReason.MeetingLiving, 1f);
 
     [Theory]
-    [InlineData(false, false, false)]
-    [InlineData(false, true, false)]
-    [InlineData(true, false, false)]
-    [InlineData(true, true, true)]
-    public void GroupMixOnlyActivatesForADeadListenerInAMeeting(
-        bool meetingActive,
-        bool localDead,
-        bool expected)
+    [InlineData(1, false, 0.25f)]
+    [InlineData(1, true, 1.75f)]
+    [InlineData(2, false, 1.25f)]
+    [InlineData(2, true, 0f)]
+    public void EachHeldFocusSelectsItsOwnIndependentProfile(
+        int focusValue,
+        bool targetDead,
+        float expected)
     {
-        Assert.Equal(expected,
-            VoiceVolumeMath.ShouldApplyDeadMeetingMix(meetingActive, localDead));
+        var focus = (VoiceAliveDeadMixFocus)focusValue;
+        var aliveFocus = new VoiceAliveDeadMixProfile(0.25f, 1.75f);
+        var deadFocus = new VoiceAliveDeadMixProfile(1.25f, 0f);
+
+        Assert.Equal(expected, VoiceVolumeMath.SelectGroupVolume(
+            focus, targetDead, aliveFocus, deadFocus));
     }
 
     [Fact]
-    public void AliveAndDeadGroupsAreSelectedIndependently()
+    public void DefaultProfilesMatchTheTwoAdvertisedHoldMixes()
     {
-        Assert.Equal(0.5f, VoiceVolumeMath.SelectGroupVolume(true, false, 0.5f, 2f));
-        Assert.Equal(2f, VoiceVolumeMath.SelectGroupVolume(true, true, 0.5f, 2f));
-        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(false, true, 0.5f, 2f));
-        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(true, null, 0.5f, 2f));
+        Assert.Equal(2f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Alive, false,
+            VoiceVolumeMath.DefaultAliveFocusProfile,
+            VoiceVolumeMath.DefaultDeadFocusProfile));
+        Assert.Equal(0.5f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Alive, true,
+            VoiceVolumeMath.DefaultAliveFocusProfile,
+            VoiceVolumeMath.DefaultDeadFocusProfile));
+        Assert.Equal(0.5f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Dead, false,
+            VoiceVolumeMath.DefaultAliveFocusProfile,
+            VoiceVolumeMath.DefaultDeadFocusProfile));
+        Assert.Equal(2f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Dead, true,
+            VoiceVolumeMath.DefaultAliveFocusProfile,
+            VoiceVolumeMath.DefaultDeadFocusProfile));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(0, true)]
+    [InlineData(99, false)]
+    [InlineData(99, true)]
+    public void NeutralInvalidAndUnknownTargetsUseTheNormalMix(
+        int focusValue,
+        bool targetDead)
+    {
+        var focus = (VoiceAliveDeadMixFocus)focusValue;
+        var aliveFocus = new VoiceAliveDeadMixProfile(0f, 2f);
+        var deadFocus = new VoiceAliveDeadMixProfile(2f, 0f);
+
+        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(
+            focus, targetDead, aliveFocus, deadFocus));
+        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Alive, null, aliveFocus, deadFocus));
+        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Dead, null, aliveFocus, deadFocus));
+    }
+
+    [Fact]
+    public void SelectedProfileValuesAreNormalizedBeforePlayback()
+    {
+        var aliveFocus = new VoiceAliveDeadMixProfile(float.NaN, -1f);
+        var deadFocus = new VoiceAliveDeadMixProfile(float.PositiveInfinity, 99f);
+
+        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Alive, false, aliveFocus, deadFocus));
+        Assert.Equal(0f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Alive, true, aliveFocus, deadFocus));
+        Assert.Equal(1f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Dead, false, aliveFocus, deadFocus));
+        Assert.Equal(2f, VoiceVolumeMath.SelectGroupVolume(
+            VoiceAliveDeadMixFocus.Dead, true, aliveFocus, deadFocus));
+    }
+
+    [Theory]
+    [InlineData(true, false, 1)]
+    [InlineData(false, true, 2)]
+    [InlineData(false, false, 0)]
+    [InlineData(true, true, 0)]
+    public void MixFocusExistsOnlyWhileExactlyOneBindingIsHeld(
+        bool aliveLouderHeld,
+        bool deadLouderHeld,
+        int expectedValue)
+    {
+        var expected = (VoiceAliveDeadMixFocus)expectedValue;
+        Assert.Equal(expected,
+            VoiceVolumeMath.ResolveAliveDeadMixFocus(aliveLouderHeld, deadLouderHeld));
     }
 
     [Fact]

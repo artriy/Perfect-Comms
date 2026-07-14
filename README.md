@@ -98,8 +98,11 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
 | Team radio (hold) | `V` | | Refresh voice (host) | `F8` |
+| Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
 
 <br>
+
+Each alive/dead hold binding has its own settings button in **Voice Settings → Keybinds** for independently choosing the temporary alive-player and dead-player levels. Releasing the binding restores the normal mix.
 
 ## Install
 

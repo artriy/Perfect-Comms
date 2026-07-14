@@ -442,9 +442,11 @@ internal static class VoiceModRegistry
         if (tabIndex < 0 || tabIndex >= _tabs.Count) return holders;
         string modId = _tabs[tabIndex].ModId;
         foreach (var opt in BoolOptionsFor(modId))
-            holders.Add(new ModToggleHolder(Compose(modId, opt.Key), opt.Label));
+            holders.Add(new ModToggleHolder(
+                Compose(modId, opt.Key), opt.Label, opt.Description));
         foreach (var opt in EnumOptionsFor(modId))
-            holders.Add(new ModEnumHolder(Compose(modId, opt.Key), opt.Label, opt.Choices));
+            holders.Add(new ModEnumHolder(
+                Compose(modId, opt.Key), opt.Label, opt.Choices, opt.Description));
         return holders;
     }
 

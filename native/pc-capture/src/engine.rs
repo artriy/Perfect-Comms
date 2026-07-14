@@ -101,7 +101,7 @@ impl Engine {
             return f32::from_bits(self.level.load(Ordering::Relaxed));
         }
         let mut buf = match self.synthetic.lock().unwrap().as_mut() {
-            Some(tone) => tone.fill_frame(0).samples,
+            Some(tone) => tone.fill_frame(0, 0, false).samples,
             None => samples.to_vec(),
         };
         self.dsp.lock().unwrap().capture(&mut buf);

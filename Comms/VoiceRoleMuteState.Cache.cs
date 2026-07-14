@@ -1,5 +1,4 @@
 using System;
-using HarmonyLib;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -202,11 +201,18 @@ internal static partial class VoiceRoleMuteState
 
         bool phaseChanged = phase != _resolvedPhase;
         bool joinedNewLobby = gameId != 0 && gameId != _resolvedGameId;
-        if (_supportedModTypesResolved && !phaseChanged && !joinedNewLobby)
+        int assemblyGeneration = SoftDependencyTypeResolver.AssemblyGeneration;
+        if (!ShouldRefreshSupportedModTypes(
+                _supportedModTypesResolved,
+                phaseChanged,
+                joinedNewLobby,
+                _resolvedAssemblyGeneration,
+                assemblyGeneration))
             return;
 
         _resolvedPhase = phase;
         _resolvedGameId = gameId;
+        _resolvedAssemblyGeneration = assemblyGeneration;
         _blackmailedModifierType = ResolveType(BlackmailedModifierName);
         _jailedModifierType = ResolveType(JailedModifierName);
         _parasiteInfectedModifierType = ResolveType(ParasiteInfectedModifierName);
@@ -225,29 +231,19 @@ internal static partial class VoiceRoleMuteState
         InvalidateRoleStateCache();
     }
 
-    // Memoizes type lookups (hits and misses) keyed by assembly count to avoid repeated AppDomain
-    // scans; a new assembly load invalidates the entry, the only time a miss could become resolvable.
-    private static readonly System.Collections.Generic.Dictionary<string, (Type? Type, int AssemblyCount)> _typeResolveCache = new();
+    internal static bool ShouldRefreshSupportedModTypes(
+        bool alreadyResolved,
+        bool phaseChanged,
+        bool joinedNewLobby,
+        int resolvedAssemblyGeneration,
+        int currentAssemblyGeneration)
+        => !alreadyResolved
+           || phaseChanged
+           || joinedNewLobby
+           || resolvedAssemblyGeneration != currentAssemblyGeneration;
 
     private static Type? ResolveType(string fullName)
-    {
-        int assemblyCount = AppDomain.CurrentDomain.GetAssemblies().Length;
-        if (_typeResolveCache.TryGetValue(fullName, out var cached) && cached.AssemblyCount == assemblyCount)
-            return cached.Type;
-
-        Type? type = AccessTools.TypeByName(fullName);
-        if (type == null)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                type = asm.GetType(fullName, false);
-                if (type != null) break;
-            }
-        }
-
-        _typeResolveCache[fullName] = (type, assemblyCount);
-        return type;
-    }
+        => SoftDependencyTypeResolver.ResolveExact(fullName);
 
     private static bool IsRole(PlayerControl player, Type? type, string fullName)
     {

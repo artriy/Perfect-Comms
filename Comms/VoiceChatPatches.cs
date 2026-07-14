@@ -16,6 +16,9 @@ public static class VoiceChatPatches
     private static int _lastRadioChannelCycleFrame = -1;
     private static int _lastMicModeToggleFrame = -1;
     private static System.DateTime _lastKbErrorLogUtc;
+    private static VoiceAliveDeadMixFocus _aliveDeadMixFocus;
+
+    internal static VoiceAliveDeadMixFocus AliveDeadMixFocus => _aliveDeadMixFocus;
 
     internal static void RegisterKeybindHandlers()
     {
@@ -42,6 +45,7 @@ public static class VoiceChatPatches
             VoiceChatKeybinds.ToggleMute.FireIfPressed();
             VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
             VoiceChatKeybinds.VolumeMenu.FireIfPressed();
+            UpdateAliveDeadMixHold();
             VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
             VoiceChatKeybinds.HostVoiceRefresh.FireIfPressed();
             VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
@@ -77,6 +81,7 @@ public static class VoiceChatPatches
         }
         catch (System.Exception ex)
         {
+            SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
             var now = System.DateTime.UtcNow;
             if ((now - _lastKbErrorLogUtc).TotalSeconds >= 5)
             {
@@ -93,6 +98,7 @@ public static class VoiceChatPatches
         _pushToTalkInputHeld = false;
         VoiceChatHudState.UpdateTeamRadioHold(false, false, radioWasHeld);
         VoiceChatHudState.UpdatePushToTalkHeld(false);
+        SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
     }
 
     internal static bool ShouldIgnoreToggleKeybinds()
@@ -122,6 +128,47 @@ public static class VoiceChatPatches
         if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastVolumeToggleFrame)) return;
         VoiceVolumeMenu.Toggle();
+    }
+
+    private static void UpdateAliveDeadMixHold()
+    {
+        var focus = ShouldIgnoreToggleKeybinds()
+            ? VoiceAliveDeadMixFocus.Neutral
+            : VoiceVolumeMath.ResolveAliveDeadMixFocus(
+                VoiceChatKeybinds.AliveLouderDeadQuieter.IsHeld(),
+                VoiceChatKeybinds.AliveQuieterDeadLouder.IsHeld());
+        SetAliveDeadMixFocus(focus, showToast: true);
+    }
+
+    private static void SetAliveDeadMixFocus(VoiceAliveDeadMixFocus focus, bool showToast)
+    {
+        if (_aliveDeadMixFocus == focus) return;
+        _aliveDeadMixFocus = focus;
+        var profile = GetAliveDeadMixProfile(focus);
+        float aliveVolume = VoiceVolumeMath.NormalizeUserVolume(profile.AliveVolume);
+        float deadVolume = VoiceVolumeMath.NormalizeUserVolume(profile.DeadVolume);
+        if (showToast)
+        {
+            VoiceChatHudState.ShowToast(focus == VoiceAliveDeadMixFocus.Neutral
+                ? "Voice mix: Normal"
+                : $"Voice mix: Alive {Mathf.RoundToInt(aliveVolume * 100f)}% / Dead {Mathf.RoundToInt(deadVolume * 100f)}%");
+        }
+        VoiceDiagnostics.Log(
+            "voice.mix.hold",
+            $"focus={focus.ToString().ToLowerInvariant()} alive={aliveVolume:0.00} dead={deadVolume:0.00}");
+    }
+
+    private static VoiceAliveDeadMixProfile GetAliveDeadMixProfile(VoiceAliveDeadMixFocus focus)
+    {
+        var settings = VoiceSettings.Instance;
+        return focus switch
+        {
+            VoiceAliveDeadMixFocus.Alive => settings?.AliveFocusProfile
+                ?? VoiceVolumeMath.DefaultAliveFocusProfile,
+            VoiceAliveDeadMixFocus.Dead => settings?.DeadFocusProfile
+                ?? VoiceVolumeMath.DefaultDeadFocusProfile,
+            _ => new VoiceAliveDeadMixProfile(1f, 1f),
+        };
     }
 
     private static void RequestLocalRefreshFromInput()

@@ -8,9 +8,17 @@ public sealed class ModToggleHolder : OptionHolder
     private readonly string _composedKey;
 
     public ModToggleHolder(string composedKey, string label)
+        : this(composedKey, label, "")
+    {
+    }
+
+    public ModToggleHolder(string composedKey, string label, string helpText)
     {
         _composedKey = composedKey;
         Label = label;
+        HelpText = string.IsNullOrWhiteSpace(helpText)
+            ? "Enables or disables this host option provided by the connected mod. The host's choice is synchronized to the lobby."
+            : helpText;
     }
 
     public bool Value
@@ -27,10 +35,18 @@ public sealed class ModEnumHolder : OptionHolder
     public string[] Labels { get; }
 
     public ModEnumHolder(string composedKey, string label, string[] labels)
+        : this(composedKey, label, labels, "")
+    {
+    }
+
+    public ModEnumHolder(string composedKey, string label, string[] labels, string helpText)
     {
         _composedKey = composedKey;
         Label = label;
         Labels = labels;
+        HelpText = string.IsNullOrWhiteSpace(helpText)
+            ? "Chooses the value for this host option provided by the connected mod. The host's choice is synchronized to the lobby."
+            : helpText;
     }
 
     public int Value

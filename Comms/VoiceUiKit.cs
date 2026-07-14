@@ -68,6 +68,10 @@ internal static class VoiceUiKit
     private static TMP_FontAsset? _font;
     private static GameObject? _canvasRoot;
     private static Canvas? _canvas;
+    private static RectTransform? _tooltipRoot;
+    private static CanvasGroup? _tooltipGroup;
+    private static TextMeshProUGUI? _tooltipText;
+    private static bool _tooltipRequested;
 
     public static readonly Color32 Backdrop = new(0, 0, 0, 150);
 
@@ -98,11 +102,109 @@ internal static class VoiceUiKit
         if (frame == _tickFrame) return;
         _tickFrame = frame;
         UpdateSwallow();
+        BeginTooltipFrame();
 
         try { VoiceOptionsMenuEntry.TickButton(); VoiceHostMenuEntry.TickHostButton(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] TickButton threw: " + e.Message); }
         try { VoiceSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceSettingsPanel.Tick threw: " + e.Message); }
         try { HostSettingsPanel.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] HostSettingsPanel.Tick threw: " + e.Message); }
         try { VoiceVolumeMenu.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceVolumeMenu.Tick threw: " + e.Message); }
+        EndTooltipFrame();
+    }
+
+    private static void BeginTooltipFrame() => _tooltipRequested = false;
+
+    private static void EndTooltipFrame()
+    {
+        if (_tooltipRoot == null || _tooltipGroup == null) return;
+        if (!_tooltipRequested)
+        {
+            _tooltipGroup.alpha = 0f;
+            _tooltipRoot.gameObject.SetActive(false);
+            return;
+        }
+
+        _tooltipRoot.SetAsLastSibling();
+    }
+
+    internal static void RequestTooltip(
+        string title,
+        string description,
+        bool plainTextDescription = false)
+    {
+        if (string.IsNullOrWhiteSpace(description)) return;
+        EnsureTooltip();
+        if (_tooltipRoot == null || _tooltipGroup == null || _tooltipText == null) return;
+
+        _tooltipRequested = true;
+        _tooltipRoot.gameObject.SetActive(true);
+        _tooltipGroup.alpha = 1f;
+        string body = plainTextDescription
+            ? $"<noparse>{description}</noparse>"
+            : description;
+        _tooltipText.text = string.IsNullOrWhiteSpace(title)
+            ? body
+            : $"<b>{title}</b>\n<size=86%><color=#B5C2D4>{body}</color></size>";
+
+        _tooltipRoot.sizeDelta = new Vector2(420f, 80f);
+        _tooltipText.ForceMeshUpdate();
+        float height = Mathf.Clamp(_tooltipText.preferredHeight + 28f, 62f, 260f);
+        _tooltipRoot.sizeDelta = new Vector2(420f, height);
+
+        if (!LocalPoint(CanvasRect, out var mouse)) return;
+        var canvasRect = CanvasRect.rect;
+        float halfW = _tooltipRoot.sizeDelta.x * 0.5f;
+        float halfH = _tooltipRoot.sizeDelta.y * 0.5f;
+        float x = mouse.x + 22f + halfW;
+        if (x + halfW > canvasRect.xMax - 12f)
+            x = mouse.x - 22f - halfW;
+        float y = mouse.y - 18f - halfH;
+        x = Mathf.Clamp(x, canvasRect.xMin + halfW + 12f, canvasRect.xMax - halfW - 12f);
+        y = Mathf.Clamp(y, canvasRect.yMin + halfH + 12f, canvasRect.yMax - halfH - 12f);
+        _tooltipRoot.anchoredPosition = new Vector2(x, y);
+    }
+
+    private static void EnsureTooltip()
+    {
+        EnsureCanvas();
+        if (_tooltipRoot != null && _tooltipGroup != null && _tooltipText != null) return;
+
+        _tooltipRoot = Rect("PerfectComms_Tooltip", Canvas.transform);
+        _tooltipRoot.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+        _tooltipRoot.sizeDelta = new Vector2(420f, 80f);
+
+        var shadow = GlowImage("TooltipShadow", _tooltipRoot, new Color32(0, 0, 0, 165));
+        shadow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+        shadow.rectTransform.offsetMin = new Vector2(-18f, -22f);
+        shadow.rectTransform.offsetMax = new Vector2(18f, 14f);
+
+        var backgroundRt = Rect("TooltipBackground", _tooltipRoot);
+        backgroundRt.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+        backgroundRt.offsetMin = Vector2.zero;
+        backgroundRt.offsetMax = Vector2.zero;
+        var background = backgroundRt.gameObject.AddComponent<Image>();
+        background.sprite = Rounded();
+        background.type = Image.Type.Sliced;
+        background.color = new Color32(18, 23, 31, 252);
+        background.raycastTarget = false;
+
+        var accent = Panel("TooltipAccent", _tooltipRoot, Accent, true);
+        accent.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f));
+        accent.rectTransform.sizeDelta = new Vector2(3f, -20f);
+        accent.rectTransform.anchoredPosition = new Vector2(7f, 0f);
+
+        _tooltipText = Text("TooltipText", _tooltipRoot, "", 18f,
+            TextPrimary, TextAlignmentOptions.TopLeft);
+        _tooltipText.enableWordWrapping = true;
+        _tooltipText.overflowMode = TextOverflowModes.Overflow;
+        _tooltipText.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+        _tooltipText.rectTransform.offsetMin = new Vector2(20f, 14f);
+        _tooltipText.rectTransform.offsetMax = new Vector2(-16f, -14f);
+
+        _tooltipGroup = _tooltipRoot.gameObject.AddComponent<CanvasGroup>();
+        _tooltipGroup.interactable = false;
+        _tooltipGroup.blocksRaycasts = false;
+        _tooltipGroup.alpha = 0f;
+        _tooltipRoot.gameObject.SetActive(false);
     }
 
     public static void RaiseAbove(Transform panel, Transform? extra = null)
@@ -730,6 +832,11 @@ internal static class VoiceUiKit
         public RectTransform Root = null!;
         public Image? Hover;
         public TextMeshProUGUI Title = null!;
+        private RectTransform? _helpRt;
+        private Image? _helpBadge;
+        private TextMeshProUGUI? _helpGlyph;
+        private RectTransform? _clip;
+        private string? _helpText;
         public float Height = 72f;
         protected float PaneW;
         public virtual void Tick(float dt) { }
@@ -747,10 +854,23 @@ internal static class VoiceUiKit
         protected float ControlRight => PaneW - EdgePad - ValueColW - ColGap;
         protected float ControlColW => Mathf.Max(120f, ControlRight - ControlLeft);
 
-        protected void BuildBase(RectTransform pane, string label, float width, float y, float height)
+        protected bool PointerWithinClip => _clip == null || Contains(_clip);
+        protected bool HelpHovered => _helpRt != null
+            && _helpRt.gameObject.activeInHierarchy
+            && PointerWithinClip
+            && Contains(_helpRt);
+
+        protected void BuildBase(
+            RectTransform pane,
+            string label,
+            float width,
+            float y,
+            float height,
+            string? helpText = null)
         {
             Height = height;
             PaneW = width;
+            _clip = pane.parent as RectTransform;
             Root = Rect("Row", pane);
             Root.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             Root.sizeDelta = new Vector2(0f, height);
@@ -770,13 +890,68 @@ internal static class VoiceUiKit
             title.rectTransform.sizeDelta = new Vector2(LabelColW, height);
             title.rectTransform.anchoredPosition = new Vector2(EdgePad, 0f);
             Title = title;
+
+            if (!string.IsNullOrWhiteSpace(helpText))
+                BuildHelp(helpText);
+        }
+
+        private void BuildHelp(string helpText)
+        {
+            const float hitD = 26f;
+            const float badgeD = 20f;
+            const float gap = 6f;
+            _helpText = helpText;
+
+            float availableTitleW = Mathf.Max(40f, LabelColW - hitD - gap);
+            Title.rectTransform.sizeDelta = new Vector2(availableTitleW, Height);
+            float preferredW = Title.GetPreferredValues(Title.text).x;
+            float iconX = Mathf.Min(preferredW, availableTitleW) + gap + hitD * 0.5f;
+
+            _helpRt = Rect("Help", Title.rectTransform);
+            _helpRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0.5f, 0.5f));
+            _helpRt.sizeDelta = new Vector2(hitD, hitD);
+            _helpRt.anchoredPosition = new Vector2(iconX, 0f);
+
+            var badge = Rect("Badge", _helpRt);
+            badge.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+            badge.sizeDelta = new Vector2(badgeD, badgeD);
+            _helpBadge = badge.gameObject.AddComponent<Image>();
+            _helpBadge.sprite = Rounded(true);
+            _helpBadge.type = Image.Type.Sliced;
+            _helpBadge.color = ControlBg;
+            _helpBadge.raycastTarget = false;
+
+            _helpGlyph = Text("Glyph", badge, "!", 17f, Accent,
+                TextAlignmentOptions.Center, FontStyles.Bold);
+            _helpGlyph.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            _helpGlyph.rectTransform.offsetMin = Vector2.zero;
+            _helpGlyph.rectTransform.offsetMax = Vector2.zero;
         }
 
         protected void TickHover()
         {
             if (Hover == null) return;
-            bool over = Contains(Root);
+            bool over = PointerWithinClip && Contains(Root);
             Hover.color = Lerp(Hover.color, over ? RowHover : Clear, 0.22f);
+            TickHelp();
+        }
+
+        private void TickHelp()
+        {
+            if (_helpRt == null || _helpBadge == null || _helpGlyph == null
+                || string.IsNullOrWhiteSpace(_helpText)) return;
+            bool over = HelpHovered;
+            _helpBadge.color = Lerp(
+                _helpBadge.color,
+                over ? AccentFaint : ControlBg,
+                0.28f);
+            _helpGlyph.color = Lerp(
+                _helpGlyph.color,
+                over ? TextBright : Accent,
+                0.28f);
+            float scale = Mathf.Lerp(_helpRt.localScale.x, over ? 1.12f : 1f, 0.3f);
+            _helpRt.localScale = new Vector3(scale, scale, 1f);
+            if (over) RequestTooltip(Title.text, _helpText!);
         }
     }
 
@@ -795,9 +970,15 @@ internal static class VoiceUiKit
 
         protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - 66f);
 
-        public ToggleRow Build(RectTransform pane, string label, float width, float y, float height)
+        public ToggleRow Build(
+            RectTransform pane,
+            string label,
+            float width,
+            float y,
+            float height,
+            string? helpText = null)
         {
-            BuildBase(pane, label, width, y, height);
+            BuildBase(pane, label, width, y, height, helpText);
 
             var trackRt = Rect("Track", Root);
             trackRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
@@ -849,7 +1030,7 @@ internal static class VoiceUiKit
 
         public override void OnMouseDown()
         {
-            if (Contains(Root)) _set(!_get());
+            if (Contains(Root) && !HelpHovered) _set(!_get());
         }
 
         public override void Tick(float dt)
@@ -881,9 +1062,15 @@ internal static class VoiceUiKit
         public SliderRow(Func<float> get, Action<float> set, float min, float max, Func<float, string> fmt)
         { _get = get; _set = set; _min = min; _max = max; _fmt = fmt; }
 
-        public SliderRow Build(RectTransform pane, string label, float width, float y, float height)
+        public SliderRow Build(
+            RectTransform pane,
+            string label,
+            float width,
+            float y,
+            float height,
+            string? helpText = null)
         {
-            BuildBase(pane, label, width, y, height);
+            BuildBase(pane, label, width, y, height, helpText);
 
             var pill = Rect("Pill", Root);
             pill.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
@@ -994,35 +1181,71 @@ internal static class VoiceUiKit
         private readonly Action<int> _setIndex;
         private readonly Func<int> _count;
         private readonly Func<int, string> _labelOf;
+        private readonly bool _fullWidthValue;
         private Image _left = null!;
         private Image _right = null!;
         private TextMeshProUGUI _value = null!;
+        private RectTransform _valuePill = null!;
 
-        public StepperRow(Func<int> getIndex, Action<int> setIndex, Func<int> count, Func<int, string> labelOf)
-        { _getIndex = getIndex; _setIndex = setIndex; _count = count; _labelOf = labelOf; }
-
-        public StepperRow Build(RectTransform pane, string label, float width, float y, float height)
+        public StepperRow(
+            Func<int> getIndex,
+            Action<int> setIndex,
+            Func<int> count,
+            Func<int, string> labelOf,
+            bool fullWidthValue = false)
         {
-            BuildBase(pane, label, width, y, height);
+            _getIndex = getIndex;
+            _setIndex = setIndex;
+            _count = count;
+            _labelOf = labelOf;
+            _fullWidthValue = fullWidthValue;
+        }
 
-            float groupW = (PaneW - EdgePad) - ControlLeft;
+        public StepperRow Build(
+            RectTransform pane,
+            string label,
+            float width,
+            float y,
+            float height,
+            string? helpText = null)
+        {
+            BuildBase(pane, label, width, y, height, helpText);
+
+            float groupW = _fullWidthValue
+                ? PaneW - EdgePad * 2f
+                : (PaneW - EdgePad) - ControlLeft;
             var group = Rect("Stepper", Root);
             group.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            group.sizeDelta = new Vector2(groupW, 40f);
-            group.anchoredPosition = new Vector2(ControlLeft, 0f);
+            group.sizeDelta = new Vector2(groupW, _fullWidthValue ? 76f : 40f);
+            group.anchoredPosition = _fullWidthValue
+                ? new Vector2(EdgePad, -height * 0.23f)
+                : new Vector2(ControlLeft, 0f);
 
-            var valuePill = Rect("ValuePill", group);
-            valuePill.Anchor(new Vector2(0f, 0f), new Vector2(1f, 1f), new Vector2(0.5f, 0.5f));
-            valuePill.offsetMin = new Vector2(44f, 2f);
-            valuePill.offsetMax = new Vector2(-44f, -2f);
-            var valuePillImg = valuePill.gameObject.AddComponent<Image>();
+            if (_fullWidthValue)
+            {
+                Title.rectTransform.sizeDelta = new Vector2(Title.rectTransform.sizeDelta.x, 42f);
+                Title.rectTransform.anchoredPosition = new Vector2(EdgePad, height * 0.25f);
+            }
+
+            _valuePill = Rect("ValuePill", group);
+            _valuePill.Anchor(new Vector2(0f, 0f), new Vector2(1f, 1f), new Vector2(0.5f, 0.5f));
+            _valuePill.offsetMin = new Vector2(44f, 2f);
+            _valuePill.offsetMax = new Vector2(-44f, -2f);
+            var valuePillImg = _valuePill.gameObject.AddComponent<Image>();
             valuePillImg.sprite = Rounded(true);
             valuePillImg.type = Image.Type.Sliced;
             valuePillImg.color = AccentFaint;
             valuePillImg.raycastTarget = false;
 
-            _value = Text("Value", valuePill, "", 18f, Accent, TextAlignmentOptions.Center, FontStyles.Bold);
-            _value.overflowMode = TextOverflowModes.Ellipsis;
+            _value = Text("Value", _valuePill, "", 18f, Accent, TextAlignmentOptions.Center, FontStyles.Bold);
+            _value.overflowMode = _fullWidthValue
+                ? TextOverflowModes.Overflow
+                : TextOverflowModes.Ellipsis;
+            _value.enableAutoSizing = _fullWidthValue;
+            _value.fontSizeMax = 18f;
+            _value.fontSizeMin = 10f;
+            _value.enableWordWrapping = _fullWidthValue;
+            _value.richText = !_fullWidthValue;
             _value.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _value.rectTransform.offsetMin = new Vector2(8f, 0f);
             _value.rectTransform.offsetMax = new Vector2(-8f, 0f);
@@ -1056,7 +1279,16 @@ internal static class VoiceUiKit
         {
             int n = _count();
             int i = n > 0 ? Mathf.Clamp(_getIndex(), 0, n - 1) : 0;
-            _value.text = n > 0 ? _labelOf(i) : "<color=#607282>--</color>";
+            if (n > 0)
+            {
+                _value.text = _labelOf(i);
+                _value.color = Accent;
+            }
+            else
+            {
+                _value.text = _fullWidthValue ? "--" : "<color=#607282>--</color>";
+                _value.color = _fullWidthValue ? TextFaint : Accent;
+            }
         }
 
         public override void OnMouseDown()
@@ -1073,6 +1305,13 @@ internal static class VoiceUiKit
             TickHover();
             ArrowTick(_left);
             ArrowTick(_right);
+            if (_fullWidthValue && PointerWithinClip && Contains(_valuePill))
+            {
+                int n = _count();
+                int i = n > 0 ? Mathf.Clamp(_getIndex(), 0, n - 1) : 0;
+                if (n > 0) RequestTooltip(
+                    "Selected device", _labelOf(i), plainTextDescription: true);
+            }
         }
 
         private static void ArrowTick(Image arrow)
@@ -1093,9 +1332,13 @@ internal static class VoiceUiKit
         private readonly Action _clear;
         private readonly Func<KeyCode>? _getMod;
         private readonly Func<VoiceModifierMatch>? _getModMatch;
+        private readonly Action? _configure;
+        private readonly Func<bool>? _configureActive;
         private Image _btn = null!;
         private RectTransform _btnRt = null!;
         private TextMeshProUGUI _label = null!;
+        private RectTransform? _settingsRt;
+        private Image? _settingsBtn;
         private RectTransform _capRow = null!;
         private Image _clearBtn = null!;
         private Image _cancelBtn = null!;
@@ -1112,22 +1355,30 @@ internal static class VoiceUiKit
         private const float CapW = 170f;
         private const float NormalBtnW = 185f;
         private const float CapBtnW = 150f;
+        private const float SettingsW = 40f;
+        private const float SettingsGap = 10f;
 
         public RebindRow(
             Func<KeyCode> get,
             Action<KeyCode, KeyCode, VoiceModifierMatch> set,
             Action clear,
             Func<KeyCode>? getMod = null,
-            Func<VoiceModifierMatch>? getModMatch = null)
+            Func<VoiceModifierMatch>? getModMatch = null,
+            Action? configure = null,
+            Func<bool>? configureActive = null)
         {
             _get = get;
             _set = set;
             _clear = clear;
             _getMod = getMod;
             _getModMatch = getModMatch;
+            _configure = configure;
+            _configureActive = configureActive;
         }
 
-        protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - NormalBtnW);
+        protected override float LabelColW => Mathf.Round(
+            PaneW - EdgePad * 2f - ColGap - NormalBtnW
+            - (_configure == null ? 0f : SettingsW + SettingsGap));
 
         public static bool IsCapturing => _active != null;
         public static bool ShouldSuppressKeybinds
@@ -1150,9 +1401,15 @@ internal static class VoiceUiKit
             if (_active != null) { _active.EndCapture(); }
         }
 
-        public RebindRow Build(RectTransform pane, string label, float width, float y, float height)
+        public RebindRow Build(
+            RectTransform pane,
+            string label,
+            float width,
+            float y,
+            float height,
+            string? helpText = null)
         {
-            BuildBase(pane, label, width, y, height);
+            BuildBase(pane, label, width, y, height, helpText);
 
             _normalLeft = (PaneW - EdgePad) - NormalBtnW;
             _capLeft = (PaneW - EdgePad) - (CapBtnW + ColGap + CapW);
@@ -1171,6 +1428,20 @@ internal static class VoiceUiKit
             _label.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _label.rectTransform.offsetMin = new Vector2(10f, 0f);
             _label.rectTransform.offsetMax = new Vector2(-10f, 0f);
+
+            if (_configure != null)
+            {
+                _settingsRt = Rect("Configure", Root);
+                _settingsRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+                _settingsRt.sizeDelta = new Vector2(SettingsW, SettingsW);
+                _settingsRt.anchoredPosition = new Vector2(_normalLeft - SettingsGap - SettingsW, 0f);
+                _settingsBtn = _settingsRt.gameObject.AddComponent<Image>();
+                _settingsBtn.sprite = Rounded();
+                _settingsBtn.type = Image.Type.Sliced;
+                _settingsBtn.color = ControlBg;
+                _settingsBtn.raycastTarget = false;
+                BuildSettingsGlyph(_settingsRt);
+            }
 
             _capRow = Rect("CapControls", Root);
             _capRow.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
@@ -1193,6 +1464,7 @@ internal static class VoiceUiKit
                 _btnRt.anchoredPosition = new Vector2(_capLeft, 0f);
                 _btnRt.sizeDelta = new Vector2(CapBtnW, 40f);
                 _capRow.gameObject.SetActive(true);
+                if (_settingsRt != null) _settingsRt.gameObject.SetActive(false);
                 if (Title != null) Title.gameObject.SetActive(false);
             }
             else
@@ -1200,7 +1472,36 @@ internal static class VoiceUiKit
                 _btnRt.anchoredPosition = new Vector2(_normalLeft, 0f);
                 _btnRt.sizeDelta = new Vector2(NormalBtnW, 40f);
                 _capRow.gameObject.SetActive(false);
+                if (_settingsRt != null) _settingsRt.gameObject.SetActive(true);
                 if (Title != null) Title.gameObject.SetActive(true);
+            }
+        }
+
+        private static void BuildSettingsGlyph(RectTransform parent)
+        {
+            float[] ys = { 7f, 0f, -7f };
+            float[] knobXs = { -5f, 6f, -1f };
+            for (int i = 0; i < ys.Length; i++)
+            {
+                var bar = Rect("TuneBar", parent);
+                bar.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+                bar.sizeDelta = new Vector2(22f, 2.5f);
+                bar.anchoredPosition = new Vector2(0f, ys[i]);
+                var barImg = bar.gameObject.AddComponent<Image>();
+                barImg.sprite = Rounded(true);
+                barImg.type = Image.Type.Sliced;
+                barImg.color = TextMuted;
+                barImg.raycastTarget = false;
+
+                var knob = Rect("TuneKnob", parent);
+                knob.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+                knob.sizeDelta = new Vector2(6f, 6f);
+                knob.anchoredPosition = new Vector2(knobXs[i], ys[i]);
+                var knobImg = knob.gameObject.AddComponent<Image>();
+                knobImg.sprite = Rounded(true);
+                knobImg.type = Image.Type.Sliced;
+                knobImg.color = TextBright;
+                knobImg.raycastTarget = false;
             }
         }
 
@@ -1259,6 +1560,12 @@ internal static class VoiceUiKit
         public override void OnMouseDown()
         {
             if (_capturing) return;
+            if (_configure != null && _settingsRt != null && Contains(_settingsRt))
+            {
+                if (_active != null) _active.EndCapture();
+                _configure();
+                return;
+            }
             if (Contains(_btnRt))
             {
                 if (_active != null && _active != this) _active.EndCapture();
@@ -1276,6 +1583,23 @@ internal static class VoiceUiKit
             TickHover();
             _btn.color = Lerp(_btn.color,
                 _capturing ? AccentFaint : (Contains(_btnRt) ? ControlHover : ControlBg), 0.25f);
+            if (_settingsBtn != null && _settingsRt != null)
+            {
+                bool settingsOver = Contains(_settingsRt);
+                bool settingsPressed = settingsOver && Input.GetMouseButton(0);
+                bool settingsActive = _configureActive?.Invoke() == true;
+                _settingsBtn.color = Lerp(
+                    _settingsBtn.color,
+                    settingsOver
+                        ? (settingsActive ? AccentSoft : ControlHover)
+                        : (settingsActive ? AccentFaint : ControlBg),
+                    0.25f);
+                float settingsScale = Mathf.Lerp(
+                    _settingsRt.localScale.x,
+                    settingsPressed ? 0.9f : 1f,
+                    0.35f);
+                _settingsRt.localScale = new Vector3(settingsScale, settingsScale, 1f);
+            }
 
             if (!_capturing) return;
 

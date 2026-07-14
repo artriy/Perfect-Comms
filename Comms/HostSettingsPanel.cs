@@ -184,29 +184,29 @@ public static class HostSettingsPanel
         {
             case ToggleHolder t:
                 return new VoiceUiKit.ToggleRow(() => t.Value, v => t.Value = v)
-                    .Build(_shell.PaneRoot, t.Label, paneW, y, RowH);
+                    .Build(_shell.PaneRoot, t.Label, paneW, y, RowH, t.HelpText);
             case ModToggleHolder mt:
                 return new VoiceUiKit.ToggleRow(() => mt.Value, v => mt.Value = v)
-                    .Build(_shell.PaneRoot, mt.Label, paneW, y, RowH);
+                    .Build(_shell.PaneRoot, mt.Label, paneW, y, RowH, mt.HelpText);
             case EnumHolder e:
                 return new VoiceUiKit.StepperRow(
                     () => e.Value,
                     i => e.Value = i,
                     () => e.Labels.Length,
                     i => e.Labels[Mathf.Clamp(i, 0, e.Labels.Length - 1)])
-                    .Build(_shell.PaneRoot, e.Label, paneW, y, RowH);
+                    .Build(_shell.PaneRoot, e.Label, paneW, y, RowH, e.HelpText);
             case ModEnumHolder me:
                 return new VoiceUiKit.StepperRow(
                     () => me.Value,
                     i => me.Value = i,
                     () => me.Labels.Length,
                     i => me.Labels[Mathf.Clamp(i, 0, me.Labels.Length - 1)])
-                    .Build(_shell.PaneRoot, me.Label, paneW, y, RowH);
+                    .Build(_shell.PaneRoot, me.Label, paneW, y, RowH, me.HelpText);
             case NumberHolder n:
                 return new VoiceUiKit.SliderRow(
                     () => n.Value, v => n.Value = v, n.Min, n.Max,
                     v => $"<color=#22D3EE>{v.ToString(n.Format, CultureInfo.InvariantCulture)}</color>")
-                    .Build(_shell.PaneRoot, n.Label, paneW, y, RowH);
+                    .Build(_shell.PaneRoot, n.Label, paneW, y, RowH, n.HelpText);
         }
         return null;
     }
@@ -342,6 +342,7 @@ public static class HostSettingsPanel
         }
         if (Input.GetMouseButtonDown(0))
         {
+            if (_shell == null || !VoiceUiKit.Contains(_shell.PaneClip)) return;
             for (int i = 0; i < _rows.Count; i++) _rows[i].OnMouseDown();
             _activeRow = FindDragging();
         }

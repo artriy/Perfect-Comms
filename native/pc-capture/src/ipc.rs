@@ -3,6 +3,10 @@ use crate::audio::{
     PlaybackProgress, ToneSource,
 };
 use crate::codec::OpusCodec;
+use crate::diagnostics::{
+    media_state_json, send_media_state, CaptureDiagnostics, MediaDiagnostics, MediaStateEvent,
+    StreamDescriptor,
+};
 use crate::gamestate::{GameState, LocalState, PeerState};
 use crate::input::{
     InputConfig, LevelCadence, PeerLevelCadence, TelemetryMailbox, TELEMETRY_INTERVAL,
@@ -11,9 +15,9 @@ use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
     encode_control, error_json, level_json, local_candidate_json, local_sdp_json, parse_inbound,
-    peer_levels_json, peer_state_json, pong_json, ready_json, stats_json, AudioFrame,
-    AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing, PROTO_VERSION,
-    RING_CAPACITY,
+    peer_levels_json, peer_state_json, pong_json, ready_json, stats_json_with_diagnostics,
+    AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
+    PROTO_VERSION, RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
 use std::collections::HashMap;
@@ -21,7 +25,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -57,6 +61,8 @@ impl SessionSupervisor {
 struct PlaybackSupervision {
     progress: Arc<PlaybackProgress>,
     aec_timing: Arc<AecTiming>,
+    media_diagnostics: Arc<MediaDiagnostics>,
+    media_events: SyncSender<MediaStateEvent>,
     session: SessionSupervisor,
 }
 
@@ -65,7 +71,10 @@ struct TelemetrySources {
     counters: Arc<NativeCounters>,
     capture_ring: Arc<Mutex<AudioRing>>,
     playback_ring: Arc<Mutex<PlaybackRing>>,
+    dsp: Arc<Mutex<crate::dsp::Dsp>>,
+    input: Arc<Mutex<InputConfig>>,
     aec_timing: Arc<AecTiming>,
+    media_diagnostics: Arc<MediaDiagnostics>,
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -336,7 +345,11 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
             Ok(Frame::Audio(AudioFrame {
+                capture_generation: 0,
+                capture_open_attempt: 0,
                 capture_ts_ns: ts,
+                capture_callback_ts_ns: ts,
+                capture_timestamp_valid: false,
                 samples,
             }))
         }
@@ -434,12 +447,78 @@ fn join_thread_bounded(
 fn spawn_synthetic_producer(
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
+    diagnostics: Arc<CaptureDiagnostics>,
+    stream_generation: u64,
+    media_events: SyncSender<MediaStateEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut src = ToneSource::new();
+        let open_attempt = diagnostics.begin_open_attempt();
+        let descriptor = StreamDescriptor {
+            requested_device: "synthetic-tone".to_string(),
+            resolved_device: "synthetic-tone".to_string(),
+            requested_default: true,
+            requested_matched: true,
+            fell_back_to_default: false,
+            sample_rate: proto::SAMPLE_RATE,
+            channels: proto::CHANNELS,
+            sample_format: "F32".to_string(),
+            buffer_mode: "synthetic-fixed".to_string(),
+            buffer_min_frames: proto::FRAME_SAMPLES as u32,
+            buffer_max_frames: proto::FRAME_SAMPLES as u32,
+        };
+        let started_ns = monotonic_ns();
+        diagnostics.mark_stream_started(started_ns, descriptor.clone());
+        send_media_state(
+            &media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "stream-started".to_string(),
+                command_seq: diagnostics.current_command_seq(),
+                stream_generation,
+                open_attempt,
+                running: true,
+                requested_device: descriptor.requested_device,
+                resolved_device: descriptor.resolved_device,
+                requested_default: descriptor.requested_default,
+                requested_matched: descriptor.requested_matched,
+                sample_rate: descriptor.sample_rate,
+                channels: descriptor.channels,
+                sample_format: descriptor.sample_format,
+                buffer_mode: descriptor.buffer_mode,
+                ..Default::default()
+            },
+        );
         while !stop.load(Ordering::Relaxed) {
-            let frame = src.fill_frame(now_ns());
-            ring.lock().unwrap().push(frame);
+            let callback_ns = monotonic_ns();
+            let first =
+                diagnostics.observe_callback(callback_ns, proto::FRAME_SAMPLES, proto::SAMPLE_RATE);
+            let mut frame = src.fill_frame(callback_ns, callback_ns, true);
+            frame.capture_generation = stream_generation;
+            frame.capture_open_attempt = open_attempt;
+            diagnostics.raw_input.record(&frame.samples);
+            diagnostics.observe_resampled_samples(frame.samples.len());
+            diagnostics.observe_frames_produced(1);
+            let mut ring = ring.lock().unwrap();
+            ring.push(frame);
+            diagnostics.observe_ring_len(ring.len());
+            drop(ring);
+            if first {
+                send_media_state(
+                    &media_events,
+                    MediaStateEvent {
+                        direction: "capture".to_string(),
+                        state: "first-callback".to_string(),
+                        command_seq: diagnostics.current_command_seq(),
+                        stream_generation,
+                        open_attempt,
+                        running: true,
+                        callback_frames: proto::FRAME_SAMPLES as u64,
+                        elapsed_ms: callback_ns.saturating_sub(started_ns) / 1_000_000,
+                        ..Default::default()
+                    },
+                );
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
     })
@@ -517,6 +596,9 @@ struct CaptureProducer {
     ring: Arc<Mutex<AudioRing>>,
     conn: Arc<Mutex<TcpStream>>,
     aec_timing: Arc<AecTiming>,
+    diagnostics: Arc<CaptureDiagnostics>,
+    media_events: SyncSender<MediaStateEvent>,
+    stream_generation: u64,
     stop: Option<Arc<AtomicBool>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -527,12 +609,17 @@ impl CaptureProducer {
         ring: Arc<Mutex<AudioRing>>,
         conn: Arc<Mutex<TcpStream>>,
         aec_timing: Arc<AecTiming>,
+        diagnostics: Arc<CaptureDiagnostics>,
+        media_events: SyncSender<MediaStateEvent>,
     ) -> Self {
         Self {
             lifecycle: ProducerLifecycle::new(synthetic),
             ring,
             conn,
             aec_timing,
+            diagnostics,
+            media_events,
+            stream_generation: 0,
             stop: None,
             handle: None,
         }
@@ -551,7 +638,27 @@ impl CaptureProducer {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        let command_seq = self.diagnostics.next_command();
         let action = self.lifecycle.start();
+        let acknowledged_generation = if action == ProducerAction::Start {
+            self.stream_generation.saturating_add(1)
+        } else {
+            self.stream_generation
+        };
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "command-accepted".to_string(),
+                action: "start".to_string(),
+                command_seq,
+                stream_generation: acknowledged_generation,
+                open_attempt: self.diagnostics.current_open_attempt(),
+                changed: action != ProducerAction::None,
+                running: self.lifecycle.running,
+                ..Default::default()
+            },
+        );
         self.apply(action)?;
         if self.lifecycle.running && self.handle.is_none() {
             self.spawn()?;
@@ -560,7 +667,22 @@ impl CaptureProducer {
     }
 
     fn stop(&mut self) -> Result<(), String> {
+        let command_seq = self.diagnostics.next_command();
         let action = self.lifecycle.stop();
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "command-accepted".to_string(),
+                action: "stop".to_string(),
+                command_seq,
+                stream_generation: self.stream_generation,
+                open_attempt: self.diagnostics.current_open_attempt(),
+                changed: action != ProducerAction::None,
+                running: self.lifecycle.running,
+                ..Default::default()
+            },
+        );
         self.apply(action)?;
         // A producer may have exited just before Stop; always clear any stale queued PCM.
         if !self.lifecycle.running {
@@ -571,12 +693,44 @@ impl CaptureProducer {
 
     fn select_device(&mut self, id: String) -> Result<(), String> {
         let selected = if id.is_empty() { None } else { Some(id) };
+        let changed = self.lifecycle.selected != selected;
+        let command_seq = self.diagnostics.next_command();
         let action = self.lifecycle.select(selected);
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "command-accepted".to_string(),
+                action: "select-device".to_string(),
+                command_seq,
+                stream_generation: self.stream_generation,
+                open_attempt: self.diagnostics.current_open_attempt(),
+                changed,
+                running: self.lifecycle.running,
+                ..Default::default()
+            },
+        );
         self.apply(action)
     }
 
     fn set_synthetic(&mut self, enabled: bool) -> Result<(), String> {
+        let changed = self.lifecycle.synthetic != enabled;
+        let command_seq = self.diagnostics.next_command();
         let action = self.lifecycle.set_synthetic(enabled);
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "command-accepted".to_string(),
+                action: "set-synthetic".to_string(),
+                command_seq,
+                stream_generation: self.stream_generation,
+                open_attempt: self.diagnostics.current_open_attempt(),
+                changed,
+                running: self.lifecycle.running,
+                ..Default::default()
+            },
+        );
         self.apply(action)
     }
 
@@ -604,9 +758,35 @@ impl CaptureProducer {
             return Ok(());
         }
         self.ring.lock().unwrap().clear();
+        self.stream_generation = self.diagnostics.begin_stream(
+            monotonic_ns(),
+            self.lifecycle.synthetic,
+            self.lifecycle.selected.as_deref(),
+        );
+        self.aec_timing.reset_capture_path();
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "starting".to_string(),
+                command_seq: self.diagnostics.current_command_seq(),
+                stream_generation: self.stream_generation,
+                open_attempt: self.diagnostics.current_open_attempt().saturating_add(1),
+                running: true,
+                requested_device: self.lifecycle.selected.clone().unwrap_or_default(),
+                requested_default: self.lifecycle.selected.as_deref().is_none_or(str::is_empty),
+                ..Default::default()
+            },
+        );
         let stop = Arc::new(AtomicBool::new(false));
         self.handle = Some(if self.lifecycle.synthetic {
-            spawn_synthetic_producer(self.ring.clone(), stop.clone())
+            spawn_synthetic_producer(
+                self.ring.clone(),
+                stop.clone(),
+                self.diagnostics.clone(),
+                self.stream_generation,
+                self.media_events.clone(),
+            )
         } else {
             spawn_real_producer(
                 self.lifecycle.selected.clone(),
@@ -614,6 +794,9 @@ impl CaptureProducer {
                 stop.clone(),
                 self.conn.clone(),
                 self.aec_timing.clone(),
+                self.diagnostics.clone(),
+                self.stream_generation,
+                self.media_events.clone(),
             )
         });
         self.stop = Some(stop);
@@ -621,14 +804,58 @@ impl CaptureProducer {
     }
 
     fn stop_join_clear(&mut self) -> Result<(), String> {
+        let had_worker = self.stop.is_some() || self.handle.is_some();
+        let stop_started = Instant::now();
+        if had_worker {
+            self.diagnostics.mark_stopping();
+        }
         if let Some(stop) = self.stop.take() {
             stop.store(true, Ordering::Release);
         }
-        let result = self.handle.take().map_or(Ok(()), |handle| {
+        let join_result = self.handle.take().map_or(Ok(()), |handle| {
             join_thread_bounded(handle, "capture worker", CAPTURE_STOP_TIMEOUT)
         });
-        if let Ok(mut ring) = self.ring.lock() {
-            ring.clear();
+        let clear_deadline = Instant::now() + Duration::from_millis(50);
+        let clear_result = loop {
+            match self.ring.try_lock() {
+                Ok(mut ring) => {
+                    ring.clear();
+                    break Ok(());
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    break Err("capture ring lock poisoned during stop".to_string());
+                }
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < clear_deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    break Err("capture ring remained busy during stop".to_string());
+                }
+            }
+        };
+        let result = join_result.and(clear_result);
+        if had_worker {
+            let stopped = result.is_ok();
+            let final_window = if stopped {
+                Some(self.diagnostics.mark_stopped())
+            } else {
+                self.diagnostics.mark_stop_failed();
+                None
+            };
+            send_media_state(
+                &self.media_events,
+                MediaStateEvent {
+                    direction: "capture".to_string(),
+                    state: if stopped { "stopped" } else { "stop-failed" }.to_string(),
+                    command_seq: self.diagnostics.current_command_seq(),
+                    stream_generation: self.stream_generation,
+                    open_attempt: self.diagnostics.current_open_attempt(),
+                    running: false,
+                    elapsed_ms: stop_started.elapsed().as_millis() as u64,
+                    final_window,
+                    ..Default::default()
+                },
+            );
         }
         result
     }
@@ -644,6 +871,7 @@ impl Drop for CaptureProducer {
 
 fn spawn_telemetry_writer(
     mailbox: Arc<TelemetryMailbox>,
+    media_events: Receiver<MediaStateEvent>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
     sources: TelemetrySources,
@@ -653,6 +881,12 @@ fn spawn_telemetry_writer(
         const STATS_INTERVAL: Duration = Duration::from_secs(2);
         let mut last_stats = Instant::now() - STATS_INTERVAL;
         while !stop.load(Ordering::Acquire) {
+            while let Ok(event) = media_events.try_recv() {
+                let bytes = encode_control(&media_state_json(&event));
+                if write_frame(&conn, &bytes).is_err() {
+                    return;
+                }
+            }
             if let Some((peak, speaking)) = mailbox.take_local() {
                 let bytes = encode_control(&level_json(peak, speaking));
                 if write_frame(&conn, &bytes).is_err() {
@@ -670,7 +904,19 @@ fn spawn_telemetry_writer(
                 }
             }
             if last_stats.elapsed() >= STATS_INTERVAL {
-                let capture_dropped = sources.capture_ring.lock().unwrap().dropped();
+                let now_ns = monotonic_ns();
+                let (capture_len, capture_capacity, capture_dropped, capture_oldest_age_ms) = {
+                    let capture = sources.capture_ring.lock().unwrap();
+                    let oldest_age_ms = capture
+                        .oldest_capture_ts_ns()
+                        .map_or(0, |timestamp| now_ns.saturating_sub(timestamp) / 1_000_000);
+                    (
+                        capture.len() as u64,
+                        capture.capacity() as u64,
+                        capture.dropped(),
+                        oldest_age_ms,
+                    )
+                };
                 let (playback_len, playback_dropped) = {
                     let playback = sources.playback_ring.lock().unwrap();
                     (playback.len() as u64, playback.dropped())
@@ -679,18 +925,53 @@ fn spawn_telemetry_writer(
                     sources
                         .counters
                         .snapshot(capture_dropped, playback_len, playback_dropped);
-                let aec = sources.aec_timing.snapshot(monotonic_ns());
+                let dsp = sources.dsp.lock().unwrap().status();
+                let input = *sources.input.lock().unwrap();
+                snapshot.dsp_config_generation = dsp.config_generation;
+                snapshot.dsp_requested_aec = dsp.requested.aec;
+                snapshot.dsp_requested_agc = dsp.requested.agc;
+                snapshot.dsp_requested_ns = dsp.requested.ns;
+                snapshot.dsp_requested_hpf = dsp.requested.hpf;
+                snapshot.dsp_apm_loaded = dsp.apm_loaded;
+                snapshot.dsp_config_fully_applied = dsp.config_fully_applied;
+                snapshot.dsp_applied_aec = dsp.applied_aec;
+                snapshot.dsp_applied_agc = dsp.applied_agc;
+                snapshot.dsp_applied_ns = dsp.applied_ns;
+                snapshot.dsp_applied_hpf = dsp.applied_hpf;
+                snapshot.input_gain = input.gain;
+                snapshot.input_vad_threshold = input.vad_threshold;
+                let aec = sources.aec_timing.snapshot(now_ns);
                 snapshot.aec_delay_ms = sources.aec_timing.applied_delay_ms().unwrap_or(0);
+                snapshot.aec_recommended_delay_ms = aec.recommended_delay_ms.max(0) as u64;
                 snapshot.aec_measured_delay_ms = aec.measured_delay_ms;
                 snapshot.aec_input_latency_ms = aec.input_latency_ms;
                 snapshot.aec_output_latency_ms = aec.output_latency_ms;
                 snapshot.aec_render_queue_ms = aec.render_queue_ms;
                 snapshot.aec_capture_processing_ms = aec.capture_processing_ms;
+                snapshot.aec_capture_path_ms = aec.capture_path_ms;
                 snapshot.aec_timing_complete = aec.timing_complete;
+                snapshot.aec_input_timing_present = aec.input_timing_present;
+                snapshot.aec_output_timing_present = aec.output_timing_present;
+                snapshot.aec_render_timing_present = aec.render_timing_present;
+                snapshot.aec_capture_path_present = aec.capture_path_present;
+                snapshot.aec_fallback_reason = aec.fallback_reason.to_string();
+                snapshot.aec_frame_timestamp_valid = aec.frame_timestamp_valid;
                 snapshot.aec_render_observations = aec.render_observations;
                 snapshot.aec_invalid_timestamp_samples = aec.invalid_timestamp_samples;
+                snapshot.aec_invalid_frame_timestamp_samples = aec.invalid_frame_timestamp_samples;
+                snapshot.aec_last_frame_processed_present = aec.last_frame_processed_present;
+                snapshot.aec_last_frame_processed_age_ms = aec.last_frame_processed_age_ms;
                 snapshot.aec_delay_frames = sources.aec_timing.applied_delay_frames();
-                let bytes = encode_control(&stats_json(&snapshot));
+                let media = sources.media_diagnostics.snapshot(
+                    now_ns,
+                    capture_len,
+                    capture_capacity,
+                    capture_dropped,
+                    capture_oldest_age_ms,
+                    playback_len,
+                    playback_dropped,
+                );
+                let bytes = encode_control(&stats_json_with_diagnostics(&snapshot, &media));
                 if write_frame(&conn, &bytes).is_err() {
                     break;
                 }
@@ -701,12 +982,16 @@ fn spawn_telemetry_writer(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_real_producer(
     device_id: Option<String>,
     ring: Arc<Mutex<AudioRing>>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
     aec_timing: Arc<AecTiming>,
+    diagnostics: Arc<CaptureDiagnostics>,
+    stream_generation: u64,
+    media_events: SyncSender<MediaStateEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         const ESCALATE_AFTER: Duration = Duration::from_secs(10);
@@ -723,6 +1008,9 @@ fn spawn_real_producer(
                 stop.clone(),
                 healthy.clone(),
                 aec_timing.clone(),
+                diagnostics.clone(),
+                stream_generation,
+                media_events.clone(),
             ) {
                 Ok(()) => break,
                 Err(e) => {
@@ -734,6 +1022,24 @@ fn spawn_real_producer(
                     }
                     retry_attempt = retry_attempt.saturating_add(1);
                     let retry_delay = capture_retry_delay(retry_attempt);
+                    diagnostics.mark_retrying(retry_attempt as u64);
+                    if let Ok(mut queued) = ring.lock() {
+                        queued.clear();
+                    }
+                    send_media_state(
+                        &media_events,
+                        MediaStateEvent {
+                            direction: "capture".to_string(),
+                            state: "retrying".to_string(),
+                            command_seq: diagnostics.current_command_seq(),
+                            stream_generation,
+                            open_attempt: diagnostics.current_open_attempt(),
+                            running: true,
+                            retry_attempt: retry_attempt as u64,
+                            retry_delay_ms: retry_delay.as_millis() as u64,
+                            ..Default::default()
+                        },
+                    );
                     // A permanently absent/denied microphone is a supported listen-only state.
                     // Log the first failure and then only exponentially-sparse attempts so stderr
                     // diagnostics remain bounded while the speaker/signaling engine stays alive.
@@ -851,6 +1157,24 @@ fn stop_playback_bounded(
     Ok(())
 }
 
+fn reap_finished_playback_worker(
+    worker: &mut Option<std::thread::JoinHandle<()>>,
+    progress: &PlaybackProgress,
+    aec_timing: &AecTiming,
+) -> bool {
+    if !worker.as_ref().is_some_and(|handle| handle.is_finished()) {
+        return false;
+    }
+    if let Some(handle) = worker.take() {
+        handle.join().ok();
+    }
+    progress.reset();
+    // Invalidate the dead output route immediately. This must happen even when the spawn throttle
+    // delays replacement, otherwise reverse audio can look renderable against stale output timing.
+    aec_timing.reset_playback_path();
+    true
+}
+
 fn ensure_playback(
     out_thread: &Mutex<Option<std::thread::JoinHandle<()>>>,
     out_selected: &Mutex<Option<String>>,
@@ -861,12 +1185,8 @@ fn ensure_playback(
     supervision: &PlaybackSupervision,
 ) {
     let mut guard = out_thread.lock().unwrap();
-    if guard.as_ref().is_some_and(|h| h.is_finished()) {
-        if let Some(h) = guard.take() {
-            h.join().ok();
-        }
-        supervision.progress.reset();
-    }
+    let reaped_finished_worker =
+        reap_finished_playback_worker(&mut guard, &supervision.progress, &supervision.aec_timing);
     if guard.is_none() {
         let now = monotonic_ns();
         let last = last_spawn_ns.load(Ordering::Relaxed);
@@ -880,6 +1200,21 @@ fn ensure_playback(
         let stats = counters.clone();
         let playback_progress = supervision.progress.clone();
         let aec_timing = supervision.aec_timing.clone();
+        // Initial starts and explicit device switches set the spawn marker to zero. A failed
+        // worker was already invalidated when reaped, including when a prior call returned at the
+        // throttle above, so do not advance the timing epoch again for that replacement.
+        if !reaped_finished_worker && last == 0 {
+            aec_timing.reset_playback_path();
+        } else {
+            // A failed worker advances the epoch as soon as it is reaped, even if the spawn
+            // throttle delays its replacement. Drop render observations accumulated during that
+            // outage before the replacement starts, without advancing the same epoch twice.
+            aec_timing.clear_playback_measurements();
+        }
+        let media_diagnostics = supervision.media_diagnostics.clone();
+        let media_events = supervision.media_events.clone();
+        let stream_generation = media_diagnostics.playback.begin_stream(dev.as_deref());
+        let playback_diagnostics = media_diagnostics.playback.clone();
         let worker_supervisor = supervision.session.clone();
         supervision.progress.reset();
         st.store(false, Ordering::Release);
@@ -888,18 +1223,52 @@ fn ensure_playback(
             .fetch_add(1, Ordering::Relaxed);
         *guard = Some(std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                spawn_cpal_playback(dev, pb, st, stats.clone(), playback_progress, aec_timing)
+                spawn_cpal_playback(
+                    dev,
+                    pb,
+                    st,
+                    stats.clone(),
+                    playback_progress,
+                    aec_timing,
+                    playback_diagnostics.clone(),
+                    stream_generation,
+                    media_events.clone(),
+                )
             }));
             match outcome {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     stats.playback_errors.fetch_add(1, Ordering::Relaxed);
+                    playback_diagnostics.mark_error();
+                    send_media_state(
+                        &media_events,
+                        MediaStateEvent {
+                            direction: "playback".to_string(),
+                            state: "error".to_string(),
+                            stream_generation,
+                            running: false,
+                            ..Default::default()
+                        },
+                    );
                     eprintln!("pc-capture: playback error: {error}");
                 }
-                Err(payload) => worker_supervisor.report(
-                    "playback worker",
-                    &format!("panicked: {}", panic_detail(payload.as_ref())),
-                ),
+                Err(payload) => {
+                    playback_diagnostics.mark_error();
+                    send_media_state(
+                        &media_events,
+                        MediaStateEvent {
+                            direction: "playback".to_string(),
+                            state: "error".to_string(),
+                            stream_generation,
+                            running: false,
+                            ..Default::default()
+                        },
+                    );
+                    worker_supervisor.report(
+                        "playback worker",
+                        &format!("panicked: {}", panic_detail(payload.as_ref())),
+                    );
+                }
             }
         }));
     }
@@ -931,6 +1300,8 @@ enum RtcOp {
 
 #[allow(clippy::while_let_loop)]
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
+    // Establish the process-local monotonic epoch before either audio stream can callback.
+    let _ = monotonic_ns();
     stream.set_nodelay(true).ok();
     stream
         .set_write_timeout(Some(Duration::from_millis(250)))
@@ -979,6 +1350,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let out_spawn_ns = Arc::new(AtomicU64::new(0));
     let out_progress = Arc::new(PlaybackProgress::default());
     let aec_timing = Arc::new(AecTiming::default());
+    let media_diagnostics = Arc::new(MediaDiagnostics::default());
+    let (media_event_tx, media_event_rx) = std::sync::mpsc::sync_channel(64);
 
     let session_stopping = Arc::new(AtomicBool::new(false));
     let (critical_tx, critical_rx) = std::sync::mpsc::channel::<String>();
@@ -989,6 +1362,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let playback_supervision = PlaybackSupervision {
         progress: out_progress.clone(),
         aec_timing: aec_timing.clone(),
+        media_diagnostics: media_diagnostics.clone(),
+        media_events: media_event_tx.clone(),
         session: session_supervisor.clone(),
     };
     let critical_monitor_handle =
@@ -1007,6 +1382,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         ring.clone(),
         conn.clone(),
         aec_timing.clone(),
+        media_diagnostics.capture.clone(),
+        media_event_tx.clone(),
     );
     let input = Arc::new(Mutex::new(InputConfig::default()));
     let telemetry = Arc::new(TelemetryMailbox::default());
@@ -1014,13 +1391,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let counters = Arc::new(NativeCounters::default());
     let telemetry_handle = spawn_telemetry_writer(
         telemetry.clone(),
+        media_event_rx,
         telemetry_stop.clone(),
         conn.clone(),
         TelemetrySources {
             counters: counters.clone(),
             capture_ring: ring.clone(),
             playback_ring: playback.clone(),
+            dsp: dsp.clone(),
+            input: input.clone(),
             aec_timing: aec_timing.clone(),
+            media_diagnostics: media_diagnostics.clone(),
         },
         session_supervisor.clone(),
     );
@@ -1066,10 +1447,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_telemetry = telemetry.clone();
     let writer_counters = counters.clone();
     let writer_aec_timing = aec_timing.clone();
+    let writer_capture_diagnostics = media_diagnostics.capture.clone();
     let writer_handle = spawn_critical_worker("encoder", session_supervisor.clone(), move || {
         let mut encoder = encoder;
         let mut level_cadence = LevelCadence::new(Instant::now());
         let mut last_dropped = 0u64;
+        let mut last_capture_stream = None;
         while !writer_stop.load(Ordering::Relaxed) {
             let (frame, dropped) = {
                 let mut ring = writer_ring.lock().unwrap();
@@ -1077,18 +1460,48 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             };
             match frame {
                 Some(mut f) => {
+                    if !writer_capture_diagnostics
+                        .is_active_stream(f.capture_generation, f.capture_open_attempt)
+                    {
+                        writer_capture_diagnostics.note_stale_generation_frame();
+                        continue;
+                    }
                     writer_counters
                         .capture_frames
                         .fetch_add(1, Ordering::Relaxed);
-                    let aec = writer_aec_timing.snapshot(monotonic_ns());
-                    let applied_delay_ms = writer_dsp.lock().unwrap().capture_with_stream_delay(
+                    writer_capture_diagnostics.pre_dsp.record(&f.samples);
+                    let mut dsp = writer_dsp.lock().unwrap();
+                    let capture_stream = (f.capture_generation, f.capture_open_attempt);
+                    if last_capture_stream != Some(capture_stream) {
+                        dsp.begin_capture_generation();
+                        last_capture_stream = Some(capture_stream);
+                    }
+                    // Measure at the real DSP boundary so time spent waiting behind reverse-stream
+                    // analysis and capture-ring backlog is included in the AEC delay.
+                    let process_ns = monotonic_ns();
+                    let aec = writer_aec_timing.snapshot_for_capture(process_ns, &f);
+                    if f.capture_timestamp_valid && process_ns >= f.capture_ts_ns {
+                        writer_capture_diagnostics
+                            .observe_encoder_pop_age(process_ns - f.capture_ts_ns);
+                    }
+                    let applied_delay_ms = dsp.capture_with_stream_delay(
                         &mut f.samples,
                         aec.recommended_delay_ms,
                         aec.timing_complete,
+                        aec.playback_timing_epoch,
                     );
+                    drop(dsp);
                     writer_aec_timing.note_applied_delay(applied_delay_ms);
+                    writer_capture_diagnostics.post_dsp.record(&f.samples);
                     let input = *writer_input.lock().unwrap();
                     input.apply_gain(&mut f.samples);
+                    if !writer_capture_diagnostics
+                        .is_active_stream(f.capture_generation, f.capture_open_attempt)
+                    {
+                        writer_capture_diagnostics.note_stale_generation_frame();
+                        continue;
+                    }
+                    writer_capture_diagnostics.post_gain.record(&f.samples);
                     let pk = peak(&f.samples);
                     let pkt = encoder.encode(&f.samples);
                     if !pkt.is_empty() {
@@ -1693,6 +2106,35 @@ mod tests {
     }
 
     #[test]
+    fn reaping_finished_playback_worker_invalidates_timing_before_respawn() {
+        let progress = PlaybackProgress::default();
+        progress.mark_started();
+        progress.mark_callback();
+        let timing = AecTiming::default();
+        let previous_epoch = timing.snapshot(monotonic_ns()).playback_timing_epoch;
+        let handle = std::thread::spawn(|| {});
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(handle.is_finished());
+        let mut worker = Some(handle);
+
+        assert!(reap_finished_playback_worker(
+            &mut worker,
+            &progress,
+            &timing,
+        ));
+
+        assert!(worker.is_none());
+        assert_eq!(progress.snapshot(), (0, 0));
+        assert_eq!(
+            timing.snapshot(monotonic_ns()).playback_timing_epoch,
+            previous_epoch + 1
+        );
+    }
+
+    #[test]
     fn playback_watchdog_bounds_stream_startup() {
         let mut watchdog = PlaybackWatchdog::default();
         let spawned_ns = 100;
@@ -1934,11 +2376,15 @@ mod tests {
         let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (server, _) = listener.accept().unwrap();
         let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
+        let diagnostics = Arc::new(CaptureDiagnostics::default());
+        let (media_tx, _media_rx) = std::sync::mpsc::sync_channel(64);
         let mut producer = CaptureProducer::new(
             true,
             ring.clone(),
             Arc::new(Mutex::new(server)),
             Arc::new(AecTiming::default()),
+            diagnostics.clone(),
+            media_tx,
         );
 
         producer.start().unwrap();
@@ -1949,6 +2395,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ring.lock().unwrap().len() > 0);
+        assert_eq!(
+            diagnostics
+                .snapshot(monotonic_ns(), 1, RING_CAPACITY as u64, 0, 0)
+                .stream_generation,
+            1
+        );
         producer.stop().unwrap();
         assert_eq!(ring.lock().unwrap().len(), 0);
 
@@ -1960,6 +2412,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ring.lock().unwrap().len() > 0);
+        assert_eq!(
+            diagnostics
+                .snapshot(monotonic_ns(), 1, RING_CAPACITY as u64, 0, 0)
+                .stream_generation,
+            2
+        );
         producer.stop().unwrap();
         drop(client);
     }

@@ -73,7 +73,12 @@ impl SyntheticTone {
         Self { phase: 0.0 }
     }
 
-    pub fn fill_frame(&mut self, capture_ts_ns: u64) -> AudioFrame {
+    pub fn fill_frame(
+        &mut self,
+        capture_ts_ns: u64,
+        capture_callback_ts_ns: u64,
+        capture_timestamp_valid: bool,
+    ) -> AudioFrame {
         let step = std::f32::consts::TAU * SYNTHETIC_TONE_HZ / SAMPLE_RATE as f32;
         let mut samples = Vec::with_capacity(FRAME_SAMPLES);
         for _ in 0..FRAME_SAMPLES {
@@ -84,7 +89,11 @@ impl SyntheticTone {
             }
         }
         AudioFrame {
+            capture_generation: 0,
+            capture_open_attempt: 0,
             capture_ts_ns,
+            capture_callback_ts_ns,
+            capture_timestamp_valid,
             samples,
         }
     }
@@ -254,8 +263,10 @@ mod tests {
     #[test]
     fn synthetic_tone_matches_managed_frequency_and_level() {
         let mut tone = SyntheticTone::new();
-        let frame = tone.fill_frame(7);
+        let frame = tone.fill_frame(7, 9, true);
         assert_eq!(frame.capture_ts_ns, 7);
+        assert_eq!(frame.capture_callback_ts_ns, 9);
+        assert!(frame.capture_timestamp_valid);
         assert_eq!(frame.samples.len(), FRAME_SAMPLES);
         let peak = frame.samples.iter().fold(0.0f32, |p, s| p.max(s.abs()));
         assert!((peak - SYNTHETIC_TONE_AMPLITUDE).abs() < 0.000_01);

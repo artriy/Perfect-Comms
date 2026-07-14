@@ -26,6 +26,9 @@ internal static class CrewmateAvatarRenderer
     // Memoized "is this color id the animated Rainbow color?" so the per-frame ring/glow/highlight color path
     // never repeats IsRainbowColorId's assembly-scanning reflection. Cleared per game by ClearCache().
     private static readonly Dictionary<int, bool> RainbowColorIdCache = new();
+    private static MethodInfo? _townOfUsRainbowMethod;
+    private static Type? _townOfUsRainbowMethodOwner;
+    private static readonly object?[] TownOfUsRainbowArguments = new object?[1];
     private static Color32[]? templatePixels;
     private static int templateWidth;
     private static int templateHeight;
@@ -663,23 +666,27 @@ internal static class CrewmateAvatarRenderer
         isRainbow = false;
         try
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            var type = SoftDependencyTypeResolver.ResolveExact("TownOfUs.Modules.RainbowMod.RainbowUtils");
+            if (type == null) return false;
+
+            if (_townOfUsRainbowMethod == null || _townOfUsRainbowMethodOwner != type)
             {
-                var type = assembly.GetType("TownOfUs.Modules.RainbowMod.RainbowUtils");
-                var method = type?.GetMethod(
+                _townOfUsRainbowMethod = type.GetMethod(
                     "IsRainbow",
                     BindingFlags.Public | BindingFlags.Static,
                     null,
                     new[] { typeof(int) },
                     null);
-                if (method == null) continue;
-
-                var result = method.Invoke(null, new object[] { colorId });
-                if (result is not bool value) continue;
-
-                isRainbow = value;
-                return true;
+                _townOfUsRainbowMethodOwner = type;
             }
+
+            if (_townOfUsRainbowMethod == null) return false;
+            TownOfUsRainbowArguments[0] = colorId;
+            if (_townOfUsRainbowMethod.Invoke(null, TownOfUsRainbowArguments) is not bool value)
+                return false;
+
+            isRainbow = value;
+            return true;
         }
         catch
         {

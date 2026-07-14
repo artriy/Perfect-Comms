@@ -8,10 +8,18 @@ namespace VoiceChatPlugin.VoiceChat;
 
 public static class VoiceSettingsPanel
 {
+    private enum MixSettingsExpansion
+    {
+        None,
+        AliveFocus,
+        DeadFocus,
+    }
+
     private const float PanelW = 908f;
     private const float PanelH = 554f;
     private const float PanelScale = 1.3f;
     private const float RowH = 72f;
+    private const float DeviceRowH = 142f;
     private const float HeaderH = 42f;
     private const float TopPad = 12f;
 
@@ -26,6 +34,9 @@ public static class VoiceSettingsPanel
     private static float _contentHeight;
     private static float _animT;
     private static int _visSignature = int.MinValue;
+    private static MixSettingsExpansion _expandedMixSettings;
+    private static bool _rebuildRequested;
+    private static bool _revealExpandedMix;
 
     private static bool ShellAlive => _shell != null && _shell.Root != null;
     private static bool _shown;
@@ -72,13 +83,22 @@ public static class VoiceSettingsPanel
         _shell = new VoiceUiKit.PanelShell("VC_SettingsPanel", "PERFECT COMMS", PanelW, PanelH, HeaderClose);
         _rail = new VoiceUiKit.CategoryRail();
         _rail.Build(_shell.RailRoot, _shell.RailWidth, Categories);
-        _rail.OnSelect = _ => RebuildRows(true);
+        _rail.OnSelect = _ =>
+        {
+            _expandedMixSettings = MixSettingsExpansion.None;
+            _rebuildRequested = false;
+            _revealExpandedMix = false;
+            RebuildRows(true);
+        };
         RebuildRows(true);
     }
 
     public static void Hide()
     {
         VoiceUiKit.RebindRow.CancelCapture();
+        _expandedMixSettings = MixSettingsExpansion.None;
+        _rebuildRequested = false;
+        _revealExpandedMix = false;
         _shown = false;
         _animT = 0f;
         _activeRow = null;
@@ -116,6 +136,9 @@ public static class VoiceSettingsPanel
         _scroll = 0f;
         _shown = false;
         _visSignature = int.MinValue;
+        _expandedMixSettings = MixSettingsExpansion.None;
+        _rebuildRequested = false;
+        _revealExpandedMix = false;
     }
 
     private static void RebuildRows(bool resetScroll)
@@ -128,6 +151,7 @@ public static class VoiceSettingsPanel
         _activeRow = null;
 
         var visible = CollectVisible(_rail!.Selected);
+        float? revealBottom = null;
 
         float y = -TopPad;
         for (int i = 0; i < visible.Count; i++)
@@ -143,12 +167,21 @@ public static class VoiceSettingsPanel
                 div.rectTransform.sizeDelta = new Vector2(-20f, 1f);
                 div.rectTransform.anchoredPosition = new Vector2(0f, y - e.Height + 1f);
             }
+            if (_revealExpandedMix
+                && ((_expandedMixSettings == MixSettingsExpansion.AliveFocus
+                        && e.Key == "AliveFocus.DeadPlayers")
+                    || (_expandedMixSettings == MixSettingsExpansion.DeadFocus
+                        && e.Key == "DeadFocus.DeadPlayers")))
+                revealBottom = y - e.Height;
             y -= e.Height;
         }
         _contentHeight = -y;
         _visSignature = Signature(visible);
 
         ApplyScroll(resetScroll);
+        if (_revealExpandedMix && revealBottom.HasValue)
+            RevealContentBottom(revealBottom.Value);
+        _revealExpandedMix = false;
 
         if (visible.Count == 0)
         {
@@ -222,6 +255,16 @@ public static class VoiceSettingsPanel
         _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
     }
 
+    private static void RevealContentBottom(float contentBottom)
+    {
+        if (_shell == null) return;
+        float viewH = _shell.PaneHeight - 24f;
+        float maxScroll = Mathf.Max(0f, _contentHeight - viewH);
+        float requiredScroll = -viewH + 12f - contentBottom;
+        _scroll = Mathf.Clamp(Mathf.Max(_scroll, requiredScroll), 0f, maxScroll);
+        _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+    }
+
     private static Func<float, string> Pct => v => $"<color=#22D3EE>{Mathf.RoundToInt(v * 100f)}%</color>";
     private static Func<float, string> VolumePct => v => v <= 0.005f
         ? "<color=#8C9CB2>None</color>"
@@ -245,16 +288,17 @@ public static class VoiceSettingsPanel
     }
 
     private static void Slider(List<Entry> defs, string label,
-        BepInEx.Configuration.ConfigEntry<float> entry, Func<float, string> fmt, Func<bool>? visible = null)
+        BepInEx.Configuration.ConfigEntry<float> entry, Func<float, string> fmt,
+        Func<bool>? visible = null, string? key = null)
     {
         var range = GetRange(entry);
         defs.Add(new Entry
         {
-            Key = label,
+            Key = key ?? label,
             Visible = visible ?? Always,
             Build = (pane, paneW, y) => new VoiceUiKit.SliderRow(
                 () => entry.Value, v => entry.Value = v, range.x, range.y, fmt)
-                .Build(pane, label, paneW, y, RowH)
+                .Build(pane, label, paneW, y, RowH, SettingHelp(entry))
         });
     }
 
@@ -266,19 +310,19 @@ public static class VoiceSettingsPanel
             Key = label,
             Visible = visible ?? Always,
             Build = (pane, paneW, y) => new VoiceUiKit.ToggleRow(() => entry.Value, v => entry.Value = v)
-                .Build(pane, label, paneW, y, RowH)
+                .Build(pane, label, paneW, y, RowH, SettingHelp(entry))
         });
     }
 
     private static void Toggle(List<Entry> defs, string label,
-        Func<bool> get, Action<bool> set, Func<bool>? visible = null)
+        Func<bool> get, Action<bool> set, string help, Func<bool>? visible = null)
     {
         defs.Add(new Entry
         {
             Key = label,
             Visible = visible ?? Always,
             Build = (pane, paneW, y) => new VoiceUiKit.ToggleRow(get, set)
-                .Build(pane, label, paneW, y, RowH)
+                .Build(pane, label, paneW, y, RowH, help)
         });
     }
 
@@ -295,7 +339,7 @@ public static class VoiceSettingsPanel
                 i => entry.Value = (TEnum)Enum.ToObject(typeof(TEnum), i),
                 () => labels.Length,
                 i => labels[Mathf.Clamp(i, 0, labels.Length - 1)])
-                .Build(pane, label, paneW, y, RowH)
+                .Build(pane, label, paneW, y, RowH, SettingHelp(entry))
         });
     }
 
@@ -305,9 +349,6 @@ public static class VoiceSettingsPanel
         Slider(defs, "Mic Volume", s.MicVolume, Pct);
         Slider(defs, "Mic Sensitivity", s.MicSensitivity, Num2);
         Slider(defs, "Speaker Volume", s.MasterVolume, Pct);
-        Section(defs, "DEAD MEETING MIX");
-        Slider(defs, "Alive Players", s.AlivePlayerVolume, VolumePct);
-        Slider(defs, "Dead Players", s.DeadPlayerVolume, VolumePct);
         Section(defs, "PROCESSING");
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
@@ -325,26 +366,32 @@ public static class VoiceSettingsPanel
         defs.Add(new Entry
         {
             Key = "Microphone",
+            Height = DeviceRowH,
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
                 () => (int)s.MicrophoneDeviceIndex.Value,
                 i => s.MicrophoneDeviceIndex.Value = (MicDeviceEnum)i,
                 () => VoiceChatLocalSettings.MicDeviceNames.Length,
-                i => DeviceName(VoiceChatLocalSettings.MicDeviceNames, i))
-                .Build(pane, "Microphone", paneW, y, RowH)
+                i => DeviceName(VoiceChatLocalSettings.MicDeviceNames, i),
+                fullWidthValue: true)
+                .Build(pane, "Microphone", paneW, y, DeviceRowH,
+                    SettingHelp(s.MicrophoneDeviceIndex))
         });
 
 #if WINDOWS
         defs.Add(new Entry
         {
             Key = "Speaker",
+            Height = DeviceRowH,
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
                 () => (int)s.SpeakerDeviceIndex.Value,
                 i => s.SpeakerDeviceIndex.Value = (SpkDeviceEnum)i,
                 () => VoiceChatLocalSettings.SpkDeviceNames.Length,
-                i => DeviceName(VoiceChatLocalSettings.SpkDeviceNames, i))
-                .Build(pane, "Speaker", paneW, y, RowH)
+                i => DeviceName(VoiceChatLocalSettings.SpkDeviceNames, i),
+                fullWidthValue: true)
+                .Build(pane, "Speaker", paneW, y, DeviceRowH,
+                    SettingHelp(s.SpeakerDeviceIndex))
         });
 #endif
     }
@@ -355,7 +402,11 @@ public static class VoiceSettingsPanel
         return names[Mathf.Clamp(i, 0, names.Length - 1)];
     }
 
-    private static void Rebind(List<Entry> defs, VoiceKeybind bind)
+    private static void Rebind(
+        List<Entry> defs,
+        VoiceKeybind bind,
+        Action? configure = null,
+        Func<bool>? configureActive = null)
     {
         defs.Add(new Entry
         {
@@ -366,9 +417,21 @@ public static class VoiceSettingsPanel
                 (key, modifier, match) => bind.SetBinding(key, modifier, match),
                 () => bind.Clear(),
                 () => bind.Modifier,
-                () => bind.ModifierMatch)
-                .Build(pane, bind.DisplayName, paneW, y, RowH)
+                () => bind.ModifierMatch,
+                configure,
+                configureActive)
+                .Build(pane, bind.DisplayName, paneW, y, RowH, bind.HelpText)
         });
+    }
+
+    private static void ToggleMixSettings(MixSettingsExpansion expansion)
+    {
+        bool opening = _expandedMixSettings != expansion;
+        _expandedMixSettings = opening
+            ? expansion
+            : MixSettingsExpansion.None;
+        _revealExpandedMix = opening;
+        _rebuildRequested = true;
     }
 
     private static void BuildKeybinds(List<Entry> defs, VoiceChatLocalSettings s)
@@ -382,6 +445,26 @@ public static class VoiceSettingsPanel
         Rebind(defs, VoiceChatKeybinds.ToggleMicMode);
         Rebind(defs, VoiceChatKeybinds.ToggleSpeaker);
         Rebind(defs, VoiceChatKeybinds.VolumeMenu);
+        Rebind(defs, VoiceChatKeybinds.AliveLouderDeadQuieter,
+            () => ToggleMixSettings(MixSettingsExpansion.AliveFocus),
+            () => _expandedMixSettings == MixSettingsExpansion.AliveFocus);
+        if (_expandedMixSettings == MixSettingsExpansion.AliveFocus)
+        {
+            Slider(defs, "Alive Players", s.AliveFocusAliveVolume, VolumePct,
+                key: "AliveFocus.AlivePlayers");
+            Slider(defs, "Dead Players", s.AliveFocusDeadVolume, VolumePct,
+                key: "AliveFocus.DeadPlayers");
+        }
+        Rebind(defs, VoiceChatKeybinds.AliveQuieterDeadLouder,
+            () => ToggleMixSettings(MixSettingsExpansion.DeadFocus),
+            () => _expandedMixSettings == MixSettingsExpansion.DeadFocus);
+        if (_expandedMixSettings == MixSettingsExpansion.DeadFocus)
+        {
+            Slider(defs, "Alive Players", s.DeadFocusAliveVolume, VolumePct,
+                key: "DeadFocus.AlivePlayers");
+            Slider(defs, "Dead Players", s.DeadFocusDeadVolume, VolumePct,
+                key: "DeadFocus.DeadPlayers");
+        }
         Rebind(defs, VoiceChatKeybinds.LocalVoiceRefresh);
         Rebind(defs, VoiceChatKeybinds.HostVoiceRefresh);
     }
@@ -422,7 +505,8 @@ public static class VoiceSettingsPanel
         Toggle(defs, "Nat Fix", s.NatFix);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,
-            v => s.ApplyDiagnosticsToggle(v));
+            v => s.ApplyDiagnosticsToggle(v),
+            "Writes detailed voice logs and microphone calibration data for troubleshooting. Leave this off unless you are diagnosing an issue.");
     }
 
     private static Vector2 GetRange(BepInEx.Configuration.ConfigEntryBase entry)
@@ -432,6 +516,9 @@ public static class VoiceSettingsPanel
             return new Vector2((float)r.MinValue, (float)r.MaxValue);
         return new Vector2(0f, 1f);
     }
+
+    private static string SettingHelp(BepInEx.Configuration.ConfigEntryBase entry)
+        => entry.Description?.Description ?? string.Empty;
 
     public static void Tick()
     {
@@ -459,6 +546,13 @@ public static class VoiceSettingsPanel
         HandleScroll();
         HandleInput();
         for (int i = 0; i < _rows.Count; i++) _rows[i].Tick(dt);
+
+        if (_rebuildRequested)
+        {
+            _rebuildRequested = false;
+            RebuildRows(false);
+            return;
+        }
 
         if (Time.frameCount % 20 == 0) RefreshVisibilityIfChanged();
     }
@@ -505,6 +599,7 @@ public static class VoiceSettingsPanel
         }
         if (Input.GetMouseButtonDown(0))
         {
+            if (_shell == null || !VoiceUiKit.Contains(_shell.PaneClip)) return;
             for (int i = 0; i < _rows.Count; i++) _rows[i].OnMouseDown();
             _activeRow = FindDragging();
         }

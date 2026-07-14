@@ -16,7 +16,16 @@ use std::io::Read;
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
+    /// Internal capture lifecycle generation. Not serialized on the legacy PCM wire frame.
+    pub capture_generation: u64,
+    /// Internal concrete stream-open attempt. Not serialized on the legacy PCM wire frame.
+    pub capture_open_attempt: u64,
+    /// Process-local monotonic time at which the frame's first sample reached the ADC.
     pub capture_ts_ns: u64,
+    /// Process-local monotonic time at which CPAL delivered the buffer containing that sample.
+    /// This is internal timing metadata and is intentionally not part of the legacy PCM wire frame.
+    pub capture_callback_ts_ns: u64,
+    pub capture_timestamp_valid: bool,
     pub samples: Vec<f32>,
 }
 
@@ -112,7 +121,11 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
             Ok(Frame::Audio(AudioFrame {
+                capture_generation: 0,
+                capture_open_attempt: 0,
                 capture_ts_ns: ts,
+                capture_callback_ts_ns: ts,
+                capture_timestamp_valid: false,
                 samples,
             }))
         }
@@ -156,9 +169,19 @@ impl AudioRing {
         self.queue.clear();
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.queue.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn oldest_capture_ts_ns(&self) -> Option<u64> {
+        self.queue
+            .front()
+            .filter(|frame| frame.capture_timestamp_valid)
+            .map(|frame| frame.capture_ts_ns)
     }
 
     pub fn dropped(&self) -> u64 {
@@ -344,7 +367,8 @@ struct PeerLevelsMsg<'a> {
     levels: &'a [PeerLevel],
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct NativeStatsSnapshot {
     pub capture_frames: u64,
     pub opus_encoded: u64,
@@ -370,15 +394,39 @@ pub struct NativeStatsSnapshot {
     pub mix_peak: f32,
     pub mix_rms: f64,
     pub jitter_idle_ticks: u64,
+    pub dsp_config_generation: u64,
+    pub dsp_requested_aec: bool,
+    pub dsp_requested_agc: bool,
+    pub dsp_requested_ns: bool,
+    pub dsp_requested_hpf: bool,
+    pub dsp_apm_loaded: bool,
+    pub dsp_config_fully_applied: bool,
+    pub dsp_applied_aec: bool,
+    pub dsp_applied_agc: bool,
+    pub dsp_applied_ns: bool,
+    pub dsp_applied_hpf: bool,
+    pub input_gain: f32,
+    pub input_vad_threshold: f32,
     pub aec_delay_ms: u64,
+    pub aec_recommended_delay_ms: u64,
     pub aec_measured_delay_ms: u64,
     pub aec_input_latency_ms: u64,
     pub aec_output_latency_ms: u64,
     pub aec_render_queue_ms: u64,
     pub aec_capture_processing_ms: u64,
+    pub aec_capture_path_ms: u64,
     pub aec_timing_complete: bool,
+    pub aec_input_timing_present: bool,
+    pub aec_output_timing_present: bool,
+    pub aec_render_timing_present: bool,
+    pub aec_capture_path_present: bool,
+    pub aec_fallback_reason: String,
+    pub aec_frame_timestamp_valid: bool,
     pub aec_render_observations: u64,
     pub aec_invalid_timestamp_samples: u64,
+    pub aec_invalid_frame_timestamp_samples: u64,
+    pub aec_last_frame_processed_present: bool,
+    pub aec_last_frame_processed_age_ms: u64,
     pub aec_delay_frames: u64,
     pub game_state_updates: u64,
     pub applied_deaf: bool,
@@ -468,6 +516,26 @@ pub fn peer_levels_json(levels: &[PeerLevel]) -> String {
 
 pub fn stats_json(stats: &NativeStatsSnapshot) -> String {
     serde_json::to_string(&StatsMsg { op: "stats", stats }).expect("stats serialize")
+}
+
+#[derive(Serialize)]
+struct StatsWithDiagnosticsMsg<'a, T: Serialize> {
+    op: &'static str,
+    #[serde(flatten)]
+    stats: &'a NativeStatsSnapshot,
+    diagnostics: &'a T,
+}
+
+pub fn stats_json_with_diagnostics<T: Serialize>(
+    stats: &NativeStatsSnapshot,
+    diagnostics: &T,
+) -> String {
+    serde_json::to_string(&StatsWithDiagnosticsMsg {
+        op: "stats",
+        stats,
+        diagnostics,
+    })
+    .expect("stats diagnostics serialize")
 }
 
 pub fn error_json(code: &str, msg: &str) -> String {
@@ -753,6 +821,19 @@ mod tests {
             mix_nonzero_samples: 8_000,
             mix_peak: 0.5,
             mix_rms: 0.125,
+            dsp_config_generation: 3,
+            dsp_requested_aec: true,
+            dsp_requested_agc: true,
+            dsp_requested_ns: true,
+            dsp_requested_hpf: false,
+            dsp_apm_loaded: true,
+            dsp_config_fully_applied: false,
+            dsp_applied_aec: true,
+            dsp_applied_agc: false,
+            dsp_applied_ns: true,
+            dsp_applied_hpf: false,
+            input_gain: 1.25,
+            input_vad_threshold: 0.006,
             aec_delay_ms: 87,
             aec_measured_delay_ms: 89,
             aec_input_latency_ms: 12,
@@ -760,6 +841,12 @@ mod tests {
             aec_render_queue_ms: 52,
             aec_capture_processing_ms: 4,
             aec_timing_complete: true,
+            aec_input_timing_present: true,
+            aec_output_timing_present: true,
+            aec_render_timing_present: true,
+            aec_capture_path_present: true,
+            aec_last_frame_processed_present: true,
+            aec_fallback_reason: "complete".to_string(),
             aec_render_observations: 100,
             aec_delay_frames: 200,
             game_state_updates: 20,
@@ -787,6 +874,19 @@ mod tests {
         assert_eq!(value["mix_silent_rounds"], 1);
         assert_eq!(value["mix_peak"], 0.5);
         assert_eq!(value["mix_rms"], 0.125);
+        assert_eq!(value["dsp_config_generation"], 3);
+        assert_eq!(value["dsp_requested_aec"], true);
+        assert_eq!(value["dsp_requested_agc"], true);
+        assert_eq!(value["dsp_requested_ns"], true);
+        assert_eq!(value["dsp_requested_hpf"], false);
+        assert_eq!(value["dsp_apm_loaded"], true);
+        assert_eq!(value["dsp_config_fully_applied"], false);
+        assert_eq!(value["dsp_applied_aec"], true);
+        assert_eq!(value["dsp_applied_agc"], false);
+        assert_eq!(value["dsp_applied_ns"], true);
+        assert_eq!(value["dsp_applied_hpf"], false);
+        assert_eq!(value["input_gain"], 1.25);
+        assert_eq!(value["input_vad_threshold"], 0.006);
         assert_eq!(value["aec_delay_ms"], 87);
         assert_eq!(value["aec_measured_delay_ms"], 89);
         assert_eq!(value["aec_input_latency_ms"], 12);
@@ -794,6 +894,12 @@ mod tests {
         assert_eq!(value["aec_render_queue_ms"], 52);
         assert_eq!(value["aec_capture_processing_ms"], 4);
         assert_eq!(value["aec_timing_complete"], true);
+        assert_eq!(value["aec_input_timing_present"], true);
+        assert_eq!(value["aec_output_timing_present"], true);
+        assert_eq!(value["aec_render_timing_present"], true);
+        assert_eq!(value["aec_capture_path_present"], true);
+        assert_eq!(value["aec_last_frame_processed_present"], true);
+        assert_eq!(value["aec_fallback_reason"], "complete");
         assert_eq!(value["aec_render_observations"], 100);
         assert_eq!(value["aec_delay_frames"], 200);
         assert_eq!(value["game_state_updates"], 20);
@@ -809,6 +915,33 @@ mod tests {
         assert_eq!(value["playback_output_peak"], 0.4);
         assert!(value.get("sdp").is_none());
         assert!(value.get("candidate").is_none());
+    }
+
+    #[test]
+    fn native_stats_diagnostics_are_additive_and_nested() {
+        let stats = NativeStatsSnapshot {
+            capture_frames: 4,
+            ..Default::default()
+        };
+        let diagnostics = serde_json::json!({
+            "schema": 1,
+            "capture": { "stream_generation": 2, "running": true }
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(&stats_json_with_diagnostics(&stats, &diagnostics)).unwrap();
+        assert_eq!(value["op"], "stats");
+        assert_eq!(value["capture_frames"], 4);
+        assert_eq!(value["diagnostics"]["schema"], 1);
+        assert_eq!(value["diagnostics"]["capture"]["stream_generation"], 2);
+    }
+
+    #[test]
+    fn native_stats_deserialize_defaults_additive_fields_from_old_payloads() {
+        let stats: NativeStatsSnapshot = serde_json::from_str(r#"{"capture_frames":7}"#).unwrap();
+        assert_eq!(stats.capture_frames, 7);
+        assert_eq!(stats.aec_capture_path_ms, 0);
+        assert!(!stats.aec_timing_complete);
+        assert!(stats.aec_fallback_reason.is_empty());
     }
 
     #[test]
@@ -842,7 +975,11 @@ mod tests {
         samples[0] = 1.0;
         samples[FRAME_SAMPLES - 1] = -0.5;
         let frame = AudioFrame {
+            capture_generation: 0,
+            capture_open_attempt: 0,
             capture_ts_ns: 0x0102_0304_0506_0708,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
             samples,
         };
         let bytes = encode_audio(&frame);
@@ -887,7 +1024,11 @@ mod tests {
 
     fn frame_with(ts: u64) -> AudioFrame {
         AudioFrame {
+            capture_generation: 0,
+            capture_open_attempt: 0,
             capture_ts_ns: ts,
+            capture_callback_ts_ns: ts,
+            capture_timestamp_valid: true,
             samples: vec![0.0; FRAME_SAMPLES],
         }
     }

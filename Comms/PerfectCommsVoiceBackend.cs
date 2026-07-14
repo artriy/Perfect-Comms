@@ -2811,12 +2811,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         var localPlayer = snapshot.TryGetLocalPlayer(out var local) ? local : (VoicePlayerSnapshot?)null;
         var listenerPos = localPlayer?.Position;
+        var aliveDeadMixFocus = VoiceChatPatches.AliveDeadMixFocus;
         var localSettings = VoiceSettings.Instance;
-        bool deadMeetingMixActive = VoiceVolumeMath.ShouldApplyDeadMeetingMix(
-            snapshot.MeetingActive,
-            localPlayer?.IsDead == true);
-        float alivePlayerVolume = localSettings?.AlivePlayerVolume.Value ?? 1f;
-        float deadPlayerVolume = localSettings?.DeadPlayerVolume.Value ?? 1f;
+        var aliveFocusProfile = localSettings?.AliveFocusProfile
+            ?? VoiceVolumeMath.DefaultAliveFocusProfile;
+        var deadFocusProfile = localSettings?.DeadFocusProfile
+            ?? VoiceVolumeMath.DefaultDeadFocusProfile;
 
         long proxTicks = VoiceFrameProfiler.Begin();
         SnapshotPeersInto(_updatePeerScratch);
@@ -2875,10 +2875,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (helperGameStatePeers != null && peer.ClientId >= 0)
             {
                 float groupVolume = VoiceVolumeMath.SelectGroupVolume(
-                    deadMeetingMixActive,
+                    aliveDeadMixFocus,
                     target?.IsDead,
-                    alivePlayerVolume,
-                    deadPlayerVolume);
+                    aliveFocusProfile,
+                    deadFocusProfile);
                 float gain = VoiceVolumeMath.ResolvePeerGain(result, peer.ClientVolume, groupVolume);
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
                     peer.ClientId.ToString(CultureInfo.InvariantCulture),
@@ -3610,26 +3610,31 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var engineRouteTargets = peers.Length == 0
             ? "none"
             : string.Join("|", peers.Select(peer => $"{peer.ClientId}:engine"));
+        var aliveDeadMixFocus = VoiceChatPatches.AliveDeadMixFocus;
+        var localSettings = VoiceSettings.Instance;
+        var aliveFocusProfile = localSettings?.AliveFocusProfile
+            ?? VoiceVolumeMath.DefaultAliveFocusProfile;
+        var deadFocusProfile = localSettings?.DeadFocusProfile
+            ?? VoiceVolumeMath.DefaultDeadFocusProfile;
         var effectiveRoutes = peers.Length == 0
             ? "none"
             : string.Join("|", peers.Select(peer =>
             {
                 var route = peer.CurrentRoute;
                 var target = snapshot == null ? null : FindTarget(snapshot, peer);
-                var local = snapshot != null && snapshot.TryGetLocalPlayer(out var localPlayer)
-                    ? localPlayer
-                    : (VoicePlayerSnapshot?)null;
-                bool deadMeetingMix = snapshot != null && VoiceVolumeMath.ShouldApplyDeadMeetingMix(
-                    snapshot.MeetingActive,
-                    local?.IsDead == true);
-                var settings = VoiceSettings.Instance;
                 float groupVolume = VoiceVolumeMath.SelectGroupVolume(
-                    deadMeetingMix,
+                    aliveDeadMixFocus,
                     target?.IsDead,
-                    settings?.AlivePlayerVolume.Value ?? 1f,
-                    settings?.DeadPlayerVolume.Value ?? 1f);
+                    aliveFocusProfile,
+                    deadFocusProfile);
                 var gain = VoiceVolumeMath.ResolvePeerGain(route, peer.ClientVolume, groupVolume);
-                return $"{peer.ClientId}:gain={gain:0.000},pan={route.Pan:0.000},mode={(int)route.FilterMode},clientVol={peer.ClientVolume:0.000},groupVol={groupVolume:0.000},targetDead={target?.IsDead.ToString() ?? "unknown"},deadMeetingMix={deadMeetingMix},reason={route.Reason}";
+                string mixGroup = target?.IsDead switch
+                {
+                    true => "dead",
+                    false => "alive",
+                    null => "unknown",
+                };
+                return $"{peer.ClientId}:gain={gain:0.000},pan={route.Pan:0.000},mode={(int)route.FilterMode},clientVol={peer.ClientVolume:0.000},groupVol={groupVolume:0.000},mixFocus={aliveDeadMixFocus},mixGroup={mixGroup},reason={route.Reason}";
             }));
         var rpcDiagnosticsText = "rpcState=unsupported";
 #if WINDOWS || ANDROID

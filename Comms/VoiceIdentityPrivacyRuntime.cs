@@ -2,8 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Threading;
-using HarmonyLib;
 using PerfectComms.Api;
 using UnityEngine;
 
@@ -85,7 +83,6 @@ internal static class VoiceIdentityPrivacyRuntime
         "TownOfUs.Modifiers.Crewmate.MediumHiddenModifier",
     ];
 
-    private static readonly Dictionary<string, (Type? Type, int AssemblyGeneration)> TypeCache = new();
     private static readonly Dictionary<byte, PlayerControl> PlayerLookup = new();
     private static readonly Dictionary<byte, int> PlayerInstanceIds = new();
     private static readonly Dictionary<byte, VoiceIdentityPrivacyTransitionGate> TransitionGates = new();
@@ -116,14 +113,6 @@ internal static class VoiceIdentityPrivacyRuntime
     private static int _lifecycleGameId = int.MinValue;
     private static VoiceGamePhase _lifecyclePhase = VoiceGamePhase.Unknown;
     private static bool _sourceRequestedHideAll;
-    private static int _assemblyGeneration;
-
-    static VoiceIdentityPrivacyRuntime()
-    {
-        // Invalidate cached "type absent" answers when a soft-dependency assembly loads, without
-        // allocating AppDomain.GetAssemblies() on every modifier lookup and every rendered frame.
-        AppDomain.CurrentDomain.AssemblyLoad += (_, _) => Interlocked.Increment(ref _assemblyGeneration);
-    }
 
     internal static VoiceIdentityPrivacyFrame Current(VoiceOverlayState overlay)
     {
@@ -1015,25 +1004,7 @@ internal static class VoiceIdentityPrivacyRuntime
     }
 
     private static Type? ResolveType(string fullName)
-    {
-        int assemblyGeneration = Volatile.Read(ref _assemblyGeneration);
-        if (TypeCache.TryGetValue(fullName, out var cached)
-            && cached.AssemblyGeneration == assemblyGeneration)
-            return cached.Type;
-
-        Type? type = AccessTools.TypeByName(fullName);
-        if (type == null)
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                type = assembly.GetType(fullName, throwOnError: false);
-                if (type != null) break;
-            }
-        }
-
-        TypeCache[fullName] = (type, assemblyGeneration);
-        return type;
-    }
+        => SoftDependencyTypeResolver.ResolveExact(fullName);
 
     private static bool TryReadBool(object instance, string propertyName, out bool value)
     {

@@ -9,14 +9,19 @@ using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+internal readonly record struct SidecarDiagnosticLogLine(string Category, string Details);
+
 internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
+    private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
+
     // Protocol 7 adds native input gain/VAD, runtime synthetic capture, and batched remote levels.
     // Reject older helpers so managed settings and speaking telemetry cannot silently become no-ops.
     public const int Proto = 7;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
+    private const ulong SupportedMediaDiagnosticsSchema = 1;
 
     private readonly Func<string, string, SidecarLaunchResult> _launch;
     private readonly object _gate = new();
@@ -155,7 +160,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
         _running = true;
         SetHealth(CaptureHealth.Healthy);
-        reader.Start(stream);
+        reader.Start(new ReaderLoopState(stream, generation));
         Volatile.Write(ref _lastPongTick, Environment.TickCount64);
         heartbeat.Start(stream);
         VoiceDiagnostics.Log("sidecar.lifecycle", $"event=running proto={Proto} pid={launch.Pid}");
@@ -702,7 +707,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     private void ReadLoop(object? state)
     {
-        var stream = (NetworkStream)state!;
+        var readerState = (ReaderLoopState)state!;
+        var stream = readerState.Stream;
+        var managedGeneration = readerState.ManagedGeneration;
         try { stream.ReadTimeout = Timeout.Infinite; } catch { }
         var buffer = new byte[1 << 16];
         var have = 0;
@@ -758,7 +765,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 else if (type == SidecarProtocol.TypeControl)
                 {
                     var json = Encoding.UTF8.GetString(buffer, off, len);
-                    HandleStreamingControl(json, len);
+                    HandleStreamingControl(json, len, managedGeneration);
                 }
                 else
                     VoiceDiagnostics.Log("sidecar.frame.reject", $"reason=unknown-type type={type} payloadBytes={len}");
@@ -790,7 +797,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
     }
 
-    private void HandleStreamingControl(string json, int payloadBytes)
+    private void HandleStreamingControl(string json, int payloadBytes, int managedGeneration)
     {
         var op = SidecarProtocol.ReadOp(json);
         if (string.IsNullOrEmpty(op))
@@ -945,9 +952,13 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 "sidecar.control.rx",
                 $"op=devices result=parsed inputs={inputDevices.Length} outputs={outputDevices.Length} payloadBytes={payloadBytes}");
         }
+        else if (op == "media-state")
+        {
+            HandleMediaState(json, payloadBytes, managedGeneration);
+        }
         else if (op == "stats")
         {
-            HandleNativeStats(json, payloadBytes);
+            HandleNativeStats(json, payloadBytes, managedGeneration);
         }
         else
             VoiceDiagnostics.Log(
@@ -968,7 +979,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         return true;
     }
 
-    private static void HandleNativeStats(string json, int payloadBytes)
+    private static void HandleNativeStats(string json, int payloadBytes, int managedGeneration)
     {
         try
         {
@@ -986,21 +997,31 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 return;
             }
 
+            var hasMediaDiagnostics = root.TryGetProperty("diagnostics", out var mediaDiagnostics) &&
+                                      mediaDiagnostics.ValueKind == JsonValueKind.Object;
+            var mediaDiagnosticsSchema = hasMediaDiagnostics
+                ? FormatOptionalU64(mediaDiagnostics, "schema")
+                : "na";
+            var mediaDiagnosticsSchemaSupported = hasMediaDiagnostics
+                ? FormatSchemaSupport(mediaDiagnostics)
+                : "na";
             VoiceDiagnostics.Log(
                 "sidecar.native.stats",
-                $"captureFrames={captureFrames} captureDropped={ReadU64(root, "capture_ring_dropped")} " +
+                $"managedGeneration={managedGeneration} captureFrames={captureFrames} captureDropped={ReadU64(root, "capture_ring_dropped")} " +
                 $"opusEncoded={opusEncoded} opusEmpty={ReadU64(root, "opus_empty")} opusErrors={ReadU64(root, "opus_errors")} " +
                 $"rtpTxAttempts={ReadU64(root, "rtp_tx_attempts")} rtpTxOk={rtpTxOk} rtpTxErrors={ReadU64(root, "rtp_tx_errors")} " +
                 $"rtpRxPackets={rtpRxPackets} rtpRxBytes={ReadU64(root, "rtp_rx_bytes")} staleRtpDropped={ReadU64(root, "stale_rtp_rx_dropped")} " +
                 $"decodePackets={ReadU64(root, "decode_packets")} decodeFrames={decodeFrames} decodeEmpty={ReadU64(root, "decode_empty")} decodeErrors={ReadU64(root, "decode_errors")} " +
                 $"peerLevelBatches={ReadU64(root, "peer_level_batches")} mixRounds={mixRounds} mixedPeerFrames={ReadU64(root, "mixed_peer_frames")} " +
                 $"mixNonzeroRounds={ReadU64(root, "mix_nonzero_rounds")} mixSilentRounds={ReadU64(root, "mix_silent_rounds")} mixSamples={ReadU64(root, "mix_samples")} mixNonzeroSamples={ReadU64(root, "mix_nonzero_samples")} mixPeak={ReadDouble(root, "mix_peak"):0.000000} mixRms={ReadDouble(root, "mix_rms"):0.000000} jitterIdleTicks={ReadU64(root, "jitter_idle_ticks")} " +
-                $"aecDelayMs={ReadU64(root, "aec_delay_ms")} aecMeasuredDelayMs={ReadU64(root, "aec_measured_delay_ms")} aecInputLatencyMs={ReadU64(root, "aec_input_latency_ms")} aecOutputLatencyMs={ReadU64(root, "aec_output_latency_ms")} aecRenderQueueMs={ReadU64(root, "aec_render_queue_ms")} aecCaptureProcessingMs={ReadU64(root, "aec_capture_processing_ms")} aecTimingComplete={ReadBool(root, "aec_timing_complete").ToString().ToLowerInvariant()} aecRenderObservations={ReadU64(root, "aec_render_observations")} aecInvalidTimestampSamples={ReadU64(root, "aec_invalid_timestamp_samples")} aecDelayFrames={ReadU64(root, "aec_delay_frames")} " +
+                DescribeNativeDspInputForDiagnostics(root) + " " +
+                DescribeNativeAecTimingForDiagnostics(root) + " " +
                 $"gameStateUpdates={ReadU64(root, "game_state_updates")} appliedDeaf={ReadBool(root, "applied_deaf").ToString().ToLowerInvariant()} appliedMaster={ReadDouble(root, "applied_master"):0.000} appliedPeers={ReadU64(root, "applied_peer_count")} appliedNonzeroGainPeers={ReadU64(root, "applied_nonzero_gain_peers")} " +
                 $"playbackQueuedPairs={playbackQueuedPairs} playbackSpawnAttempts={ReadU64(root, "playback_spawn_attempts")} playbackStarts={ReadU64(root, "playback_starts")} playbackStops={ReadU64(root, "playback_stops")} playbackErrors={ReadU64(root, "playback_errors")} playbackCallbackErrors={ReadU64(root, "playback_callback_errors")} " +
                 $"playbackCallbacks={ReadU64(root, "playback_callbacks")} playbackRequestedPairs={ReadU64(root, "playback_requested_pairs")} playbackConsumedPairs={ReadU64(root, "playback_consumed_pairs")} playbackUnderrunPairs={ReadU64(root, "playback_underrun_pairs")} " +
                 $"playbackLockContentionCallbacks={ReadU64(root, "playback_lock_contention_callbacks")} playbackLockContentionSilencePairs={ReadU64(root, "playback_lock_contention_silence_pairs")} playbackOutputNonzeroSamples={ReadU64(root, "playback_output_nonzero_samples")} playbackOutputPeak={ReadDouble(root, "playback_output_peak"):0.000000} " +
-                $"playbackRingLen={ReadU64(root, "playback_ring_len")} playbackDropped={ReadU64(root, "playback_ring_dropped")} payloadBytes={payloadBytes}");
+                $"playbackRingLen={ReadU64(root, "playback_ring_len")} playbackDropped={ReadU64(root, "playback_ring_dropped")} mediaDiagnosticsPresent={hasMediaDiagnostics.ToString().ToLowerInvariant()} mediaDiagnosticsSchema={mediaDiagnosticsSchema} mediaDiagnosticsSchemaSupported={mediaDiagnosticsSchemaSupported} payloadBytes={payloadBytes}");
+            LogNativeMediaDiagnostics(root, payloadBytes, managedGeneration);
         }
         catch (Exception ex)
         {
@@ -1008,10 +1029,360 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
     }
 
+    private static void HandleMediaState(string json, int payloadBytes, int managedGeneration)
+    {
+        if (!TryDescribeMediaStateForDiagnostics(json, payloadBytes, out var details))
+        {
+            VoiceDiagnostics.Log(
+                "sidecar.control.reject",
+                $"op=media-state reason=invalid-json-or-missing-required-fields payloadBytes={payloadBytes}");
+            return;
+        }
+        VoiceDiagnostics.Log(
+            "sidecar.native.media-state",
+            $"managedGeneration={managedGeneration} {details}");
+    }
+
+    internal static bool TryDescribeMediaStateForDiagnostics(string json, int payloadBytes, out string details)
+    {
+        details = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var direction = ReadString(root, "direction");
+            var state = ReadString(root, "state");
+            if (string.IsNullOrEmpty(direction) || string.IsNullOrEmpty(state)) return false;
+
+            var builder = new StringBuilder();
+            builder.Append("schema=").Append(FormatOptionalU64(root, "schema"));
+            builder.Append(" schemaSupported=").Append(FormatSchemaSupport(root));
+            builder.Append(" direction=").Append(SafeDiagnosticText(direction, 24));
+            builder.Append(" state=").Append(SafeDiagnosticText(state, 32));
+            builder.Append(" streamGeneration=").Append(FormatOptionalU64(root, "stream_generation"));
+            builder.Append(" running=").Append(FormatOptionalBool(root, "running"));
+
+            switch (state)
+            {
+                case "command-accepted":
+                    builder.Append(" action=").Append(FormatOptionalText(root, "action", 32));
+                    builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" changed=").Append(FormatOptionalBool(root, "changed"));
+                    if (direction == "capture")
+                        builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    break;
+                case "starting":
+                    builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" requested=").Append(DescribeOptionalRequestedDevice(root));
+                    builder.Append(" requestedDefault=").Append(FormatOptionalBool(root, "requested_default"));
+                    builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    break;
+                case "stream-started":
+                    if (direction == "capture")
+                        builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" requested=").Append(DescribeOptionalRequestedDevice(root));
+                    builder.Append(" resolved=").Append(DescribeOptionalResolvedDevice(root));
+                    builder.Append(" requestedDefault=").Append(FormatOptionalBool(root, "requested_default"));
+                    builder.Append(" requestedMatched=").Append(FormatOptionalBool(root, "requested_matched"));
+                    builder.Append(" fellBackToDefault=").Append(FormatOptionalBool(root, "fell_back_to_default"));
+                    builder.Append(" rate=").Append(FormatOptionalU64(root, "sample_rate"));
+                    builder.Append(" channels=").Append(FormatOptionalU64(root, "channels"));
+                    builder.Append(" sampleFormat=").Append(FormatOptionalText(root, "sample_format", 24));
+                    builder.Append(" bufferMode=").Append(FormatOptionalText(root, "buffer_mode", 48));
+                    if (direction == "capture")
+                        builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    break;
+                case "first-callback":
+                    if (direction == "capture")
+                        builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" callbackFrames=").Append(FormatOptionalU64(root, "callback_frames"));
+                    builder.Append(" elapsedMs=").Append(FormatOptionalU64(root, "elapsed_ms"));
+                    if (direction == "capture")
+                        builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    break;
+                case "retrying":
+                    builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" retryAttempt=").Append(FormatOptionalU64(root, "retry_attempt"));
+                    builder.Append(" retryDelayMs=").Append(FormatOptionalU64(root, "retry_delay_ms"));
+                    builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    break;
+                case "stopped":
+                    if (direction == "capture")
+                    {
+                        builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                        builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                        builder.Append(" elapsedMs=").Append(FormatOptionalU64(root, "elapsed_ms"));
+                        if (root.TryGetProperty("final_window", out var finalWindow) &&
+                            finalWindow.ValueKind == JsonValueKind.Object)
+                        {
+                            builder.Append(" finalWindowPresent=true finalCallbacks=")
+                                .Append(FormatOptionalU64(finalWindow, "callbacks"));
+                            builder.Append(' ').Append(DescribeSignalWindow(finalWindow, "raw_input", "finalRaw"));
+                            builder.Append(' ').Append(DescribeSignalWindow(finalWindow, "pre_dsp", "finalPreDsp"));
+                            builder.Append(' ').Append(DescribeSignalWindow(finalWindow, "post_dsp", "finalPostDsp"));
+                            builder.Append(' ').Append(DescribeSignalWindow(finalWindow, "post_gain", "finalPostGain"));
+                        }
+                        else
+                        {
+                            builder.Append(" finalWindowPresent=false");
+                        }
+                    }
+                    break;
+                case "stop-failed" when direction == "capture":
+                    builder.Append(" commandSeq=").Append(FormatOptionalU64(root, "command_seq"));
+                    builder.Append(" openAttempt=").Append(FormatOptionalU64(root, "open_attempt"));
+                    builder.Append(" elapsedMs=").Append(FormatOptionalU64(root, "elapsed_ms"));
+                    break;
+                case "error" when direction == "playback":
+                    break;
+                default:
+                    builder.Append(" extensionFieldsIgnored=true");
+                    break;
+            }
+
+            builder.Append(" payloadBytes=").Append(payloadBytes);
+            details = builder.ToString();
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static void LogNativeMediaDiagnostics(
+        JsonElement root,
+        int payloadBytes,
+        int managedGeneration)
+    {
+        foreach (var line in DescribeNativeMediaDiagnosticsForDiagnostics(root, payloadBytes))
+            VoiceDiagnostics.Log(line.Category, $"managedGeneration={managedGeneration} {line.Details}");
+    }
+
+    internal static bool TryDescribeNativeDspInputForDiagnostics(string json, out string details)
+    {
+        details = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            details = DescribeNativeDspInputForDiagnostics(doc.RootElement);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static string DescribeNativeDspInputForDiagnostics(JsonElement root)
+        => $"dspConfigGeneration={FormatOptionalU64(root, "dsp_config_generation")} " +
+           $"dspRequestedAec={FormatOptionalBool(root, "dsp_requested_aec")} dspRequestedAgc={FormatOptionalBool(root, "dsp_requested_agc")} dspRequestedNs={FormatOptionalBool(root, "dsp_requested_ns")} dspRequestedHpf={FormatOptionalBool(root, "dsp_requested_hpf")} " +
+           $"dspApmLoaded={FormatOptionalBool(root, "dsp_apm_loaded")} dspConfigFullyApplied={FormatOptionalBool(root, "dsp_config_fully_applied")} " +
+           $"dspAppliedAec={FormatOptionalBool(root, "dsp_applied_aec")} dspAppliedAgc={FormatOptionalBool(root, "dsp_applied_agc")} dspAppliedNs={FormatOptionalBool(root, "dsp_applied_ns")} dspAppliedHpf={FormatOptionalBool(root, "dsp_applied_hpf")} " +
+           $"inputGain={FormatOptionalDouble(root, "input_gain", "0.#########")} vadThreshold={FormatOptionalDouble(root, "input_vad_threshold", "0.#########")}";
+
+    internal static bool TryDescribeNativeAecAvailabilityForDiagnostics(string json, out string details)
+    {
+        details = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            details = DescribeNativeAecAvailabilityForDiagnostics(doc.RootElement);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static string DescribeNativeAecAvailabilityForDiagnostics(JsonElement root)
+        => $"aecTimingComplete={FormatOptionalBool(root, "aec_timing_complete")} " +
+           $"aecInputTimingPresent={FormatOptionalBool(root, "aec_input_timing_present")} aecOutputTimingPresent={FormatOptionalBool(root, "aec_output_timing_present")} " +
+           $"aecRenderTimingPresent={FormatOptionalBool(root, "aec_render_timing_present")} aecCapturePathPresent={FormatOptionalBool(root, "aec_capture_path_present")} " +
+           $"aecFallbackReason={FormatOptionalText(root, "aec_fallback_reason", 48)}";
+
+    internal static bool TryDescribeNativeAecTimingForDiagnostics(string json, out string details)
+    {
+        details = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            details = DescribeNativeAecTimingForDiagnostics(doc.RootElement);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static string DescribeNativeAecTimingForDiagnostics(JsonElement root)
+        => $"aecDelayMs={ReadU64(root, "aec_delay_ms")} aecRecommendedDelayMs={FormatOptionalU64(root, "aec_recommended_delay_ms")} aecMeasuredDelayMs={ReadU64(root, "aec_measured_delay_ms")} " +
+           $"aecInputLatencyMs={FormatOptionalU64WhenPresent(root, "aec_input_latency_ms", "aec_input_timing_present")} aecOutputLatencyMs={FormatOptionalU64WhenPresent(root, "aec_output_latency_ms", "aec_output_timing_present")} " +
+           $"aecRenderQueueMs={FormatOptionalU64WhenPresent(root, "aec_render_queue_ms", "aec_render_timing_present")} aecCaptureProcessingMs={FormatOptionalU64WhenPresent(root, "aec_capture_processing_ms", "aec_capture_path_present")} aecCapturePathMs={FormatOptionalU64WhenPresent(root, "aec_capture_path_ms", "aec_capture_path_present")} " +
+           DescribeNativeAecAvailabilityForDiagnostics(root) + " " +
+           $"aecFrameTimestampValid={FormatOptionalBoolWhenPresent(root, "aec_frame_timestamp_valid", "aec_last_frame_processed_present")} aecLastFrameProcessedAgeMs={FormatOptionalU64WhenPresent(root, "aec_last_frame_processed_age_ms", "aec_last_frame_processed_present")} " +
+           $"aecRenderObservations={ReadU64(root, "aec_render_observations")} aecInvalidTimestampSamples={ReadU64(root, "aec_invalid_timestamp_samples")} aecInvalidFrameTimestampSamples={FormatOptionalU64(root, "aec_invalid_frame_timestamp_samples")} aecDelayFrames={ReadU64(root, "aec_delay_frames")}";
+
+    internal static bool TryDescribeNativeMediaDiagnosticsForDiagnostics(
+        string json,
+        int payloadBytes,
+        out SidecarDiagnosticLogLine[] lines)
+    {
+        lines = Array.Empty<SidecarDiagnosticLogLine>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            lines = DescribeNativeMediaDiagnosticsForDiagnostics(doc.RootElement, payloadBytes);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static SidecarDiagnosticLogLine[] DescribeNativeMediaDiagnosticsForDiagnostics(
+        JsonElement root,
+        int payloadBytes)
+    {
+        if (!root.TryGetProperty("diagnostics", out var diagnostics) ||
+            diagnostics.ValueKind != JsonValueKind.Object)
+            return Array.Empty<SidecarDiagnosticLogLine>();
+
+        var lines = new List<SidecarDiagnosticLogLine>(3);
+        var schema = FormatOptionalU64(diagnostics, "schema");
+        var schemaSupported = FormatSchemaSupport(diagnostics);
+        var windowSeq = FormatOptionalU64(diagnostics, "window_seq");
+        var windowMs = FormatOptionalU64(diagnostics, "window_ms");
+        var mediaStateEventsDropped = FormatOptionalU64(diagnostics, "media_state_events_dropped");
+        if (diagnostics.TryGetProperty("capture", out var capture) && capture.ValueKind == JsonValueKind.Object)
+        {
+            lines.Add(new SidecarDiagnosticLogLine(
+                "sidecar.native.capture",
+                $"schema={schema} schemaSupported={schemaSupported} windowSeq={windowSeq} windowMs={windowMs} mediaStateEventsDropped={mediaStateEventsDropped} commandSeq={FormatOptionalU64(capture, "command_seq")} streamGeneration={FormatOptionalU64(capture, "stream_generation")} state={FormatOptionalText(capture, "state", 32)} running={FormatOptionalBool(capture, "running")} healthy={FormatOptionalBool(capture, "healthy")} synthetic={FormatOptionalBool(capture, "synthetic")} staleGenerationFrames={FormatOptionalU64(capture, "stale_generation_frames")} " +
+                $"requested={DescribeOptionalRequestedDevice(capture)} resolved={DescribeOptionalResolvedDevice(capture)} requestedDefault={FormatOptionalBool(capture, "requested_default")} requestedMatched={FormatOptionalBool(capture, "requested_matched")} fellBackToDefault={FormatOptionalBool(capture, "fell_back_to_default")} " +
+                $"rate={FormatOptionalU64(capture, "sample_rate")} channels={FormatOptionalU64(capture, "channels")} sampleFormat={FormatOptionalText(capture, "sample_format", 24)} bufferMode={FormatOptionalText(capture, "buffer_mode", 48)} bufferMinFrames={FormatOptionalU64(capture, "buffer_min_frames")} bufferMaxFrames={FormatOptionalU64(capture, "buffer_max_frames")} " +
+                $"openAttempts={FormatOptionalU64(capture, "open_attempts")} streamErrors={FormatOptionalU64(capture, "stream_errors")} retryAttempt={FormatOptionalU64(capture, "retry_attempt")} startToOpenMs={FormatOptionalU64WhenPresent(capture, "start_to_open_ms", "stream_started")} openToFirstCallbackMs={FormatOptionalU64WhenPresent(capture, "open_to_first_callback_ms", "first_callback_seen")} streamAgeMs={FormatOptionalU64WhenPresent(capture, "stream_age_ms", "stream_started")} " +
+                $"callbacksTotal={FormatOptionalU64(capture, "callbacks_total")} callbacksWindow={FormatOptionalU64(capture, "callbacks_window")} callbackAgeMs={FormatOptionalU64WhenPresent(capture, "callback_age_ms", "callback_seen")} callbackFramesLast={FormatOptionalU64WhenPresent(capture, "callback_frames_last", "callback_seen")} callbackFramesMin={FormatOptionalU64WhenPresent(capture, "callback_frames_min", "callback_window_seen")} callbackFramesMax={FormatOptionalU64WhenPresent(capture, "callback_frames_max", "callback_window_seen")} callbackIntervalLastUs={FormatOptionalU64WhenPresent(capture, "callback_interval_last_us", "callback_interval_seen")} callbackIntervalMaxUs={FormatOptionalU64WhenPresent(capture, "callback_interval_max_us", "callback_interval_window_seen")} lateCallbacks={FormatOptionalU64(capture, "late_callbacks")} " +
+                $"inputFramesTotal={FormatOptionalU64(capture, "input_samples_total")} resampledSamplesTotal={FormatOptionalU64(capture, "resampled_samples_total")} framesProducedTotal={FormatOptionalU64(capture, "frames_produced_total")} accumulatorPending={FormatOptionalU64(capture, "accumulator_pending_samples")} invalidTimestamps={FormatOptionalU64(capture, "invalid_timestamps")} timestampDiscontinuities={FormatOptionalU64(capture, "timestamp_discontinuities")} " +
+                $"captureClockDeltaSeen={FormatOptionalBool(capture, "capture_clock_delta_seen")} captureClockDeltaLastUs={FormatOptionalU64WhenPresent(capture, "capture_clock_delta_last_us", "capture_clock_delta_seen")} captureClockExpectedDeltaUs={FormatOptionalU64WhenPresent(capture, "capture_clock_expected_delta_us", "capture_clock_delta_seen")} captureClockDeltaErrorUs={FormatOptionalI64WhenPresent(capture, "capture_clock_delta_error_us", "capture_clock_delta_seen")} captureClockBridgeResidualSeen={FormatOptionalBool(capture, "capture_clock_bridge_residual_seen")} captureClockBridgeResidualUs={FormatOptionalI64WhenPresent(capture, "capture_clock_bridge_residual_us", "capture_clock_bridge_residual_seen")} captureClockStatus={FormatOptionalText(capture, "capture_clock_status", 64)} lastTimestampDiscontinuityReason={FormatOptionalText(capture, "last_timestamp_discontinuity_reason", 64)} " +
+                $"ringLen={FormatOptionalU64(capture, "ring_len")} ringCapacity={FormatOptionalU64(capture, "ring_capacity")} ringHighWater={FormatOptionalU64(capture, "ring_high_water")} ringDropped={FormatOptionalU64(capture, "ring_dropped")} ringOldestAgeMs={FormatOptionalU64WhenPresent(capture, "ring_oldest_frame_age_ms", "ring_has_frames")} encoderPopAgeLastMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_last_ms", "encoder_frame_seen")} encoderPopAgeMaxMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_max_ms", "encoder_window_seen")} payloadBytes={payloadBytes}"));
+
+            lines.Add(new SidecarDiagnosticLogLine(
+                "sidecar.native.capture-signal",
+                $"schema={schema} schemaSupported={schemaSupported} windowSeq={windowSeq} windowMs={windowMs} mediaStateEventsDropped={mediaStateEventsDropped} " +
+                DescribeSignalWindow(capture, "raw_input", "raw") + " " +
+                DescribeSignalWindow(capture, "pre_dsp", "preDsp") + " " +
+                DescribeSignalWindow(capture, "post_dsp", "postDsp") + " " +
+                DescribeSignalWindow(capture, "post_gain", "postGain") +
+                $" payloadBytes={payloadBytes}"));
+        }
+
+        if (diagnostics.TryGetProperty("playback", out var playback) && playback.ValueKind == JsonValueKind.Object)
+        {
+            lines.Add(new SidecarDiagnosticLogLine(
+                "sidecar.native.playback",
+                $"schema={schema} schemaSupported={schemaSupported} windowSeq={windowSeq} windowMs={windowMs} mediaStateEventsDropped={mediaStateEventsDropped} streamGeneration={FormatOptionalU64(playback, "stream_generation")} state={FormatOptionalText(playback, "state", 32)} running={FormatOptionalBool(playback, "running")} " +
+                $"requested={DescribeOptionalRequestedDevice(playback)} resolved={DescribeOptionalResolvedDevice(playback)} requestedDefault={FormatOptionalBool(playback, "requested_default")} requestedMatched={FormatOptionalBool(playback, "requested_matched")} fellBackToDefault={FormatOptionalBool(playback, "fell_back_to_default")} " +
+                $"rate={FormatOptionalU64(playback, "sample_rate")} channels={FormatOptionalU64(playback, "channels")} sampleFormat={FormatOptionalText(playback, "sample_format", 24)} bufferMode={FormatOptionalText(playback, "buffer_mode", 48)} bufferMinFrames={FormatOptionalU64(playback, "buffer_min_frames")} bufferMaxFrames={FormatOptionalU64(playback, "buffer_max_frames")} " +
+                $"callbacksTotal={FormatOptionalU64(playback, "callbacks_total")} callbackAgeMs={FormatOptionalU64WhenPresent(playback, "callback_age_ms", "callback_seen")} callbackFramesLast={FormatOptionalU64WhenPresent(playback, "callback_frames_last", "callback_seen")} callbackIntervalLastUs={FormatOptionalU64WhenPresent(playback, "callback_interval_last_us", "callback_interval_seen")} callbackIntervalMaxUs={FormatOptionalU64WhenPresent(playback, "callback_interval_max_us", "callback_interval_window_seen")} streamErrors={FormatOptionalU64(playback, "stream_errors")} ringLen={FormatOptionalU64(playback, "ring_len")} ringDropped={FormatOptionalU64(playback, "ring_dropped")} payloadBytes={payloadBytes}"));
+        }
+
+        return lines.ToArray();
+    }
+
+    private static string DescribeSignalWindow(JsonElement parent, string propertyName, string prefix)
+    {
+        if (!parent.TryGetProperty(propertyName, out var signal) || signal.ValueKind != JsonValueKind.Object)
+            return $"{prefix}Present=false";
+        return $"{prefix}Present=true {prefix}Samples={FormatOptionalU64(signal, "samples")} {prefix}DroppedRecords={FormatOptionalU64(signal, "dropped_records")} {prefix}Nonfinite={FormatOptionalU64(signal, "nonfinite_samples")} {prefix}NearClip={FormatOptionalU64(signal, "near_clip_samples")} {prefix}HardClip={FormatOptionalU64(signal, "hard_clip_samples")} {prefix}SilentFrames={FormatOptionalU64(signal, "silent_frames")} {prefix}Peak={FormatOptionalDouble(signal, "peak", "0.000000")} {prefix}Rms={FormatOptionalDouble(signal, "rms", "0.000000")} {prefix}Dc={FormatOptionalDouble(signal, "dc", "0.000000")}";
+    }
+
+    private static string FormatSchemaSupport(JsonElement root)
+        => TryReadU64(root, "schema", out var schema)
+            ? (schema == SupportedMediaDiagnosticsSchema).ToString().ToLowerInvariant()
+            : "na";
+
+    private static string FormatOptionalU64(JsonElement root, string name)
+        => TryReadU64(root, name, out var value)
+            ? value.ToString(CultureInfo.InvariantCulture)
+            : "na";
+
+    private static string FormatOptionalU64WhenPresent(
+        JsonElement root,
+        string valueName,
+        string presenceName)
+        => TryReadBool(root, presenceName, out var present) && present
+            ? FormatOptionalU64(root, valueName)
+            : "na";
+
+    private static string FormatOptionalI64(JsonElement root, string name)
+        => TryReadI64(root, name, out var value)
+            ? value.ToString(CultureInfo.InvariantCulture)
+            : "na";
+
+    private static string FormatOptionalI64WhenPresent(
+        JsonElement root,
+        string valueName,
+        string presenceName)
+        => TryReadBool(root, presenceName, out var present) && present
+            ? FormatOptionalI64(root, valueName)
+            : "na";
+
+    private static string FormatOptionalDouble(JsonElement root, string name, string format)
+        => TryReadDouble(root, name, out var value)
+            ? value.ToString(format, CultureInfo.InvariantCulture)
+            : "na";
+
+    private static string FormatOptionalBool(JsonElement root, string name)
+        => TryReadBool(root, name, out var value)
+            ? value.ToString().ToLowerInvariant()
+            : "na";
+
+    private static string FormatOptionalBoolWhenPresent(
+        JsonElement root,
+        string valueName,
+        string presenceName)
+        => TryReadBool(root, presenceName, out var present) && present
+            ? FormatOptionalBool(root, valueName)
+            : "na";
+
+    private static string FormatOptionalText(JsonElement root, string name, int maxChars)
+    {
+        var value = ReadString(root, name);
+        return string.IsNullOrEmpty(value) ? "na" : SafeDiagnosticText(value, maxChars);
+    }
+
+    private static string DescribeOptionalRequestedDevice(JsonElement root)
+    {
+        var value = ReadString(root, "requested_device");
+        if (!string.IsNullOrEmpty(value)) return DescribeDeviceForDiagnostics(value);
+        return TryReadBool(root, "requested_default", out var requestedDefault) && requestedDefault
+            ? "default=true"
+            : "na";
+    }
+
+    private static string DescribeOptionalResolvedDevice(JsonElement root)
+    {
+        var value = ReadString(root, "resolved_device");
+        return string.IsNullOrEmpty(value) ? "na" : DescribeDeviceForDiagnostics(value);
+    }
+
     private static bool TryReadU64(JsonElement root, string name, out ulong value)
     {
         value = 0;
         return root.TryGetProperty(name, out var property) && property.TryGetUInt64(out value);
+    }
+
+    private static bool TryReadI64(JsonElement root, string name, out long value)
+    {
+        value = 0;
+        return root.TryGetProperty(name, out var property) && property.TryGetInt64(out value);
     }
 
     private static ulong ReadU64(JsonElement root, string name)
@@ -1022,10 +1393,40 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             ? value
             : 0;
 
+    private static bool TryReadDouble(JsonElement root, string name, out double value)
+    {
+        value = 0;
+        return root.TryGetProperty(name, out var property) &&
+               property.TryGetDouble(out value) &&
+               double.IsFinite(value);
+    }
+
     private static bool ReadBool(JsonElement root, string name)
         => root.TryGetProperty(name, out var property) &&
            (property.ValueKind == JsonValueKind.True ||
             (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value) && value != 0));
+
+    private static bool TryReadBool(JsonElement root, string name, out bool value)
+    {
+        value = false;
+        if (!root.TryGetProperty(name, out var property)) return false;
+        if (property.ValueKind == JsonValueKind.True)
+        {
+            value = true;
+            return true;
+        }
+        if (property.ValueKind == JsonValueKind.False)
+            return true;
+        if (property.ValueKind != JsonValueKind.Number || !property.TryGetInt32(out var numeric))
+            return false;
+        value = numeric != 0;
+        return true;
+    }
+
+    private static string ReadString(JsonElement root, string name)
+        => root.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() ?? string.Empty
+            : string.Empty;
 
     private void HeartbeatLoop(object? state)
     {

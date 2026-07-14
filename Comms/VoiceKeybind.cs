@@ -27,6 +27,7 @@ public sealed class VoiceKeybind
     private bool _standaloneModifierPressedThisFrame;
 
     public string DisplayName { get; }
+    public string HelpText { get; }
     public KeyCode Value => _entry.Value;
     public KeyCode CurrentKey => _entry.Value;
     public KeyCode Modifier => _modifier.Value;
@@ -39,7 +40,30 @@ public sealed class VoiceKeybind
         KeyCode defaultKey,
         KeyCode defaultModifier = KeyCode.None)
         : this(config, section, displayName, defaultKey, defaultModifier,
-            LegacyModifierMatch(defaultModifier), hasExplicitModifierMatch: false)
+            LegacyModifierMatch(defaultModifier), hasExplicitModifierMatch: false, helpText: "")
+    {
+    }
+
+    public VoiceKeybind(
+        ConfigFile config,
+        string section,
+        string displayName,
+        KeyCode defaultKey,
+        string helpText)
+        : this(config, section, displayName, defaultKey, KeyCode.None,
+            LegacyModifierMatch(KeyCode.None), hasExplicitModifierMatch: false, helpText: helpText)
+    {
+    }
+
+    public VoiceKeybind(
+        ConfigFile config,
+        string section,
+        string displayName,
+        KeyCode defaultKey,
+        KeyCode defaultModifier,
+        string helpText)
+        : this(config, section, displayName, defaultKey, defaultModifier,
+            LegacyModifierMatch(defaultModifier), hasExplicitModifierMatch: false, helpText: helpText)
     {
     }
 
@@ -51,7 +75,20 @@ public sealed class VoiceKeybind
         KeyCode defaultModifier,
         VoiceModifierMatch defaultModifierMatch)
         : this(config, section, displayName, defaultKey, defaultModifier,
-            defaultModifierMatch, hasExplicitModifierMatch: true)
+            defaultModifierMatch, hasExplicitModifierMatch: true, helpText: "")
+    {
+    }
+
+    public VoiceKeybind(
+        ConfigFile config,
+        string section,
+        string displayName,
+        KeyCode defaultKey,
+        KeyCode defaultModifier,
+        VoiceModifierMatch defaultModifierMatch,
+        string helpText)
+        : this(config, section, displayName, defaultKey, defaultModifier,
+            defaultModifierMatch, hasExplicitModifierMatch: true, helpText: helpText)
     {
     }
 
@@ -62,9 +99,11 @@ public sealed class VoiceKeybind
         KeyCode defaultKey,
         KeyCode defaultModifier,
         VoiceModifierMatch defaultModifierMatch,
-        bool hasExplicitModifierMatch)
+        bool hasExplicitModifierMatch,
+        string helpText)
     {
         DisplayName = displayName;
+        HelpText = helpText;
         _entry = config.Bind(section, displayName, defaultKey);
         _modifier = config.Bind(section, displayName + " Modifier", defaultModifier);
         // Existing config files have no match-mode entry. Preserve the old behavior for their

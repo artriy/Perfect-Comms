@@ -175,10 +175,16 @@ public sealed record VoiceOverlaySpeakerContext(
 }
 
 /// <summary>Declarative host toggle. Stored/synced as "modId.Key".</summary>
-public sealed record VoiceHostOption(string Key, string Label, bool Default);
+public sealed record VoiceHostOption(string Key, string Label, bool Default)
+{
+    public string Description { get; init; } = "";
+}
 
 /// <summary>Declarative host enum/stepper option.</summary>
-public sealed record VoiceHostEnumOption(string Key, string Label, int Default, string[] Choices);
+public sealed record VoiceHostEnumOption(string Key, string Label, int Default, string[] Choices)
+{
+    public string Description { get; init; } = "";
+}
 
 public static class PerfectCommsApi
 {

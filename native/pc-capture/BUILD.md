@@ -61,3 +61,9 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 ## Compatibility
 
 The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 7` (the `Proto` constant in `SidecarVoiceClient`). Protocol 7 adds restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of protocol 6's per-peer relay-only ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+
+## Media diagnostics
+
+Protocol 7 stats may include the additive `diagnostics` object with `schema: 1`. It reports capture/playback lifecycle generations and open attempts, resolved formats, callback cadence, ring age/high-water/drop state, timestamp validity, and raw/pre-DSP/post-DSP/post-gain signal windows. Sparse `media-state` messages carry the same schema for command, open, first-callback, retry, stop, and playback lifecycle transitions. Queue or realtime-window diagnostic loss is counted explicitly.
+
+AEC delay is derived from the processed frame's process-local monotonic first-sample time, not wall clock or the newest capture callback: output hardware latency + render queue + ADC-to-DSP capture path + a bounded acoustic allowance. Non-48 kHz resampling re-anchors against each valid hardware callback so device-clock drift cannot accumulate over a game. Raw endpoint names exist only in the authenticated loopback control payload; managed diagnostic files log bounded fingerprints instead.

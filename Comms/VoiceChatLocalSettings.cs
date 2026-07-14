@@ -111,8 +111,14 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> MicVolume { get; }
     public ConfigEntry<float> MicSensitivity { get; }
     public ConfigEntry<float> MasterVolume { get; }
-    public ConfigEntry<float> AlivePlayerVolume { get; }
-    public ConfigEntry<float> DeadPlayerVolume { get; }
+    public ConfigEntry<float> AliveFocusAliveVolume { get; }
+    public ConfigEntry<float> AliveFocusDeadVolume { get; }
+    public ConfigEntry<float> DeadFocusAliveVolume { get; }
+    public ConfigEntry<float> DeadFocusDeadVolume { get; }
+    internal VoiceAliveDeadMixProfile AliveFocusProfile =>
+        new(AliveFocusAliveVolume.Value, AliveFocusDeadVolume.Value);
+    internal VoiceAliveDeadMixProfile DeadFocusProfile =>
+        new(DeadFocusAliveVolume.Value, DeadFocusDeadVolume.Value);
     public ConfigEntry<float> VoiceFalloffSoftness { get; }
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
@@ -221,25 +227,39 @@ public class VoiceChatLocalSettings
         RefreshDeviceLists();
 
         MicVolume = config.Bind("Audio", "MicVolume", 1f,
-            new ConfigDescription("Mic input volume",
+            new ConfigDescription("Adjusts how loudly your microphone is sent to other players. This does not change when the mic counts as speaking.",
                 new AcceptableValueRange<float>(0.1f, 2f)));
 
         MicSensitivity = config.Bind("Audio", "MicSensitivity", 1f,
-            new ConfigDescription("How easily the mic is treated as speaking. Higher is more sensitive; lower ignores more room noise.",
+            new ConfigDescription("Controls how easily your mic detects speech. Higher values pick up quieter speech; lower values ignore more room noise.",
                 new AcceptableValueRange<float>(0.25f, 2f)));
 
         MasterVolume = config.Bind("Audio", "MasterVolume", 1f,
-            new ConfigDescription("Master output volume",
+            new ConfigDescription("Adjusts the overall volume of all Perfect Comms voice audio you hear.",
                 new AcceptableValueRange<float>(0.1f, 2f)));
 
-        AlivePlayerVolume = config.Bind("Audio", "AlivePlayerVolume", 1f,
+        AliveFocusAliveVolume = config.Bind("Audio.HoldMix", "AliveFocusAliveVolume",
+            VoiceVolumeMath.DefaultLouderVolume,
             new ConfigDescription(
-                "Local playback volume for alive players while you are dead in a meeting. 0 mutes alive players only for you.",
+                "Sets the volume of audible living players while Alive Louder / Dead Quieter is held. 100% is normal; 0% mutes that group.",
                 new AcceptableValueRange<float>(0f, 2f)));
 
-        DeadPlayerVolume = config.Bind("Audio", "DeadPlayerVolume", 1f,
+        AliveFocusDeadVolume = config.Bind("Audio.HoldMix", "AliveFocusDeadVolume",
+            VoiceVolumeMath.DefaultQuieterVolume,
             new ConfigDescription(
-                "Local playback volume for dead players while you are dead in a meeting. 0 mutes dead players only for you.",
+                "Sets the volume of audible dead players while Alive Louder / Dead Quieter is held. 100% is normal; 0% mutes that group.",
+                new AcceptableValueRange<float>(0f, 2f)));
+
+        DeadFocusAliveVolume = config.Bind("Audio.HoldMix", "DeadFocusAliveVolume",
+            VoiceVolumeMath.DefaultQuieterVolume,
+            new ConfigDescription(
+                "Sets the volume of audible living players while Alive Quieter / Dead Louder is held. 100% is normal; 0% mutes that group.",
+                new AcceptableValueRange<float>(0f, 2f)));
+
+        DeadFocusDeadVolume = config.Bind("Audio.HoldMix", "DeadFocusDeadVolume",
+            VoiceVolumeMath.DefaultLouderVolume,
+            new ConfigDescription(
+                "Sets the volume of audible dead players while Alive Quieter / Dead Louder is held. 100% is normal; 0% mutes that group.",
                 new AcceptableValueRange<float>(0f, 2f)));
 
         VoiceFalloffSoftness = config.Bind("Audio", "VoiceFalloffSoftness", 0.30f,
@@ -249,7 +269,7 @@ public class VoiceChatLocalSettings
         VoiceAudioOcclusion.ProximitySoftness01 = VoiceFalloffSoftness.Value;
 
         MicMode = config.Bind("Audio", "MicMode", VoiceMicMode.OpenMic,
-            new ConfigDescription("Microphone activation mode"));
+            new ConfigDescription("Chooses whether your mic transmits automatically when you speak or only while Push To Talk is held."));
 
         NoiseGateThreshold = config.Bind("Audio.Advanced", "NoiseGateThreshold", 0.003f,
             new ConfigDescription("Advanced base gate threshold. Effective value is divided by MicSensitivity.",
@@ -260,10 +280,10 @@ public class VoiceChatLocalSettings
                 new AcceptableValueRange<float>(0.002f, 0.080f)));
 
         StartMuted = config.Bind("Audio", "StartMuted", false,
-            new ConfigDescription("Start each session with microphone muted"));
+            new ConfigDescription("Starts each voice session with your microphone muted."));
 
         StartDeafened = config.Bind("Audio", "StartDeafened", false,
-            new ConfigDescription("Start each session with speaker muted"));
+            new ConfigDescription("Starts each voice session with incoming voice audio muted."));
 
         _savedMicDeviceName = config.Bind("Audio", "MicDeviceName", "",
             "Saved microphone device name (used to restore selection across sessions)");
@@ -275,7 +295,7 @@ public class VoiceChatLocalSettings
 
         MicrophoneDeviceIndex = config.Bind("Audio", "Microphone",
             MicDeviceEnum.Default,
-            new ConfigDescription("Selected microphone device"));
+            new ConfigDescription("Selects the recording device Perfect Comms uses. Default follows the system's default input device."));
 
         MicrophoneDeviceIndex.Value = ResolveDeviceIndex<MicDeviceEnum>(
             _savedMicDeviceName.Value, _micDeviceNames, MicrophoneDeviceIndex.Value);
@@ -300,7 +320,7 @@ public class VoiceChatLocalSettings
 #if WINDOWS
         SpeakerDeviceIndex = config.Bind("Audio", "Speaker",
             SpkDeviceEnum.Default,
-            new ConfigDescription("Selected speaker device"));
+            new ConfigDescription("Selects the playback device Perfect Comms uses for voice audio. Default follows the system's default output device."));
 
         SpeakerDeviceIndex.Value = ResolveDeviceIndex<SpkDeviceEnum>(
             _savedSpkDeviceName.Value, _spkDeviceNames, SpeakerDeviceIndex.Value);
@@ -333,11 +353,11 @@ public class VoiceChatLocalSettings
 
         VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,
-            new ConfigDescription("Direction used to place the microphone and speaker controls"));
+            new ConfigDescription("Arranges the microphone, speaker, and role voice controls vertically or horizontally."));
 
         SpeakingBarPosition = config.Bind("UI", "SpeakingBarPosition",
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
-            new ConfigDescription("Position of the speaking bar"));
+            new ConfigDescription("Chooses the speaking bar's screen preset while manual layout is disabled."));
 
         SpeakingBarManualLayout = config.Bind("UI", "SpeakingBarManualLayout", false,
             new ConfigDescription("Use the sliders and layout below instead of the position preset."));
@@ -362,23 +382,23 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Show a translucent dark backdrop behind the speaking bar."));
 
         SpeakingBarScale = config.Bind("UI", "SpeakingBarScale", 1.0f,
-            new ConfigDescription("Scale of the speaking bar",
+            new ConfigDescription("Changes the size of the speaking bar, including its player icons and names.",
                 new AcceptableValueRange<float>(0.5f, 2.0f)));
 
         SpeakingBarFixedAllPlayers = config.Bind("UI", "SpeakingBarFixedAllPlayers", false,
-            new ConfigDescription("Show a fixed slot for every player during tasks instead of only current speakers."));
+            new ConfigDescription("Keeps a stable speaking-bar slot for every connected player, including across meeting transitions, instead of showing only current speakers."));
 
         JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
             VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
-            new ConfigDescription("Jailor unmute button: Voice HUD or the jailee's meeting card."));
+            new ConfigDescription("Chooses whether the Jailor's temporary unmute control appears on the voice HUD or the jailed player's meeting card."));
 
         // Meeting overlay — on by default.
         MeetingSpeakingOverlay = config.Bind("UI", "MeetingSpeakingOverlay", true,
             new ConfigDescription(
-                "Show smooth coloured card glows around talking players during meetings"));
+                "Shows a coloured glow around a player's meeting card while they are speaking, subject to concealment and blindness privacy rules."));
 
         OverlayScale = config.Bind("UI", "OverlayScale", 1.30f,
-            new ConfigDescription("Scale for voice HUD buttons",
+            new ConfigDescription("Changes the size of the voice HUD buttons.",
                 new AcceptableValueRange<float>(0.75f, 3.00f)));
 
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
@@ -421,7 +441,7 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Optional BetterCrewLink public-lobby directory endpoint. Voice audio and signaling do not use this service."));
 
         NatFix = config.Bind("Voice Server", "NatFix", true,
-            new ConfigDescription("Route Perfect Comms WebRTC through TURN when a direct peer-to-peer connection cannot be established. Only peers that need relay use it; everyone else stays direct."));
+            new ConfigDescription("Allows voice connections to fall back to a TURN relay when a direct peer-to-peer connection cannot be established. Direct connections remain preferred."));
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
             "",
