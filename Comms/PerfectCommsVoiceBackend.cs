@@ -267,10 +267,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             EnsureManagedTurnCredentials(forceRelay: ShouldForceRelay(), refreshRelayPeers: false);
         VoiceDiagnostics.Log("voice.engine.created", $"room={RoomCode} region={Region} signaling=among-us-rpc");
         if (WineEnvironment.IsWine)
-        {
-            var forceRelay = VoiceSettings.Instance?.WineForceRelay.Value == true;
-            VoiceDiagnostics.Log("env.wine", $"detected=true forceRelay={forceRelay} localIp={WineEnvironment.GetLocalIPv4()?.ToString() ?? "none"}");
-        }
+            VoiceDiagnostics.Log("env.wine", $"detected=true localIp={WineEnvironment.GetLocalIPv4()?.ToString() ?? "none"}");
     }
 
     private void ApplyIceServers(List<IceServer> servers)
@@ -522,16 +519,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     }
 
     private bool ShouldForceRelay()
-        => ShouldForceRelayPolicy(
-            _forceRelayForSession,
-            WineEnvironment.IsWine,
-            VoiceSettings.Instance?.WineForceRelay.Value == true);
-
-    internal static bool ShouldForceRelayPolicy(
-        bool sessionRelayLatch,
-        bool wineDetected,
-        bool wineForceRelay)
-        => sessionRelayLatch || (wineDetected && wineForceRelay);
+        => _forceRelayForSession;
 
     private static bool TryGetCustomTurnServer(out IceServer server, out bool invalid)
     {

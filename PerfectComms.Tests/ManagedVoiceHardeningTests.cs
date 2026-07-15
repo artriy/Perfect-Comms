@@ -159,21 +159,6 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Theory]
-    [InlineData(true, false, false, true)]
-    [InlineData(false, true, true, true)]
-    [InlineData(false, true, false, false)]
-    [InlineData(false, false, true, false)]
-    public void RelayPolicyPreservesAutomaticSessionEscalation(
-        bool sessionLatch,
-        bool wine,
-        bool wineSetting,
-        bool expected)
-    {
-        Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldForceRelayPolicy(
-            sessionLatch, wine, wineSetting));
-    }
-
-    [Theory]
     [InlineData(false, false, true)]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]

@@ -192,11 +192,6 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> SpeakingBarY { get; }
     public ConfigEntry<float> OverlayScale { get; }
 
-    // Wine/Proton (Linux) only. When on, the native engine forces TURN-relay-only ICE and adds a TURN-over-TCP
-    // candidate for Wine setups whose local ICE gathering still cannot establish a direct/STUN connection.
-    // Ignored on native Windows. Default off; automatic direct-first/TURN fallback remains active either way.
-    public ConfigEntry<bool> WineForceRelay { get; }
-
     public ConfigEntry<bool> DebugVoiceStats { get; }
     public ConfigEntry<bool> MicCalibrationDiagnostics { get; }
 
@@ -277,6 +272,10 @@ public class VoiceChatLocalSettings
             existingConfigText,
             "Voice Server",
             "NatFix");
+        bool hadRetiredWineForceRelay = SpeakingBarScalePolicy.ConfigTextContainsSetting(
+            existingConfigText,
+            "Voice Server",
+            "WineForceRelay");
         RefreshDeviceLists();
 
         MicVolume = config.Bind("Audio", "MicVolume", 1f,
@@ -520,8 +519,6 @@ public class VoiceChatLocalSettings
         TurnCredential = config.Bind("Voice Server", "TurnCredential",
             "",
             new ConfigDescription("Credential (password) for a custom TURN relay (only used when TurnServerUrl is set)."));
-        WineForceRelay = config.Bind("Voice Server", "WineForceRelay", false,
-            new ConfigDescription("Wine/Proton (Linux) only opt-in: force TURN-relay-only voice (and add TURN-over-TCP). Off by default - Wine uses the same automatic ICE selection as native Windows, using TURN only when direct/STUN fail. Enable only if your Wine setup still cannot connect. Ignored on native Windows and requires valid TURN credentials."));
 
         UpdateNotificationsEnabled = config.Bind("Updates", "NotificationsEnabled", true,
             new ConfigDescription("Show Perfect Comms update notifications on the main menu"));
@@ -539,14 +536,20 @@ public class VoiceChatLocalSettings
 
         // Run after every current entry is bound so migration saves write a complete config file
         // and cannot disturb still-unbound legacy entries.
-        if (hadRetiredNatFix)
+        if (hadRetiredNatFix || hadRetiredWineForceRelay)
         {
-            try { RemoveRetiredNatFixSetting(config); }
+            try
+            {
+                RemoveRetiredRelaySettings(
+                    config,
+                    removeNatFix: hadRetiredNatFix,
+                    removeWineForceRelay: hadRetiredWineForceRelay);
+            }
             catch (Exception ex)
             {
-                // The setting is no longer read anywhere, so a read-only config can safely retain
-                // the inert legacy line without disabling automatic TURN fallback.
-                VoiceDiagnostics.DebugWarning($"[VC] Could not remove retired NatFix setting: {ex.Message}");
+                // These settings are no longer read anywhere, so a read-only config can safely retain
+                // inert legacy lines without changing automatic direct-to-TURN behavior.
+                VoiceDiagnostics.DebugWarning($"[VC] Could not remove retired relay settings: {ex.Message}");
             }
         }
         ApplySpeakingBarV4Migration(hadLegacySpeakingBarScale);
@@ -648,20 +651,35 @@ public class VoiceChatLocalSettings
         }
     }
 
-    private static void RemoveRetiredNatFixSetting(ConfigFile config)
+    private static void RemoveRetiredRelaySettings(
+        ConfigFile config,
+        bool removeNatFix,
+        bool removeWineForceRelay)
     {
         bool saveOnConfigSet = config.SaveOnConfigSet;
         try
         {
-            // Binding consumes BepInEx's private orphan entry. Removing the resulting public entry
-            // before saving deletes only the retired key while preserving every unrelated setting.
+            // Binding consumes BepInEx's private orphan entries. Removing the resulting public entries
+            // before saving deletes only the retired keys while preserving every unrelated setting.
             config.SaveOnConfigSet = false;
-            ConfigEntry<bool> retired = config.Bind(
-                "Voice Server",
-                "NatFix",
-                true,
-                new ConfigDescription("Retired: TURN fallback is automatic."));
-            config.Remove(retired.Definition);
+            if (removeNatFix)
+            {
+                ConfigEntry<bool> retiredNatFix = config.Bind(
+                    "Voice Server",
+                    "NatFix",
+                    true,
+                    new ConfigDescription("Retired: TURN fallback is automatic."));
+                config.Remove(retiredNatFix.Definition);
+            }
+            if (removeWineForceRelay)
+            {
+                ConfigEntry<bool> retiredWineForceRelay = config.Bind(
+                    "Voice Server",
+                    "WineForceRelay",
+                    false,
+                    new ConfigDescription("Retired: Wine uses automatic direct-to-TURN fallback."));
+                config.Remove(retiredWineForceRelay.Definition);
+            }
             config.Save();
         }
         finally
@@ -939,8 +957,7 @@ public class VoiceChatLocalSettings
             VoiceChatHudState.SetSpeakerMuted(StartDeafened.Value);
         }
         else if (configEntry == TurnServerUrl || configEntry == TurnUsername ||
-                 configEntry == TurnCredential ||
-                 configEntry == WineForceRelay)
+                 configEntry == TurnCredential)
         {
             // Recreate the native peer generation so custom TURN/relay policy changes take effect immediately.
             // This does not leave or rejoin the game lobby.

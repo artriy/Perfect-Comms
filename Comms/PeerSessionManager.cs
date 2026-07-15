@@ -1402,8 +1402,8 @@ internal sealed class PeerSessionManager
             return;
         }
 
-        // A remote direct-mode reset must not override this client's explicit Wine force-relay
-        // preference. One relay endpoint can still pair with a direct endpoint.
+        // A remote direct-mode reset must not override this client's automatic relay-only session
+        // latch. One relay endpoint can still pair with a direct endpoint.
         var relayOnly = requestedRelay || (ForceRelay() && RelayAvailable());
         var changed = peer.RelayOnly != relayOnly;
         peer.RelayOnly = relayOnly;

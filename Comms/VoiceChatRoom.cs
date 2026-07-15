@@ -1376,9 +1376,8 @@ public class VoiceChatRoom
             // Automated relay escalation: if we've never mapped a single peer despite repeated global rebuilds
             // (remotePlayers exist but mappedPeers==0), direct/STUN ICE is clearly not working for this client
             // (strict/symmetric NAT, or a Wine box where host-candidate gathering fails). Latch the native session
-            // to relay-only ICE before this rebuild so the fresh peer connections route through TURN. Reuses the
-            // same forceRelay path the Wine fix validated; only fires after total failure, so a client whose
-            // voice already works never reaches here.
+            // to relay-only ICE before this rebuild so the fresh peer connections route through TURN. The
+            // session latch only fires after total failure, so a client whose voice already works never reaches here.
             if (ShouldEscalateTotalCollapseToRelay(
                     openPeers,
                     openChannelsRaw,
