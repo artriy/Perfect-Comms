@@ -34,6 +34,12 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<EmbeddedResource Include="Fixtures\cache-test-payload.txt">
+			<LogicalName>PerfectComms.Tests.cache-test-payload</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
+	<ItemGroup>
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
 		<PackageReference Include="xunit" Version="2.9.3" />

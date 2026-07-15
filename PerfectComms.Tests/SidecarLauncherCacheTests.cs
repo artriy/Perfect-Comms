@@ -5,7 +5,7 @@ using Xunit;
 public sealed class SidecarLauncherCacheTests
 {
     private const string Triple = "x86_64-pc-windows-msvc";
-    private const string HelperResource = "Lib.pc-capture.pc-capture-win-x64.exe";
+    private const string CacheFixtureResource = "PerfectComms.Tests.cache-test-payload";
 
     [Fact]
     public void NativeLaunchArgumentsIncludeManagedOwnerPid()
@@ -27,8 +27,8 @@ public sealed class SidecarLauncherCacheTests
     [Fact]
     public void HelperAndDspMapToFixedNamesInsideSameVersionedBundle()
     {
-        var assembly = typeof(SidecarLauncher).Assembly;
-        var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { HelperResource });
+        var assembly = typeof(SidecarLauncherCacheTests).Assembly;
+        var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { CacheFixtureResource });
         var baseDirectory = Path.Combine(Path.GetTempPath(), "Perfect Comms cache mapping");
         var expectedDirectory = Path.Combine(
             baseDirectory,
@@ -60,14 +60,14 @@ public sealed class SidecarLauncherCacheTests
     [Fact]
     public void BundleVersionIsStableRegardlessOfResourceOrder()
     {
-        var assembly = typeof(SidecarLauncher).Assembly;
+        var assembly = typeof(SidecarLauncherCacheTests).Assembly;
 
         var first = NativeLibraryCache.BuildContentVersion(
             assembly,
-            new[] { HelperResource, "missing.optional.resource" });
+            new[] { CacheFixtureResource, "missing.optional.resource" });
         var second = NativeLibraryCache.BuildContentVersion(
             assembly,
-            new[] { "missing.optional.resource", HelperResource, HelperResource });
+            new[] { "missing.optional.resource", CacheFixtureResource, CacheFixtureResource });
 
         Assert.Equal(first, second);
     }
@@ -76,7 +76,7 @@ public sealed class SidecarLauncherCacheTests
     [Fact]
     public void LockedLegacyTargetDoesNotBlockVersionedExtraction()
     {
-        var assembly = typeof(SidecarLauncher).Assembly;
+        var assembly = typeof(SidecarLauncherCacheTests).Assembly;
         var baseDirectory = NewTemporaryDirectory();
         var legacyTarget = NativeLibraryCache.ResolveExtractionPath(
             baseDirectory,
@@ -93,10 +93,10 @@ public sealed class SidecarLauncherCacheTests
                        FileAccess.ReadWrite,
                        FileShare.Read))
             {
-                var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { HelperResource });
+                var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { CacheFixtureResource });
                 var extracted = NativeLibraryCache.Extract(
                     assembly,
-                    HelperResource,
+                    CacheFixtureResource,
                     "PerfectCommsAudio.exe",
                     Triple,
                     baseDirectory,

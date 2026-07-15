@@ -23,7 +23,8 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    name: windows (${{ matrix.target }}, ${{ matrix.dest }}, ${{ matrix.artifact }})
+    runs-on: ${{ matrix.runner }}
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
@@ -33,9 +34,14 @@ jobs:
           - target: x86_64-pc-windows-msvc
             dest: pc-capture-win-x64.exe
             artifact: helper-win-x64
+            runner: windows-latest
           - target: i686-pc-windows-msvc
             dest: pc-capture-win-x86.exe
             artifact: helper-win-x86
+            # VS 2026's MSVC 14.51 crashes internally while compiling Opus 1.6.1
+            # DRED SIMD for Win32. Keep the supported VS 2022 compiler for this
+            # target so DRED and SIMD remain enabled.
+            runner: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
