@@ -86,6 +86,26 @@ internal static class SidecarProtocol
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
     public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
 
+    public static byte[] OutputAudioFrame(ReadOnlySpan<float> interleavedStereo)
+    {
+        if (interleavedStereo.Length != AudioOutSamples)
+            throw new ArgumentException(
+                $"Output test frame must contain exactly {AudioOutSamples} interleaved stereo samples.",
+                nameof(interleavedStereo));
+
+        var payload = new byte[AudioOutPayloadBytes];
+        for (int i = 0; i < interleavedStereo.Length; i++)
+        {
+            float sample = float.IsFinite(interleavedStereo[i])
+                ? Math.Clamp(interleavedStereo[i], -1f, 1f)
+                : 0f;
+            BinaryPrimitives.WriteInt32LittleEndian(
+                payload.AsSpan(i * sizeof(float), sizeof(float)),
+                BitConverter.SingleToInt32Bits(sample));
+        }
+        return EncodeFrame(TypeAudioOut, payload);
+    }
+
     public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
         => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
 

@@ -99,9 +99,8 @@ public class VoiceChatLocalSettings
         arr[0] = "Default";
         for (int i = 0; i < names.Count; i++)
             arr[i + 1] = names[i];
-        _micDeviceNames = arr;
         _micNamesFromSidecar = true;
-        Interlocked.Increment(ref _micDeviceListVersion);
+        PublishMicDeviceNames(arr);
     }
 
     public static int SpkDeviceListVersion =>
@@ -112,6 +111,8 @@ public class VoiceChatLocalSettings
 #endif
 #if WINDOWS
     public static string[] SpkDeviceNames => _spkDeviceNames;
+    internal static bool SidecarDeviceProbePending =>
+        _sidecarProbeTask != null && !_sidecarProbeTask.IsCompleted;
 
     public static void SetSpkDeviceNamesFromSidecar(IReadOnlyList<string> names)
     {
@@ -119,8 +120,32 @@ public class VoiceChatLocalSettings
         arr[0] = "Default";
         for (int i = 0; i < names.Count; i++)
             arr[i + 1] = names[i];
-        _spkDeviceNames = arr;
         _spkNamesFromSidecar = true;
+        PublishSpkDeviceNames(arr);
+    }
+#endif
+
+    private static bool SameDeviceNames(IReadOnlyList<string> first, IReadOnlyList<string> second)
+    {
+        if (first.Count != second.Count) return false;
+        for (int i = 0; i < first.Count; i++)
+            if (!string.Equals(first[i], second[i], StringComparison.Ordinal))
+                return false;
+        return true;
+    }
+
+    private static void PublishMicDeviceNames(string[] names)
+    {
+        if (SameDeviceNames(_micDeviceNames, names)) return;
+        _micDeviceNames = names;
+        Interlocked.Increment(ref _micDeviceListVersion);
+    }
+
+#if WINDOWS
+    private static void PublishSpkDeviceNames(string[] names)
+    {
+        if (SameDeviceNames(_spkDeviceNames, names)) return;
+        _spkDeviceNames = names;
         Interlocked.Increment(ref _spkDeviceListVersion);
     }
 #endif
@@ -198,6 +223,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<string> TurnCredential { get; }
     public ConfigEntry<bool> UpdateNotificationsEnabled { get; }
     public ConfigEntry<string> UpdateNotificationUrl { get; }
+    internal ConfigEntry<int> CompletedSetupRevision { get; }
 
     private readonly ConfigFile _config;
     private readonly ConfigEntry<int> _speakingBarSettingsVersion;
@@ -508,6 +534,10 @@ public class VoiceChatLocalSettings
             "https://api.github.com/repos/artriy/Perfect-Comms/releases/latest",
             new ConfigDescription("Perfect Comms GitHub latest-release API endpoint"));
 
+        CompletedSetupRevision = config.Bind("Setup.Internal", "CompletedSetupRevision", 0,
+            new ConfigDescription(
+                "Internal one-time setup revision. Zero means the Perfect Comms setup has not been completed."));
+
         PerPlayerVolumes = config.Bind("Audio", "PerPlayerVolumes", "",
             "Saved per-player voice volumes keyed by player name");
 
@@ -516,6 +546,84 @@ public class VoiceChatLocalSettings
         ApplySpeakingBarV4Migration(hadLegacySpeakingBarScale);
 
         VoiceDiagnostics.SetEnabled(DebugVoiceStats.Value);
+    }
+
+    internal bool NeedsFirstRunSetup
+        => FirstRunSetupPolicy.NeedsAutomaticSetup(CompletedSetupRevision.Value);
+
+    internal void CommitFirstRunSetup(FirstRunSetupDraft draft)
+    {
+        if (draft == null) throw new ArgumentNullException(nameof(draft));
+
+        var before = FirstRunSetupDraft.CaptureExisting(this);
+        int previousRevision = CompletedSetupRevision.Value;
+        bool saveOnConfigSet = _config.SaveOnConfigSet;
+        try
+        {
+            _config.SaveOnConfigSet = false;
+            draft.ApplyTo(this);
+            // The marker is deliberately last: a crash or exception before this assignment
+            // causes setup to be offered again instead of treating a partial draft as complete.
+            CompletedSetupRevision.Value =
+                FirstRunSetupPolicy.RevisionToStoreOnCompletion(previousRevision);
+            _config.Save();
+        }
+        catch
+        {
+            try
+            {
+                before.ApplyTo(this);
+                CompletedSetupRevision.Value = previousRevision;
+                _config.Save();
+            }
+            catch
+            {
+                // Preserve the original exception. A later launch will still see the old marker
+                // from disk unless the final atomic save above succeeded.
+            }
+            throw;
+        }
+        finally
+        {
+            _config.SaveOnConfigSet = saveOnConfigSet;
+        }
+    }
+
+    /// <summary>
+    /// Keeps every persisted setting exactly as-is and records only that onboarding is complete.
+    /// This backs the explicit "Use existing settings" escape for both automatic and manual runs.
+    /// </summary>
+    internal void UseExistingSettingsForFirstRunSetup()
+    {
+        int previousRevision = CompletedSetupRevision.Value;
+        int revision = FirstRunSetupPolicy.RevisionToStoreOnCompletion(previousRevision);
+        if (previousRevision == revision) return;
+
+        bool saveOnConfigSet = _config.SaveOnConfigSet;
+        try
+        {
+            _config.SaveOnConfigSet = false;
+            CompletedSetupRevision.Value = revision;
+            _config.Save();
+        }
+        catch
+        {
+            try
+            {
+                CompletedSetupRevision.Value = previousRevision;
+                _config.Save();
+            }
+            catch
+            {
+                // Preserve the original save error. The in-memory marker is restored above, and
+                // the previous on-disk value remains the only revision considered trustworthy.
+            }
+            throw;
+        }
+        finally
+        {
+            _config.SaveOnConfigSet = saveOnConfigSet;
+        }
     }
 
     private static string ReadExistingConfigText(string? configPath)
@@ -622,12 +730,12 @@ public class VoiceChatLocalSettings
 #endif
             }
             catch { }
-            _micDeviceNames = mics.ToArray();
+            PublishMicDeviceNames(mics.ToArray());
         }
 
 #if WINDOWS
         if (!_spkNamesFromSidecar)
-            _spkDeviceNames = new[] { "Default" };
+            PublishSpkDeviceNames(new[] { "Default" });
 #endif
     }
 
@@ -635,7 +743,7 @@ public class VoiceChatLocalSettings
 
     // Re-enumerate devices (throttled to every 2s) so hot-plugged or removed mics/speakers show up in the
     // in-game device pickers without a game restart. Called from the settings panel's device rows.
-    public static void MaybeRefreshDeviceLists()
+    public static void MaybeRefreshDeviceLists(bool resolveSavedIndices = true)
     {
         var now = DateTime.UtcNow;
         if (now >= _nextDeviceRefreshUtc)
@@ -644,8 +752,11 @@ public class VoiceChatLocalSettings
             RefreshDeviceLists();
             MaybeProbeSidecarDevices();
         }
-        VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
-        VoiceSettings.Instance?.ResolveSpkIndexIfListChanged();
+        if (resolveSavedIndices)
+        {
+            VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
+            VoiceSettings.Instance?.ResolveSpkIndexIfListChanged();
+        }
     }
 
     private static void MaybeProbeSidecarDevices()

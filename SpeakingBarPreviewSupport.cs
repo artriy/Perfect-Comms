@@ -96,6 +96,37 @@ internal readonly record struct SpeakingBarPreviewTransition(
     float Reveal);
 
 /// <summary>
+/// Complete immutable input for the isolated speaking-bar renderer. The settings panel builds
+/// this from live config entries, while first-run setup builds it from a staged draft so merely
+/// hovering a preset never writes config or mutates the real HUD.
+/// </summary>
+internal readonly record struct SpeakingBarPreviewSettings(
+    SpeakingBarPosition Position,
+    SpeakingBarSideLayout SideLayout,
+    bool ManualLayout,
+    VoiceControlsLayout ManualOrientation,
+    SpeakingBarAvatarFacing ManualAvatarFacing,
+    float ManualX,
+    float ManualY,
+    SpeakingBarNamePosition NamePosition,
+    float Scale,
+    bool Backdrop)
+{
+    internal static SpeakingBarPreviewSettings From(VoiceChatLocalSettings settings)
+        => new(
+            settings.SpeakingBarPosition.Value,
+            settings.SpeakingBarSideLayout.Value,
+            settings.SpeakingBarManualLayout.Value,
+            settings.SpeakingBarLayout.Value,
+            settings.SpeakingBarAvatarFacing.Value,
+            settings.SpeakingBarX.Value,
+            settings.SpeakingBarY.Value,
+            settings.SpeakingBarNamePosition.Value,
+            settings.SpeakingBarScale.Value,
+            settings.SpeakingBarBackdrop.Value);
+}
+
+/// <summary>
 /// Stages the settings-card movement ahead of the preview reveal. Because both values
 /// are derived from one reversible progress value, disabling naturally fades the preview
 /// away before the settings card glides back to center.

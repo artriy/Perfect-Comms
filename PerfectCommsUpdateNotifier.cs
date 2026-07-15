@@ -37,6 +37,9 @@ internal static class PerfectCommsUpdateNotifier
 
     internal static void Update(MainMenuManager menu)
     {
+        // Do not consume this menu load's notification while first-run setup is pending/open.
+        // Once setup releases the gate, the completed task is handled by a later LateUpdate.
+        if (VoiceFirstRunSetup.ShouldDeferMainMenuPopups) return;
         if (_root != null) return;
         if (_shownLoadId == _mainMenuLoadId) return;
         if (_checkTask == null || !_checkTask.IsCompleted) return;

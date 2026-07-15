@@ -49,7 +49,9 @@ public static class VoiceSettingsPanel
     private static float _scrollbarDragOffset;
     private static SpeakingBarLivePreview? _livePreview;
     private static bool _livePreviewUnavailable;
+    private static bool _lastLivePreviewEnabled;
     private static float _livePreviewProgress;
+    private static int _deferredShowFrame = -1;
 
     private static bool ShellAlive => _shell != null && _shell.Root != null;
     private static bool _shown;
@@ -88,18 +90,24 @@ public static class VoiceSettingsPanel
         _shown = true;
 
         bool previewEnabled = VoiceSettings.Instance.SpeakingBarLivePreview.Value;
+        _lastLivePreviewEnabled = previewEnabled;
         _livePreviewProgress = previewEnabled ? 1f : 0f;
-        if (previewEnabled)
-        {
-            _livePreviewUnavailable = false;
-            EnsureLivePreview();
-        }
+        // Build the light-weight preview card up front and warm its render world over the
+        // next few frames. Toggling Live Preview later should only reveal already-ready
+        // objects, never construct fifteen avatars and a render texture on the click frame.
+        _livePreviewUnavailable = false;
+        EnsureLivePreview();
         ApplyPanelPresentation();
         UpdateLivePreview(0f);
 
         if (!rebuilt) RebuildRows(true);
 
         VoiceUiKit.RaiseAbove(_shell.RootRect);
+    }
+
+    internal static void ShowDeferred()
+    {
+        _deferredShowFrame = Time.frameCount + 1;
     }
 
     private static void Build()
@@ -227,6 +235,7 @@ public static class VoiceSettingsPanel
         _scrollbarThumbImage = null;
         _livePreviewUnavailable = false;
         _livePreviewProgress = 0f;
+        _lastLivePreviewEnabled = false;
     }
 
     private static void RebuildRows(bool resetScroll)
@@ -522,6 +531,22 @@ public static class VoiceSettingsPanel
         });
     }
 
+    private static void Action(
+        List<Entry> defs,
+        string label,
+        string buttonText,
+        System.Action onClick,
+        string help)
+    {
+        defs.Add(new Entry
+        {
+            Key = label,
+            Visible = Always,
+            Build = (pane, paneW, y) => new VoiceUiKit.ActionRow(onClick)
+                .Build(pane, label, buttonText, paneW, y, RowH, help)
+        });
+    }
+
     private static void SpeakingBarNamePositionStep(List<Entry> defs, VoiceChatLocalSettings settings)
     {
         // Auto was appended to the persisted enum to preserve the legacy 0-3 values,
@@ -638,12 +663,24 @@ public static class VoiceSettingsPanel
 
     private static void BuildAdvanced(List<Entry> defs, VoiceChatLocalSettings s)
     {
+        Section(defs, "SETUP");
+        Action(defs, "First-Time Setup", "RUN SETUP AGAIN", ShowFirstRunSetup,
+            "Reopens the guided audio, controls, and HUD setup. Your current settings are kept unless you finish with changes.");
+
+        Section(defs, "TROUBLESHOOTING");
         Toggle(defs, "Nat Fix", s.NatFix);
         Toggle(defs, "Show Fake 15 Players", s.ShowFake15Players);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,
             v => s.ApplyDiagnosticsToggle(v),
             "Writes detailed voice logs and microphone calibration data for troubleshooting. Leave this off unless you are diagnosing an issue.");
+    }
+
+    private static void ShowFirstRunSetup()
+    {
+        Hide();
+        VoiceUiKit.SwallowClick();
+        VoiceFirstRunSetup.ShowManual();
     }
 
     private static Vector2 GetRange(BepInEx.Configuration.ConfigEntryBase entry)
@@ -659,6 +696,11 @@ public static class VoiceSettingsPanel
 
     public static void Tick()
     {
+        if (_deferredShowFrame >= 0 && Time.frameCount >= _deferredShowFrame)
+        {
+            _deferredShowFrame = -1;
+            Show();
+        }
         if (_shell == null) return;
         if (_shell.Root == null) { Destroy(); return; }
         if (!_shown) return;
@@ -734,15 +776,16 @@ public static class VoiceSettingsPanel
         if (settings == null) return;
 
         bool enabled = settings.SpeakingBarLivePreview.Value;
-        if (!enabled && _livePreviewUnavailable)
+        if (enabled != _lastLivePreviewEnabled && _livePreviewUnavailable)
             _livePreviewUnavailable = false;
+        _lastLivePreviewEnabled = enabled;
         _livePreviewProgress = SpeakingBarLivePreviewTransitionPolicy.Advance(
             _livePreviewProgress,
             enabled,
             unscaledDeltaTime);
 
         bool shouldRender = _shown && (enabled || _livePreviewProgress > 0.001f);
-        if (shouldRender) EnsureLivePreview();
+        if (_shown) EnsureLivePreview();
         if (_livePreview == null)
         {
             if (_livePreviewUnavailable) _livePreviewProgress = 0f;
@@ -752,9 +795,11 @@ public static class VoiceSettingsPanel
 
         try
         {
+            if (!preview.IsWarmupReady)
+                preview.Prewarm(settings, unscaledDeltaTime);
             var transition = SpeakingBarLivePreviewTransitionPolicy.Resolve(_livePreviewProgress);
             preview.SetPresentation(transition.Reveal, shouldRender);
-            if (shouldRender)
+            if (shouldRender && preview.IsWarmupReady)
                 preview.Tick(settings, unscaledDeltaTime);
             if (preview.IsUnavailable)
             {

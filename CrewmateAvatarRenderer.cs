@@ -205,6 +205,55 @@ internal static class CrewmateAvatarRenderer
         }
     }
 
+    /// <summary>
+    /// Builds a small, crewmate-shaped preview chip from already-cached UI sprites. Unlike the
+    /// full preview avatar path, this never performs a per-colour 100x100 texture recolour/upload,
+    /// so opening a HUD editor cannot stall the UI while fifteen synthetic colours are prepared.
+    /// </summary>
+    internal static bool TryCreateLightweightPreview(
+        int previewIndex,
+        Transform parent,
+        int targetLayer,
+        out GameObject? iconGO)
+    {
+        iconGO = null;
+        if (parent == null || (uint)targetLayer > 31u ||
+            !TryGetPreviewColorId(previewIndex, out int colorId)) return false;
+
+        GameObject? root = null;
+        try
+        {
+            var chip = VoiceUiKit.Rounded(soft: true);
+            Color main = Palette.PlayerColors[colorId];
+            Color shadow = Palette.ShadowColors[colorId];
+            root = new GameObject($"VC_SpriteIcon_PreviewChip_{previewIndex}");
+            root.transform.SetParent(parent, false);
+            root.transform.localScale = Vector3.one;
+            root.transform.localPosition = Vector3.zero;
+
+            AddSprite(root.transform, "VC_PreviewBackpack", chip,
+                new Vector3(-0.15f, -0.01f, 0f), Quaternion.identity,
+                new Vector3(0.17f, 0.27f, 1f), shadow, BodyOrder - 1);
+            AddSprite(root.transform, "VC_PreviewBody", chip,
+                Vector3.zero, Quaternion.identity,
+                new Vector3(0.30f, 0.38f, 1f), main, BodyOrder);
+            AddSprite(root.transform, "VC_PreviewVisor", chip,
+                new Vector3(0.075f, 0.055f, 0f), Quaternion.identity,
+                new Vector3(0.16f, 0.09f, 1f),
+                new Color32(174, 231, 241, 255), BodyOrder + 1);
+
+            ApplySorting(root);
+            SetLayerRecursive(root.transform, targetLayer);
+            iconGO = root;
+            return true;
+        }
+        catch
+        {
+            if (root != null) Object.Destroy(root);
+            return false;
+        }
+    }
+
     private static void SetLayerRecursive(Transform root, int layer)
     {
         root.gameObject.layer = layer;

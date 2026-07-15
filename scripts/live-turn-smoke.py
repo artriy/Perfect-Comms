@@ -30,6 +30,29 @@ MAX_FRAME_BYTES = 1024 * 1024
 DEFAULT_ENDPOINT = "https://perfect-comms-lobbies.edgetel.workers.dev/turn-credentials"
 
 
+def source_protocol_version() -> int:
+    root = Path(__file__).resolve().parents[1]
+    managed = (root / "Comms" / "SidecarVoiceClient.cs").read_text(encoding="utf-8")
+    native = (root / "native" / "pc-capture" / "src" / "proto.rs").read_text(
+        encoding="utf-8"
+    )
+    managed_match = re.search(r"public const int Proto\s*=\s*(\d+)", managed)
+    native_match = re.search(r"PROTO_VERSION:\s*u32\s*=\s*(\d+)", native)
+    if managed_match is None or native_match is None:
+        raise RuntimeError("could not read the sidecar protocol contract from source")
+    managed_version = int(managed_match.group(1))
+    native_version = int(native_match.group(1))
+    if managed_version != native_version:
+        raise RuntimeError(
+            "managed/native sidecar protocol mismatch: "
+            f"managed={managed_version} native={native_version}"
+        )
+    return managed_version
+
+
+SIDECAR_PROTOCOL = source_protocol_version()
+
+
 def recv_exact(sock: socket.socket, length: int) -> bytes:
     chunks: list[bytes] = []
     remaining = length
@@ -117,10 +140,14 @@ class Helper:
 
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=timeout)
         self.socket.settimeout(timeout)
-        self.send({"op": "hello", "proto": 7, "token": token})
+        self.send({"op": "hello", "proto": SIDECAR_PROTOCOL, "token": token})
         frame_type, body = recv_frame(self.socket)
         ready = json.loads(body)
-        if frame_type != TYPE_CONTROL or ready.get("op") != "ready" or ready.get("proto") != 7:
+        if (
+            frame_type != TYPE_CONTROL
+            or ready.get("op") != "ready"
+            or ready.get("proto") != SIDECAR_PROTOCOL
+        ):
             raise RuntimeError(f"helper {name} returned an incompatible ready frame")
 
         self.socket.settimeout(None)

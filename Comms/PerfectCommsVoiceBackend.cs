@@ -1364,7 +1364,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 OnHelperLocalCandidate,
                 OnHelperPeerState,
                 (peak, speaking) => OnSidecarLevel(sessionGeneration, peak, speaking),
-                OnSidecarPeerLevels);
+                OnSidecarPeerLevels,
+                _ => { });
             var voice = SidecarVoiceHost.TryAcquire(callbacks, out var failure);
             if (voice == null)
             {

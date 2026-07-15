@@ -1,4 +1,4 @@
-# Release example: .\scripts\package-release.ps1 -Version 1.2.3 -SidecarProtocolVersion 7
+# Release example: .\scripts\package-release.ps1 -Version 1.2.3 -SidecarProtocolVersion 8
 # Keep the protocol unchanged for compatible releases; increment it only when the
 # managed DLL <-> native sidecar contract changes.
 param(

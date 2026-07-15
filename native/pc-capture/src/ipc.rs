@@ -369,6 +369,13 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
     }
 }
 
+fn enqueue_audio_out(playback: &Arc<Mutex<PlaybackRing>>, samples: &[f32]) -> usize {
+    let mut playback = playback.lock().unwrap();
+    let queued_pairs_before_frame = playback.len();
+    playback.push(samples);
+    queued_pairs_before_frame
+}
+
 #[derive(Debug, PartialEq)]
 pub enum HelloResult {
     Accept,
@@ -1726,7 +1733,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
             }
         };
         match frame {
-            Frame::AudioOut(_) => {
+            Frame::AudioOut(frame) => {
                 ensure_playback(
                     &out_thread,
                     &out_selected,
@@ -1736,6 +1743,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     &counters,
                     &playback_supervision,
                 );
+                // Managed setup playback uses the already-versioned AUDIO_OUT frame to test the
+                // exact CPAL output selected in Perfect Comms. Pace is controlled by managed code;
+                // this bounded ring still drops oldest samples if a broken caller floods it.
+                dsp.lock().unwrap().far_end(&frame.samples);
+                let queued_pairs_before_frame = enqueue_audio_out(&playback, &frame.samples);
+                aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
+                counters
+                    .playback_queued_pairs
+                    .fetch_add((frame.samples.len() / 2) as u64, Ordering::Relaxed);
             }
             Frame::Control(text) => {
                 let op = match parse_inbound(&text) {
@@ -1752,6 +1768,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         }
                     }
                     InboundOp::SelectOutputDevice { id } => {
+                        let requested_output = id.clone();
                         *out_selected.lock().unwrap() = Some(id);
 
                         if let Err(error) = stop_playback_bounded(
@@ -1767,6 +1784,22 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         }
                         out_stop.store(false, Ordering::Release);
                         out_spawn_ns.store(0, Ordering::Release);
+                        // This event is emitted only after the previous worker has fully stopped.
+                        // Managed setup can therefore ignore stale playback events, wait for the
+                        // following stream-started/first-callback pair, and avoid feeding its test
+                        // chime into a ring whose output device is still opening.
+                        send_media_state(
+                            &playback_supervision.media_events,
+                            MediaStateEvent {
+                                direction: "playback".to_string(),
+                                state: "command-accepted".to_string(),
+                                action: "select-output-device".to_string(),
+                                requested_default: requested_output.is_empty(),
+                                requested_device: requested_output,
+                                running: false,
+                                ..Default::default()
+                            },
+                        );
                         ensure_playback(
                             &out_thread,
                             &out_selected,
@@ -2319,13 +2352,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":7,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":8,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":7,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":8,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -2339,6 +2372,22 @@ mod tests {
             validate_hello(&op, "good"),
             HelloResult::RejectProto
         ));
+    }
+
+    #[test]
+    fn audio_out_enqueue_preserves_samples_for_selected_output_playback() {
+        let playback = Arc::new(Mutex::new(PlaybackRing::new(8)));
+        let first = [0.25, -0.25, 0.5, -0.5];
+        assert_eq!(enqueue_audio_out(&playback, &first), 0);
+
+        let second = [0.75, -0.75];
+        assert_eq!(enqueue_audio_out(&playback, &second), 2);
+
+        let mut ring = playback.lock().unwrap();
+        assert_eq!(ring.pop_stereo(), Some((0.25, -0.25)));
+        assert_eq!(ring.pop_stereo(), Some((0.5, -0.5)));
+        assert_eq!(ring.pop_stereo(), Some((0.75, -0.75)));
+        assert_eq!(ring.pop_stereo(), None);
     }
 
     #[test]
@@ -2444,7 +2493,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":7,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":8,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -2500,7 +2549,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":7,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":8,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -2509,7 +2558,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 7);
+                assert_eq!(v["proto"], 8);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -2580,7 +2629,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":7,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":8,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -2654,7 +2703,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":7,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":8,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

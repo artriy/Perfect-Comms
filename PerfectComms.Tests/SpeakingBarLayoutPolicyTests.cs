@@ -62,6 +62,8 @@ public sealed class SpeakingBarLayoutPolicyTests
     [Theory]
     [InlineData((int)SpeakingBarPosition.TopLeft, (int)SpeakingBarSideLayout.SingleLane, true)]
     [InlineData((int)SpeakingBarPosition.TopLeft, (int)SpeakingBarSideLayout.Wrapped, false)]
+    [InlineData((int)SpeakingBarPosition.MiddleLeft, (int)SpeakingBarSideLayout.SingleLane, true)]
+    [InlineData((int)SpeakingBarPosition.MiddleLeft, (int)SpeakingBarSideLayout.Wrapped, false)]
     [InlineData((int)SpeakingBarPosition.MiddleRight, (int)SpeakingBarSideLayout.SingleLane, true)]
     [InlineData((int)SpeakingBarPosition.BottomRight, (int)SpeakingBarSideLayout.Wrapped, false)]
     [InlineData((int)SpeakingBarPosition.TopMiddle, (int)SpeakingBarSideLayout.SingleLane, false)]

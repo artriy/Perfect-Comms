@@ -138,7 +138,7 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(7, SidecarVoiceClient.Proto);
+        Assert.Equal(8, SidecarVoiceClient.Proto);
         Assert.Equal(3, SidecarProtocol.MobileAbi);
     }
 

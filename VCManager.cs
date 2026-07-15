@@ -48,6 +48,7 @@ internal class VCManager : MonoBehaviour
         _activeSceneName = scene.name;
         VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
         VoiceChatRoom.NotifyScenePhaseBoundary();
+        VoiceFirstRunSetup.CloseForSceneChange();
         EnsureManagerObject();
         switch (scene.name)
         {

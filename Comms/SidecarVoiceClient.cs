@@ -15,9 +15,11 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 7 adds native input gain/VAD, runtime synthetic capture, and batched remote levels.
-    // Reject older helpers so managed settings and speaking telemetry cannot silently become no-ops.
-    public const int Proto = 7;
+    // Protocol 8 requires AUDIO_OUT playback injection plus playback lifecycle acknowledgement
+    // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
+    // discarded their samples silently.
+    // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
+    public const int Proto = 8;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -50,6 +52,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public event Action<string, int, string>? OnPeerState;
     public event Action<float, bool>? OnLevel;
     public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
+    public event Action<SidecarPlaybackState>? OnPlaybackState;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<string> OutputDevices => _outputDevices;
@@ -325,6 +328,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             "select-output-device",
             () => SidecarProtocol.SelectOutputDeviceFrame(deviceId ?? string.Empty),
             DescribeDeviceForDiagnostics(deviceId));
+    }
+
+    public void SendOutputTestFrame(float[] interleavedStereo)
+    {
+        if (interleavedStereo == null) throw new ArgumentNullException(nameof(interleavedStereo));
+        SendCommand(
+            "output-test-audio",
+            () => SidecarProtocol.OutputAudioFrame(interleavedStereo),
+            $"samples={interleavedStereo.Length}",
+            logSuccess: false);
     }
 
     public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
@@ -1029,7 +1042,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
     }
 
-    private static void HandleMediaState(string json, int payloadBytes, int managedGeneration)
+    private void HandleMediaState(string json, int payloadBytes, int managedGeneration)
     {
         if (!TryDescribeMediaStateForDiagnostics(json, payloadBytes, out var details))
         {
@@ -1041,6 +1054,46 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         VoiceDiagnostics.Log(
             "sidecar.native.media-state",
             $"managedGeneration={managedGeneration} {details}");
+        if (TryReadPlaybackState(json, out var playbackState))
+        {
+            try { OnPlaybackState?.Invoke(playbackState); }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log(
+                    "sidecar.event",
+                    $"op=media-state event=handler-failed direction=playback error={ExceptionDiagnostic(ex)}");
+            }
+        }
+    }
+
+    internal static bool TryReadPlaybackState(string json, out SidecarPlaybackState state)
+    {
+        state = default;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!string.Equals(ReadString(root, "direction"), "playback", StringComparison.Ordinal) ||
+                !TryReadU64(root, "stream_generation", out ulong streamGeneration))
+                return false;
+            string eventState = ReadString(root, "state");
+            if (string.IsNullOrEmpty(eventState)) return false;
+            state = new SidecarPlaybackState(
+                eventState,
+                ReadString(root, "action"),
+                streamGeneration,
+                ReadString(root, "requested_device"),
+                ReadString(root, "resolved_device"),
+                ReadBool(root, "requested_default"),
+                ReadBool(root, "requested_matched"),
+                ReadBool(root, "fell_back_to_default"),
+                ReadBool(root, "running"));
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     internal static bool TryDescribeMediaStateForDiagnostics(string json, int payloadBytes, out string details)

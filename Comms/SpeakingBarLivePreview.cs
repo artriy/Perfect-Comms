@@ -13,14 +13,21 @@ namespace VoiceChatPlugin.VoiceChat;
 /// </summary>
 internal sealed class SpeakingBarLivePreview
 {
-    private const float HeaderHeight = 76f;
-    private const float ViewportMaxWidth = 420f;
-    private const float ViewportMaxHeight = 236.25f;
-    private const float ViewportY = 34f;
+    private const float DefaultHeaderHeight = 76f;
+    private const float DefaultViewportMaxWidth = 420f;
+    private const float DefaultViewportMaxHeight = 236.25f;
+    private const float DefaultViewportY = 34f;
+    private const float DefaultRevealSlide = 28f;
+    private const float EmbeddedCardWidth = 424f;
+    private const float EmbeddedCardHeight = 342f;
+    private const float EmbeddedHeaderHeight = 52f;
+    private const float EmbeddedViewportMaxWidth = 380f;
+    private const float EmbeddedViewportMaxHeight = 213.75f;
+    private const float EmbeddedViewportY = 2f;
+    private const float EmbeddedRevealSlide = 12f;
     private const float FarWorldX = 20000f;
     private const float FarWorldY = 20000f;
     private const float FallbackOrthographicSize = 3f;
-    private const float RevealSlide = 28f;
     private const int TextureMaxWidth = 960;
     private const int TextureBaseHeight = 540;
     private const int PreviewRenderingLayer = 30;
@@ -28,9 +35,22 @@ internal sealed class SpeakingBarLivePreview
     private const float WorldRetryBaseDelaySeconds = 0.75f;
     private const float WorldRetryMaximumDelaySeconds = 3f;
     private const int WorldFailureLimit = 3;
+    private const int WarmupSlotsPerTick = 3;
+    private const int WarmupAvatarsPerTick = 1;
 
     private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.5f);
     private static readonly Color32 SpeakingGreen = new(46, 204, 113, 255);
+
+    private enum WarmupStage
+    {
+        World,
+        Camera,
+        Texture,
+        Slots,
+        Avatars,
+        Layout,
+        Ready,
+    }
 
     private sealed class PreviewSlot
     {
@@ -43,6 +63,7 @@ internal sealed class SpeakingBarLivePreview
         internal float LabelHeight;
         internal float SmoothedLevel;
         internal bool StyleApplied;
+        internal bool MeasurementComplete;
 
         internal PreviewSlot(int index)
         {
@@ -54,32 +75,6 @@ internal sealed class SpeakingBarLivePreview
             SmoothedLevel = global::VoiceChatPlugin.VoiceLevelVisual.NormalizeVoiceLevel(
                 SpeakingBarPreviewRoster.VoiceLevel(index));
         }
-    }
-
-    private readonly record struct SettingsSnapshot(
-        SpeakingBarPosition Position,
-        SpeakingBarSideLayout SideLayout,
-        bool ManualLayout,
-        VoiceControlsLayout ManualOrientation,
-        SpeakingBarAvatarFacing ManualAvatarFacing,
-        float ManualX,
-        float ManualY,
-        SpeakingBarNamePosition NamePosition,
-        float Scale,
-        bool Backdrop)
-    {
-        internal static SettingsSnapshot From(VoiceChatLocalSettings settings)
-            => new(
-                settings.SpeakingBarPosition.Value,
-                settings.SpeakingBarSideLayout.Value,
-                settings.SpeakingBarManualLayout.Value,
-                settings.SpeakingBarLayout.Value,
-                settings.SpeakingBarAvatarFacing.Value,
-                settings.SpeakingBarX.Value,
-                settings.SpeakingBarY.Value,
-                settings.SpeakingBarNamePosition.Value,
-                settings.SpeakingBarScale.Value,
-                settings.SpeakingBarBackdrop.Value);
     }
 
     internal readonly RectTransform CardRoot;
@@ -98,7 +93,7 @@ internal sealed class SpeakingBarLivePreview
     private Camera? _camera;
     private RenderTexture? _renderTexture;
     private SpriteRenderer? _backdrop;
-    private SettingsSnapshot _lastSettings;
+    private SpeakingBarPreviewSettings _lastSettings;
     private bool _hasLastSettings;
     private float _lastWorldWidth = -1f;
     private float _lastWorldHeight = -1f;
@@ -107,49 +102,103 @@ internal sealed class SpeakingBarLivePreview
     private float _nextTextureRetryTime;
     private float _nextWorldRetryTime;
     private int _worldFailureCount;
+    private WarmupStage _warmupStage;
+    private int _nextWarmupSlotIndex;
+    private int _nextWarmupAvatarIndex;
+    private int _nextLabelMeasurementIndex;
+    private int _completedLabelMeasurements;
+    private int _nextMissingAvatarIndex;
+    private int _nextMissingAvatarRetryFrame;
+    private int _lastWarmupFrame = -1;
     private bool _shouldRender;
     private bool _disposed;
 
     internal bool IsUnavailable => _disposed || _worldFailureCount >= WorldFailureLimit;
+    internal bool IsWarmupReady => !_disposed &&
+        _warmupStage == WarmupStage.Ready &&
+        _worldRoot != null &&
+        _barRoot != null &&
+        _backdrop != null &&
+        _camera != null &&
+        _renderTexture != null &&
+        _renderTexture.IsCreated() &&
+        _slots.Count == SpeakingBarPreviewRoster.PlayerCount;
 
-    internal SpeakingBarLivePreview(RectTransform settingsRoot)
+    private readonly Vector2 _previewLocalCenter;
+    private readonly bool _embedded;
+    private readonly float _viewportMaxWidth;
+    private readonly float _viewportMaxHeight;
+    private readonly float _revealSlide;
+    private readonly float _presentationStartScale;
+    private readonly string _liveBadgeLabel;
+
+    internal SpeakingBarLivePreview(RectTransform settingsRoot, float? previewLocalCenterX = null)
+        : this(
+            settingsRoot,
+            new Vector2(previewLocalCenterX ?? DefaultPreviewLocalCenterX, 0f),
+            embedded: false)
     {
-        CardRoot = VoiceUiKit.Rect("VC_SpeakingBarLivePreview", settingsRoot);
+    }
+
+    internal SpeakingBarLivePreview(RectTransform parent, Vector2 localCenter, bool embedded)
+    {
+        _previewLocalCenter = localCenter;
+        _embedded = embedded;
+        _viewportMaxWidth = embedded ? EmbeddedViewportMaxWidth : DefaultViewportMaxWidth;
+        _viewportMaxHeight = embedded ? EmbeddedViewportMaxHeight : DefaultViewportMaxHeight;
+        _revealSlide = embedded ? EmbeddedRevealSlide : DefaultRevealSlide;
+        _presentationStartScale = embedded ? 1f : 0.96f;
+        _liveBadgeLabel = embedded ? "LIVE" : "\u25CF  LIVE";
+
+        float cardWidth = embedded
+            ? EmbeddedCardWidth
+            : SpeakingBarLivePreviewWorkspacePolicy.PreviewWidth;
+        float cardHeight = embedded
+            ? EmbeddedCardHeight
+            : SpeakingBarLivePreviewWorkspacePolicy.PreviewHeight;
+        float headerHeight = embedded ? EmbeddedHeaderHeight : DefaultHeaderHeight;
+        float viewportY = embedded ? EmbeddedViewportY : DefaultViewportY;
+
+        CardRoot = VoiceUiKit.Rect("VC_SpeakingBarLivePreview", parent);
         CardRoot.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
-        CardRoot.sizeDelta = new Vector2(
-            SpeakingBarLivePreviewWorkspacePolicy.PreviewWidth,
-            SpeakingBarLivePreviewWorkspacePolicy.PreviewHeight);
-        CardRoot.anchoredPosition = new Vector2(PreviewLocalCenterX, 0f);
-        CardRoot.localScale = new Vector3(0.96f, 0.96f, 1f);
+        CardRoot.sizeDelta = new Vector2(cardWidth, cardHeight);
+        CardRoot.anchoredPosition = _previewLocalCenter;
+        CardRoot.localScale = new Vector3(
+            _presentationStartScale,
+            _presentationStartScale,
+            1f);
 
         _cardGroup = CardRoot.gameObject.AddComponent<CanvasGroup>();
         _cardGroup.alpha = 0f;
         _cardGroup.interactable = false;
         _cardGroup.blocksRaycasts = false;
 
-        var shadow = VoiceUiKit.GlowImage("PreviewShadow", CardRoot, VoiceUiKit.PanelShadow);
-        shadow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-        shadow.rectTransform.offsetMin = new Vector2(-38f, -46f);
-        shadow.rectTransform.offsetMax = new Vector2(38f, 34f);
+        if (!embedded)
+        {
+            var shadow = VoiceUiKit.GlowImage("PreviewShadow", CardRoot, VoiceUiKit.PanelShadow);
+            shadow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            shadow.rectTransform.offsetMin = new Vector2(-38f, -46f);
+            shadow.rectTransform.offsetMax = new Vector2(38f, 34f);
 
-        var rim = VoiceUiKit.GlowImage("PreviewRim", CardRoot, VoiceUiKit.AccentGlow);
-        rim.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-        rim.rectTransform.offsetMin = new Vector2(-18f, -18f);
-        rim.rectTransform.offsetMax = new Vector2(18f, 18f);
+            var rim = VoiceUiKit.GlowImage("PreviewRim", CardRoot, VoiceUiKit.AccentGlow);
+            rim.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+            rim.rectTransform.offsetMin = new Vector2(-18f, -18f);
+            rim.rectTransform.offsetMax = new Vector2(18f, 18f);
+        }
 
         var surface = VoiceUiKit.Rect("PreviewSurface", CardRoot);
         surface.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
         surface.offsetMin = Vector2.zero;
         surface.offsetMax = Vector2.zero;
         var surfaceImage = surface.gameObject.AddComponent<Image>();
-        surfaceImage.sprite = VoiceUiKit.PanelGradient();
+        surfaceImage.sprite = embedded ? VoiceUiKit.Rounded(true) : VoiceUiKit.PanelGradient();
         surfaceImage.type = Image.Type.Sliced;
-        surfaceImage.color = Color.white;
+        surfaceImage.color = embedded ? new Color32(17, 22, 30, 248) : Color.white;
         surfaceImage.raycastTarget = false;
 
         var header = VoiceUiKit.Rect("PreviewHeader", CardRoot);
         header.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
-        header.sizeDelta = new Vector2(0f, HeaderHeight);
+        header.sizeDelta = new Vector2(0f, headerHeight);
         header.anchoredPosition = Vector2.zero;
         var headerImage = header.gameObject.AddComponent<Image>();
         headerImage.sprite = VoiceUiKit.HeaderGradient();
@@ -159,70 +208,96 @@ internal sealed class SpeakingBarLivePreview
 
         var divider = VoiceUiKit.Panel("PreviewHeaderDivider", header, VoiceUiKit.Divider, rounded: false);
         divider.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f));
-        divider.rectTransform.sizeDelta = new Vector2(0f, 1.5f);
+        divider.rectTransform.sizeDelta = new Vector2(0f, embedded ? 1f : 1.5f);
         divider.rectTransform.anchoredPosition = Vector2.zero;
 
-        var title = VoiceUiKit.Text("PreviewTitle", header, "HUD LIVE PREVIEW", 25f,
+        var title = VoiceUiKit.Text("PreviewTitle", header,
+            embedded ? "HUD PREVIEW" : "HUD LIVE PREVIEW",
+            embedded ? 20f : 25f,
             VoiceUiKit.TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
-        title.characterSpacing = 3f;
+        title.characterSpacing = embedded ? 1.25f : 3f;
         title.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 0.5f));
-        title.rectTransform.sizeDelta = new Vector2(-155f, HeaderHeight);
-        title.rectTransform.anchoredPosition = new Vector2(26f, 0f);
+        title.rectTransform.sizeDelta = new Vector2(embedded ? -118f : -155f, headerHeight);
+        title.rectTransform.anchoredPosition = new Vector2(embedded ? 18f : 26f, 0f);
 
-        var badge = VoiceUiKit.Panel("LiveBadge", header, new Color32(18, 64, 44, 230), soft: true);
+        var badge = VoiceUiKit.Panel("LiveBadge", header,
+            embedded ? new Color32(22, 55, 40, 210) : new Color32(18, 64, 44, 230),
+            soft: true);
         badge.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-        badge.rectTransform.sizeDelta = new Vector2(104f, 32f);
-        badge.rectTransform.anchoredPosition = new Vector2(-22f, 0f);
-        _badgeText = VoiceUiKit.Text("LiveBadgeText", badge.rectTransform, "●  LIVE", 14f,
+        badge.rectTransform.sizeDelta = new Vector2(embedded ? 82f : 104f, embedded ? 24f : 32f);
+        badge.rectTransform.anchoredPosition = new Vector2(embedded ? -16f : -22f, 0f);
+        _badgeText = VoiceUiKit.Text("LiveBadgeText", badge.rectTransform, _liveBadgeLabel,
+            embedded ? 15f : 14f,
             new Color32(118, 239, 165, 255), TextAlignmentOptions.Center, FontStyles.Bold);
         _badgeText.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
         _badgeText.rectTransform.offsetMin = Vector2.zero;
         _badgeText.rectTransform.offsetMax = Vector2.zero;
 
-        var viewportGlow = VoiceUiKit.GlowImage("ViewportGlow", CardRoot, new Color32(34, 211, 238, 34));
-        viewportGlow.rectTransform.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
-        viewportGlow.rectTransform.sizeDelta = new Vector2(ViewportMaxWidth + 24f, ViewportMaxHeight + 24f);
-        viewportGlow.rectTransform.anchoredPosition = new Vector2(0f, ViewportY);
+        if (!embedded)
+        {
+            var viewportGlow = VoiceUiKit.GlowImage(
+                "ViewportGlow",
+                CardRoot,
+                new Color32(34, 211, 238, 34));
+            viewportGlow.rectTransform.Anchor(
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f));
+            viewportGlow.rectTransform.sizeDelta = new Vector2(
+                _viewportMaxWidth + 24f,
+                _viewportMaxHeight + 24f);
+            viewportGlow.rectTransform.anchoredPosition = new Vector2(0f, viewportY);
+        }
 
         var viewportFrame = VoiceUiKit.Panel("GameViewportFrame", CardRoot,
             new Color32(4, 7, 11, 255), rounded: true, soft: true);
         viewportFrame.rectTransform.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
-        viewportFrame.rectTransform.sizeDelta = new Vector2(ViewportMaxWidth + 4f, ViewportMaxHeight + 4f);
-        viewportFrame.rectTransform.anchoredPosition = new Vector2(0f, ViewportY);
+        viewportFrame.rectTransform.sizeDelta = new Vector2(
+            _viewportMaxWidth + 4f,
+            _viewportMaxHeight + 4f);
+        viewportFrame.rectTransform.anchoredPosition = new Vector2(0f, viewportY);
         viewportFrame.rectTransform.gameObject.AddComponent<RectMask2D>();
 
         _rawRect = VoiceUiKit.Rect("GameViewport", viewportFrame.rectTransform);
         _rawRect.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
-        _rawRect.sizeDelta = new Vector2(ViewportMaxWidth, ViewportMaxHeight);
+        _rawRect.sizeDelta = new Vector2(_viewportMaxWidth, _viewportMaxHeight);
         _rawRect.anchoredPosition = Vector2.zero;
         _rawImage = _rawRect.gameObject.AddComponent<RawImage>();
-        _rawImage.color = Color.white;
+        // A RawImage with no assigned texture draws Unity's white fallback texture. Keep the
+        // viewport dark until the camera and render target are genuinely ready so warmup (or a
+        // recoverable allocation failure) never flashes a large white rectangle.
+        _rawImage.color = new Color32(4, 7, 11, 255);
         _rawImage.raycastTarget = false;
 
         _statusText = VoiceUiKit.Text("PreviewStatus", CardRoot, "", 18f,
             VoiceUiKit.TextPrimary, TextAlignmentOptions.Center, FontStyles.Bold);
         _statusText.rectTransform.Anchor(new Vector2(0.5f, 0f), new Vector2(0.5f, 0f), new Vector2(0.5f, 0.5f));
-        _statusText.rectTransform.sizeDelta = new Vector2(410f, 32f);
-        _statusText.rectTransform.anchoredPosition = new Vector2(0f, 70f);
+        _statusText.rectTransform.sizeDelta = new Vector2(embedded ? 396f : 410f, embedded ? 22f : 32f);
+        _statusText.rectTransform.anchoredPosition = new Vector2(0f, embedded ? 45f : 70f);
 
         _detailText = VoiceUiKit.Text("PreviewDetails", CardRoot,
-            "10 alive  •  5 ghosts  •  synthetic voice activity", 14f,
+            "10 alive / 5 ghosts / synthetic voice activity", 14f,
             VoiceUiKit.TextMuted, TextAlignmentOptions.Center);
+        if (embedded) _detailText.fontSize = 16f;
         _detailText.rectTransform.Anchor(new Vector2(0.5f, 0f), new Vector2(0.5f, 0f), new Vector2(0.5f, 0.5f));
-        _detailText.rectTransform.sizeDelta = new Vector2(410f, 28f);
-        _detailText.rectTransform.anchoredPosition = new Vector2(0f, 39f);
+        _detailText.rectTransform.sizeDelta = new Vector2(embedded ? 396f : 410f, embedded ? 20f : 28f);
+        _detailText.rectTransform.anchoredPosition = new Vector2(0f, embedded ? 20f : 39f);
 
-        var note = VoiceUiKit.Text("PreviewNote", CardRoot,
-            "Full virtual game viewport • preview is isolated from the real HUD", 12f,
-            VoiceUiKit.TextFaint, TextAlignmentOptions.Center);
-        note.rectTransform.Anchor(new Vector2(0.5f, 0f), new Vector2(0.5f, 0f), new Vector2(0.5f, 0.5f));
-        note.rectTransform.sizeDelta = new Vector2(410f, 24f);
-        note.rectTransform.anchoredPosition = new Vector2(0f, 15f);
+        if (!embedded)
+        {
+            var note = VoiceUiKit.Text("PreviewNote", CardRoot,
+                "Full virtual game viewport / preview is isolated from the real HUD", 12f,
+                VoiceUiKit.TextFaint, TextAlignmentOptions.Center);
+            note.rectTransform.Anchor(new Vector2(0.5f, 0f), new Vector2(0.5f, 0f), new Vector2(0.5f, 0.5f));
+            note.rectTransform.sizeDelta = new Vector2(410f, 24f);
+            note.rectTransform.anchoredPosition = new Vector2(0f, 15f);
+        }
 
+        SetWarmupStatus();
         CardRoot.gameObject.SetActive(false);
     }
 
-    private static float PreviewLocalCenterX
+    private static float DefaultPreviewLocalCenterX
         => SpeakingBarLivePreviewWorkspacePolicy.SettingsWidth * 0.5f
            + SpeakingBarLivePreviewWorkspacePolicy.Gap
            + SpeakingBarLivePreviewWorkspacePolicy.PreviewWidth * 0.5f;
@@ -237,42 +312,47 @@ internal sealed class SpeakingBarLivePreview
             CardRoot.gameObject.SetActive(visible);
 
         _cardGroup.alpha = reveal;
-        CardRoot.anchoredPosition = new Vector2(
-            PreviewLocalCenterX + (1f - reveal) * RevealSlide,
-            0f);
-        float cardScale = Mathf.Lerp(0.96f, 1f, reveal);
+        CardRoot.anchoredPosition = _previewLocalCenter +
+            new Vector2((1f - reveal) * _revealSlide, 0f);
+        float cardScale = _embedded
+            ? 1f
+            : Mathf.Lerp(_presentationStartScale, 1f, reveal);
         CardRoot.localScale = new Vector3(cardScale, cardScale, 1f);
 
-        if (_camera != null)
-            _camera.enabled = shouldRender &&
-                              _renderTexture != null &&
-                              _renderTexture.IsCreated() &&
-                              _camera.targetTexture == _renderTexture;
-        if (_worldRoot != null)
-            _worldRoot.SetActive(shouldRender);
+        ApplyRenderingState();
     }
 
     internal void Tick(VoiceChatLocalSettings settings, float unscaledDeltaTime)
+        => Tick(SpeakingBarPreviewSettings.From(settings), unscaledDeltaTime);
+
+    internal bool Prewarm(VoiceChatLocalSettings settings, float unscaledDeltaTime)
+        => Prewarm(SpeakingBarPreviewSettings.From(settings), unscaledDeltaTime);
+
+    /// <summary>
+    /// Advances at most one bounded warmup stage while the preview is hidden. Repeated calls
+    /// spread world, texture, slot, and avatar creation across frames and return true once the
+    /// same objects that will be shown by <see cref="SetPresentation"/> are ready.
+    /// </summary>
+    internal bool Prewarm(SpeakingBarPreviewSettings settings, float unscaledDeltaTime)
+    {
+        if (_disposed) return false;
+        _ = unscaledDeltaTime;
+        _shouldRender = false;
+        ApplyRenderingState();
+
+        bool wasReady = IsWarmupReady;
+        if (!AdvanceWarmup(settings)) return false;
+        if (wasReady) UpdateReadyPreview(settings);
+        return true;
+    }
+
+    internal void Tick(SpeakingBarPreviewSettings settings, float unscaledDeltaTime)
     {
         if (_disposed || !CardRoot.gameObject.activeInHierarchy) return;
-        if (!EnsureWorld()) return;
+        bool wasReady = IsWarmupReady;
+        if (!AdvanceWarmup(settings)) return;
 
-        UpdateCameraFrame(out float worldWidth, out float worldHeight);
-        bool measurementsChanged = RefreshLabelMeasurements();
-        RefreshMissingAvatars();
-
-        var snapshot = SettingsSnapshot.From(settings);
-        if (!_hasLastSettings || snapshot != _lastSettings || measurementsChanged ||
-            Mathf.Abs(worldWidth - _lastWorldWidth) > 0.0001f ||
-            Mathf.Abs(worldHeight - _lastWorldHeight) > 0.0001f)
-        {
-            Layout(snapshot, worldWidth, worldHeight);
-            _lastSettings = snapshot;
-            _hasLastSettings = true;
-            _lastWorldWidth = worldWidth;
-            _lastWorldHeight = worldHeight;
-        }
-
+        if (wasReady) UpdateReadyPreview(settings);
         AnimateRings(Mathf.Max(0f, unscaledDeltaTime));
     }
 
@@ -308,91 +388,212 @@ internal sealed class SpeakingBarLivePreview
         _slots.Clear();
     }
 
-    private bool EnsureWorld()
+    private bool AdvanceWarmup(SpeakingBarPreviewSettings settings)
     {
-        if (_camera != null && _cameraObject != null && _worldRoot != null && _barRoot != null)
-            return true;
+        if (IsWarmupReady) return true;
+        // Prewarm and visible Tick can both run in one UI frame. Never let that double the
+        // construction budget or turn a reveal into another burst of work.
+        if (_lastWarmupFrame == Time.frameCount) return false;
+        _lastWarmupFrame = Time.frameCount;
+        if (_warmupStage == WarmupStage.Ready)
+        {
+            // A Unity object or render target was lost after a completed warmup. Rebuild through
+            // the same bounded path instead of falling back to a one-frame reconstruction.
+            DestroyBrokenWorld();
+            SetWarmupStatus();
+        }
         if (IsUnavailable || Time.unscaledTime < _nextWorldRetryTime)
             return false;
 
-        DestroyBrokenWorld();
+        WarmupStage failedStage = _warmupStage;
         try
         {
-            _worldRoot = new GameObject("VC_SettingsPreviewWorld");
-            _worldRoot.layer = PreviewRenderingLayer;
-            Object.DontDestroyOnLoad(_worldRoot);
-            _worldRoot.hideFlags |= HideFlags.DontUnloadUnusedAsset;
-            _worldRoot.transform.position = new Vector3(FarWorldX, FarWorldY, 0f);
+            switch (_warmupStage)
+            {
+                case WarmupStage.World:
+                    CreateWorldObjects();
+                    _warmupStage = WarmupStage.Camera;
+                    break;
 
-            _barRoot = new GameObject("VC_SettingsPreviewBar");
-            _barRoot.layer = PreviewRenderingLayer;
-            _barRoot.transform.SetParent(_worldRoot.transform, false);
+                case WarmupStage.Camera:
+                    CreatePreviewCamera();
+                    _warmupStage = WarmupStage.Texture;
+                    break;
 
-            var backdropObject = new GameObject("VC_SettingsPreviewBackdrop");
-            backdropObject.layer = PreviewRenderingLayer;
-            backdropObject.transform.SetParent(_barRoot.transform, false);
-            _backdrop = backdropObject.AddComponent<SpriteRenderer>();
-            _backdrop.sprite = global::VoiceChatPlugin.PingTrackerPatch.GetPreviewBackdropSprite();
-            _backdrop.drawMode = SpriteDrawMode.Sliced;
-            _backdrop.color = BackdropColor;
-            _backdrop.sortingLayerName = global::VoiceChatPlugin.VCSorting.Layer;
-            _backdrop.sortingOrder = global::VoiceChatPlugin.VCSorting.Backdrop;
-            _backdrop.maskInteraction = SpriteMaskInteraction.None;
+                case WarmupStage.Texture:
+                    UpdateCameraFrame(out _, out _);
+                    if (_renderTexture != null && _renderTexture.IsCreated())
+                        _warmupStage = WarmupStage.Slots;
+                    break;
 
-            for (int i = 0; i < SpeakingBarPreviewRoster.PlayerCount; i++)
-                _slots.Add(CreateSlot(i));
+                case WarmupStage.Slots:
+                    int remainingSlots = WarmupSlotsPerTick;
+                    while (remainingSlots-- > 0 &&
+                           _nextWarmupSlotIndex < SpeakingBarPreviewRoster.PlayerCount)
+                    {
+                        _slots.Add(CreateSlot(_nextWarmupSlotIndex));
+                        _nextWarmupSlotIndex++;
+                    }
+                    if (_nextWarmupSlotIndex >= SpeakingBarPreviewRoster.PlayerCount)
+                        _warmupStage = WarmupStage.Avatars;
+                    break;
 
-            _cameraObject = new GameObject("VC_SettingsPreviewCamera");
-            Object.DontDestroyOnLoad(_cameraObject);
-            _cameraObject.hideFlags |= HideFlags.DontUnloadUnusedAsset;
-            _cameraObject.transform.position = new Vector3(FarWorldX, FarWorldY, -10f);
-            _camera = _cameraObject.AddComponent<Camera>();
-            // A target texture is installed atomically by EnsureRenderTexture before this
-            // camera can render. It must never fall back to clearing the game display.
-            _camera.enabled = false;
-            _camera.orthographic = true;
-            _camera.orthographicSize = FallbackOrthographicSize;
-            _camera.clearFlags = CameraClearFlags.SolidColor;
-            _camera.backgroundColor = new Color(0.025f, 0.04f, 0.065f, 1f);
-            _camera.cullingMask = 1 << PreviewRenderingLayer;
-            _camera.allowHDR = false;
-            _camera.allowMSAA = false;
-            _camera.nearClipPlane = 0.1f;
-            _camera.farClipPlane = 100f;
+                case WarmupStage.Avatars:
+                    int remainingAvatars = WarmupAvatarsPerTick;
+                    while (remainingAvatars-- > 0 &&
+                           _nextWarmupAvatarIndex < _slots.Count)
+                    {
+                        TryCreateAvatar(_slots[_nextWarmupAvatarIndex]);
+                        _nextWarmupAvatarIndex++;
+                    }
+                    if (_nextWarmupAvatarIndex >= SpeakingBarPreviewRoster.PlayerCount)
+                        _warmupStage = WarmupStage.Layout;
+                    break;
 
-            _hasLastSettings = false;
-            _lastWorldWidth = -1f;
-            _lastWorldHeight = -1f;
-            _worldFailureCount = 0;
-            _nextWorldRetryTime = 0f;
-            SetWorldAvailabilityStatus(unavailable: false);
-            return true;
+                case WarmupStage.Layout:
+                    UpdateCameraFrame(out float worldWidth, out float worldHeight);
+                    RefreshLabelMeasurements();
+                    Layout(settings, worldWidth, worldHeight);
+                    _lastSettings = settings;
+                    _hasLastSettings = true;
+                    _lastWorldWidth = worldWidth;
+                    _lastWorldHeight = worldHeight;
+                    _worldFailureCount = 0;
+                    _nextWorldRetryTime = 0f;
+                    _warmupStage = WarmupStage.Ready;
+                    SetWorldAvailabilityStatus(unavailable: false);
+                    ApplyRenderingState();
+                    return true;
+            }
         }
         catch (Exception ex)
         {
-            _worldFailureCount++;
-            bool unavailable = _worldFailureCount >= WorldFailureLimit;
-            if (!unavailable)
-            {
-                float backoff = WorldRetryBaseDelaySeconds *
-                    Mathf.Pow(2f, _worldFailureCount - 1);
-                _nextWorldRetryTime = Time.unscaledTime +
-                    Mathf.Min(backoff, WorldRetryMaximumDelaySeconds);
-            }
-            else
-            {
-                _nextWorldRetryTime = float.PositiveInfinity;
-            }
+            HandleWarmupFailure(ex, failedStage);
+        }
 
-            DestroyBrokenWorld();
-            SetWorldAvailabilityStatus(unavailable);
-            string disposition = unavailable
-                ? " Preview disabled after repeated failures."
-                : $" Retrying in {Mathf.Max(0f, _nextWorldRetryTime - Time.unscaledTime):0.0}s.";
-            VoiceChatPluginMain.Logger.LogWarning(
-                $"[PC-UI] Could not create speaking-bar live preview " +
-                $"({_worldFailureCount}/{WorldFailureLimit}): {ex.Message}.{disposition}");
-            return false;
+        return false;
+    }
+
+    private void CreateWorldObjects()
+    {
+        _worldRoot = new GameObject("VC_SettingsPreviewWorld");
+        _worldRoot.layer = PreviewRenderingLayer;
+        Object.DontDestroyOnLoad(_worldRoot);
+        _worldRoot.hideFlags |= HideFlags.DontUnloadUnusedAsset;
+        _worldRoot.transform.position = new Vector3(FarWorldX, FarWorldY, 0f);
+        _worldRoot.SetActive(false);
+
+        _barRoot = new GameObject("VC_SettingsPreviewBar");
+        _barRoot.layer = PreviewRenderingLayer;
+        _barRoot.transform.SetParent(_worldRoot.transform, false);
+
+        var backdropObject = new GameObject("VC_SettingsPreviewBackdrop");
+        backdropObject.layer = PreviewRenderingLayer;
+        backdropObject.transform.SetParent(_barRoot.transform, false);
+        _backdrop = backdropObject.AddComponent<SpriteRenderer>();
+        _backdrop.sprite = global::VoiceChatPlugin.PingTrackerPatch.GetPreviewBackdropSprite();
+        _backdrop.drawMode = SpriteDrawMode.Sliced;
+        _backdrop.color = BackdropColor;
+        _backdrop.sortingLayerName = global::VoiceChatPlugin.VCSorting.Layer;
+        _backdrop.sortingOrder = global::VoiceChatPlugin.VCSorting.Backdrop;
+        _backdrop.maskInteraction = SpriteMaskInteraction.None;
+    }
+
+    private void CreatePreviewCamera()
+    {
+        _cameraObject = new GameObject("VC_SettingsPreviewCamera");
+        Object.DontDestroyOnLoad(_cameraObject);
+        _cameraObject.hideFlags |= HideFlags.DontUnloadUnusedAsset;
+        _cameraObject.transform.position = new Vector3(FarWorldX, FarWorldY, -10f);
+        _camera = _cameraObject.AddComponent<Camera>();
+        // A target texture is installed atomically by EnsureRenderTexture before this camera
+        // can render. It must never fall back to clearing the game display.
+        _camera.enabled = false;
+        _camera.orthographic = true;
+        _camera.orthographicSize = FallbackOrthographicSize;
+        _camera.clearFlags = CameraClearFlags.SolidColor;
+        _camera.backgroundColor = new Color(0.025f, 0.04f, 0.065f, 1f);
+        _camera.cullingMask = 1 << PreviewRenderingLayer;
+        _camera.allowHDR = false;
+        _camera.allowMSAA = false;
+        _camera.nearClipPlane = 0.1f;
+        _camera.farClipPlane = 100f;
+    }
+
+    private void HandleWarmupFailure(Exception ex, WarmupStage failedStage)
+    {
+        _worldFailureCount++;
+        bool unavailable = _worldFailureCount >= WorldFailureLimit;
+        if (!unavailable)
+        {
+            float backoff = WorldRetryBaseDelaySeconds *
+                Mathf.Pow(2f, _worldFailureCount - 1);
+            _nextWorldRetryTime = Time.unscaledTime +
+                Mathf.Min(backoff, WorldRetryMaximumDelaySeconds);
+        }
+        else
+        {
+            _nextWorldRetryTime = float.PositiveInfinity;
+        }
+
+        DestroyBrokenWorld();
+        SetWorldAvailabilityStatus(unavailable);
+        string disposition = unavailable
+            ? " Preview disabled after repeated failures."
+            : $" Retrying in {Mathf.Max(0f, _nextWorldRetryTime - Time.unscaledTime):0.0}s.";
+        VoiceChatPluginMain.Logger.LogWarning(
+            $"[PC-UI] Could not prewarm speaking-bar live preview " +
+            $"during {failedStage} ({_worldFailureCount}/{WorldFailureLimit}): " +
+            $"{ex.Message}.{disposition}");
+    }
+
+    private void UpdateReadyPreview(SpeakingBarPreviewSettings settings)
+    {
+        UpdateCameraFrame(out float worldWidth, out float worldHeight);
+        bool measurementsChanged = RefreshLabelMeasurements();
+        RefreshMissingAvatars();
+
+        if (!_hasLastSettings || settings != _lastSettings || measurementsChanged ||
+            Mathf.Abs(worldWidth - _lastWorldWidth) > 0.0001f ||
+            Mathf.Abs(worldHeight - _lastWorldHeight) > 0.0001f)
+        {
+            Layout(settings, worldWidth, worldHeight);
+            _lastSettings = settings;
+            _hasLastSettings = true;
+            _lastWorldWidth = worldWidth;
+            _lastWorldHeight = worldHeight;
+        }
+
+        ApplyRenderingState();
+    }
+
+    private void ApplyRenderingState()
+    {
+        bool canRender = _shouldRender && IsWarmupReady;
+        _rawImage.color = canRender
+            ? Color.white
+            : new Color32(4, 7, 11, 255);
+        if (_camera != null)
+        {
+            _camera.enabled = canRender &&
+                              _camera.targetTexture == _renderTexture;
+        }
+        if (_worldRoot != null)
+            _worldRoot.SetActive(canRender);
+    }
+
+    private void SetWarmupStatus()
+    {
+        try
+        {
+            _badgeText.text = "LOADING";
+            _badgeText.color = VoiceUiKit.TextMuted;
+            _statusText.text = "PREPARING PREVIEW";
+            _detailText.text = "Building the virtual HUD in the background";
+        }
+        catch
+        {
+            // Status decoration is best-effort; construction remains independently guarded.
         }
     }
 
@@ -419,7 +620,7 @@ internal sealed class SpeakingBarLivePreview
                 return;
             }
 
-            _badgeText.text = "●  LIVE";
+            _badgeText.text = _liveBadgeLabel;
             _badgeText.color = new Color32(118, 239, 165, 255);
         }
         catch
@@ -431,7 +632,6 @@ internal sealed class SpeakingBarLivePreview
     private PreviewSlot CreateSlot(int index)
     {
         var slot = new PreviewSlot(index);
-        TryCreateAvatar(slot);
 
         slot.RingObject = new GameObject($"VC_SettingsPreviewRing_{index}");
         slot.RingObject.layer = PreviewRenderingLayer;
@@ -456,9 +656,13 @@ internal sealed class SpeakingBarLivePreview
         slot.Label.sortingOrder = global::VoiceChatPlugin.VCSorting.Text;
         slot.Label.color = Color.white;
         slot.Label.alpha = 1f;
+        // Keep fontless world-space TMP components out of Unity's render/update pass. Each label
+        // is enabled only after the visible hierarchy lets us assign a known-good game font.
+        slot.Label.enabled = false;
         slot.Label.rectTransform.sizeDelta = new Vector2(
             SpeakingBarVisualMetrics.MaximumLabelWidth,
             SpeakingBarVisualMetrics.MaximumLabelHeight);
+        slot.StyleApplied = global::VoiceChatPlugin.PingTrackerPatch.ApplyPreviewNameStyle(slot.Label);
         return slot;
     }
 
@@ -467,11 +671,10 @@ internal sealed class SpeakingBarLivePreview
         if (_barRoot == null) return;
         if (slot.Icon != null) Object.Destroy(slot.Icon);
         slot.Icon = null;
-        if (global::VoiceChatPlugin.CrewmateAvatarRenderer.TryCreatePreview(
+        if (global::VoiceChatPlugin.CrewmateAvatarRenderer.TryCreateLightweightPreview(
                 slot.Index,
                 _barRoot.transform,
                 PreviewRenderingLayer,
-                attachToOverlayCamera: false,
                 out var icon) && icon != null)
         {
             slot.Icon = icon;
@@ -481,16 +684,24 @@ internal sealed class SpeakingBarLivePreview
 
     private void RefreshMissingAvatars()
     {
-        if (Time.frameCount % 30 != 0) return;
-        bool recreated = false;
-        foreach (var slot in _slots)
+        if (_slots.Count == 0 || Time.frameCount < _nextMissingAvatarRetryFrame) return;
+
+        int checkedSlots = 0;
+        while (checkedSlots++ < _slots.Count)
         {
+            int index = _nextMissingAvatarIndex % _slots.Count;
+            _nextMissingAvatarIndex = (index + 1) % _slots.Count;
+            var slot = _slots[index];
             var body = slot.Icon != null ? slot.Icon.GetComponentInChildren<SpriteRenderer>(true) : null;
             if (body != null && body.sprite != null) continue;
+
             TryCreateAvatar(slot);
-            recreated = true;
+            _hasLastSettings = false;
+            _nextMissingAvatarRetryFrame = Time.frameCount + 2;
+            return;
         }
-        if (recreated) _hasLastSettings = false;
+
+        _nextMissingAvatarRetryFrame = Time.frameCount + 30;
     }
 
     private static void SetAvatarAlpha(GameObject icon, float alpha)
@@ -543,7 +754,7 @@ internal sealed class SpeakingBarLivePreview
                 _camera.targetTexture = _renderTexture;
             if (_rawImage.texture != _renderTexture)
                 _rawImage.texture = _renderTexture;
-            _camera.enabled = _shouldRender;
+            _camera.enabled = _shouldRender && IsWarmupReady;
             return;
         }
 
@@ -554,7 +765,7 @@ internal sealed class SpeakingBarLivePreview
             {
                 _camera.targetTexture = _renderTexture;
                 _rawImage.texture = _renderTexture;
-                _camera.enabled = _shouldRender;
+                _camera.enabled = _shouldRender && IsWarmupReady;
             }
             else
             {
@@ -586,11 +797,11 @@ internal sealed class SpeakingBarLivePreview
             if (!replacement.Create() || !replacement.IsCreated())
                 throw new InvalidOperationException("Unity could not allocate the preview render texture.");
 
-            float width = ViewportMaxWidth;
+            float width = _viewportMaxWidth;
             float height = width / aspect;
-            if (height > ViewportMaxHeight)
+            if (height > _viewportMaxHeight)
             {
-                height = ViewportMaxHeight;
+                height = _viewportMaxHeight;
                 width = height * aspect;
             }
 
@@ -607,7 +818,7 @@ internal sealed class SpeakingBarLivePreview
             _lastAspect = aspect;
             _nextTextureRetryTime = 0f;
             _hasLastSettings = false;
-            _camera.enabled = _shouldRender;
+            _camera.enabled = _shouldRender && IsWarmupReady;
 
             if (previous != null)
             {
@@ -628,7 +839,7 @@ internal sealed class SpeakingBarLivePreview
             {
                 _camera.targetTexture = _renderTexture;
                 _rawImage.texture = _renderTexture;
-                _camera.enabled = _shouldRender;
+                _camera.enabled = _shouldRender && IsWarmupReady;
             }
             else
             {
@@ -645,31 +856,78 @@ internal sealed class SpeakingBarLivePreview
 
     private bool RefreshLabelMeasurements()
     {
-        bool changed = false;
-        foreach (var slot in _slots)
+        if (_slots.Count == 0 || _completedLabelMeasurements >= _slots.Count)
+            return false;
+
+        // World-space TMP cannot safely resolve preferred sizes while its hierarchy is inactive
+        // under IL2CPP: ParseInputText can dereference an uninitialised font lookup table. The
+        // preview already starts with deterministic name-size estimates, so defer optional exact
+        // measurement until the world is visible, process at most one label per frame, and retain
+        // the estimate if TMP still cannot measure it. Label cosmetics must never take the whole
+        // live preview offline.
+        int checkedSlots = 0;
+        while (checkedSlots++ < _slots.Count)
         {
+            int index = _nextLabelMeasurementIndex % _slots.Count;
+            _nextLabelMeasurementIndex = (index + 1) % _slots.Count;
+            var slot = _slots[index];
+            if (slot.MeasurementComplete) continue;
+
+            if (!slot.Label.gameObject.activeInHierarchy)
+                return false;
+
             if (!slot.StyleApplied || slot.Label.font == null)
                 slot.StyleApplied = global::VoiceChatPlugin.PingTrackerPatch.ApplyPreviewNameStyle(slot.Label);
+            if (slot.Label.font == null)
+            {
+                // ApplyPreviewNameStyle may intentionally decline while scene-owned name styling
+                // is unavailable. The setup UI already resolved a safe game font, so use it as a
+                // preview-only fallback once assigning fonts is safe in the active hierarchy.
+                var fallbackFont = VoiceUiKit.GameFont();
+                if (fallbackFont != null)
+                {
+                    try { slot.Label.font = fallbackFont; }
+                    catch { }
+                }
+            }
+            if (slot.Label.font == null)
+                return false;
 
-            float width = slot.Label.preferredWidth;
-            float height = slot.Label.preferredHeight;
-            if (float.IsNaN(width) || float.IsInfinity(width) || width < 0f ||
-                float.IsNaN(height) || float.IsInfinity(height) || height < 0f)
-                continue;
+            slot.Label.enabled = true;
 
-            width = Mathf.Min(width, SpeakingBarVisualMetrics.MaximumLabelWidth);
-            height = Mathf.Min(height, SpeakingBarVisualMetrics.MaximumLabelHeight);
-            if (Mathf.Abs(width - slot.LabelWidth) <= 0.01f &&
-                Mathf.Abs(height - slot.LabelHeight) <= 0.01f)
-                continue;
-            slot.LabelWidth = width;
-            slot.LabelHeight = height;
-            changed = true;
+            try
+            {
+                float width = slot.Label.preferredWidth;
+                float height = slot.Label.preferredHeight;
+                slot.MeasurementComplete = true;
+                _completedLabelMeasurements++;
+                if (float.IsNaN(width) || float.IsInfinity(width) || width < 0f ||
+                    float.IsNaN(height) || float.IsInfinity(height) || height < 0f)
+                    return false;
+
+                width = Mathf.Min(width, SpeakingBarVisualMetrics.MaximumLabelWidth);
+                height = Mathf.Min(height, SpeakingBarVisualMetrics.MaximumLabelHeight);
+                if (Mathf.Abs(width - slot.LabelWidth) <= 0.01f &&
+                    Mathf.Abs(height - slot.LabelHeight) <= 0.01f)
+                    return false;
+                slot.LabelWidth = width;
+                slot.LabelHeight = height;
+                return true;
+            }
+            catch
+            {
+                // The deterministic constructor estimate is deliberately usable on its own.
+                // Do not retry a TMP parser failure every frame or restart the whole preview.
+                slot.MeasurementComplete = true;
+                _completedLabelMeasurements++;
+                return false;
+            }
         }
-        return changed;
+
+        return false;
     }
 
-    private void Layout(SettingsSnapshot settings, float availableWidth, float availableHeight)
+    private void Layout(SpeakingBarPreviewSettings settings, float availableWidth, float availableHeight)
     {
         if (_barRoot == null || _backdrop == null || _slots.Count == 0) return;
 
@@ -983,17 +1241,17 @@ internal sealed class SpeakingBarLivePreview
         }
     }
 
-    private void UpdateStatus(SettingsSnapshot settings, int lineCount)
+    private void UpdateStatus(SpeakingBarPreviewSettings settings, int lineCount)
     {
         string placement = settings.ManualLayout
             ? $"MANUAL {settings.ManualOrientation.ToString().ToUpperInvariant()}"
             : PositionLabel(settings.Position);
         string layout = lineCount == 1 ? "1 LANE" : $"{lineCount} LINES";
         int percent = Mathf.RoundToInt(settings.Scale * 100f);
-        _statusText.text = $"{placement}  •  {layout}  •  {percent}%";
+        _statusText.text = $"{placement} / {layout} / {percent}%";
         _detailText.text = settings.Backdrop
-            ? "10 alive  •  5 ghosts  •  backdrop on"
-            : "10 alive  •  5 ghosts  •  backdrop off";
+            ? "10 alive / 5 ghosts / backdrop on"
+            : "10 alive / 5 ghosts / backdrop off";
     }
 
     private static string PositionLabel(SpeakingBarPosition position) => position switch
@@ -1033,7 +1291,17 @@ internal sealed class SpeakingBarLivePreview
         _barRoot = null;
         _backdrop = null;
         _slots.Clear();
+        _warmupStage = WarmupStage.World;
+        _nextWarmupSlotIndex = 0;
+        _nextWarmupAvatarIndex = 0;
+        _nextLabelMeasurementIndex = 0;
+        _completedLabelMeasurements = 0;
+        _nextMissingAvatarIndex = 0;
+        _nextMissingAvatarRetryFrame = 0;
+        _lastWarmupFrame = -1;
         _lastAspect = -1f;
+        _lastWorldWidth = -1f;
+        _lastWorldHeight = -1f;
         _nextTextureRetryTime = 0f;
         _hasLastSettings = false;
     }

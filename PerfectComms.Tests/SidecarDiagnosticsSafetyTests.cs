@@ -468,4 +468,35 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.DoesNotContain("commandSeq=", stoppedDetails);
         Assert.DoesNotContain("elapsedMs=", stoppedDetails);
     }
+
+    [Fact]
+    public void PlaybackStateParserPreservesSelectionAcknowledgementAndResolvedRoute()
+    {
+        const string accepted = """
+            {"op":"media-state","direction":"playback","state":"command-accepted",
+             "action":"select-output-device","stream_generation":0,"running":false,
+             "requested_device":"Headphones","requested_default":false}
+            """;
+        const string started = """
+            {"op":"media-state","direction":"playback","state":"stream-started",
+             "stream_generation":9,"running":true,"requested_device":"Headphones",
+             "resolved_device":"Default Speakers","requested_default":false,
+             "requested_matched":false,"fell_back_to_default":true}
+            """;
+
+        Assert.True(SidecarVoiceClient.TryReadPlaybackState(accepted, out var acknowledgement));
+        Assert.Equal("command-accepted", acknowledgement.State);
+        Assert.Equal("select-output-device", acknowledgement.Action);
+        Assert.Equal("Headphones", acknowledgement.RequestedDevice);
+
+        Assert.True(SidecarVoiceClient.TryReadPlaybackState(started, out var playback));
+        Assert.Equal((ulong)9, playback.StreamGeneration);
+        Assert.Equal("Default Speakers", playback.ResolvedDevice);
+        Assert.True(playback.FellBackToDefault);
+        Assert.False(playback.RequestedMatched);
+
+        Assert.False(SidecarVoiceClient.TryReadPlaybackState(
+            "{\"direction\":\"capture\",\"state\":\"stream-started\",\"stream_generation\":1}",
+            out _));
+    }
 }
