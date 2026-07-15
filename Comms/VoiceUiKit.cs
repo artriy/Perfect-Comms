@@ -84,6 +84,18 @@ internal static class VoiceUiKit
         VoiceFirstRunSetup.IsOpen || VoiceSettingsPanel.IsOpen ||
         HostSettingsPanel.IsOpen || VoiceVolumeMenu.IsOpen;
 
+    internal static void ClosePersistentPanels(string reason)
+    {
+        // These panels live on the persistent overlay canvas, so scene destruction cannot close
+        // them for us. Close every settings surface at a scene/session boundary and release any
+        // transmit hold captured before the modal appeared.
+        try { VoiceSettingsPanel.ForceClose(); } catch { }
+        try { HostSettingsPanel.ForceClose(); } catch { }
+        try { VoiceVolumeMenu.ForceClose(); } catch { }
+        try { VoiceChatPatches.ReleaseHeldTransmitInputs(); } catch { }
+        try { VoiceDiagnostics.Log("voice.ui.panels_closed", $"reason={reason}"); } catch { }
+    }
+
     private static bool _swallowActive;
     private static bool _swallowSawRelease;
     private static int _swallowFrame = -1000;
@@ -108,6 +120,12 @@ internal static class VoiceUiKit
         if (frame == _tickFrame) return;
         _tickFrame = frame;
         UpdateSwallow();
+        if (AnyPanelOpen)
+        {
+            // Modal input capture is authoritative for the whole frame. This also handles a panel
+            // opened after KeyboardJoystick.Update, preventing a one-frame PTT/radio leak.
+            try { VoiceChatPatches.ReleaseHeldTransmitInputs(); } catch { }
+        }
         BeginTooltipFrame();
 
         try { VoiceOptionsMenuEntry.TickButton(); VoiceHostMenuEntry.TickHostButton(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] TickButton threw: " + e.Message); }

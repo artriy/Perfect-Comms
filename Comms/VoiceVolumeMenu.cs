@@ -66,6 +66,7 @@ public static class VoiceVolumeMenu
         _shell.PaneRoot.anchoredPosition = Vector2.zero;
         _animT = 0f;
         _shown = true;
+        VoiceChatPatches.ReleaseHeldTransmitInputs();
 
         if (!rebuilt) RebuildRows();
 

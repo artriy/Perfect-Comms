@@ -138,7 +138,7 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
     client.set_nodelay(true).ok();
     client
         .write_all(&encode_control(
-            r#"{"op":"hello","proto":8,"token":"e2e-token"}"#,
+            r#"{"op":"hello","proto":9,"token":"e2e-token"}"#,
         ))
         .unwrap();
 
@@ -153,6 +153,12 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
 
     client
         .write_all(&encode_control(r#"{"op":"ping"}"#))
+        .unwrap();
+    // Extended signal windows/stats are intentionally opt-in in production.
+    client
+        .write_all(&encode_control(
+            r#"{"op":"set-diagnostics","enabled":true}"#,
+        ))
         .unwrap();
     client
         .write_all(&encode_control(r#"{"op":"start"}"#))

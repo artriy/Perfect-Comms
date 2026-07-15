@@ -2,7 +2,10 @@ use crate::diagnostics::{
     send_media_state, CaptureClockStatus, CaptureDiagnostics, MediaStateEvent, PlaybackDiagnostics,
     StreamDescriptor,
 };
-use crate::proto::{AudioFrame, AudioRing, DeviceInfo, PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::proto::{
+    AudioFrame, CaptureFrameMetadata, CaptureFrameProducer, DeviceInfo, PlaybackRing,
+    FRAME_SAMPLES, SAMPLE_RATE,
+};
 use crate::rtc::NativeCounters;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
@@ -14,28 +17,129 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use crate::input::SyntheticTone as ToneSource;
 pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
 
-pub fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return interleaved.to_vec();
-    }
-    let frames = interleaved.len() / channels;
-    let mut out = Vec::with_capacity(frames);
-    for f in 0..frames {
-        let base = f * channels;
-        let mut sum = 0.0f32;
-        for c in 0..channels {
-            sum += interleaved[base + c];
-        }
-        out.push(sum / channels as f32);
-    }
-    out
+const DOWNMIX_SWITCH_RATIO: f64 = 1.6;
+const CORRELATED_STEREO_THRESHOLD: f64 = 0.55;
+
+/// Stateful microphone downmixer. Many USB headsets expose a nominal stereo stream with speech
+/// on only one side; averaging that stream loses 6 dB. Other devices expose inverted channels,
+/// where averaging can cancel speech almost completely. Correlated, balanced stereo is still
+/// averaged normally, while asymmetric or decorrelated input follows a dominant channel with
+/// hysteresis so small block-to-block energy changes cannot make the source flutter left/right.
+pub struct AdaptiveDownmixer {
+    channels: usize,
+    dominant_channel: usize,
+    scratch: Vec<f32>,
+    energy: Vec<f64>,
 }
+
+impl AdaptiveDownmixer {
+    pub fn new(channels: usize) -> Self {
+        Self::with_capacity(channels, 0)
+    }
+
+    fn with_capacity(channels: usize, frames: usize) -> Self {
+        let channels = channels.max(1);
+        Self {
+            channels,
+            dominant_channel: 0,
+            scratch: Vec::with_capacity(frames),
+            energy: vec![0.0; channels],
+        }
+    }
+
+    pub fn process(&mut self, interleaved: &[f32]) -> &[f32] {
+        let frames = interleaved.len() / self.channels;
+        self.scratch.clear();
+        self.scratch.reserve(frames);
+        if self.channels == 1 {
+            self.scratch
+                .extend(interleaved.iter().take(frames).map(|sample| {
+                    if sample.is_finite() {
+                        *sample
+                    } else {
+                        0.0
+                    }
+                }));
+            return &self.scratch;
+        }
+
+        self.energy.fill(0.0);
+        let mut cross = 0.0f64;
+        for frame in interleaved.chunks_exact(self.channels) {
+            for (channel, sample) in frame.iter().enumerate() {
+                let sample = if sample.is_finite() { *sample } else { 0.0 };
+                self.energy[channel] += f64::from(sample) * f64::from(sample);
+            }
+            let left = if frame[0].is_finite() { frame[0] } else { 0.0 };
+            let right = if frame[1].is_finite() { frame[1] } else { 0.0 };
+            cross += f64::from(left) * f64::from(right);
+        }
+
+        let candidate = self
+            .energy
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map_or(0, |(channel, _)| channel);
+        let current_energy = self.energy[self.dominant_channel.min(self.channels - 1)];
+        if candidate != self.dominant_channel
+            && self.energy[candidate] > current_energy * DOWNMIX_SWITCH_RATIO
+        {
+            self.dominant_channel = candidate;
+        }
+
+        let left_energy = self.energy[0];
+        let right_energy = self.energy[1];
+        let correlation = if left_energy > f64::EPSILON && right_energy > f64::EPSILON {
+            cross / (left_energy * right_energy).sqrt()
+        } else {
+            0.0
+        };
+        let stereo_balance = if left_energy.min(right_energy) > f64::EPSILON {
+            left_energy.max(right_energy) / left_energy.min(right_energy)
+        } else {
+            f64::INFINITY
+        };
+        let average_correlated_stereo = self.channels == 2
+            && correlation >= CORRELATED_STEREO_THRESHOLD
+            && stereo_balance <= DOWNMIX_SWITCH_RATIO;
+
+        for frame in interleaved.chunks_exact(self.channels) {
+            let sample = if average_correlated_stereo {
+                let left = if frame[0].is_finite() { frame[0] } else { 0.0 };
+                let right = if frame[1].is_finite() { frame[1] } else { 0.0 };
+                (left + right) * 0.5
+            } else {
+                let value = frame[self.dominant_channel.min(frame.len() - 1)];
+                if value.is_finite() {
+                    value
+                } else {
+                    0.0
+                }
+            };
+            self.scratch.push(sample);
+        }
+        &self.scratch
+    }
+}
+
+pub fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    AdaptiveDownmixer::new(channels)
+        .process(interleaved)
+        .to_vec()
+}
+
+const SINC_FILTER_TAPS: usize = 48;
+const SINC_FILTER_HALF: usize = SINC_FILTER_TAPS / 2;
+const SINC_FILTER_PHASES: usize = 1024;
 
 pub struct Resampler {
     in_rate: u32,
-    ratio: f64,
-    pos: f64,
+    // Source position in units of 1 / SAMPLE_RATE input samples. Keeping the phase rational
+    // avoids floating-point drift when callbacks use different chunk boundaries.
+    pos_numerator: u64,
     source: Vec<f32>,
+    kernel: Vec<[f32; SINC_FILTER_TAPS]>,
     source_base_ts_ns: Option<u64>,
     // A discontinuity can arrive in a callback too small to emit a resampled sample. Preserve
     // that fact until a non-empty output block carries the invalid boundary to the accumulator.
@@ -50,14 +154,30 @@ pub struct ResampledBlock {
     pub timing_valid: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct ResampledTiming {
+    first_capture_ts_ns: u64,
+    capture_callback_ts_ns: u64,
+    timing_valid: bool,
+}
+
 impl Resampler {
     pub fn new(in_rate: u32) -> Resampler {
         let in_rate = in_rate.max(1);
+        let kernel = if in_rate == SAMPLE_RATE {
+            Vec::new()
+        } else {
+            build_sinc_kernel(in_rate)
+        };
         Resampler {
             in_rate,
-            ratio: in_rate as f64 / SAMPLE_RATE as f64,
-            pos: 0.0,
-            source: Vec::new(),
+            pos_numerator: SINC_FILTER_HALF as u64 * u64::from(SAMPLE_RATE),
+            source: if in_rate == SAMPLE_RATE {
+                Vec::new()
+            } else {
+                vec![0.0; SINC_FILTER_HALF]
+            },
+            kernel,
             source_base_ts_ns: None,
             timing_tainted: false,
         }
@@ -68,10 +188,21 @@ impl Resampler {
     }
 
     pub fn reset(&mut self) {
-        self.pos = 0.0;
+        self.pos_numerator = SINC_FILTER_HALF as u64 * u64::from(SAMPLE_RATE);
         self.source.clear();
+        if self.in_rate != SAMPLE_RATE {
+            self.source.resize(SINC_FILTER_HALF, 0.0);
+        }
         self.source_base_ts_ns = None;
         self.timing_tainted = false;
+    }
+
+    fn reserve_realtime_input(&mut self, input_samples: usize) {
+        self.source.reserve(
+            input_samples
+                .saturating_add(SINC_FILTER_TAPS)
+                .saturating_sub(self.source.capacity()),
+        );
     }
 
     pub fn process_timed(
@@ -82,15 +213,43 @@ impl Resampler {
         capture_timestamp_valid: bool,
         frame_timing_valid: bool,
     ) -> ResampledBlock {
+        let mut samples = Vec::new();
+        let timing = self.process_timed_into(
+            mono_in,
+            first_capture_ts_ns,
+            callback_ts_ns,
+            capture_timestamp_valid,
+            frame_timing_valid,
+            &mut samples,
+        );
+        ResampledBlock {
+            samples,
+            first_capture_ts_ns: timing.first_capture_ts_ns,
+            capture_callback_ts_ns: timing.capture_callback_ts_ns,
+            timing_valid: timing.timing_valid,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_timed_into(
+        &mut self,
+        mono_in: &[f32],
+        first_capture_ts_ns: u64,
+        callback_ts_ns: u64,
+        capture_timestamp_valid: bool,
+        frame_timing_valid: bool,
+        output: &mut Vec<f32>,
+    ) -> ResampledTiming {
+        output.clear();
         self.timing_tainted |= !frame_timing_valid;
         if mono_in.is_empty() {
-            return ResampledBlock::default();
+            return ResampledTiming::default();
         }
-        if (self.ratio - 1.0).abs() < f64::EPSILON {
+        if self.in_rate == SAMPLE_RATE {
             let timing_valid = !self.timing_tainted;
             self.timing_tainted = false;
-            return ResampledBlock {
-                samples: mono_in.to_vec(),
+            output.extend_from_slice(mono_in);
+            return ResampledTiming {
                 first_capture_ts_ns,
                 capture_callback_ts_ns: callback_ts_ns,
                 timing_valid,
@@ -105,32 +264,44 @@ impl Resampler {
             self.source_base_ts_ns = Some(first_capture_ts_ns.saturating_sub(retained_duration_ns));
         }
         self.source.extend_from_slice(mono_in);
-        let first_output_offset_ns =
-            (self.pos * 1_000_000_000.0 / f64::from(self.in_rate)).round() as u64;
+        let first_output_offset_ns = ((u128::from(self.pos_numerator) * 1_000_000_000)
+            / (u128::from(SAMPLE_RATE) * u128::from(self.in_rate)))
+            as u64;
         let output_ts_ns = self
             .source_base_ts_ns
             .map_or(0, |base| base.saturating_add(first_output_offset_ns));
-        let mut out = Vec::with_capacity(
-            mono_in.len().saturating_mul(SAMPLE_RATE as usize) / self.in_rate as usize + 2,
-        );
-        // Linear interpolation needs the sample on both sides. Keep the final source sample until
-        // the next callback instead of repeating it at every callback boundary.
-        while self.pos + 1.0 < self.source.len() as f64 {
-            let i0 = self.pos.floor() as usize;
-            let frac = (self.pos - i0 as f64) as f32;
-            let s0 = self.source[i0];
-            let s1 = self.source[i0 + 1];
-            out.push(s0 + (s1 - s0) * frac);
-            self.pos += self.ratio;
+        let expected =
+            mono_in.len().saturating_mul(SAMPLE_RATE as usize) / self.in_rate as usize + 2;
+        output.reserve(expected);
+        // A precomputed 48-tap Blackman-windowed sinc rejects content above the destination
+        // Nyquist frequency before downsampling. Retaining half a filter of history and future
+        // input makes output independent of backend callback chunking.
+        let phase_denominator = u64::from(SAMPLE_RATE);
+        while self.pos_numerator + SINC_FILTER_HALF as u64 * phase_denominator
+            < self.source.len() as u64 * phase_denominator
+        {
+            let center = (self.pos_numerator / phase_denominator) as usize;
+            let phase = (((self.pos_numerator % phase_denominator) * SINC_FILTER_PHASES as u64)
+                / phase_denominator) as usize;
+            let start = center + 1 - SINC_FILTER_HALF;
+            let coefficients = &self.kernel[phase];
+            let sample = self.source[start..start + SINC_FILTER_TAPS]
+                .iter()
+                .zip(coefficients)
+                .map(|(sample, coefficient)| sample * coefficient)
+                .sum();
+            output.push(sample);
+            self.pos_numerator += u64::from(self.in_rate);
         }
 
-        // At high input rates the next interpolation position can legitimately overshoot the
-        // current callback. Drain only the available samples and retain that positional debt for
-        // the next callback instead of indexing past the vector.
-        let consumed = (self.pos.floor() as usize).min(self.source.len());
+        // Retain enough source history for the next convolution. At very high input rates the
+        // position may overshoot this callback; positional debt is kept just as before.
+        let consumed = (self.pos_numerator / phase_denominator)
+            .saturating_sub(SINC_FILTER_HALF as u64) as usize;
+        let consumed = consumed.min(self.source.len().saturating_sub(SINC_FILTER_HALF));
         if consumed > 0 {
             self.source.drain(0..consumed);
-            self.pos -= consumed as f64;
+            self.pos_numerator -= consumed as u64 * phase_denominator;
             if let Some(base) = self.source_base_ts_ns.as_mut() {
                 *base = base.saturating_add(
                     (consumed as u64).saturating_mul(1_000_000_000) / u64::from(self.in_rate),
@@ -138,16 +309,50 @@ impl Resampler {
             }
         }
         let timing_valid = !self.timing_tainted && output_ts_ns != 0;
-        if !out.is_empty() {
+        if !output.is_empty() {
             self.timing_tainted = false;
         }
-        ResampledBlock {
-            samples: out,
+        ResampledTiming {
             first_capture_ts_ns: output_ts_ns,
             capture_callback_ts_ns: callback_ts_ns,
             timing_valid,
         }
     }
+}
+
+fn build_sinc_kernel(in_rate: u32) -> Vec<[f32; SINC_FILTER_TAPS]> {
+    // Leave a small transition band so common 44.1/48/96/192 kHz device clocks receive useful
+    // stop-band attenuation despite the deliberately compact real-time filter.
+    let cutoff = (SAMPLE_RATE as f64 / f64::from(in_rate)).min(1.0) * 0.94;
+    let mut phases = Vec::with_capacity(SINC_FILTER_PHASES);
+    for phase in 0..SINC_FILTER_PHASES {
+        let fraction = phase as f64 / SINC_FILTER_PHASES as f64;
+        let mut coefficients = [0.0f32; SINC_FILTER_TAPS];
+        let mut sum = 0.0f64;
+        for (tap, coefficient) in coefficients.iter_mut().enumerate() {
+            let offset = tap as f64 - (SINC_FILTER_HALF - 1) as f64 - fraction;
+            let sinc_x = cutoff * offset;
+            let sinc = if sinc_x.abs() < 1.0e-12 {
+                cutoff
+            } else {
+                cutoff * (std::f64::consts::PI * sinc_x).sin() / (std::f64::consts::PI * sinc_x)
+            };
+            let normalized = (offset.abs() / SINC_FILTER_HALF as f64).min(1.0);
+            let window = 0.42
+                + 0.5 * (std::f64::consts::PI * normalized).cos()
+                + 0.08 * (std::f64::consts::TAU * normalized).cos();
+            let value = sinc * window;
+            *coefficient = value as f32;
+            sum += value;
+        }
+        if sum.abs() > f64::EPSILON {
+            for coefficient in &mut coefficients {
+                *coefficient = (*coefficient as f64 / sum) as f32;
+            }
+        }
+        phases.push(coefficients);
+    }
+    phases
 }
 
 pub struct FrameAccumulator {
@@ -171,9 +376,13 @@ impl Default for FrameAccumulator {
 
 impl FrameAccumulator {
     pub fn new() -> FrameAccumulator {
+        Self::with_capacity(FRAME_SAMPLES * 2, 8)
+    }
+
+    fn with_capacity(sample_capacity: usize, timeline_capacity: usize) -> FrameAccumulator {
         FrameAccumulator {
-            buf: Vec::with_capacity(FRAME_SAMPLES * 2),
-            timeline: VecDeque::new(),
+            buf: Vec::with_capacity(sample_capacity),
+            timeline: VecDeque::with_capacity(timeline_capacity),
         }
     }
 
@@ -187,32 +396,70 @@ impl FrameAccumulator {
     }
 
     pub fn push_and_drain(&mut self, block: ResampledBlock) -> Vec<AudioFrame> {
-        if block.samples.is_empty() {
-            return Vec::new();
-        }
-        let block_len = block.samples.len();
-        self.buf.extend_from_slice(&block.samples);
-        self.timeline.push_back(TimingSegment {
-            samples: block_len,
-            capture_ts_ns: block.first_capture_ts_ns,
-            callback_ts_ns: block.capture_callback_ts_ns,
-            valid: block.timing_valid,
-        });
         let mut frames = Vec::new();
-        while self.buf.len() >= FRAME_SAMPLES {
-            let timing = self.frame_timing(FRAME_SAMPLES);
-            let samples: Vec<f32> = self.buf.drain(0..FRAME_SAMPLES).collect();
-            self.consume_timeline(FRAME_SAMPLES);
+        self.push_samples_and_drain_into(
+            &block.samples,
+            ResampledTiming {
+                first_capture_ts_ns: block.first_capture_ts_ns,
+                capture_callback_ts_ns: block.capture_callback_ts_ns,
+                timing_valid: block.timing_valid,
+            },
+            &mut frames,
+        );
+        frames
+    }
+
+    fn push_samples_and_drain_into(
+        &mut self,
+        samples: &[f32],
+        timing: ResampledTiming,
+        frames: &mut Vec<AudioFrame>,
+    ) {
+        frames.clear();
+        self.push_samples_and_drain_with(samples, timing, |timing, samples| {
             frames.push(AudioFrame {
+                encoder_epoch: 0,
                 capture_generation: 0,
                 capture_open_attempt: 0,
                 capture_ts_ns: timing.capture_ts_ns,
                 capture_callback_ts_ns: timing.callback_ts_ns,
                 capture_timestamp_valid: timing.valid,
-                samples,
+                samples: samples.to_vec(),
             });
+        });
+    }
+
+    fn push_samples_and_drain_with<F>(
+        &mut self,
+        samples: &[f32],
+        timing: ResampledTiming,
+        mut emit: F,
+    ) -> usize
+    where
+        F: FnMut(TimingSegment, &[f32]),
+    {
+        if samples.is_empty() {
+            return 0;
         }
-        frames
+        let block_len = samples.len();
+        self.buf.extend_from_slice(samples);
+        self.timeline.push_back(TimingSegment {
+            samples: block_len,
+            capture_ts_ns: timing.first_capture_ts_ns,
+            callback_ts_ns: timing.capture_callback_ts_ns,
+            valid: timing.timing_valid,
+        });
+        let mut emitted = 0;
+        while self.buf.len() >= FRAME_SAMPLES {
+            let timing = self.frame_timing(FRAME_SAMPLES);
+            emit(timing, &self.buf[..FRAME_SAMPLES]);
+            self.consume_timeline(FRAME_SAMPLES);
+            let remaining = self.buf.len() - FRAME_SAMPLES;
+            self.buf.copy_within(FRAME_SAMPLES.., 0);
+            self.buf.truncate(remaining);
+            emitted += 1;
+        }
+        emitted
     }
 
     fn frame_timing(&self, samples: usize) -> TimingSegment {
@@ -1064,10 +1311,31 @@ fn supported_buffer_details(config: &cpal::SupportedStreamConfig) -> (String, u3
     }
 }
 
+const MIN_REALTIME_CAPTURE_RATE: u32 = 8_000;
+const MAX_REALTIME_CAPTURE_RATE: u32 = 384_000;
+const CAPTURE_PROCESS_CHUNK_FRAMES: usize = 256;
+const UNKNOWN_CALLBACK_MAX_FRAMES: usize = 65_536;
+const MAX_RESAMPLED_CHUNK_SAMPLES: usize =
+    CAPTURE_PROCESS_CHUNK_FRAMES * SAMPLE_RATE as usize / MIN_REALTIME_CAPTURE_RATE as usize + 2;
+const REALTIME_ACCUMULATOR_SAMPLES: usize = FRAME_SAMPLES + MAX_RESAMPLED_CHUNK_SAMPLES;
+const REALTIME_TIMING_SEGMENTS: usize = 64;
+
+fn callback_scratch_samples(buffer_max_frames: u32, channels: usize) -> Result<usize, String> {
+    let frames = if buffer_max_frames == 0 {
+        UNKNOWN_CALLBACK_MAX_FRAMES
+    } else {
+        (buffer_max_frames as usize).min(UNKNOWN_CALLBACK_MAX_FRAMES)
+    };
+    frames
+        .checked_mul(channels.max(1))
+        .ok_or_else(|| "audio callback scratch capacity overflow".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cpal_capture(
     device_id: Option<String>,
-    ring: Arc<Mutex<AudioRing>>,
+    ring: CaptureFrameProducer,
+    encoder_epoch: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     aec_timing: Arc<AecTiming>,
@@ -1084,6 +1352,11 @@ pub fn spawn_cpal_capture(
         .map_err(|e| format!("default input config: {e}"))?;
     let in_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
+    if !(MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_CAPTURE_RATE).contains(&in_rate) {
+        return Err(format!(
+            "unsupported realtime input rate {in_rate}Hz (expected {MIN_REALTIME_CAPTURE_RATE}..={MAX_REALTIME_CAPTURE_RATE})"
+        ));
+    }
     let sample_format = config.sample_format();
     let (buffer_mode, buffer_min_frames, buffer_max_frames) = supported_buffer_details(&config);
     let descriptor = StreamDescriptor {
@@ -1099,27 +1372,31 @@ pub fn spawn_cpal_capture(
         buffer_min_frames,
         buffer_max_frames,
     };
-    let resampler = Arc::new(Mutex::new(Resampler::new(in_rate)));
-    let accumulator = Arc::new(Mutex::new(FrameAccumulator::new()));
     let errored = Arc::new(AtomicBool::new(false));
     let make_err = || {
         let ef = errored.clone();
-        move |e| {
-            eprintln!("cpal stream error: {e}");
+        move |_e| {
             ef.store(true, Ordering::Relaxed);
         }
     };
 
-    let cb_ring = ring.clone();
-    let cb_rs = resampler.clone();
-    let cb_acc = accumulator.clone();
+    let cb_ring = ring;
     let cb_diagnostics = diagnostics.clone();
     let mut capture_clock = CaptureClockMapper::default();
+    let mut downmixer = AdaptiveDownmixer::with_capacity(channels, CAPTURE_PROCESS_CHUNK_FRAMES);
+    let mut resampler = Resampler::new(in_rate);
+    resampler.reserve_realtime_input(CAPTURE_PROCESS_CHUNK_FRAMES);
+    let mut accumulator =
+        FrameAccumulator::with_capacity(REALTIME_ACCUMULATOR_SAMPLES, REALTIME_TIMING_SEGMENTS);
+    let mut resampled_scratch = Vec::with_capacity(MAX_RESAMPLED_CHUNK_SAMPLES);
     let first_callback_ns = Arc::new(AtomicU64::new(0));
     let first_callback_frames = Arc::new(AtomicU64::new(0));
     let cb_first_callback_ns = first_callback_ns.clone();
     let cb_first_callback_frames = first_callback_frames.clone();
     let mut push = move |data: &[f32], info: &cpal::InputCallbackInfo| {
+        // A callback is one capture transaction: every derived 20 ms frame retains the privacy
+        // epoch that was current before this callback touched its PCM.
+        let callback_encoder_epoch = encoder_epoch.load(Ordering::Acquire);
         let input_frames = data.len() / channels.max(1);
         let observation =
             aec_timing.observe_input_callback(&mut capture_clock, info, input_frames, in_rate);
@@ -1129,7 +1406,9 @@ pub fn spawn_cpal_capture(
             cb_first_callback_frames.store(input_frames as u64, Ordering::Release);
             cb_first_callback_ns.store(observation.callback_mono_ns, Ordering::Release);
         }
-        cb_diagnostics.raw_input.record(data);
+        if cb_diagnostics.signal_windows_enabled() {
+            cb_diagnostics.raw_input.record(data);
+        }
         cb_diagnostics.observe_capture_clock(
             observation.clock_status,
             observation.capture_clock_delta_ns,
@@ -1143,36 +1422,52 @@ pub fn spawn_cpal_capture(
         if !observation.valid {
             cb_diagnostics.note_invalid_timestamp();
         }
-        let mono = downmix_to_mono(data, channels);
-        let block = {
-            let mut resampler = cb_rs.lock().unwrap();
-            resampler.process_timed(
-                &mono,
-                observation.first_sample_mono_ns,
+        let chunk_samples = CAPTURE_PROCESS_CHUNK_FRAMES.saturating_mul(channels.max(1));
+        let mut produced_frames = 0;
+        for (chunk_index, chunk) in data.chunks(chunk_samples).enumerate() {
+            let complete_samples = chunk.len() - chunk.len() % channels.max(1);
+            if complete_samples == 0 {
+                continue;
+            }
+            let chunk = &chunk[..complete_samples];
+            let frame_offset = chunk_index.saturating_mul(CAPTURE_PROCESS_CHUNK_FRAMES);
+            let chunk_capture_ts_ns = observation.first_sample_mono_ns.saturating_add(
+                (frame_offset as u64).saturating_mul(1_000_000_000) / u64::from(in_rate),
+            );
+            let mono = downmixer.process(chunk);
+            let timing = resampler.process_timed_into(
+                mono,
+                chunk_capture_ts_ns,
                 observation.callback_mono_ns,
                 observation.valid,
                 observation.frame_timing_valid,
-            )
-        };
-        cb_diagnostics.observe_resampled_samples(block.samples.len());
-        let (frames, pending_samples) = {
-            let mut accumulator = cb_acc.lock().unwrap();
-            let frames = accumulator.push_and_drain(block);
-            let pending = accumulator.pending_samples();
-            (frames, pending)
-        };
+                &mut resampled_scratch,
+            );
+            cb_diagnostics.observe_resampled_samples(resampled_scratch.len());
+            produced_frames += accumulator.push_samples_and_drain_with(
+                &resampled_scratch,
+                timing,
+                |timing, samples| {
+                    let _ = cb_ring.push(
+                        CaptureFrameMetadata {
+                            encoder_epoch: callback_encoder_epoch,
+                            capture_generation: stream_generation,
+                            capture_open_attempt: open_attempt,
+                            capture_ts_ns: timing.capture_ts_ns,
+                            capture_callback_ts_ns: timing.callback_ts_ns,
+                            capture_timestamp_valid: timing.valid,
+                        },
+                        samples,
+                    );
+                },
+            );
+        }
+        let pending_samples = accumulator.pending_samples();
         cb_diagnostics.set_accumulator_pending(pending_samples);
-        cb_diagnostics.observe_frames_produced(frames.len());
-        if frames.is_empty() {
-            return;
+        cb_diagnostics.observe_frames_produced(produced_frames);
+        if produced_frames > 0 {
+            cb_diagnostics.observe_ring_len(cb_ring.len());
         }
-        let mut ring = cb_ring.lock().unwrap();
-        for mut f in frames {
-            f.capture_generation = stream_generation;
-            f.capture_open_attempt = open_attempt;
-            ring.push(f);
-        }
-        cb_diagnostics.observe_ring_len(ring.len());
     };
 
     let stream_config: cpal::StreamConfig = config.into();
@@ -1187,21 +1482,41 @@ pub fn spawn_cpal_capture(
         ),
         cpal::SampleFormat::I16 => selected.device.build_input_stream(
             &stream_config,
-            move |data: &[i16], info| {
-                let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                push(&f, info);
+            {
+                let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
+                let mut scratch = Vec::with_capacity(max_samples);
+                let oversize = errored.clone();
+                move |data: &[i16], info| {
+                    if data.len() > scratch.capacity() {
+                        oversize.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    scratch.clear();
+                    scratch.extend(data.iter().map(|&sample| sample as f32 / 32768.0));
+                    push(&scratch, info);
+                }
             },
             make_err(),
             None,
         ),
         cpal::SampleFormat::U16 => selected.device.build_input_stream(
             &stream_config,
-            move |data: &[u16], info| {
-                let f: Vec<f32> = data
-                    .iter()
-                    .map(|&s| (s as f32 - 32768.0) / 32768.0)
-                    .collect();
-                push(&f, info);
+            {
+                let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
+                let mut scratch = Vec::with_capacity(max_samples);
+                let oversize = errored.clone();
+                move |data: &[u16], info| {
+                    if data.len() > scratch.capacity() {
+                        oversize.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    scratch.clear();
+                    scratch.extend(
+                        data.iter()
+                            .map(|&sample| (sample as f32 - 32768.0) / 32768.0),
+                    );
+                    push(&scratch, info);
+                }
             },
             make_err(),
             None,
@@ -1332,9 +1647,8 @@ fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConf
                 let better = match &best {
                     None => true,
                     Some(b) => {
-                        let bf = b.sample_format() == cpal::SampleFormat::F32;
-                        let rf = r.sample_format() == cpal::SampleFormat::F32;
-                        (rf && !bf) || (rf == bf && r.channels() > b.channels())
+                        output_config_score(r.channels(), r.sample_format())
+                            < output_config_score(b.channels(), b.sample_format())
                     }
                 };
                 if better {
@@ -1351,18 +1665,101 @@ fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConf
         .map_err(|e| format!("default output config: {e}"))
 }
 
+fn output_config_score(channels: u16, format: cpal::SampleFormat) -> (u8, u8, u16) {
+    let channel_rank = match channels {
+        2 => 0, // Preserve spatial pan without relying on an ambiguous multichannel layout.
+        1 => 1,
+        _ => 2,
+    };
+    let format_rank = match format {
+        cpal::SampleFormat::F32 => 0,
+        cpal::SampleFormat::I16 => 1,
+        cpal::SampleFormat::U16 => 2,
+        _ => 3,
+    };
+    (channel_rank, format_rank, channels)
+}
+
 fn write_out_frame(out: &mut [f32], frame: usize, channels: usize, l: f32, r: f32) {
     let base = frame * channels;
     if channels == 1 {
         out[base] = (l + r) * 0.5;
         return;
     }
-    for c in 0..channels {
-        out[base + c] = match c {
-            0 => l,
-            1 => r,
-            _ => 0.0,
+    out[base..base + channels].fill(0.0);
+    out[base] = l;
+    out[base + 1] = r;
+    match channels {
+        // Common channel orders: 3.0 = FL/FR/FC, quad = FL/FR/RL/RR,
+        // 5.0 = FL/FR/FC/RL/RR, 5.1+ = FL/FR/FC/LFE/SL/SR/...
+        3 => out[base + 2] = (l + r) * 0.5,
+        4 => {
+            out[base + 2] = l * 0.5;
+            out[base + 3] = r * 0.5;
+        }
+        5 => {
+            out[base + 2] = (l + r) * 0.5;
+            out[base + 3] = l * 0.5;
+            out[base + 4] = r * 0.5;
+        }
+        6.. => {
+            out[base + 2] = (l + r) * 0.5;
+            // Keep LFE silent; voice-band content does not belong there.
+            out[base + 4] = l * 0.5;
+            out[base + 5] = r * 0.5;
+        }
+        _ => {}
+    }
+}
+
+const UNDERRUN_FADE_SAMPLES: u32 = 240; // 5 ms at the internal 48 kHz clock.
+const UNDERRUN_RESUME_SAMPLES: u32 = 96; // 2 ms crossfade when audio returns.
+
+#[derive(Default)]
+struct UnderrunFader {
+    last_output: (f32, f32),
+    fade_from: (f32, f32),
+    fade_remaining: u32,
+    resume_remaining: u32,
+    resume_from: (f32, f32),
+    starved: bool,
+}
+
+impl UnderrunFader {
+    fn process(&mut self, pair: (f32, f32), available: bool) -> (f32, f32) {
+        let output = if !available {
+            if !self.starved {
+                self.starved = true;
+                self.fade_remaining = UNDERRUN_FADE_SAMPLES;
+                self.fade_from = self.last_output;
+                self.resume_remaining = 0;
+            }
+            if self.fade_remaining == 0 {
+                (0.0, 0.0)
+            } else {
+                let factor = self.fade_remaining as f32 / UNDERRUN_FADE_SAMPLES as f32;
+                self.fade_remaining -= 1;
+                (self.fade_from.0 * factor, self.fade_from.1 * factor)
+            }
+        } else {
+            if self.starved {
+                self.starved = false;
+                self.resume_remaining = UNDERRUN_RESUME_SAMPLES;
+                self.resume_from = self.last_output;
+            }
+            if self.resume_remaining == 0 {
+                pair
+            } else {
+                let progress = 1.0 - self.resume_remaining as f32 / UNDERRUN_RESUME_SAMPLES as f32;
+                self.resume_remaining -= 1;
+                (
+                    self.resume_from.0 + (pair.0 - self.resume_from.0) * progress,
+                    self.resume_from.1 + (pair.1 - self.resume_from.1) * progress,
+                )
+            }
         };
+        self.last_output = output;
+        output
     }
 }
 
@@ -1401,11 +1798,19 @@ pub fn spawn_cpal_playback(
     let stream_config: cpal::StreamConfig = config.into();
     let ratio = SAMPLE_RATE as f64 / out_rate.max(1) as f64;
 
-    let cb_ring = playback.clone();
+    // Take a lock-free consumer handle once. The outer mutex remains for control-path ABI
+    // compatibility, but is never touched by the hardware callback.
+    let cb_ring = playback
+        .lock()
+        .map_err(|_| "playback ring lock poisoned".to_string())?
+        .consumer();
     let target_pairs = (FRAME_SAMPLES * 4) as f64;
     let mut s0 = (0.0f32, 0.0f32);
     let mut s1 = (0.0f32, 0.0f32);
+    let mut s0_available = false;
+    let mut s1_available = false;
     let mut pos = 1.0f64;
+    let mut underrun_fader = UnderrunFader::default();
     let fill_counters = counters.clone();
     let fill_progress = progress.clone();
     let fill_timing = aec_timing.clone();
@@ -1426,22 +1831,7 @@ pub fn spawn_cpal_playback(
         fill_counters
             .playback_callbacks
             .fetch_add(1, Ordering::Relaxed);
-        let mut ring = match cb_ring.try_lock() {
-            Ok(g) => g,
-            Err(_) => {
-                for s in out.iter_mut() {
-                    *s = 0.0;
-                }
-                fill_counters
-                    .playback_lock_contention_callbacks
-                    .fetch_add(1, Ordering::Relaxed);
-                fill_counters
-                    .playback_lock_contention_silence_pairs
-                    .fetch_add(frames as u64, Ordering::Relaxed);
-                return;
-            }
-        };
-        let err = (ring.len() as f64 - target_pairs) / target_pairs;
+        let err = (cb_ring.len() as f64 - target_pairs) / target_pairs;
         let eff_ratio = ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004));
         let mut requested_pairs = 0u64;
         let mut consumed_pairs = 0u64;
@@ -1449,14 +1839,17 @@ pub fn spawn_cpal_playback(
         for f in 0..frames {
             while pos >= 1.0 {
                 s0 = s1;
+                s0_available = s1_available;
                 requested_pairs += 1;
-                match ring.pop_stereo() {
+                match cb_ring.pop_stereo() {
                     Some(pair) => {
                         s1 = pair;
+                        s1_available = true;
                         consumed_pairs += 1;
                     }
                     None => {
                         s1 = (0.0, 0.0);
+                        s1_available = false;
                         underrun_pairs += 1;
                     }
                 }
@@ -1465,6 +1858,7 @@ pub fn spawn_cpal_playback(
             let t = pos as f32;
             let l = s0.0 + (s1.0 - s0.0) * t;
             let r = s0.1 + (s1.1 - s0.1) * t;
+            let (l, r) = underrun_fader.process((l, r), s0_available || s1_available);
             write_out_frame(out, f, out_channels, l, r);
             pos += eff_ratio;
         }
@@ -1484,8 +1878,7 @@ pub fn spawn_cpal_playback(
     let make_err = || {
         let es = stop.clone();
         let errored = errored.clone();
-        move |e| {
-            eprintln!("cpal output stream error: {e}");
+        move |_e| {
             errored.store(true, Ordering::Release);
             es.store(true, Ordering::Relaxed);
         }
@@ -1499,13 +1892,21 @@ pub fn spawn_cpal_playback(
             None,
         ),
         cpal::SampleFormat::I16 => {
-            let mut scratch: Vec<f32> = Vec::new();
+            let mut scratch = vec![0.0; callback_scratch_samples(buffer_max_frames, out_channels)?];
+            let oversize = errored.clone();
+            let oversize_stop = stop.clone();
             selected.device.build_output_stream(
                 &stream_config,
                 move |data: &mut [i16], info| {
-                    scratch.resize(data.len(), 0.0);
-                    fill(&mut scratch, info);
-                    for (d, &s) in data.iter_mut().zip(scratch.iter()) {
+                    let data_len = data.len();
+                    if data_len > scratch.len() {
+                        data.fill(0);
+                        oversize.store(true, Ordering::Release);
+                        oversize_stop.store(true, Ordering::Release);
+                        return;
+                    }
+                    fill(&mut scratch[..data_len], info);
+                    for (d, &s) in data.iter_mut().zip(&scratch[..data_len]) {
                         *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                     }
                 },
@@ -1514,13 +1915,21 @@ pub fn spawn_cpal_playback(
             )
         }
         cpal::SampleFormat::U16 => {
-            let mut scratch: Vec<f32> = Vec::new();
+            let mut scratch = vec![0.0; callback_scratch_samples(buffer_max_frames, out_channels)?];
+            let oversize = errored.clone();
+            let oversize_stop = stop.clone();
             selected.device.build_output_stream(
                 &stream_config,
                 move |data: &mut [u16], info| {
-                    scratch.resize(data.len(), 0.0);
-                    fill(&mut scratch, info);
-                    for (d, &s) in data.iter_mut().zip(scratch.iter()) {
+                    let data_len = data.len();
+                    if data_len > scratch.len() {
+                        data.fill(32768);
+                        oversize.store(true, Ordering::Release);
+                        oversize_stop.store(true, Ordering::Release);
+                        return;
+                    }
+                    fill(&mut scratch[..data_len], info);
+                    for (d, &s) in data.iter_mut().zip(&scratch[..data_len]) {
                         *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
                     }
                 },
@@ -1609,6 +2018,7 @@ mod tests {
 
     fn timed_frame(capture_ns: u64, callback_ns: u64, valid: bool) -> AudioFrame {
         AudioFrame {
+            encoder_epoch: 0,
             capture_generation: 0,
             capture_open_attempt: 0,
             capture_ts_ns: capture_ns,
@@ -1624,6 +2034,71 @@ mod tests {
             first_capture_ts_ns: capture_ns,
             capture_callback_ts_ns: callback_ns,
             timing_valid: true,
+        }
+    }
+
+    #[test]
+    fn callback_scratch_is_bounded_and_channel_sized() {
+        assert_eq!(callback_scratch_samples(480, 2).unwrap(), 960);
+        assert_eq!(
+            callback_scratch_samples(0, 2).unwrap(),
+            UNKNOWN_CALLBACK_MAX_FRAMES * 2
+        );
+        assert_eq!(
+            callback_scratch_samples(u32::MAX, 6).unwrap(),
+            UNKNOWN_CALLBACK_MAX_FRAMES * 6
+        );
+        assert!(callback_scratch_samples(2, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn realtime_capture_pipeline_retains_preallocated_capacities() {
+        for rate in [
+            MIN_REALTIME_CAPTURE_RATE,
+            SAMPLE_RATE,
+            MAX_REALTIME_CAPTURE_RATE,
+        ] {
+            let mut downmixer = AdaptiveDownmixer::with_capacity(2, CAPTURE_PROCESS_CHUNK_FRAMES);
+            let downmix_capacity = downmixer.scratch.capacity();
+            let interleaved = vec![0.1f32; CAPTURE_PROCESS_CHUNK_FRAMES * 2];
+
+            let mut resampler = Resampler::new(rate);
+            resampler.reserve_realtime_input(CAPTURE_PROCESS_CHUNK_FRAMES);
+            let source_capacity = resampler.source.capacity();
+            let mut resampled = Vec::with_capacity(MAX_RESAMPLED_CHUNK_SAMPLES);
+            let resampled_capacity = resampled.capacity();
+
+            let mut accumulator = FrameAccumulator::with_capacity(
+                REALTIME_ACCUMULATOR_SAMPLES,
+                REALTIME_TIMING_SEGMENTS,
+            );
+            let accumulator_capacity = accumulator.buf.capacity();
+            let timeline_capacity = accumulator.timeline.capacity();
+            let mut emitted = 0usize;
+
+            for callback in 0..2_000u64 {
+                let mono = downmixer.process(&interleaved);
+                let timing = resampler.process_timed_into(
+                    mono,
+                    callback * 1_000_000,
+                    callback * 1_000_000 + 500_000,
+                    true,
+                    true,
+                    &mut resampled,
+                );
+                emitted += accumulator.push_samples_and_drain_with(
+                    &resampled,
+                    timing,
+                    |_timing, frame| assert_eq!(frame.len(), FRAME_SAMPLES),
+                );
+            }
+
+            assert!(emitted > 0);
+            assert_eq!(downmixer.scratch.capacity(), downmix_capacity);
+            assert_eq!(resampler.source.capacity(), source_capacity);
+            assert_eq!(resampled.capacity(), resampled_capacity);
+            assert_eq!(accumulator.buf.capacity(), accumulator_capacity);
+            assert_eq!(accumulator.timeline.capacity(), timeline_capacity);
         }
     }
 
@@ -1964,15 +2439,32 @@ mod tests {
 
     #[test]
     fn downmix_stereo_averages_channels() {
-        let interleaved = [1.0f32, 0.0, 0.0, 1.0, 0.5, 0.5];
+        let interleaved = [1.0f32, 0.8, 0.0, 0.0, 0.5, 0.4];
         let mono = downmix_to_mono(&interleaved, 2);
-        assert_eq!(mono, vec![0.5, 0.5, 0.5]);
+        assert_eq!(mono, vec![0.9, 0.0, 0.45]);
     }
 
     #[test]
     fn downmix_mono_is_identity() {
         let mono = downmix_to_mono(&[0.1, 0.2, 0.3], 1);
         assert_eq!(mono, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn downmix_preserves_one_sided_and_antiphase_microphones() {
+        let one_sided = downmix_to_mono(&[0.0, 0.8, 0.0, -0.6, 0.0, 0.4], 2);
+        assert_eq!(one_sided, vec![0.8, -0.6, 0.4]);
+
+        let antiphase = downmix_to_mono(&[0.7, -0.7, -0.4, 0.4, 0.2, -0.2], 2);
+        assert_eq!(antiphase, vec![0.7, -0.4, 0.2]);
+    }
+
+    #[test]
+    fn downmix_dominant_channel_has_block_hysteresis() {
+        let mut downmixer = AdaptiveDownmixer::new(2);
+        assert_eq!(downmixer.process(&[0.0, 0.8, 0.0, -0.8]), &[0.8, -0.8]);
+        // A small energy advantage on the other channel must not flip the selected microphone.
+        assert_eq!(downmixer.process(&[0.81, 0.8, 0.81, -0.8]), &[0.8, -0.8]);
     }
 
     #[test]
@@ -2025,13 +2517,13 @@ mod tests {
         assert!(discontinuous.samples.is_empty());
 
         let continued = resampler.process_timed(
-            &[0.25; 4],
+            &[0.25; SINC_FILTER_TAPS * 2],
             base + 100_005_208,
             base + 108_005_208,
             true,
             true,
         );
-        assert_eq!(continued.samples.len(), 1);
+        assert!(!continued.samples.is_empty());
         assert!(!continued.timing_valid);
 
         let frames = accumulator.push_and_drain(continued);
@@ -2054,7 +2546,7 @@ mod tests {
             }
         }
         assert!(
-            last_error < 100_000,
+            last_error < 700_000,
             "capture timestamp drifted {last_error}ns from the current hardware callback"
         );
     }
@@ -2086,6 +2578,78 @@ mod tests {
         assert!(
             max_error < 0.000_001,
             "max callback-boundary error {max_error}"
+        );
+    }
+
+    #[test]
+    fn resampler_rejects_above_nyquist_energy_when_downsampling() {
+        fn rms(samples: &[f32]) -> f32 {
+            (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32)
+                .sqrt()
+        }
+
+        let input_rate = 96_000u32;
+        let seconds = 1usize;
+        let passband: Vec<f32> = (0..input_rate as usize * seconds)
+            .map(|index| (std::f32::consts::TAU * 5_000.0 * index as f32 / input_rate as f32).sin())
+            .collect();
+        let stopband: Vec<f32> = (0..input_rate as usize * seconds)
+            .map(|index| {
+                (std::f32::consts::TAU * 30_000.0 * index as f32 / input_rate as f32).sin()
+            })
+            .collect();
+        let mut passband_resampler = Resampler::new(input_rate);
+        let passband_output = passband_resampler.process(&passband);
+        let mut stopband_resampler = Resampler::new(input_rate);
+        let stopband_output = stopband_resampler.process(&stopband);
+        // Ignore the short startup transient created by the finite filter history.
+        let passband_rms = rms(&passband_output[256..]);
+        let stopband_rms = rms(&stopband_output[256..]);
+        assert!(passband_rms > 0.65, "passband RMS was {passband_rms}");
+        assert!(
+            stopband_rms < 0.015,
+            "30 kHz aliased into 48 kHz output at RMS {stopband_rms}"
+        );
+    }
+
+    #[test]
+    fn underrun_fader_reaches_silence_smoothly_and_crossfades_resume() {
+        let mut fader = UnderrunFader::default();
+        assert_eq!(fader.process((0.8, -0.4), true), (0.8, -0.4));
+        let first_missing = fader.process((0.0, 0.0), false);
+        assert_eq!(first_missing, (0.8, -0.4));
+        let mut previous = first_missing.0;
+        for _ in 1..UNDERRUN_FADE_SAMPLES {
+            let current = fader.process((0.0, 0.0), false).0;
+            assert!(current <= previous);
+            previous = current;
+        }
+        assert_eq!(fader.process((0.0, 0.0), false), (0.0, 0.0));
+        assert_eq!(fader.process((1.0, 1.0), true), (0.0, 0.0));
+        let resumed = fader.process((1.0, 1.0), true).0;
+        assert!(resumed > 0.0 && resumed < 1.0);
+    }
+
+    #[test]
+    fn multichannel_output_mapping_uses_front_center_and_surround_without_lfe() {
+        let mut output = [99.0; 6];
+        write_out_frame(&mut output, 0, 6, 0.8, -0.4);
+        assert_eq!(output, [0.8, -0.4, 0.2, 0.0, 0.4, -0.2]);
+    }
+
+    #[test]
+    fn output_config_prefers_stereo_then_mono_before_multichannel() {
+        assert!(
+            output_config_score(2, cpal::SampleFormat::I16)
+                < output_config_score(1, cpal::SampleFormat::F32)
+        );
+        assert!(
+            output_config_score(1, cpal::SampleFormat::I16)
+                < output_config_score(6, cpal::SampleFormat::F32)
+        );
+        assert!(
+            output_config_score(2, cpal::SampleFormat::F32)
+                < output_config_score(2, cpal::SampleFormat::I16)
         );
     }
 

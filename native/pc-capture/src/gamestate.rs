@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub const MAX_MASTER_GAIN: f32 = 2.0;
 pub const MAX_PEER_GAIN: f32 = 4.0;
@@ -18,6 +18,7 @@ pub struct PeerState {
 
 #[derive(Debug, Clone)]
 pub struct GameSnapshot {
+    pub version: u64,
     pub local: LocalState,
     pub master: f32,
     pub peers: HashMap<String, PeerState>,
@@ -26,6 +27,7 @@ pub struct GameSnapshot {
 impl Default for GameSnapshot {
     fn default() -> GameSnapshot {
         GameSnapshot {
+            version: 0,
             local: LocalState::default(),
             master: 1.0,
             peers: HashMap::new(),
@@ -34,7 +36,9 @@ impl Default for GameSnapshot {
 }
 
 pub struct GameState {
-    inner: Mutex<GameSnapshot>,
+    // Readers clone one Arc instead of cloning the peer HashMap on every 20 ms mix tick. Updates
+    // use copy-on-write, so an in-flight mixer keeps an immutable, internally consistent view.
+    inner: Mutex<Arc<GameSnapshot>>,
 }
 
 impl Default for GameState {
@@ -46,41 +50,52 @@ impl Default for GameState {
 impl GameState {
     pub fn new() -> GameState {
         GameState {
-            inner: Mutex::new(GameSnapshot::default()),
+            inner: Mutex::new(Arc::new(GameSnapshot::default())),
         }
     }
 
-    pub fn snapshot(&self) -> GameSnapshot {
-        self.inner.lock().unwrap().clone()
+    pub fn snapshot(&self) -> Arc<GameSnapshot> {
+        Arc::clone(&self.inner.lock().unwrap())
     }
 
     pub fn set_local(&self, local: LocalState) {
-        self.inner.lock().unwrap().local = local;
+        let mut snapshot = self.inner.lock().unwrap();
+        let next = Arc::make_mut(&mut snapshot);
+        next.version = next.version.wrapping_add(1);
+        next.local = local;
     }
 
     pub fn set_master(&self, master: f32) {
-        self.inner.lock().unwrap().master = sanitize_master(master);
+        let mut snapshot = self.inner.lock().unwrap();
+        let next = Arc::make_mut(&mut snapshot);
+        next.version = next.version.wrapping_add(1);
+        next.master = sanitize_master(master);
     }
 
     pub fn upsert_peer(&self, peer_id: String, peer: PeerState) {
-        self.inner
-            .lock()
-            .unwrap()
-            .peers
-            .insert(peer_id, sanitize_peer(peer));
+        let mut snapshot = self.inner.lock().unwrap();
+        let next = Arc::make_mut(&mut snapshot);
+        next.version = next.version.wrapping_add(1);
+        next.peers.insert(peer_id, sanitize_peer(peer));
     }
 
     pub fn remove_peer(&self, peer_id: &str) {
-        self.inner.lock().unwrap().peers.remove(peer_id);
+        let mut snapshot = self.inner.lock().unwrap();
+        let next = Arc::make_mut(&mut snapshot);
+        if next.peers.remove(peer_id).is_some() {
+            next.version = next.version.wrapping_add(1);
+        }
     }
 
     pub fn apply(&self, local: LocalState, master: f32, peers: Vec<(String, PeerState)>) {
-        let mut g = self.inner.lock().unwrap();
-        g.local = local;
-        g.master = sanitize_master(master);
-        g.peers.clear();
+        let mut snapshot = self.inner.lock().unwrap();
+        let next = Arc::make_mut(&mut snapshot);
+        next.version = next.version.wrapping_add(1);
+        next.local = local;
+        next.master = sanitize_master(master);
+        next.peers.clear();
         for (id, p) in peers {
-            g.peers.insert(id, sanitize_peer(p));
+            next.peers.insert(id, sanitize_peer(p));
         }
     }
 }
@@ -201,5 +216,24 @@ mod tests {
         assert_eq!(snapshot.peers["bad"].pan, 0.0);
         assert_eq!(snapshot.peers["boost"].gain, MAX_PEER_GAIN);
         assert_eq!(snapshot.peers["boost"].pan, 1.0);
+    }
+
+    #[test]
+    fn snapshots_share_immutable_storage_until_a_versioned_update() {
+        let gs = GameState::new();
+        let first = gs.snapshot();
+        let second = gs.snapshot();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.version, 0);
+
+        gs.set_master(0.5);
+        let third = gs.snapshot();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(
+            first.master, 1.0,
+            "an in-flight snapshot must stay immutable"
+        );
+        assert_eq!(third.master, 0.5);
+        assert_eq!(third.version, 1);
     }
 }

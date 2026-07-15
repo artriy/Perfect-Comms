@@ -18,9 +18,37 @@ internal enum VoiceSnapshotRefreshDecision
 internal static class VoiceRoomLifetimeGate
 {
     private static int _explicitDisconnectLatched;
+    private static int _sessionGeneration;
+    private static int _confirmedGeneration;
+    private static int _confirmedGameId;
 
     internal static bool IsExplicitDisconnectLatched
         => Volatile.Read(ref _explicitDisconnectLatched) != 0;
+
+    internal static int CurrentSessionGeneration
+        => Volatile.Read(ref _sessionGeneration);
+
+    internal static bool IsConfirmedJoinedGame(int gameId)
+    {
+        if (gameId == 0 || IsExplicitDisconnectLatched) return false;
+        int generation = Volatile.Read(ref _sessionGeneration);
+        return Volatile.Read(ref _confirmedGeneration) == generation
+               && Volatile.Read(ref _confirmedGameId) == gameId;
+    }
+
+    internal static bool IsVoiceSessionEligible(
+        bool hasClient,
+        bool isLocalOrFreeplay,
+        bool explicitDisconnectLatched,
+        int gameId,
+        bool criticalPatchPairHealthy,
+        bool joinedGenerationConfirmed)
+        => hasClient
+           && !isLocalOrFreeplay
+           && !explicitDisconnectLatched
+           && gameId != 0
+           && criticalPatchPairHealthy
+           && joinedGenerationConfirmed;
 
     /// <summary>
     /// Returns true only for confirmed voice-session terminal conditions. Scene objects and
@@ -139,6 +167,9 @@ internal static class VoiceRoomLifetimeGate
 
     internal static void MarkExplicitDisconnect(string reason)
     {
+        Interlocked.Increment(ref _sessionGeneration);
+        Volatile.Write(ref _confirmedGameId, 0);
+        Volatile.Write(ref _confirmedGeneration, -1);
         Interlocked.Exchange(ref _explicitDisconnectLatched, 1);
         try { VoiceRoomSettingsState.EndSession(); }
         catch { /* settings cleanup can never interfere with the vanilla disconnect */ }
@@ -165,12 +196,15 @@ internal static class VoiceRoomLifetimeGate
         try { VoiceRoomSettingsState.BeginSession(gameId); }
         catch { /* joining the game must not depend on settings synchronization */ }
 
+        int generation = Interlocked.Increment(ref _sessionGeneration);
+        Volatile.Write(ref _confirmedGameId, gameId);
+        Volatile.Write(ref _confirmedGeneration, gameId == 0 ? -1 : generation);
         var wasLatched = Interlocked.Exchange(ref _explicitDisconnectLatched, 0) != 0;
         try
         {
             VoiceDiagnostics.Log(
                 "voice.room.lifetime",
-                $"event={(wasLatched ? "disconnect-cleared" : "session-confirmed")} source={Safe(source)}");
+                $"event={(wasLatched ? "disconnect-cleared" : "session-confirmed")} source={Safe(source)} generation={generation} gameId={gameId}");
         }
         catch { /* joining the game must not depend on diagnostics */ }
     }

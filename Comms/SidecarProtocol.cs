@@ -37,6 +37,7 @@ internal static class SidecarProtocol
     private const int MaxPeerIdChars = 32;
     private const float DefaultInputGain = 1f;
     private const float DefaultVadThreshold = 0.004f;
+    private const float DefaultNoiseGateThreshold = 0.003f;
     private const float MaxMasterGain = 2f;
     private const float MaxPeerGain = 4f;
 
@@ -109,15 +110,19 @@ internal static class SidecarProtocol
     public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
         => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
 
+    public static byte[] SetDiagnosticsFrame(bool enabled)
+        => EncodeControl($"{{\"op\":\"set-diagnostics\",\"enabled\":{JsonBool(enabled)}}}");
+
     public static byte[] SetSyntheticFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-synthetic\",\"enabled\":{JsonBool(enabled)}}}");
 
-    public static byte[] SetInputFrame(float gain, float vadThreshold)
+    public static byte[] SetInputFrame(float gain, float vadThreshold, float noiseGateThreshold)
     {
         gain = NormalizeInputGain(gain);
         vadThreshold = NormalizeVadThreshold(vadThreshold);
+        noiseGateThreshold = NormalizeNoiseGateThreshold(noiseGateThreshold);
         return EncodeControl(
-            $"{{\"op\":\"set-input\",\"gain\":{gain.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"vad_threshold\":{vadThreshold.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}}}");
+            $"{{\"op\":\"set-input\",\"gain\":{gain.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"vad_threshold\":{vadThreshold.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"noise_gate_threshold\":{noiseGateThreshold.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}}}");
     }
 
     internal static float NormalizeInputGain(float gain)
@@ -125,6 +130,9 @@ internal static class SidecarProtocol
 
     internal static float NormalizeVadThreshold(float threshold)
         => float.IsFinite(threshold) ? Math.Clamp(threshold, 0.0001f, 1f) : DefaultVadThreshold;
+
+    internal static float NormalizeNoiseGateThreshold(float threshold)
+        => float.IsFinite(threshold) ? Math.Clamp(threshold, 0f, 1f) : DefaultNoiseGateThreshold;
 
     internal static float NormalizeMasterGain(float gain)
         => float.IsFinite(gain) ? Math.Clamp(gain, 0f, MaxMasterGain) : 1f;
@@ -219,6 +227,41 @@ internal static class SidecarProtocol
             w.WriteEndObject();
         }
         return EncodeFrame(TypeControl, stream.ToArray());
+    }
+
+    public static ulong GameStateFingerprint(
+        bool deaf,
+        float master,
+        IReadOnlyList<GameStatePeerInput> peers)
+    {
+        // Deterministic FNV-1a over exactly the normalized values serialized below. This allows
+        // callers to coalesce unchanged Unity frames and safely reuse a serialized heartbeat.
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = offset;
+        static ulong Mix(ulong current, uint value)
+        {
+            const ulong p = 1099511628211UL;
+            for (var shift = 0; shift < 32; shift += 8)
+                current = (current ^ (byte)(value >> shift)) * p;
+            return current;
+        }
+
+        hash = (hash ^ (deaf ? (byte)1 : (byte)0)) * prime;
+        hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizeMasterGain(master))));
+        hash = Mix(hash, (uint)peers.Count);
+        for (var i = 0; i < peers.Count; i++)
+        {
+            var peer = peers[i];
+            var id = peer.Id ?? string.Empty;
+            for (var c = 0; c < id.Length; c++)
+                hash = Mix(hash, id[c]);
+            hash = Mix(hash, 0xFFFFu);
+            hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizePeerGain(peer.Gain))));
+            hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizePan(peer.Pan))));
+            hash = Mix(hash, unchecked((uint)peer.Mode));
+        }
+        return hash;
     }
 
     private static string JsonBool(bool value) => value ? "true" : "false";

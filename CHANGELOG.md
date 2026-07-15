@@ -100,7 +100,7 @@ Perfect Comms v3.1.0 is a deep audio-quality release. The entire voice engine ha
   > <sub>Microphone capture and playback are now built on the BASS audio library instead of the old NAudio stack, with a single managed mixer driving every voice. This is the foundation for the quality and smoothness improvements below, and it is lower-latency and cleaner under the hood.</sub>
 
 - **Native Opus 1.6.1 with neural packet-loss recovery.**
-  > <sub>The managed Opus port has been replaced with native libopus 1.6.1. You get better voice quality at the same bitrate, plus deep PLC (neural concealment of lost audio) and DRED (Deep REDundancy), which reconstructs up to roughly 400 ms of dropped audio from later packets. Brief connection hiccups no longer chop your voice the way they used to.</sub>
+  > <sub>The managed Opus port has been replaced with native libopus 1.6.1. You get better voice quality at the same bitrate, plus deep PLC (neural concealment of lost audio) and DRED (Deep REDundancy), which reconstructs multiple dropped frames from later packets. Brief connection hiccups no longer chop your voice the way they used to.</sub>
 
 - **DeepFilterNet 3 noise suppression.**
   > <sub>RNNoise has been replaced with DeepFilterNet 3, a much stronger neural denoiser. Keyboard, fans, and background chatter are removed far more cleanly while your actual voice stays natural. It is still toggleable under Noise Suppression.</sub>

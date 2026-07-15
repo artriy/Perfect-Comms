@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 
@@ -110,21 +110,43 @@ pub struct SignalWindowSnapshot {
 }
 
 #[derive(Default)]
-struct SignalWindowAccumulator {
-    samples: u64,
-    nonfinite_samples: u64,
-    near_clip_samples: u64,
-    hard_clip_samples: u64,
-    silent_frames: u64,
-    peak: f32,
-    square_sum: f64,
-    sum: f64,
+pub struct SignalWindow {
+    samples: AtomicU64,
+    nonfinite_samples: AtomicU64,
+    near_clip_samples: AtomicU64,
+    hard_clip_samples: AtomicU64,
+    silent_frames: AtomicU64,
+    peak_bits: AtomicU32,
+    square_sum_bits: AtomicU64,
+    sum_bits: AtomicU64,
+    dropped_records: AtomicU64,
 }
 
-#[derive(Default)]
-pub struct SignalWindow {
-    accumulator: Mutex<SignalWindowAccumulator>,
-    dropped_records: AtomicU64,
+fn atomic_add_f64(target: &AtomicU64, value: f64) {
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        let next = (f64::from_bits(current) + value).to_bits();
+        match target.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn atomic_max_nonnegative_f32(target: &AtomicU32, value: f32) {
+    let value_bits = value.to_bits();
+    let mut current = target.load(Ordering::Relaxed);
+    while value_bits > current {
+        match target.compare_exchange_weak(
+            current,
+            value_bits,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 impl SignalWindow {
@@ -152,48 +174,57 @@ impl SignalWindow {
                 hard_clip += 1;
             }
         }
-        // Never make a realtime media callback wait behind the telemetry thread. A skipped
-        // diagnostics record is surfaced explicitly and is preferable to distorting audio.
-        let Ok(mut accumulator) = self.accumulator.try_lock() else {
-            self.dropped_records.fetch_add(1, Ordering::Relaxed);
-            return;
-        };
-        accumulator.samples = accumulator.samples.saturating_add(samples.len() as u64);
-        accumulator.nonfinite_samples = accumulator.nonfinite_samples.saturating_add(nonfinite);
-        accumulator.near_clip_samples = accumulator.near_clip_samples.saturating_add(near_clip);
-        accumulator.hard_clip_samples = accumulator.hard_clip_samples.saturating_add(hard_clip);
+        // Each field is accumulated without a mutex. Snapshot swaps may split a concurrently
+        // arriving record across adjacent diagnostic windows, but audio callbacks never wait.
+        self.samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.nonfinite_samples
+            .fetch_add(nonfinite, Ordering::Relaxed);
+        self.near_clip_samples
+            .fetch_add(near_clip, Ordering::Relaxed);
+        self.hard_clip_samples
+            .fetch_add(hard_clip, Ordering::Relaxed);
         if peak <= SILENCE_LEVEL {
-            accumulator.silent_frames = accumulator.silent_frames.saturating_add(1);
+            self.silent_frames.fetch_add(1, Ordering::Relaxed);
         }
-        accumulator.peak = accumulator.peak.max(peak);
-        accumulator.square_sum += square_sum;
-        accumulator.sum += sum;
+        atomic_max_nonnegative_f32(&self.peak_bits, peak);
+        atomic_add_f64(&self.square_sum_bits, square_sum);
+        atomic_add_f64(&self.sum_bits, sum);
     }
 
     pub fn reset(&self) {
-        *self.accumulator.lock().unwrap() = SignalWindowAccumulator::default();
+        self.samples.store(0, Ordering::Relaxed);
+        self.nonfinite_samples.store(0, Ordering::Relaxed);
+        self.near_clip_samples.store(0, Ordering::Relaxed);
+        self.hard_clip_samples.store(0, Ordering::Relaxed);
+        self.silent_frames.store(0, Ordering::Relaxed);
+        self.peak_bits.store(0, Ordering::Relaxed);
+        self.square_sum_bits.store(0, Ordering::Relaxed);
+        self.sum_bits.store(0, Ordering::Relaxed);
         self.dropped_records.store(0, Ordering::Relaxed);
     }
 
     pub fn take(&self) -> SignalWindowSnapshot {
-        let accumulator = std::mem::take(&mut *self.accumulator.lock().unwrap());
+        let samples = self.samples.swap(0, Ordering::Relaxed);
+        let square_sum = f64::from_bits(self.square_sum_bits.swap(0, Ordering::Relaxed));
+        let sum = f64::from_bits(self.sum_bits.swap(0, Ordering::Relaxed));
         SignalWindowSnapshot {
-            samples: accumulator.samples,
+            samples,
             dropped_records: self.dropped_records.swap(0, Ordering::Relaxed),
-            nonfinite_samples: accumulator.nonfinite_samples,
-            near_clip_samples: accumulator.near_clip_samples,
-            hard_clip_samples: accumulator.hard_clip_samples,
-            silent_frames: accumulator.silent_frames,
-            peak: accumulator.peak,
-            rms: if accumulator.samples == 0 {
+            nonfinite_samples: self.nonfinite_samples.swap(0, Ordering::Relaxed),
+            near_clip_samples: self.near_clip_samples.swap(0, Ordering::Relaxed),
+            hard_clip_samples: self.hard_clip_samples.swap(0, Ordering::Relaxed),
+            silent_frames: self.silent_frames.swap(0, Ordering::Relaxed),
+            peak: f32::from_bits(self.peak_bits.swap(0, Ordering::Relaxed)),
+            rms: if samples == 0 {
                 0.0
             } else {
-                (accumulator.square_sum / accumulator.samples as f64).sqrt()
+                (square_sum / samples as f64).sqrt()
             },
-            dc: if accumulator.samples == 0 {
+            dc: if samples == 0 {
                 0.0
             } else {
-                accumulator.sum / accumulator.samples as f64
+                sum / samples as f64
             },
         }
     }
@@ -343,6 +374,7 @@ pub struct CaptureWindowSummary {
 
 pub struct CaptureDiagnostics {
     metadata: Mutex<CaptureMetadata>,
+    signal_windows_enabled: AtomicBool,
     command_seq: AtomicU64,
     first_callback_ns: AtomicU64,
     last_callback_ns: AtomicU64,
@@ -386,6 +418,7 @@ impl Default for CaptureDiagnostics {
     fn default() -> Self {
         Self {
             metadata: Mutex::new(CaptureMetadata::default()),
+            signal_windows_enabled: AtomicBool::new(false),
             command_seq: AtomicU64::new(0),
             first_callback_ns: AtomicU64::new(0),
             last_callback_ns: AtomicU64::new(0),
@@ -430,6 +463,22 @@ impl Default for CaptureDiagnostics {
 }
 
 impl CaptureDiagnostics {
+    pub fn set_signal_windows_enabled(&self, enabled: bool) {
+        self.signal_windows_enabled
+            .store(enabled, Ordering::Release);
+        if !enabled {
+            self.raw_input.reset();
+            self.pre_dsp.reset();
+            self.post_dsp.reset();
+            self.post_gain.reset();
+        }
+    }
+
+    #[inline]
+    pub fn signal_windows_enabled(&self) -> bool {
+        self.signal_windows_enabled.load(Ordering::Relaxed)
+    }
+
     fn reset_capture_clock_observation(&self) {
         self.capture_clock_delta_seen
             .store(false, Ordering::Release);
@@ -1028,6 +1077,15 @@ pub struct MediaDiagnostics {
 }
 
 impl MediaDiagnostics {
+    pub fn set_enabled(&self, enabled: bool) {
+        self.capture.set_signal_windows_enabled(enabled);
+    }
+
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        self.capture.signal_windows_enabled()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn snapshot(
         &self,
@@ -1132,14 +1190,29 @@ mod tests {
     }
 
     #[test]
-    fn signal_window_reports_realtime_records_skipped_during_snapshot_contention() {
-        let window = SignalWindow::default();
-        let guard = window.accumulator.lock().unwrap();
-        window.record(&[0.5]);
-        drop(guard);
-        let snapshot = window.take();
-        assert_eq!(snapshot.samples, 0);
-        assert_eq!(snapshot.dropped_records, 1);
+    fn signal_window_record_never_blocks_or_drops_during_concurrent_snapshots() {
+        let window = Arc::new(SignalWindow::default());
+        let recording = window.clone();
+        let producer = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                recording.record(&[0.5]);
+            }
+        });
+
+        let mut samples = 0u64;
+        let mut dropped = 0u64;
+        while !producer.is_finished() {
+            let snapshot = window.take();
+            samples += snapshot.samples;
+            dropped += snapshot.dropped_records;
+            std::thread::yield_now();
+        }
+        producer.join().unwrap();
+        let final_snapshot = window.take();
+        samples += final_snapshot.samples;
+        dropped += final_snapshot.dropped_records;
+        assert_eq!(samples, 10_000);
+        assert_eq!(dropped, 0);
     }
 
     #[test]
@@ -1249,6 +1322,23 @@ mod tests {
         assert!(!diagnostics.is_active_stream(generation, first_open));
         diagnostics.mark_stream_started(3_000_000, StreamDescriptor::default());
         assert!(diagnostics.is_active_stream(generation, second_open));
+    }
+
+    #[test]
+    fn signal_window_sampling_is_disabled_by_default_and_runtime_selectable() {
+        let diagnostics = CaptureDiagnostics::default();
+        assert!(!diagnostics.signal_windows_enabled());
+        diagnostics.set_signal_windows_enabled(true);
+        assert!(diagnostics.signal_windows_enabled());
+        diagnostics.raw_input.record(&[0.5]);
+        diagnostics.set_signal_windows_enabled(false);
+        assert!(!diagnostics.signal_windows_enabled());
+        assert_eq!(diagnostics.raw_input.take().samples, 0);
+
+        let media = MediaDiagnostics::default();
+        assert!(!media.is_enabled());
+        media.set_enabled(true);
+        assert!(media.is_enabled());
     }
 
     #[test]

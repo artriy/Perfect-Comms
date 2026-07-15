@@ -98,6 +98,9 @@ public class VoiceChatPluginMain : BasePlugin
         VoiceChatHudState.Init();
         VoiceChatPatches.RegisterKeybindHandlers();
         ApplyHarmonyPatchesResiliently();
+        // Join and disconnect are one privacy-critical lifecycle contract. A partial resilient
+        // patch pass must not leave voice capture running without its authoritative teardown hook.
+        VoiceJoinGuard.ValidateCriticalPatchHealth();
         VanillaLobbyPatchDiagnostics.LogPatchState(Harmony);
         VoiceDiagnostics.DebugInfo("[VC] Perfect Comms loaded.");
     }

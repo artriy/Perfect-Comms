@@ -217,7 +217,9 @@ class Helper:
 def configure(helper: Helper, remote_id: str, servers: list[dict[str, Any]]) -> None:
     helper.send({"op": "set-ice-servers", "servers": servers})
     helper.send({"op": "set-dsp", "aec": True, "agc": True, "ns": True, "hpf": True})
-    helper.send({"op": "set-input", "gain": 1.0, "vad_threshold": 0.005})
+    helper.send({"op": "set-diagnostics", "enabled": True})
+    helper.send({"op": "set-input", "gain": 1.0, "vad_threshold": 0.005,
+                 "noise_gate_threshold": 0.003})
     helper.send({"op": "set-synthetic", "enabled": True})
     helper.send(
         {
@@ -268,8 +270,10 @@ def main() -> int:
     if not executable.is_file():
         parser.error(f"helper does not exist: {executable}")
 
-    servers = fetch_turn_servers(args.endpoint, min(args.timeout, 15.0))
-    if args.first_turn_url:
+    # A direct smoke must not depend on the credential service or accidentally succeed through a
+    # relay. Relay mode fetches authenticated TURN and forces relay-only ICE below.
+    servers = [] if args.direct else fetch_turn_servers(args.endpoint, min(args.timeout, 15.0))
+    if args.first_turn_url and servers:
         servers = [{**server, "urls": server["urls"][:1]} for server in servers]
     helpers: list[Helper] = []
     connected: set[str] = set()

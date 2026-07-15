@@ -8,6 +8,7 @@ public static class VoiceChatPatches
 {
     private static bool _pushToTalkInputHeld;
     private static bool _radioInputHeld;
+    private static bool _transmitReleaseRequired;
     private static int _lastMuteToggleFrame = -1;
     private static int _lastSpeakerToggleFrame = -1;
     private static int _lastVolumeToggleFrame = -1;
@@ -36,10 +37,23 @@ public static class VoiceChatPatches
     {
         try
         {
-            if (VoiceUiKit.RebindRow.ShouldSuppressKeybinds)
+            if (ShouldSuppressVoiceInput())
             {
-                ReleaseHeldInputsForRebind();
+                ReleaseHeldTransmitInputs();
                 return;
+            }
+
+            // A hold that crossed a privacy boundary (chat/modal/focus/rebind/session) must be
+            // physically released before it can arm again. Otherwise closing chat while the key
+            // is still down immediately resumes capture without a new user action.
+            if (_transmitReleaseRequired)
+            {
+                if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld())
+                {
+                    ReleaseHeldTransmitInputs();
+                    return;
+                }
+                _transmitReleaseRequired = false;
             }
 
             VoiceChatKeybinds.ToggleMute.FireIfPressed();
@@ -81,7 +95,11 @@ public static class VoiceChatPatches
         }
         catch (System.Exception ex)
         {
-            SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
+            // Never leave a capture-open hold latched because an IL2CPP object disappeared while
+            // the keyboard patch was running. The release path is deliberately independent from
+            // the failing read and is also used by chat/modal/focus and session boundaries.
+            try { ReleaseHeldTransmitInputs(); }
+            catch { SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false); }
             var now = System.DateTime.UtcNow;
             if ((now - _lastKbErrorLogUtc).TotalSeconds >= 5)
             {
@@ -91,23 +109,39 @@ public static class VoiceChatPatches
         }
     }
 
-    private static void ReleaseHeldInputsForRebind()
+    internal static void ReleaseHeldTransmitInputs()
     {
-        bool radioWasHeld = _radioInputHeld;
+        _transmitReleaseRequired = true;
         _radioInputHeld = false;
         _pushToTalkInputHeld = false;
-        VoiceChatHudState.UpdateTeamRadioHold(false, false, radioWasHeld);
-        VoiceChatHudState.UpdatePushToTalkHeld(false);
+        VoiceChatHudState.ReleaseTransmitHoldsFailClosed();
         SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
     }
 
-    internal static bool ShouldIgnoreToggleKeybinds()
+    internal static bool ShouldSuppressVoiceInput()
     {
-        if (!HudManager.InstanceExists) return false;
-
-        var chat = HudManager.Instance.Chat;
-        return chat != null && chat.IsOpenOrOpening;
+        bool chatOpen = false;
+        if (HudManager.InstanceExists)
+        {
+            var chat = HudManager.Instance.Chat;
+            chatOpen = chat != null && chat.IsOpenOrOpening;
+        }
+        return ShouldSuppressVoiceInput(
+            Application.isFocused,
+            VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
+            VoiceUiKit.AnyPanelOpen,
+            chatOpen);
     }
+
+    internal static bool ShouldSuppressVoiceInput(
+        bool applicationFocused,
+        bool rebindCapturing,
+        bool modalOpen,
+        bool chatOpen)
+        => !applicationFocused || rebindCapturing || modalOpen || chatOpen;
+
+    internal static bool ShouldIgnoreToggleKeybinds()
+        => ShouldSuppressVoiceInput();
 
     private static void ToggleMuteFromInput()
     {

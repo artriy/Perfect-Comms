@@ -88,6 +88,7 @@ public static class VoiceSettingsPanel
         _shell.PaneRoot.anchoredPosition = Vector2.zero;
         _animT = 0f;
         _shown = true;
+        VoiceChatPatches.ReleaseHeldTransmitInputs();
 
         bool previewEnabled = VoiceSettings.Instance.SpeakingBarLivePreview.Value;
         _lastLivePreviewEnabled = previewEnabled;
@@ -458,8 +459,10 @@ public static class VoiceSettingsPanel
         Slider(defs, "Speaker Volume", s.MasterVolume, Pct);
         Section(defs, "PROCESSING");
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
+#if WINDOWS
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
         Toggle(defs, "Echo Cancellation", s.EchoCancellationEnabled);
+#endif
         Slider(defs, "Voice Falloff Softness", s.VoiceFalloffSoftness, Pct);
         Section(defs, "STARTUP");
         Toggle(defs, "Start Muted", s.StartMuted);

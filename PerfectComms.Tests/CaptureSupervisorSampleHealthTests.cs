@@ -1,3 +1,4 @@
+#if WINDOWS
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
@@ -207,3 +208,4 @@ public sealed class CaptureSupervisorSampleHealthTests
         Xunit.Assert.True(sup.IsAllFailed);
     }
 }
+#endif

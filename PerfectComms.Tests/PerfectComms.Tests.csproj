@@ -17,6 +17,15 @@
 		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
 	</PropertyGroup>
 
+	<!-- Match the platform symbols used by the referenced plugin so each configuration compiles
+	     and executes only tests for APIs that actually exist in that platform assembly. -->
+	<PropertyGroup Condition="'$(Configuration)' != 'Android'">
+		<DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+	</PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Android'">
+		<DefineConstants>$(DefineConstants);ANDROID</DefineConstants>
+	</PropertyGroup>
+
 	<!-- Program.cs is a local legacy console harness for the retired managed
 	     backend. Keep it available to developers without compiling it into the
 	     production xUnit gate. -->

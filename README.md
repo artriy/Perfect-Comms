@@ -82,7 +82,7 @@ Full guide, every primitive, and copy-paste examples are in the **[Mod Integrati
 | :--- | :--- |
 | Talk distance, falloff, and occlusion | Mic and speaker device |
 | Vent, ghost, and meeting voice rules | Push to talk or open mic |
-| Team Radio channels | Noise suppression, echo cancellation, auto gain |
+| Team Radio channels | Noise suppression and echo cancellation (desktop) |
 | Role-based mutes (with supported mods) | Per-player volume and HUD layout |
 
 <br>
@@ -105,8 +105,10 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 
 ## Install
 
-1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or grab **`PerfectComms+dependencies.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) which already bundles it.
-2. Drop `PerfectComms.dll` into `BepInEx/plugins`.
+1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder using the [official BepInEx installation instructions](https://docs.bepinex.dev/master/articles/user_guide/installation/index.html).
+2. Download **`PerfectComms-Release.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest)
+   and extract it into the Among Us folder. This places `PerfectComms.dll` in `BepInEx/plugins`
+   while keeping its required third-party notices alongside the package.
 3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
 ```text

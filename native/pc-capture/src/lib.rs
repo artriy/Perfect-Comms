@@ -7,6 +7,7 @@ pub mod gamestate;
 pub mod input;
 #[allow(dead_code)]
 pub mod mix;
+pub mod opus_native;
 pub mod proto;
 #[allow(dead_code)]
 pub mod rtc;

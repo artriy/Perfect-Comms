@@ -74,6 +74,10 @@ public static class VoiceChatHudState
     private static bool _pushToTalkHeld;
     private static bool _speakerMuted;
     private static bool _initialized;
+    private static int _audioPolicyRevision;
+    private static int _lastAudioPolicyRevision = -1;
+    private static int _lastAudioPolicyFrame = -1;
+    private static VoiceGameStateSnapshot? _lastAudioPolicySnapshot;
     // Audio policy must survive the short windows where Unity has destroyed/recreated the HUD or
     // LocalPlayer but the authenticated voice room is intentionally kept alive. Keep the last
     // trustworthy local snapshot so role/death policy can be evaluated for the *current* phase
@@ -95,6 +99,9 @@ public static class VoiceChatHudState
         _cachedMainCamera = null;
         DestroyButtons();
         DestroyTooltips();
+        // Preserve the HUD-independent privacy contract even when setup/role/UI work threw before
+        // the normal policy point in UpdateHud.
+        ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
     }
 
     public static bool IsMuted        => IsManualMuteActive();
@@ -136,9 +143,63 @@ public static class VoiceChatHudState
         {
             RefreshButtonLayout(settings);
             ApplyOverlayScale(settings.OverlayScale.Value);
-            _micMuted     = settings.MicMode.Value == VoiceMicMode.PushToTalk ? false : settings.StartMuted.Value;
-            _speakerMuted = settings.StartDeafened.Value;
+            ApplySessionPreferences(settings);
         }
+    }
+
+    /// <summary>
+    /// Resets process-static HUD/input state for a confirmed new voice session. StartMuted and
+    /// StartDeafened are session defaults, not one-time plugin-load defaults; PTT/radio holds must
+    /// never carry across lobbies.
+    /// </summary>
+    internal static void BeginVoiceSession()
+    {
+        _teamRadioHeld = false;
+        _teamRadioChannel = VoiceTeamRadioChannel.None;
+        _pushToTalkHeld = false;
+        _lastTrustedLocalAudioState = null;
+
+        var settings = VoiceSettings.Instance;
+        if (settings != null)
+            ApplySessionPreferences(settings);
+        else
+        {
+            // Missing settings during bootstrap is a fail-closed capture state.
+            _micMuted = true;
+            _speakerMuted = false;
+        }
+        InvalidateAudioPolicyCache();
+    }
+
+    internal static void EndVoiceSession()
+    {
+        _teamRadioHeld = false;
+        _teamRadioChannel = VoiceTeamRadioChannel.None;
+        _pushToTalkHeld = false;
+        _lastTrustedLocalAudioState = null;
+        InvalidateAudioPolicyCache();
+    }
+
+    internal static void ReleaseTransmitHoldsFailClosed()
+    {
+        bool changed = _teamRadioHeld || _pushToTalkHeld;
+        _teamRadioHeld = false;
+        _pushToTalkHeld = false;
+        if (!changed) return;
+
+        InvalidateAudioPolicyCache();
+        // State is already fail-closed even if a Unity wrapper disappears during the best-effort
+        // backend/UI refresh below.
+        try { ApplyMicState(); } catch { }
+        try { RefreshButtonVisuals(); } catch { }
+    }
+
+    private static void ApplySessionPreferences(VoiceChatLocalSettings settings)
+    {
+        _micMuted = settings.MicMode.Value == VoiceMicMode.PushToTalk
+            ? false
+            : settings.StartMuted.Value;
+        _speakerMuted = settings.StartDeafened.Value;
     }
 
     internal static void RefreshButtonLayout()
@@ -312,27 +373,42 @@ public static class VoiceChatHudState
 
     internal static void UpdateHud()
     {
-        // This is deliberately before every HUD/PlayerControl readiness return. The audio engine is
-        // room-owned, not HUD-owned: a missing HUD, MapButton or rebuilding LocalPlayer must never
-        // leave the microphone in the policy state from the previous phase.
-        ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
-
         _lastUpdateStep = "readiness.hud";
         var hud = HudManager.Instance;
-        if (hud == null) { _lastUpdateStep = "waiting.hud"; return; }
+        if (hud == null)
+        {
+            ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
+            _lastUpdateStep = "waiting.hud";
+            return;
+        }
 
         _lastUpdateStep = "readiness.local-player";
         var localPlayer = PlayerControl.LocalPlayer;
-        if (localPlayer == null) { _lastUpdateStep = "waiting.local-player"; return; }
+        if (localPlayer == null)
+        {
+            ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
+            _lastUpdateStep = "waiting.local-player";
+            return;
+        }
 
         // LocalPlayer becomes non-null a few frames before its GameData and the lobby HUD template
         // are guaranteed to be ready. Do not run role queries or clone MapButton in that window.
         // This was the timing in the observed one-shot early-lobby NullReferenceException.
         _lastUpdateStep = "readiness.local-data";
-        if (localPlayer.Data == null) { _lastUpdateStep = "waiting.local-data"; return; }
+        if (localPlayer.Data == null)
+        {
+            ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
+            _lastUpdateStep = "waiting.local-data";
+            return;
+        }
 
         _lastUpdateStep = "readiness.map-button";
-        if (hud.MapButton == null) { _lastUpdateStep = "waiting.map-button"; return; }
+        if (hud.MapButton == null)
+        {
+            ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
+            _lastUpdateStep = "waiting.map-button";
+            return;
+        }
 
         _lastUpdateStep = "pending-toast";
         var pendingToast = _pendingToast;
@@ -350,6 +426,8 @@ public static class VoiceChatHudState
         EnsureHudParent(hud);
         _lastUpdateStep = "role-state";
         VoiceRoleMuteState.Update();
+        // Apply exactly once after role/cache refresh on the ready-HUD path. The room tick later in
+        // this frame sees the same snapshot/revision and reuses this result.
         _lastUpdateStep = "apply-mic-state";
         ApplyMicState();
         _lastUpdateStep = "button-visibility";
@@ -702,6 +780,16 @@ public static class VoiceChatHudState
     /// </summary>
     internal static void ApplyAudioPolicy(VoiceGameStateSnapshot? snapshot)
     {
+        int frame = Time.frameCount;
+        int revision = _audioPolicyRevision;
+        if (_lastAudioPolicyFrame == frame
+            && _lastAudioPolicyRevision == revision
+            && ReferenceEquals(_lastAudioPolicySnapshot, snapshot))
+            return;
+
+        _lastAudioPolicyFrame = frame;
+        _lastAudioPolicyRevision = revision;
+        _lastAudioPolicySnapshot = snapshot;
         try
         {
             ApplyAudioPolicyCore(snapshot);
@@ -836,7 +924,17 @@ public static class VoiceChatHudState
         => speakerMuted || manualMuted || pushToTalkMuted || roleMuted || policyMuted;
 
     internal static void ResetAudioPolicyCache()
-        => _lastTrustedLocalAudioState = null;
+    {
+        _lastTrustedLocalAudioState = null;
+        InvalidateAudioPolicyCache();
+    }
+
+    internal static void InvalidateAudioPolicyCache()
+    {
+        unchecked { _audioPolicyRevision++; }
+        _lastAudioPolicyFrame = -1;
+        _lastAudioPolicySnapshot = null;
+    }
 
     internal static void ApplySpeakerState()
     {
@@ -858,6 +956,7 @@ public static class VoiceChatHudState
         if (settings == null) return;
         var next = settings.MicMode.Value == VoiceMicMode.PushToTalk ? VoiceMicMode.OpenMic : VoiceMicMode.PushToTalk;
         settings.MicMode.Value = next;
+        InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
         ShowToast(next == VoiceMicMode.PushToTalk ? "Push To Talk" : "Open Mic");
@@ -875,6 +974,7 @@ public static class VoiceChatHudState
     internal static void SetMuted(bool muted)
     {
         _micMuted = muted && !IsPushToTalkMode();
+        InvalidateAudioPolicyCache();
         ApplyMicState();
         if (_micMuted) MeetingSpeakingIndicatorPatch.ClearLocalIndicator();
         RefreshButtonVisuals();
@@ -888,6 +988,7 @@ public static class VoiceChatHudState
             if (_teamRadioHeld)
             {
                 _teamRadioHeld = false;
+                InvalidateAudioPolicyCache();
                 ApplyMicState();
                 RefreshButtonVisuals();
             }
@@ -896,7 +997,12 @@ public static class VoiceChatHudState
 
         bool prev     = _teamRadioHeld;
         _teamRadioHeld = held;
-        if (prev != _teamRadioHeld) { ApplyMicState(); RefreshButtonVisuals(); }
+        if (prev != _teamRadioHeld)
+        {
+            InvalidateAudioPolicyCache();
+            ApplyMicState();
+            RefreshButtonVisuals();
+        }
     }
 
     internal static void UpdateImpostorRadioHold(bool held, bool justPressed, bool justReleased)
@@ -941,6 +1047,7 @@ public static class VoiceChatHudState
             return;
 
         _teamRadioChannel = next;
+        InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
         if (_micTooltip?.activeSelf == true)
@@ -960,6 +1067,7 @@ public static class VoiceChatHudState
     {
         if (_pushToTalkHeld == held) return;
         _pushToTalkHeld = held;
+        InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
     }
@@ -976,6 +1084,7 @@ public static class VoiceChatHudState
     internal static void SetSpeakerMuted(bool muted)
     {
         _speakerMuted = muted;
+        InvalidateAudioPolicyCache();
         ApplyMicState();
         ApplySpeakerState();
         if (_speakerMuted) MeetingSpeakingIndicatorPatch.ClearLocalIndicator();

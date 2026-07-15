@@ -146,6 +146,7 @@ internal static class VoiceFirstRunSetup
             _verifiedMicrophoneDevice = string.Empty;
             _verifiedSpeakerDevice = string.Empty;
             _shown = true;
+            VoiceChatPatches.ReleaseHeldTransmitInputs();
             _inputLockedUntilFrame = Time.frameCount + 2;
 
             _shell = new VoiceUiKit.PanelShell(

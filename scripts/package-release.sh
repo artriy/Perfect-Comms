@@ -51,6 +51,46 @@ require_nonempty() {
 	fi
 }
 
+copy_third_party_license_texts() {
+	local destination="$1"
+	mkdir -p "$destination/licenses"
+	local source
+	for source in \
+		opus.COPYING \
+		opusic-c.COPYING \
+		webrtc-apm.COPYING \
+		webrtc-upstream.LICENSE \
+		webrtc-ooura.LICENSE \
+		webrtc-spl-sqrt-floor.LICENSE \
+		webrtc-fft.LICENSE \
+		webrtc-pffft.LICENSE \
+		webrtc-rnnoise.COPYING \
+		socketio-client-csharp.LICENSE \
+		dotnet-runtime.LICENSE.TXT \
+		system-text-encodings-web.THIRD-PARTY-NOTICES.TXT \
+		system-text-json.THIRD-PARTY-NOTICES.TXT \
+		native-rust-dependencies.html; do
+		require_nonempty "$root/Libs/$source"
+	done
+	cp "$root/Libs/opus.COPYING" "$destination/licenses/libopus-BSD-3-Clause.txt"
+	cp "$root/Libs/opusic-c.COPYING" "$destination/licenses/opusic-c-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-apm.COPYING" "$destination/licenses/webrtc-audio-processing-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-upstream.LICENSE" "$destination/licenses/WebRTC-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-ooura.LICENSE" "$destination/licenses/WebRTC-ooura-BSD.txt"
+	cp "$root/Libs/webrtc-spl-sqrt-floor.LICENSE" "$destination/licenses/WebRTC-spl-sqrt-floor-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-fft.LICENSE" "$destination/licenses/WebRTC-fft-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-pffft.LICENSE" "$destination/licenses/WebRTC-pffft-BSD-3-Clause.txt"
+	cp "$root/Libs/webrtc-rnnoise.COPYING" "$destination/licenses/WebRTC-rnnoise-BSD-3-Clause.txt"
+	cp "$root/Libs/socketio-client-csharp.LICENSE" "$destination/licenses/SocketIOClient-MIT.txt"
+	cp "$root/Libs/dotnet-runtime.LICENSE.TXT" "$destination/licenses/dotnet-runtime-MIT.txt"
+	cp "$root/Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT" \
+		"$destination/licenses/System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt"
+	cp "$root/Libs/system-text-json.THIRD-PARTY-NOTICES.TXT" \
+		"$destination/licenses/System.Text.Json-THIRD-PARTY-NOTICES.txt"
+	cp "$root/Libs/native-rust-dependencies.html" \
+		"$destination/licenses/native-rust-dependencies.html"
+}
+
 if [[ "$config" == "Android" ]]; then
 	require_nonempty "$root/Libs/pc-mobile/libpc_mobile.so"
 	require_nonempty "$root/release-assets/android/AndroidManifest.xml"
@@ -121,6 +161,7 @@ cp "$root/README.md" "$output/README.md"
 cp "$root/LICENSE" "$output/LICENSE"
 cp "$root/THIRD_PARTY_NOTICES.md" "$output/THIRD_PARTY_NOTICES.md"
 cp "$root/PRIVACY.md" "$output/PRIVACY.md"
+copy_third_party_license_texts "$output"
 
 version="$source_version"
 protocol="$network_protocol"
@@ -142,10 +183,12 @@ test -s "$output/BepInEx/plugins/PerfectComms.dll"
 test -s "$output/SHA256SUMS.txt"
 
 if command -v zip >/dev/null 2>&1; then
+	rm -f "$root/artifacts/PerfectComms-$config.zip"
 	(
-		cd "$root/artifacts"
-		rm -f "PerfectComms-$config.zip"
-		zip -qr "PerfectComms-$config.zip" "PerfectComms-$config"
+		cd "$output"
+		# Archive the install tree itself, not its staging-directory name. Extraction into the
+		# game root must place BepInEx directly at that root.
+		zip -qr "$root/artifacts/PerfectComms-$config.zip" .
 	)
 elif command -v python >/dev/null 2>&1; then
 	package_root="$root/artifacts"
@@ -166,95 +209,12 @@ if dst.exists():
 with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
     for path in sorted(src.rglob("*")):
         if path.is_file():
-            zf.write(path, path.relative_to(root))
+            zf.write(path, path.relative_to(src))
 PY
 fi
 
-if [[ "$config" != "Android" ]]; then
-	dependency_source="${PC_DEPENDENCY_SOURCE:-$root/TouMira}"
-	dependency_output="$root/artifacts/PerfectComms+dependencies"
-	dependency_zip="$root/artifacts/PerfectComms+dependencies.zip"
-	required_dependency_files=(
-		".doorstop_version"
-		"doorstop_config.ini"
-		"winhttp.dll"
-		"dotnet"
-		"BepInEx/core"
-		"BepInEx/patchers"
-		"BepInEx/unity-libs"
-		"BepInEx/config/BepInEx.cfg"
-	)
-	for file in "${required_dependency_files[@]}"; do
-		test -e "$dependency_source/$file" || {
-			echo "missing dependency bundle source: $file" >&2
-			exit 1
-		}
-	done
-
-	rm -rf "$dependency_output"
-	mkdir -p "$dependency_output/BepInEx/plugins" "$dependency_output/BepInEx/config"
-	cp "$dependency_source/.doorstop_version" "$dependency_output/"
-	cp "$dependency_source/doorstop_config.ini" "$dependency_output/"
-	cp "$dependency_source/winhttp.dll" "$dependency_output/"
-	cp -R "$dependency_source/dotnet" "$dependency_output/dotnet"
-	cp -R "$dependency_source/BepInEx/core" "$dependency_output/BepInEx/core"
-	cp -R "$dependency_source/BepInEx/patchers" "$dependency_output/BepInEx/patchers"
-	cp -R "$dependency_source/BepInEx/unity-libs" "$dependency_output/BepInEx/unity-libs"
-	cp "$dependency_source/BepInEx/config/BepInEx.cfg" "$dependency_output/BepInEx/config/BepInEx.cfg"
-	cp "$dll" "$dependency_output/BepInEx/plugins/PerfectComms.dll"
-	cp "$root/README.md" "$dependency_output/README.md"
-	cp "$root/LICENSE" "$dependency_output/LICENSE"
-	cp "$root/THIRD_PARTY_NOTICES.md" "$dependency_output/THIRD_PARTY_NOTICES.md"
-	cp "$root/PRIVACY.md" "$dependency_output/PRIVACY.md"
-	cat >"$dependency_output/DEPENDENCIES.txt" <<'EOF'
-Perfect Comms with dependencies
-Includes: PerfectComms.dll and BepInEx Unity IL2CPP 6.0.0-be.735.
-Perfect Comms is standalone and does NOT require MiraAPI or Reactor.
-Does not include TOU-Mira. Supported mod behaviours activate only when matching mods are installed.
-Install by extracting into the Among Us install folder so winhttp.dll sits next to Among Us.exe.
-EOF
-
-	test ! -e "$dependency_output/BepInEx/plugins/TownOfUsMira.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/Mini.RegionInstall.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/MiraAPI.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/Reactor.dll"
-	test -s "$dependency_output/BepInEx/plugins/PerfectComms.dll"
-
-	(
-		cd "$dependency_output"
-		find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.txt
-	)
-
-	if command -v zip >/dev/null 2>&1; then
-		(
-			cd "$root/artifacts"
-			rm -f "PerfectComms+dependencies.zip"
-			zip -qr "PerfectComms+dependencies.zip" "PerfectComms+dependencies"
-		)
-	elif command -v python >/dev/null 2>&1; then
-		package_root="$root/artifacts"
-		if command -v cygpath >/dev/null 2>&1; then
-			package_root="$(cygpath -w "$package_root")"
-		fi
-		PACKAGE_ROOT="$package_root" PACKAGE_NAME="PerfectComms+dependencies" python - <<'PY'
-import os
-import pathlib
-import zipfile
-
-root = pathlib.Path(os.environ["PACKAGE_ROOT"])
-name = os.environ["PACKAGE_NAME"]
-src = root / name
-dst = root / f"{name}.zip"
-if dst.exists():
-    dst.unlink()
-with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
-    for path in sorted(src.rglob("*")):
-        if path.is_file():
-            zf.write(path, path.relative_to(root))
-PY
-	fi
-	echo "Dependency package $dependency_zip"
-fi
+"$asset_python" "$root/scripts/verify-package-layout.py" \
+	"$root/artifacts/PerfectComms-$config.zip" --kind "$config"
 
 echo "Packaged $output"
 echo "Release DLL $release_dll"

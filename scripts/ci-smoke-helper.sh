@@ -76,22 +76,32 @@ try:
     assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
     send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True, "hpf": True})
-    send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01})
+    send_control({"op": "set-diagnostics", "enabled": True})
+    send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01,
+                  "noise_gate_threshold": 0.003})
     send_control({"op": "set-synthetic", "enabled": True})
     send_control({"op": "start"})
     levels = 0
+    stats_seen = False
     deadline2 = time.time() + 15
-    while levels < 2:
+    while levels < 2 or not stats_seen:
         if time.time() > deadline2:
             raise RuntimeError("did not receive 2 level frames within 15s")
         t, body = recv_frame()
         if t != 0x01:
             continue
         msg = json.loads(body)
-        if msg.get("op") != "level":
-            continue
-        assert "speaking" in msg, msg
-        levels += 1
+        if msg.get("op") == "level":
+            assert "speaking" in msg, msg
+            levels += 1
+        elif msg.get("op") == "stats":
+            assert msg.get("input_noise_gate_threshold") == 0.003, msg
+            assert isinstance(msg.get("media_receive"), dict), msg
+            assert isinstance(msg.get("network_paths"), list), msg
+            assert isinstance(msg.get("encoder_packet_loss_percent"), int), msg
+            assert isinstance(msg.get("encoder_bitrate"), int), msg
+            assert msg.get("diagnostics", {}).get("schema") == 1, msg
+            stats_seen = True
 
     # Runtime suppression changes must reconfigure the already-loaded WebRTC APM in place.
     send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": False, "hpf": True})

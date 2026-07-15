@@ -44,12 +44,13 @@ internal interface ISidecarVoiceClient : IDisposable
         bool hpf,
         float gain,
         float vadThreshold,
+        float noiseGateThreshold,
         bool synthetic,
         bool micActive,
         IEnumerable<IceServer>? iceServers);
     void SetDsp(bool aec, bool agc, bool ns, bool hpf);
     void SetSynthetic(bool enabled);
-    void SetInput(float gain, float vadThreshold);
+    void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
     void SelectMicDevice(string deviceId);
     void SelectOutputDevice(string deviceId);
@@ -195,19 +196,20 @@ internal sealed class SidecarVoiceLease : IDisposable
         bool hpf,
         float gain,
         float vadThreshold,
+        float noiseGateThreshold,
         bool synthetic,
         bool micActive,
         IEnumerable<IceServer>? iceServers)
         => _host.Use(this, client => client.TryConfigureInitialCapture(
-            micDevice, outputDevice, aec, agc, ns, hpf, gain, vadThreshold,
+            micDevice, outputDevice, aec, agc, ns, hpf, gain, vadThreshold, noiseGateThreshold,
             synthetic, micActive, iceServers), false);
 
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf)
         => _host.Use(this, client => client.SetDsp(aec, agc, ns, hpf));
     public void SetSynthetic(bool enabled)
         => _host.Use(this, client => client.SetSynthetic(enabled));
-    public void SetInput(float gain, float vadThreshold)
-        => _host.Use(this, client => client.SetInput(gain, vadThreshold));
+    public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)
+        => _host.Use(this, client => client.SetInput(gain, vadThreshold, noiseGateThreshold));
     public void SetMicActive(bool active)
         => _host.Use(this, client => client.SetMicActive(active));
     public void SelectMicDevice(string deviceId)

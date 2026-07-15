@@ -2,22 +2,25 @@ use crate::audio::{
     monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, AecTiming,
     PlaybackProgress, ToneSource,
 };
-use crate::codec::OpusCodec;
+use crate::codec::{
+    decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
+};
 use crate::diagnostics::{
     media_state_json, send_media_state, CaptureDiagnostics, MediaDiagnostics, MediaStateEvent,
     StreamDescriptor,
 };
 use crate::gamestate::{GameState, LocalState, PeerState};
 use crate::input::{
-    InputConfig, LevelCadence, PeerLevelCadence, TelemetryMailbox, TELEMETRY_INTERVAL,
+    InputConfig, LevelCadence, NoiseGate, PeerLevelCadence, TelemetryMailbox, TELEMETRY_INTERVAL,
 };
 use crate::mix::{Mixer, PeerJitter};
 use crate::proto;
 use crate::proto::{
-    encode_control, error_json, level_json, local_candidate_json, local_sdp_json, parse_inbound,
-    peer_levels_json, peer_state_json, pong_json, ready_json, stats_json_with_diagnostics,
-    AudioFrame, AudioOutFrame, AudioRing, DeviceInfo, Frame, InboundOp, PlaybackRing,
-    PROTO_VERSION, RING_CAPACITY,
+    capture_frame_ring, encode_control, error_json, level_json, local_candidate_json,
+    local_sdp_json, parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json,
+    stats_json_with_diagnostics, AudioFrame, AudioOutFrame, CaptureFrameConsumer,
+    CaptureFrameMetadata, CaptureFrameProducer, DeviceInfo, Frame, InboundOp, MediaReceiveStats,
+    NetworkPathStats, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
 use std::collections::HashMap;
@@ -36,6 +39,7 @@ const PLAYBACK_START_TIMEOUT: Duration = Duration::from_secs(5);
 const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_millis(750);
 const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_millis(750);
+const ENCODER_PRIVACY_EPOCH_TIMEOUT: Duration = Duration::from_secs(2);
 const PLAYBACK_WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
 const CRITICAL_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -69,12 +73,13 @@ struct PlaybackSupervision {
 #[derive(Clone)]
 struct TelemetrySources {
     counters: Arc<NativeCounters>,
-    capture_ring: Arc<Mutex<AudioRing>>,
+    capture_ring: CaptureFrameConsumer,
     playback_ring: Arc<Mutex<PlaybackRing>>,
     dsp: Arc<Mutex<crate::dsp::Dsp>>,
     input: Arc<Mutex<InputConfig>>,
     aec_timing: Arc<AecTiming>,
     media_diagnostics: Arc<MediaDiagnostics>,
+    rtc: Arc<RtcEngine>,
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -345,6 +350,7 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
             Ok(Frame::Audio(AudioFrame {
+                encoder_epoch: 0,
                 capture_generation: 0,
                 capture_open_attempt: 0,
                 capture_ts_ns: ts,
@@ -452,7 +458,8 @@ fn join_thread_bounded(
 }
 
 fn spawn_synthetic_producer(
-    ring: Arc<Mutex<AudioRing>>,
+    ring: CaptureFrameProducer,
+    encoder_epoch: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     diagnostics: Arc<CaptureDiagnostics>,
     stream_generation: u64,
@@ -497,19 +504,29 @@ fn spawn_synthetic_producer(
             },
         );
         while !stop.load(Ordering::Relaxed) {
+            // Stamp the privacy epoch at capture-frame begin, before any PCM is generated.
+            let frame_encoder_epoch = encoder_epoch.load(Ordering::Acquire);
             let callback_ns = monotonic_ns();
             let first =
                 diagnostics.observe_callback(callback_ns, proto::FRAME_SAMPLES, proto::SAMPLE_RATE);
-            let mut frame = src.fill_frame(callback_ns, callback_ns, true);
-            frame.capture_generation = stream_generation;
-            frame.capture_open_attempt = open_attempt;
-            diagnostics.raw_input.record(&frame.samples);
+            let frame = src.fill_frame(callback_ns, callback_ns, true);
+            if diagnostics.signal_windows_enabled() {
+                diagnostics.raw_input.record(&frame.samples);
+            }
             diagnostics.observe_resampled_samples(frame.samples.len());
             diagnostics.observe_frames_produced(1);
-            let mut ring = ring.lock().unwrap();
-            ring.push(frame);
+            let _ = ring.push(
+                CaptureFrameMetadata {
+                    encoder_epoch: frame_encoder_epoch,
+                    capture_generation: stream_generation,
+                    capture_open_attempt: open_attempt,
+                    capture_ts_ns: frame.capture_ts_ns,
+                    capture_callback_ts_ns: frame.capture_callback_ts_ns,
+                    capture_timestamp_valid: frame.capture_timestamp_valid,
+                },
+                &frame.samples,
+            );
             diagnostics.observe_ring_len(ring.len());
-            drop(ring);
             if first {
                 send_media_state(
                     &media_events,
@@ -600,7 +617,9 @@ impl ProducerLifecycle {
 
 struct CaptureProducer {
     lifecycle: ProducerLifecycle,
-    ring: Arc<Mutex<AudioRing>>,
+    ring_producer: CaptureFrameProducer,
+    ring_consumer: CaptureFrameConsumer,
+    encoder_epoch: Arc<AtomicU64>,
     conn: Arc<Mutex<TcpStream>>,
     aec_timing: Arc<AecTiming>,
     diagnostics: Arc<CaptureDiagnostics>,
@@ -611,9 +630,14 @@ struct CaptureProducer {
 }
 
 impl CaptureProducer {
+    // These are distinct preallocated callback resources and shared real-time state; grouping them
+    // only to shorten this private constructor would obscure their ownership and lifecycle.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         synthetic: bool,
-        ring: Arc<Mutex<AudioRing>>,
+        ring_producer: CaptureFrameProducer,
+        ring_consumer: CaptureFrameConsumer,
+        encoder_epoch: Arc<AtomicU64>,
         conn: Arc<Mutex<TcpStream>>,
         aec_timing: Arc<AecTiming>,
         diagnostics: Arc<CaptureDiagnostics>,
@@ -621,7 +645,9 @@ impl CaptureProducer {
     ) -> Self {
         Self {
             lifecycle: ProducerLifecycle::new(synthetic),
-            ring,
+            ring_producer,
+            ring_consumer,
+            encoder_epoch,
             conn,
             aec_timing,
             diagnostics,
@@ -764,7 +790,7 @@ impl CaptureProducer {
         if self.handle.is_some() || !self.lifecycle.running {
             return Ok(());
         }
-        self.ring.lock().unwrap().clear();
+        self.ring_consumer.reset();
         self.stream_generation = self.diagnostics.begin_stream(
             monotonic_ns(),
             self.lifecycle.synthetic,
@@ -788,7 +814,8 @@ impl CaptureProducer {
         let stop = Arc::new(AtomicBool::new(false));
         self.handle = Some(if self.lifecycle.synthetic {
             spawn_synthetic_producer(
-                self.ring.clone(),
+                self.ring_producer.clone(),
+                self.encoder_epoch.clone(),
                 stop.clone(),
                 self.diagnostics.clone(),
                 self.stream_generation,
@@ -797,7 +824,9 @@ impl CaptureProducer {
         } else {
             spawn_real_producer(
                 self.lifecycle.selected.clone(),
-                self.ring.clone(),
+                self.ring_producer.clone(),
+                self.ring_consumer.clone(),
+                self.encoder_epoch.clone(),
                 stop.clone(),
                 self.conn.clone(),
                 self.aec_timing.clone(),
@@ -822,25 +851,8 @@ impl CaptureProducer {
         let join_result = self.handle.take().map_or(Ok(()), |handle| {
             join_thread_bounded(handle, "capture worker", CAPTURE_STOP_TIMEOUT)
         });
-        let clear_deadline = Instant::now() + Duration::from_millis(50);
-        let clear_result = loop {
-            match self.ring.try_lock() {
-                Ok(mut ring) => {
-                    ring.clear();
-                    break Ok(());
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    break Err("capture ring lock poisoned during stop".to_string());
-                }
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < clear_deadline => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    break Err("capture ring remained busy during stop".to_string());
-                }
-            }
-        };
-        let result = join_result.and(clear_result);
+        self.ring_consumer.reset();
+        let result = join_result;
         if had_worker {
             let stopped = result.is_ok();
             let final_window = if stopped {
@@ -910,20 +922,15 @@ fn spawn_telemetry_writer(
                     break;
                 }
             }
-            if last_stats.elapsed() >= STATS_INTERVAL {
+            if sources.media_diagnostics.is_enabled() && last_stats.elapsed() >= STATS_INTERVAL {
                 let now_ns = monotonic_ns();
-                let (capture_len, capture_capacity, capture_dropped, capture_oldest_age_ms) = {
-                    let capture = sources.capture_ring.lock().unwrap();
-                    let oldest_age_ms = capture
-                        .oldest_capture_ts_ns()
-                        .map_or(0, |timestamp| now_ns.saturating_sub(timestamp) / 1_000_000);
-                    (
-                        capture.len() as u64,
-                        capture.capacity() as u64,
-                        capture.dropped(),
-                        oldest_age_ms,
-                    )
-                };
+                let capture = sources.capture_ring.snapshot();
+                let capture_len = capture.len as u64;
+                let capture_capacity = capture.capacity as u64;
+                let capture_dropped = capture.dropped;
+                let capture_oldest_age_ms = capture
+                    .oldest_capture_ts_ns
+                    .map_or(0, |timestamp| now_ns.saturating_sub(timestamp) / 1_000_000);
                 let (playback_len, playback_dropped) = {
                     let playback = sources.playback_ring.lock().unwrap();
                     (playback.len() as u64, playback.dropped())
@@ -947,6 +954,56 @@ fn spawn_telemetry_writer(
                 snapshot.dsp_applied_hpf = dsp.applied_hpf;
                 snapshot.input_gain = input.gain;
                 snapshot.input_vad_threshold = input.vad_threshold;
+                snapshot.input_noise_gate_threshold = input.noise_gate_threshold;
+                let receive = sources.rtc.media_receive_snapshot();
+                snapshot.media_receive = MediaReceiveStats {
+                    active_peers: receive.active_peers,
+                    ingress_queue_overflow: receive.ingress_queue_overflow,
+                    sequence_gaps: receive.sequence_gaps,
+                    reordered_recovered: receive.reordered_recovered,
+                    late_drops: receive.late_drops,
+                    duplicate_drops: receive.duplicate_drops,
+                    encoded_overflow_drops: receive.encoded_overflow_drops,
+                    deadline_losses: receive.deadline_losses,
+                    dred_frames: receive.dred_frames,
+                    fec_frames: receive.fec_frames,
+                    plc_frames: receive.plc_frames,
+                    decoder_resets: receive.decoder_resets,
+                    talkspurt_resets: receive.talkspurt_resets,
+                    underruns: receive.underruns,
+                    rebuffers: receive.rebuffers,
+                    target_frames_max: receive.target_frames_max,
+                    target_frames_current_max: receive.target_frames_current_max,
+                    depth_frames_max: receive.depth_frames_max,
+                    depth_frames_current: receive.depth_frames_current,
+                    rtp_jitter_ms_max: receive.rtp_jitter_ms_max,
+                };
+                snapshot.network_paths = sources
+                    .rtc
+                    .network_path_snapshots()
+                    .into_iter()
+                    .map(|path| NetworkPathStats {
+                        peer_id: path.peer_id,
+                        generation: path.generation,
+                        candidate_pair_id: path.candidate_pair_id,
+                        candidate_state: path.candidate_state,
+                        local_candidate_type: path.local_candidate_type,
+                        remote_candidate_type: path.remote_candidate_type,
+                        relay: path.relay,
+                        current_rtt_ms: path.current_rtt_ms,
+                        available_outgoing_bitrate: path.available_outgoing_bitrate,
+                        available_incoming_bitrate: path.available_incoming_bitrate,
+                        remote_packets_received: path.remote_packets_received,
+                        remote_packets_lost: path.remote_packets_lost,
+                        remote_fraction_lost: path.remote_fraction_lost,
+                        remote_report_rtt_ms: path.remote_report_rtt_ms,
+                        remote_rtt_measurements: path.remote_rtt_measurements,
+                    })
+                    .collect();
+                let encoder_policy = sources.rtc.encoder_policy_snapshot();
+                snapshot.encoder_packet_loss_percent =
+                    u64::from(encoder_policy.packet_loss_percent);
+                snapshot.encoder_bitrate = encoder_policy.bitrate.max(0) as u64;
                 let aec = sources.aec_timing.snapshot(now_ns);
                 snapshot.aec_delay_ms = sources.aec_timing.applied_delay_ms().unwrap_or(0);
                 snapshot.aec_recommended_delay_ms = aec.recommended_delay_ms.max(0) as u64;
@@ -992,7 +1049,9 @@ fn spawn_telemetry_writer(
 #[allow(clippy::too_many_arguments)]
 fn spawn_real_producer(
     device_id: Option<String>,
-    ring: Arc<Mutex<AudioRing>>,
+    ring_producer: CaptureFrameProducer,
+    ring_consumer: CaptureFrameConsumer,
+    encoder_epoch: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     conn: Arc<Mutex<TcpStream>>,
     aec_timing: Arc<AecTiming>,
@@ -1011,7 +1070,8 @@ fn spawn_real_producer(
             healthy.store(false, Ordering::Relaxed);
             match spawn_cpal_capture(
                 device_id.clone(),
-                ring.clone(),
+                ring_producer.clone(),
+                encoder_epoch.clone(),
                 stop.clone(),
                 healthy.clone(),
                 aec_timing.clone(),
@@ -1030,9 +1090,7 @@ fn spawn_real_producer(
                     retry_attempt = retry_attempt.saturating_add(1);
                     let retry_delay = capture_retry_delay(retry_attempt);
                     diagnostics.mark_retrying(retry_attempt as u64);
-                    if let Ok(mut queued) = ring.lock() {
-                        queued.clear();
-                    }
+                    ring_consumer.discard_all();
                     send_media_state(
                         &media_events,
                         MediaStateEvent {
@@ -1287,6 +1345,7 @@ enum RtcOp {
         offerer: bool,
         relay_only: bool,
         generation: u32,
+        min_encoder_epoch: u64,
     },
     RemovePeer {
         peer_id: String,
@@ -1303,6 +1362,93 @@ enum RtcOp {
     SetIceServers {
         servers: Vec<crate::proto::IceServer>,
     },
+}
+
+#[derive(Default)]
+struct EncoderPrivacyEpochState {
+    applied: u64,
+    failed: bool,
+}
+
+/// Coordinates privacy boundaries between the control thread and the encoder writer. Requests
+/// are monotonic and may be coalesced by the writer; waiters only require that their requested
+/// epoch (or a newer one) has been fully applied.
+#[derive(Default)]
+struct EncoderPrivacyEpoch {
+    requested: Arc<AtomicU64>,
+    state: Mutex<EncoderPrivacyEpochState>,
+    changed: Condvar,
+}
+
+impl EncoderPrivacyEpoch {
+    fn request(&self) -> Result<u64, String> {
+        let mut current = self.requested.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(1)
+                .ok_or_else(|| "encoder privacy epoch exhausted".to_string())?;
+            match self.requested.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn requested(&self) -> u64 {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn requested_source(&self) -> Arc<AtomicU64> {
+        self.requested.clone()
+    }
+
+    fn publish_applied(&self, epoch: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.applied = state.applied.max(epoch);
+        self.changed.notify_all();
+    }
+
+    fn fail(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.failed = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_applied(&self, epoch: u64, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        while state.applied < epoch && !state.failed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "encoder privacy epoch {epoch} was not applied within {}ms",
+                    timeout.as_millis()
+                ));
+            }
+            let (next, wait) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if wait.timed_out() && state.applied < epoch {
+                return Err(format!(
+                    "encoder privacy epoch {epoch} was not applied within {}ms",
+                    timeout.as_millis()
+                ));
+            }
+        }
+        if state.failed {
+            Err("encoder privacy reset failed".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn capture_frame_authorized(frame_epoch: u64, active_epoch: u64, requested_epoch: u64) -> bool {
+    frame_epoch == active_epoch && requested_epoch == active_epoch
 }
 
 #[allow(clippy::while_let_loop)]
@@ -1382,11 +1528,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         playback_supervision.clone(),
     );
 
-    let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
+    let (ring_producer, ring_consumer) = capture_frame_ring(RING_CAPACITY);
+    let encoder_privacy = Arc::new(EncoderPrivacyEpoch::default());
+    let capture_transmit_enabled = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let mut producer = CaptureProducer::new(
         cfg.synthetic,
-        ring.clone(),
+        ring_producer,
+        ring_consumer.clone(),
+        encoder_privacy.requested_source(),
         conn.clone(),
         aec_timing.clone(),
         media_diagnostics.capture.clone(),
@@ -1396,6 +1546,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let telemetry = Arc::new(TelemetryMailbox::default());
     let telemetry_stop = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(NativeCounters::default());
+    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
+
+    let rtc = Arc::new(RtcEngine::new_with_counters(
+        local_signal_tx,
+        counters.clone(),
+    ));
     let telemetry_handle = spawn_telemetry_writer(
         telemetry.clone(),
         media_event_rx,
@@ -1403,24 +1559,17 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         conn.clone(),
         TelemetrySources {
             counters: counters.clone(),
-            capture_ring: ring.clone(),
+            capture_ring: ring_consumer.clone(),
             playback_ring: playback.clone(),
             dsp: dsp.clone(),
             input: input.clone(),
             aec_timing: aec_timing.clone(),
             media_diagnostics: media_diagnostics.clone(),
+            rtc: rtc.clone(),
         },
         session_supervisor.clone(),
     );
-
-    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
-
-    let rtc = Arc::new(RtcEngine::new_with_counters(
-        local_signal_tx,
-        counters.clone(),
-    ));
     let rtc_stop = Arc::new(AtomicBool::new(false));
-
     let (rtc_op_tx, rtc_op_rx) = std::sync::mpsc::channel::<RtcOp>();
     let ctrl_rtc = rtc.clone();
     let ctrl_handle = spawn_critical_worker("rtc-control", session_supervisor.clone(), move || {
@@ -1431,7 +1580,8 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     offerer,
                     relay_only,
                     generation,
-                } => ctrl_rtc.add_peer(peer_id, offerer, relay_only, generation),
+                    min_encoder_epoch,
+                } => ctrl_rtc.add_peer(peer_id, offerer, relay_only, generation, min_encoder_epoch),
                 RtcOp::RemovePeer { peer_id } => ctrl_rtc.remove_peer(&peer_id),
                 RtcOp::SetRemoteSdp {
                     peer_id,
@@ -1446,7 +1596,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         }
     });
 
-    let writer_ring = ring.clone();
+    let writer_ring = ring_consumer.clone();
     let writer_stop = stop.clone();
     let writer_dsp = dsp.clone();
     let writer_rtc = rtc.clone();
@@ -1455,80 +1605,155 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
     let writer_counters = counters.clone();
     let writer_aec_timing = aec_timing.clone();
     let writer_capture_diagnostics = media_diagnostics.capture.clone();
+    let writer_privacy = encoder_privacy.clone();
+    let writer_transmit_enabled = capture_transmit_enabled.clone();
     let writer_handle = spawn_critical_worker("encoder", session_supervisor.clone(), move || {
         let mut encoder = encoder;
         let mut level_cadence = LevelCadence::new(Instant::now());
         let mut last_dropped = 0u64;
         let mut last_capture_stream = None;
+        let mut noise_gate = NoiseGate::default();
+        let mut applied_encoder_policy_generation = 0u64;
+        let mut active_encoder_epoch = 0u64;
+        let mut frame = AudioFrame {
+            encoder_epoch: 0,
+            capture_generation: 0,
+            capture_open_attempt: 0,
+            capture_ts_ns: 0,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
+            samples: vec![0.0; proto::FRAME_SAMPLES],
+        };
         while !writer_stop.load(Ordering::Relaxed) {
-            let (frame, dropped) = {
-                let mut ring = writer_ring.lock().unwrap();
-                (ring.pop(), ring.dropped())
-            };
-            match frame {
-                Some(mut f) => {
-                    if !writer_capture_diagnostics
-                        .is_active_stream(f.capture_generation, f.capture_open_attempt)
-                    {
-                        writer_capture_diagnostics.note_stale_generation_frame();
-                        continue;
-                    }
-                    writer_counters
-                        .capture_frames
-                        .fetch_add(1, Ordering::Relaxed);
+            let requested_epoch = writer_privacy.requested();
+            if requested_epoch > active_encoder_epoch {
+                writer_ring.discard_all();
+                if let Err(error) = encoder.reset_encoder() {
+                    writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                    writer_privacy.fail();
+                    eprintln!("pc-capture: Opus privacy reset failed: {error}");
+                    return;
+                }
+                noise_gate.reset();
+                last_capture_stream = None;
+                applied_encoder_policy_generation = 0;
+                active_encoder_epoch = requested_epoch;
+                writer_privacy.publish_applied(active_encoder_epoch);
+            }
+            let dropped = writer_ring.dropped();
+            if writer_ring.pop_into(&mut frame) {
+                if !writer_transmit_enabled.load(Ordering::Acquire) {
+                    continue;
+                }
+                let f = &mut frame;
+                if !capture_frame_authorized(
+                    f.encoder_epoch,
+                    active_encoder_epoch,
+                    writer_privacy.requested(),
+                ) {
+                    // This includes a callback that began before a privacy reset but enqueued
+                    // afterward. Such PCM must never seed the reset encoder/DRED history.
+                    continue;
+                }
+                if !writer_capture_diagnostics
+                    .is_active_stream(f.capture_generation, f.capture_open_attempt)
+                {
+                    writer_capture_diagnostics.note_stale_generation_frame();
+                    continue;
+                }
+                writer_counters
+                    .capture_frames
+                    .fetch_add(1, Ordering::Relaxed);
+                if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.pre_dsp.record(&f.samples);
-                    let mut dsp = writer_dsp.lock().unwrap();
-                    let capture_stream = (f.capture_generation, f.capture_open_attempt);
-                    if last_capture_stream != Some(capture_stream) {
-                        dsp.begin_capture_generation();
-                        last_capture_stream = Some(capture_stream);
-                    }
-                    // Measure at the real DSP boundary so time spent waiting behind reverse-stream
-                    // analysis and capture-ring backlog is included in the AEC delay.
-                    let process_ns = monotonic_ns();
-                    let aec = writer_aec_timing.snapshot_for_capture(process_ns, &f);
-                    if f.capture_timestamp_valid && process_ns >= f.capture_ts_ns {
-                        writer_capture_diagnostics
-                            .observe_encoder_pop_age(process_ns - f.capture_ts_ns);
-                    }
-                    let applied_delay_ms = dsp.capture_with_stream_delay(
-                        &mut f.samples,
-                        aec.recommended_delay_ms,
-                        aec.timing_complete,
-                        aec.playback_timing_epoch,
-                    );
-                    drop(dsp);
-                    writer_aec_timing.note_applied_delay(applied_delay_ms);
+                }
+                let mut dsp = writer_dsp.lock().unwrap();
+                let capture_stream = (f.capture_generation, f.capture_open_attempt);
+                if last_capture_stream != Some(capture_stream) {
+                    dsp.begin_capture_generation();
+                    noise_gate.reset();
+                    last_capture_stream = Some(capture_stream);
+                }
+                // Measure at the real DSP boundary so time spent waiting behind reverse-stream
+                // analysis and capture-ring backlog is included in the AEC delay.
+                let process_ns = monotonic_ns();
+                let aec = writer_aec_timing.snapshot_for_capture(process_ns, f);
+                if f.capture_timestamp_valid && process_ns >= f.capture_ts_ns {
+                    writer_capture_diagnostics
+                        .observe_encoder_pop_age(process_ns - f.capture_ts_ns);
+                }
+                let applied_delay_ms = dsp.capture_with_stream_delay(
+                    &mut f.samples,
+                    aec.recommended_delay_ms,
+                    aec.timing_complete,
+                    aec.playback_timing_epoch,
+                );
+                drop(dsp);
+                writer_aec_timing.note_applied_delay(applied_delay_ms);
+                if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.post_dsp.record(&f.samples);
-                    let input = *writer_input.lock().unwrap();
-                    input.apply_gain(&mut f.samples);
-                    if !writer_capture_diagnostics
-                        .is_active_stream(f.capture_generation, f.capture_open_attempt)
-                    {
-                        writer_capture_diagnostics.note_stale_generation_frame();
-                        continue;
-                    }
+                }
+                let input = *writer_input.lock().unwrap();
+                input.apply_gain(&mut f.samples);
+                if !writer_capture_diagnostics
+                    .is_active_stream(f.capture_generation, f.capture_open_attempt)
+                {
+                    writer_capture_diagnostics.note_stale_generation_frame();
+                    continue;
+                }
+                if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.post_gain.record(&f.samples);
-                    let pk = peak(&f.samples);
-                    let pkt = encoder.encode(&f.samples);
-                    if !pkt.is_empty() {
-                        writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
-                        writer_rtc.send_opus(&pkt);
-                    } else {
-                        writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("pc-capture: Opus encoder produced no packet for a valid frame");
+                }
+                let pk = peak(&f.samples);
+                noise_gate.process(&mut f.samples, input.noise_gate_threshold);
+                if !capture_frame_authorized(
+                    f.encoder_epoch,
+                    active_encoder_epoch,
+                    writer_privacy.requested(),
+                ) {
+                    continue;
+                }
+                let policy = writer_rtc.encoder_policy_snapshot();
+                if policy.generation != applied_encoder_policy_generation {
+                    if let Err(error) =
+                        encoder.set_network_conditions(policy.packet_loss_percent, policy.bitrate)
+                    {
+                        writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "pc-capture: opus network policy failed loss={} bitrate={}: {error}",
+                            policy.packet_loss_percent, policy.bitrate
+                        );
                         return;
                     }
-                    if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
-                        writer_telemetry
-                            .publish_local(window_peak, window_peak >= input.vad_threshold);
-                        if dropped != last_dropped {
-                            eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
-                            last_dropped = dropped;
-                        }
+                    applied_encoder_policy_generation = policy.generation;
+                }
+                let pkt = encoder.encode(&f.samples);
+                if !pkt.is_empty() {
+                    if !writer_transmit_enabled.load(Ordering::Acquire)
+                        || !capture_frame_authorized(
+                            f.encoder_epoch,
+                            active_encoder_epoch,
+                            writer_privacy.requested(),
+                        )
+                    {
+                        continue;
+                    }
+                    writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
+                    writer_rtc.send_opus(&pkt, active_encoder_epoch);
+                } else {
+                    writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("pc-capture: Opus encoder produced no packet for a valid frame");
+                    return;
+                }
+                if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
+                    writer_telemetry.publish_local(window_peak, window_peak >= input.vad_threshold);
+                    if dropped != last_dropped {
+                        eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
+                        last_dropped = dropped;
                     }
                 }
-                None => std::thread::sleep(Duration::from_millis(5)),
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
     });
@@ -1557,11 +1782,14 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
         spawn_critical_worker("decoder-mixer", session_supervisor.clone(), move || {
             let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
             let mut last_seq: HashMap<String, u16> = HashMap::new();
+            let mut encoded: HashMap<String, EncodedPacketBuffer> = HashMap::new();
             let mut generations: HashMap<String, u32> = HashMap::new();
             let mut mixer = Mixer::new();
             let mut peer_levels = PeerLevelCadence::new(Instant::now());
 
-            let mut jitter = PeerJitter::new();
+            // The encoded buffer owns network jitter adaptation. Keep only a one-frame decoded
+            // staging queue so the two layers do not double the configured playout delay.
+            let mut jitter = PeerJitter::with_limits(1, 8);
             let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
 
             let frame_dur = Duration::from_millis(20);
@@ -1576,6 +1804,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         DecoderOp::Remove { peer_id } => (peer_id, None),
                     };
                     decoders.remove(&id);
+                    encoded.remove(&id);
                     jitter.remove(&id);
                     last_seq.remove(&id);
                     peer_levels.remove(&id);
@@ -1587,21 +1816,60 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                 }
 
                 let mut drained = 0;
-                while let Some((peer, generation, seq, data)) = drain_rtc.recv() {
-                    drain_counters
-                        .decode_packets
-                        .fetch_add(1, Ordering::Relaxed);
-                    if generations.get(&peer).copied() != Some(generation) {
+                while let Some(packet) = drain_rtc.recv() {
+                    let peer = packet.peer_id;
+                    if generations.get(&peer).copied() != Some(packet.generation) {
                         decoders.remove(&peer);
+                        encoded.remove(&peer);
                         jitter.remove(&peer);
                         last_seq.remove(&peer);
                         peer_levels.remove(&peer);
-                        generations.insert(peer.clone(), generation);
+                        generations.insert(peer.clone(), packet.generation);
+                    }
+                    let media = drain_rtc.media_receive_counters();
+                    encoded
+                        .entry(peer.clone())
+                        .or_insert_with(|| EncodedPacketBuffer::new(peer, media))
+                        .insert(EncodedRtpPacket {
+                            sequence: packet.sequence,
+                            timestamp: packet.timestamp,
+                            arrival: packet.arrival,
+                            payload: packet.payload,
+                        });
+                    drained += 1;
+                    if drained >= 256 {
+                        break;
+                    }
+                }
+
+                let now = Instant::now();
+                let peers: Vec<String> = encoded.keys().cloned().collect();
+                for peer in peers {
+                    let Some(packet) = encoded
+                        .get_mut(&peer)
+                        .and_then(|buffer| buffer.pop_ready(now))
+                    else {
+                        continue;
+                    };
+                    drain_counters
+                        .decode_packets
+                        .fetch_add(1, Ordering::Relaxed);
+                    if packet.reset_decoder {
+                        last_seq.remove(&peer);
+                        if let Some(codec) = decoders.get_mut(&peer) {
+                            if let Err(error) = codec.reset_decoder() {
+                                drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
+                                eprintln!(
+                                    "pc-capture: opus decoder reset failed peer={peer}: {error}"
+                                );
+                                return;
+                            }
+                        }
                     }
                     if !decoders.contains_key(&peer) {
                         match OpusCodec::new() {
-                            Ok(c) => {
-                                decoders.insert(peer.clone(), c);
+                            Ok(codec) => {
+                                decoders.insert(peer.clone(), codec);
                             }
                             Err(error) => {
                                 drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
@@ -1613,10 +1881,18 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         }
                     }
                     let last = last_seq.get(&peer).copied();
-                    let (frames, advance) = {
+                    let (frames, advance, report) = {
                         let codec = decoders.get_mut(&peer).unwrap();
-                        crate::codec::decode_with_concealment(codec, last, seq, &data)
+                        decode_with_concealment_report(
+                            codec,
+                            last,
+                            packet.sequence,
+                            &packet.payload,
+                        )
                     };
+                    if let Some(buffer) = encoded.get(&peer) {
+                        buffer.record_decode(report);
+                    }
                     if frames.is_empty() {
                         drain_counters.decode_empty.fetch_add(1, Ordering::Relaxed);
                     } else {
@@ -1629,11 +1905,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         jitter.push(&peer, f);
                     }
                     if advance {
-                        last_seq.insert(peer.clone(), seq);
-                    }
-                    drained += 1;
-                    if drained >= 256 {
-                        break;
+                        last_seq.insert(peer, packet.sequence);
                     }
                 }
                 if let Some(levels) = peer_levels.take_due(Instant::now()) {
@@ -1811,14 +2083,53 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         );
                     }
                     InboundOp::Start => {
+                        capture_transmit_enabled.store(false, Ordering::Release);
+                        let epoch = match encoder_privacy.request() {
+                            Ok(epoch) => epoch,
+                            Err(error) => {
+                                eprintln!(
+                                    "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                        };
+                        ring_consumer.discard_all();
+                        if let Err(error) =
+                            encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                            );
+                            break 'control;
+                        }
                         if let Err(error) = producer.start() {
                             eprintln!("pc-capture: critical media failure: capture start: {error}");
                             break 'control;
                         }
+                        capture_transmit_enabled.store(true, Ordering::Release);
                     }
                     InboundOp::Stop => {
+                        capture_transmit_enabled.store(false, Ordering::Release);
                         if let Err(error) = producer.stop() {
                             eprintln!("pc-capture: critical media failure: capture stop: {error}");
+                            break 'control;
+                        }
+                        let epoch = match encoder_privacy.request() {
+                            Ok(epoch) => epoch,
+                            Err(error) => {
+                                eprintln!(
+                                    "pc-capture: critical media failure: capture stop privacy boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                        };
+                        ring_consumer.discard_all();
+                        if let Err(error) =
+                            encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
+                        {
+                            eprintln!(
+                                "pc-capture: critical media failure: capture stop privacy boundary: {error}"
+                            );
                             break 'control;
                         }
                     }
@@ -1827,11 +2138,19 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             .unwrap()
                             .set(crate::dsp::DspConfig { aec, agc, ns, hpf });
                     }
+                    InboundOp::SetDiagnostics { enabled } => {
+                        media_diagnostics.set_enabled(enabled);
+                    }
                     InboundOp::SetInput {
                         gain,
                         vad_threshold,
+                        noise_gate_threshold,
                     } => {
-                        *input.lock().unwrap() = InputConfig::sanitized(gain, vad_threshold);
+                        *input.lock().unwrap() = InputConfig::sanitized_with_gate(
+                            gain,
+                            vad_threshold,
+                            noise_gate_threshold,
+                        );
                     }
                     InboundOp::SetSynthetic { enabled } => {
                         if let Err(error) = producer.set_synthetic(enabled) {
@@ -1852,6 +2171,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         relay_only,
                         generation,
                     } => {
+                        let min_encoder_epoch = match encoder_privacy.request() {
+                            Ok(epoch) => epoch,
+                            Err(error) => {
+                                eprintln!(
+                                    "pc-capture: critical media failure: peer-add privacy boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                        };
                         if dec_op_tx
                             .send(DecoderOp::Reset {
                                 peer_id: peer_id.clone(),
@@ -1870,6 +2198,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                                 offerer,
                                 relay_only,
                                 generation,
+                                min_encoder_epoch,
                             })
                             .is_err()
                         {
@@ -2113,6 +2442,95 @@ mod tests {
     }
 
     #[test]
+    fn encoder_privacy_epochs_are_monotonic_and_coalescible() {
+        let privacy = EncoderPrivacyEpoch::default();
+        let first = privacy.request().unwrap();
+        let second = privacy.request().unwrap();
+        assert_eq!((first, second), (1, 2));
+
+        // The writer may observe only the newest request. Publishing it satisfies both waiters.
+        privacy.publish_applied(second);
+        privacy
+            .wait_applied(first, Duration::from_millis(1))
+            .unwrap();
+        privacy
+            .wait_applied(second, Duration::from_millis(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn encoder_privacy_wait_observes_async_apply_and_times_out_closed() {
+        let privacy = Arc::new(EncoderPrivacyEpoch::default());
+        let epoch = privacy.request().unwrap();
+        let writer_privacy = privacy.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            writer_privacy.publish_applied(epoch);
+        });
+        privacy.wait_applied(epoch, Duration::from_secs(1)).unwrap();
+        writer.join().unwrap();
+
+        let unapplied = privacy.request().unwrap();
+        assert!(privacy
+            .wait_applied(unapplied, Duration::from_millis(1))
+            .unwrap_err()
+            .contains("not applied"));
+    }
+
+    #[test]
+    fn privacy_boundary_discards_pre_boundary_capture_frames() {
+        let (producer, consumer) = capture_frame_ring(2);
+        let privacy = EncoderPrivacyEpoch::default();
+        // Model a hardware callback that snapshots the epoch before PeerAdd, then stalls.
+        let in_flight_callback_epoch = privacy.requested();
+        assert!(producer.push(
+            CaptureFrameMetadata {
+                encoder_epoch: in_flight_callback_epoch,
+                capture_timestamp_valid: true,
+                capture_ts_ns: 123,
+                ..Default::default()
+            },
+            &[0.25; proto::FRAME_SAMPLES],
+        ));
+
+        let epoch = privacy.request().unwrap();
+        assert_eq!(consumer.discard_all(), 1);
+        privacy.publish_applied(epoch);
+        privacy
+            .wait_applied(epoch, Duration::from_millis(1))
+            .unwrap();
+
+        // The old callback completes after discard/reset. Epoch metadata, rather than queue
+        // timing, lets the writer reject it before DSP/encode.
+        assert!(producer.push(
+            CaptureFrameMetadata {
+                encoder_epoch: in_flight_callback_epoch,
+                capture_timestamp_valid: true,
+                capture_ts_ns: 456,
+                ..Default::default()
+            },
+            &[0.5; proto::FRAME_SAMPLES],
+        ));
+
+        let mut frame = AudioFrame {
+            encoder_epoch: 0,
+            capture_generation: 0,
+            capture_open_attempt: 0,
+            capture_ts_ns: 0,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
+            samples: vec![0.0; proto::FRAME_SAMPLES],
+        };
+        assert!(consumer.pop_into(&mut frame));
+        assert!(frame.encoder_epoch < epoch);
+        assert!(!capture_frame_authorized(
+            frame.encoder_epoch,
+            epoch,
+            privacy.requested()
+        ));
+    }
+
+    #[test]
     fn bounded_join_detaches_a_stalled_platform_worker() {
         let finished = Arc::new(AtomicBool::new(false));
         let worker_finished = finished.clone();
@@ -2352,13 +2770,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":8,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":9,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":8,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":9,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -2424,12 +2842,14 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (server, _) = listener.accept().unwrap();
-        let ring = Arc::new(Mutex::new(AudioRing::new(RING_CAPACITY)));
+        let (ring_producer, ring_consumer) = capture_frame_ring(RING_CAPACITY);
         let diagnostics = Arc::new(CaptureDiagnostics::default());
         let (media_tx, _media_rx) = std::sync::mpsc::sync_channel(64);
         let mut producer = CaptureProducer::new(
             true,
-            ring.clone(),
+            ring_producer,
+            ring_consumer.clone(),
+            Arc::new(AtomicU64::new(0)),
             Arc::new(Mutex::new(server)),
             Arc::new(AecTiming::default()),
             diagnostics.clone(),
@@ -2438,12 +2858,12 @@ mod tests {
 
         producer.start().unwrap();
         for _ in 0..100 {
-            if ring.lock().unwrap().len() > 0 {
+            if ring_consumer.len() > 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(ring.lock().unwrap().len() > 0);
+        assert!(ring_consumer.len() > 0);
         assert_eq!(
             diagnostics
                 .snapshot(monotonic_ns(), 1, RING_CAPACITY as u64, 0, 0)
@@ -2451,16 +2871,16 @@ mod tests {
             1
         );
         producer.stop().unwrap();
-        assert_eq!(ring.lock().unwrap().len(), 0);
+        assert_eq!(ring_consumer.len(), 0);
 
         producer.start().unwrap();
         for _ in 0..100 {
-            if ring.lock().unwrap().len() > 0 {
+            if ring_consumer.len() > 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(ring.lock().unwrap().len() > 0);
+        assert!(ring_consumer.len() > 0);
         assert_eq!(
             diagnostics
                 .snapshot(monotonic_ns(), 1, RING_CAPACITY as u64, 0, 0)
@@ -2493,7 +2913,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":8,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":9,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -2549,7 +2969,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":8,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":9,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -2558,7 +2978,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 8);
+                assert_eq!(v["proto"], 9);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -2629,7 +3049,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":8,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":9,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -2703,7 +3123,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":8,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":9,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

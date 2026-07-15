@@ -19,6 +19,49 @@ public sealed class VoiceRoomLifetimeGateTests
         Assert.False(VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
     }
 
+    [Fact]
+    public void ConfirmedJoinIsBoundToOneGameAndLifecycleGeneration()
+    {
+        VoiceRoomLifetimeGate.ConfirmJoinedSession("generation-a", gameId: 701);
+        int firstGeneration = VoiceRoomLifetimeGate.CurrentSessionGeneration;
+        Assert.True(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(701));
+        Assert.False(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(702));
+
+        VoiceRoomLifetimeGate.MarkExplicitDisconnect("generation-end");
+        Assert.True(VoiceRoomLifetimeGate.CurrentSessionGeneration > firstGeneration);
+        Assert.False(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(701));
+
+        VoiceRoomLifetimeGate.ConfirmJoinedSession("generation-b", gameId: 702);
+        Assert.True(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(702));
+        Assert.False(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(701));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, 123, true, true, true)]
+    [InlineData(false, false, false, 123, true, true, false)]
+    [InlineData(true, true, false, 123, true, true, false)]
+    [InlineData(true, false, true, 123, true, true, false)]
+    [InlineData(true, false, false, 0, true, true, false)]
+    [InlineData(true, false, false, 123, false, true, false)]
+    [InlineData(true, false, false, 123, true, false, false)]
+    public void VoiceSessionEligibilityRequiresEveryAuthoritativeBoundary(
+        bool hasClient,
+        bool localOrFreeplay,
+        bool disconnectLatched,
+        int gameId,
+        bool patchPairHealthy,
+        bool joinedGenerationConfirmed,
+        bool expected)
+    {
+        Assert.Equal(expected, VoiceRoomLifetimeGate.IsVoiceSessionEligible(
+            hasClient,
+            localOrFreeplay,
+            disconnectLatched,
+            gameId,
+            patchPairHealthy,
+            joinedGenerationConfirmed));
+    }
+
     [Theory]
     [InlineData(true, false, false, false)]
     [InlineData(false, false, false, true)]

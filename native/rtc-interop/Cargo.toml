@@ -2,7 +2,7 @@
 name = "rtc-interop"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "LGPL-2.1-only"
 description = "PerfectComms WebRTC interop gate: webrtc-rs offer peer for SIPSorcery DTLS-SRTP/Opus interop and i686 build check."
 
 [[bin]]

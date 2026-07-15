@@ -1,0 +1,6 @@
+# cargo-about preserves upstream license-file line endings inside this generated
+# document. Keep its exact mixed-line-ending bytes so the cross-platform CI cmp
+# is deterministic instead of applying checkout-specific newline conversion.
+Libs/native-rust-dependencies.html -text -diff
+native/cargo-about.hbs text eol=lf
+native/cargo-about.toml text eol=lf

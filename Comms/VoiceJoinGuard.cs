@@ -53,6 +53,11 @@ internal static class VoiceJoinGuard
 
     private static bool _reactorProbed;
     private static bool _reactorPresent;
+    private static bool _patchHealthEvaluated;
+    private static bool _criticalPatchPairHealthy;
+    private static string _patchHealthReason = "not-evaluated";
+    private static DateTime _nextPatchWarningUtc = DateTime.MinValue;
+    private static DateTime _nextGenerationWarningUtc = DateTime.MinValue;
 
     private static void Dbg(string msg) => VoiceChatPluginMain.Logger.LogMessage("[JoinGuard] " + msg);
 
@@ -80,15 +85,135 @@ internal static class VoiceJoinGuard
     {
         _loggedActive = false;
         _pendingKickReason = null;
+        _nextPatchWarningUtc = DateTime.MinValue;
+        _nextGenerationWarningUtc = DateTime.MinValue;
     }
 
     // Kept for VCManager's per-frame call; the new model is event-driven via patches.
     public static void Tick()
     {
-        if (_loggedActive || ReactorHandlesIt()) return;
+        if (_patchHealthEvaluated && !_criticalPatchPairHealthy)
+        {
+            WarnCriticalPatchFailure();
+            return;
+        }
+        if (_loggedActive) return;
         if (AmongUsClient.Instance == null) return;
+        try
+        {
+            var client = AmongUsClient.Instance;
+            if (client.GameState == InnerNetClient.GameStates.Joined
+                && client.GameId != 0
+                && !VoiceRoomLifetimeGate.IsConfirmedJoinedGame(client.GameId))
+            {
+                WarnUnconfirmedGeneration();
+                return;
+            }
+        }
+        catch { }
         _loggedActive = true;
+        if (ReactorHandlesIt()) return;
         Dbg($"active ver={VoiceChatPluginMain.Version} (scene-change gate)");
+    }
+
+    internal static void ValidateCriticalPatchHealth()
+    {
+        bool reactor = ReactorHandlesIt();
+        bool inject = HasOurPrefix(CoSendSceneChangePatch.TargetMethod());
+        bool validate = HasOurPrefix(HandleGameDataInnerPatch.TargetMethod());
+        bool disconnect = HasOurPrefix(AccessTools.Method(
+            typeof(InnerNetClient), nameof(InnerNetClient.DisconnectInternal)));
+        bool joined = HasOurPostfix(AccessTools.Method(
+            typeof(AmongUsClient), nameof(AmongUsClient.OnGameJoined)));
+
+        _criticalPatchPairHealthy = IsCriticalPatchPairHealthy(
+            joined, disconnect, inject, validate, reactor);
+        _patchHealthEvaluated = true;
+        _patchHealthReason = _criticalPatchPairHealthy
+            ? "healthy"
+            : $"join={joined} disconnect={disconnect} inject={inject} validate={validate} reactor={reactor}";
+
+        VoiceDiagnostics.Log(
+            "voice.patch-health",
+            $"healthy={_criticalPatchPairHealthy} {_patchHealthReason}");
+        if (!_criticalPatchPairHealthy)
+            WarnCriticalPatchFailure(force: true);
+    }
+
+    internal static bool IsCriticalPatchPairHealthy(
+        bool joinedPatch,
+        bool disconnectPatch,
+        bool versionInjectPatch,
+        bool versionValidatePatch,
+        bool reactorHandlesVersionGate)
+        => joinedPatch
+           && disconnectPatch
+           && (reactorHandlesVersionGate || (versionInjectPatch && versionValidatePatch));
+
+    internal static bool CanStartVoiceForCurrentSession(int gameId, out string reason)
+    {
+        if (!_patchHealthEvaluated)
+        {
+            reason = "patch-health-not-evaluated";
+            return false;
+        }
+        if (!_criticalPatchPairHealthy)
+        {
+            reason = "critical-patch-pair-unhealthy";
+            WarnCriticalPatchFailure();
+            return false;
+        }
+        if (!VoiceRoomLifetimeGate.IsConfirmedJoinedGame(gameId))
+        {
+            reason = "join-generation-unconfirmed";
+            WarnUnconfirmedGeneration();
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private static bool HasOurPrefix(MethodBase? target)
+    {
+        if (target == null) return false;
+        var patches = Harmony.GetPatchInfo(target)?.Prefixes;
+        if (patches == null) return false;
+        foreach (var patch in patches)
+            if (string.Equals(patch.owner, VoiceChatPluginMain.Id, StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
+    private static bool HasOurPostfix(MethodBase? target)
+    {
+        if (target == null) return false;
+        var patches = Harmony.GetPatchInfo(target)?.Postfixes;
+        if (patches == null) return false;
+        foreach (var patch in patches)
+            if (string.Equals(patch.owner, VoiceChatPluginMain.Id, StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
+    private static void WarnCriticalPatchFailure(bool force = false)
+    {
+        var now = DateTime.UtcNow;
+        if (!force && now < _nextPatchWarningUtc) return;
+        _nextPatchWarningUtc = now.AddSeconds(30);
+        const string warning = "Perfect Comms voice disabled: critical game hooks are unavailable. Update the mod or game.";
+        VoiceChatHudState.ShowToastThreadSafe(warning);
+        VoiceDiagnostics.DebugError($"[VC] {warning} ({_patchHealthReason})");
+    }
+
+    private static void WarnUnconfirmedGeneration()
+    {
+        var now = DateTime.UtcNow;
+        if (now < _nextGenerationWarningUtc) return;
+        _nextGenerationWarningUtc = now.AddSeconds(30);
+        const string warning = "Perfect Comms voice is waiting for a confirmed lobby join. Leave and rejoin this lobby.";
+        VoiceChatHudState.ShowToastThreadSafe(warning);
+        VoiceDiagnostics.DebugWarning($"[VC] {warning}");
     }
 
     private static string MismatchMessage(string clientVersion) =>
@@ -306,6 +431,13 @@ internal static class VoiceJoinGuard
             // This is a confirmed new network session, unlike stale Joined/scene state that can
             // remain visible while DisconnectInternal is still transitioning away from EndGame.
             VoiceRoomLifetimeGate.ConfirmJoinedSession("among-us-on-game-joined");
+            if (!VoiceChatRoom.IsCurrentSessionEligible(out var ineligibleReason))
+            {
+                VoiceDiagnostics.Log(
+                    "voice.room.start-skipped",
+                    $"source=among-us-on-game-joined reason={ineligibleReason} generation={VoiceRoomLifetimeGate.CurrentSessionGeneration}");
+                return;
+            }
             try
             {
                 // Begin helper launch and device setup from the authoritative join callback instead

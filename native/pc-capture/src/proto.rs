@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 8;
+pub const PROTO_VERSION: u32 = 9;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -16,6 +16,8 @@ use std::io::Read;
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
+    /// Encoder privacy epoch observed when capture of this frame began. Never serialized.
+    pub encoder_epoch: u64,
     /// Internal capture lifecycle generation. Not serialized on the legacy PCM wire frame.
     pub capture_generation: u64,
     /// Internal concrete stream-open attempt. Not serialized on the legacy PCM wire frame.
@@ -121,6 +123,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
                 samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
             }
             Ok(Frame::Audio(AudioFrame {
+                encoder_epoch: 0,
                 capture_generation: 0,
                 capture_open_attempt: 0,
                 capture_ts_ns: ts,
@@ -133,66 +136,377 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
     }
 }
 
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+#[cfg(not(target_os = "android"))]
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
 pub const RING_CAPACITY: usize = 8;
 
-pub struct AudioRing {
-    capacity: usize,
-    queue: VecDeque<AudioFrame>,
-    dropped: u64,
+/// Metadata copied into one fixed capture slot. Samples live in the preallocated slot itself so
+/// the hardware callback never constructs an `AudioFrame` or allocates its `Vec<f32>`.
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureFrameMetadata {
+    pub encoder_epoch: u64,
+    pub capture_generation: u64,
+    pub capture_open_attempt: u64,
+    pub capture_ts_ns: u64,
+    pub capture_callback_ts_ns: u64,
+    pub capture_timestamp_valid: bool,
 }
 
+#[cfg(not(target_os = "android"))]
+struct CaptureSlot {
+    sequence: u64,
+    metadata: CaptureFrameMetadata,
+    samples: [f32; FRAME_SAMPLES],
+}
+
+#[cfg(not(target_os = "android"))]
+impl CaptureSlot {
+    fn new() -> Self {
+        Self {
+            sequence: 0,
+            metadata: CaptureFrameMetadata::default(),
+            samples: [0.0; FRAME_SAMPLES],
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+struct CaptureTimestampSlot {
+    // Published as logical sequence + 1; zero means this physical slot has never been written.
+    sequence_marker: AtomicU64,
+    capture_ts_ns: AtomicU64,
+}
+
+#[cfg(not(target_os = "android"))]
+struct CaptureRingInner {
+    capacity: u64,
+    ready_tx: Sender<Box<CaptureSlot>>,
+    ready_rx: Receiver<Box<CaptureSlot>>,
+    free_tx: Sender<Box<CaptureSlot>>,
+    free_rx: Receiver<Box<CaptureSlot>>,
+    timestamps: Box<[CaptureTimestampSlot]>,
+    next_sequence: AtomicU64,
+    read_sequence: AtomicU64,
+    write_sequence: AtomicU64,
+    dropped: AtomicU64,
+}
+
+/// Non-blocking producer used only by the active capture callback/thread.
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+pub struct CaptureFrameProducer {
+    inner: Arc<CaptureRingInner>,
+}
+
+/// Non-blocking consumer/control handle. Clones may safely discard during stop/restart while the
+/// encoder owns the normal pop path; the bounded channel arbitrates ownership of each slot.
+#[cfg(not(target_os = "android"))]
+#[derive(Clone)]
+pub struct CaptureFrameConsumer {
+    inner: Arc<CaptureRingInner>,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureRingSnapshot {
+    pub len: usize,
+    pub capacity: usize,
+    pub dropped: u64,
+    pub oldest_capture_ts_ns: Option<u64>,
+}
+
+/// Creates a bounded latest-audio-wins queue. `capacity + 1` slots are allocated once: the extra
+/// slot lets the producer prepare a replacement while the consumer owns one slot, so overflow can
+/// always reclaim the oldest queued frame without waiting or allocating.
+#[cfg(not(target_os = "android"))]
+pub fn capture_frame_ring(capacity: usize) -> (CaptureFrameProducer, CaptureFrameConsumer) {
+    let capacity = capacity.max(1);
+    let (ready_tx, ready_rx) = bounded(capacity);
+    let (free_tx, free_rx) = bounded(capacity + 1);
+    for _ in 0..=capacity {
+        free_tx
+            .try_send(Box::new(CaptureSlot::new()))
+            .expect("new capture free-list has exact capacity");
+    }
+    let inner = Arc::new(CaptureRingInner {
+        capacity: capacity as u64,
+        ready_tx,
+        ready_rx,
+        free_tx,
+        free_rx,
+        timestamps: (0..capacity)
+            .map(|_| CaptureTimestampSlot {
+                sequence_marker: AtomicU64::new(0),
+                capture_ts_ns: AtomicU64::new(0),
+            })
+            .collect(),
+        next_sequence: AtomicU64::new(0),
+        read_sequence: AtomicU64::new(0),
+        write_sequence: AtomicU64::new(0),
+        dropped: AtomicU64::new(0),
+    });
+    (
+        CaptureFrameProducer {
+            inner: inner.clone(),
+        },
+        CaptureFrameConsumer { inner },
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+impl CaptureRingInner {
+    fn note_removed(&self, sequence: u64) {
+        self.read_sequence
+            .fetch_max(sequence.wrapping_add(1), Ordering::AcqRel);
+    }
+
+    fn return_free(&self, slot: Box<CaptureSlot>) {
+        if let Err(error) = self.free_tx.try_send(slot) {
+            // The pool invariant makes this unreachable. Avoid deallocating on a realtime caller
+            // even if a future integration bug violates it; leaking one fixed slot is fail-safe.
+            std::mem::forget(error.into_inner());
+        }
+    }
+
+    fn snapshot(&self) -> CaptureRingSnapshot {
+        for _ in 0..3 {
+            let read = self.read_sequence.load(Ordering::Acquire);
+            let write = self.write_sequence.load(Ordering::Acquire);
+            let len = write.saturating_sub(read).min(self.capacity) as usize;
+            if len == 0 {
+                return CaptureRingSnapshot {
+                    len: 0,
+                    capacity: self.capacity as usize,
+                    dropped: self.dropped.load(Ordering::Relaxed),
+                    oldest_capture_ts_ns: None,
+                };
+            }
+            let timestamp = &self.timestamps[(read % self.capacity) as usize];
+            let marker = timestamp.sequence_marker.load(Ordering::Acquire);
+            if marker == read.wrapping_add(1) {
+                let capture_ts_ns = timestamp.capture_ts_ns.load(Ordering::Relaxed);
+                return CaptureRingSnapshot {
+                    len,
+                    capacity: self.capacity as usize,
+                    dropped: self.dropped.load(Ordering::Relaxed),
+                    oldest_capture_ts_ns: (capture_ts_ns != 0).then_some(capture_ts_ns),
+                };
+            }
+        }
+        CaptureRingSnapshot {
+            len: self
+                .write_sequence
+                .load(Ordering::Acquire)
+                .saturating_sub(self.read_sequence.load(Ordering::Acquire))
+                .min(self.capacity) as usize,
+            capacity: self.capacity as usize,
+            dropped: self.dropped.load(Ordering::Relaxed),
+            oldest_capture_ts_ns: None,
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 #[allow(clippy::len_without_is_empty)]
-impl AudioRing {
-    pub fn new(capacity: usize) -> AudioRing {
-        AudioRing {
-            capacity: capacity.max(1),
-            queue: VecDeque::with_capacity(capacity.max(1)),
-            dropped: 0,
+impl CaptureFrameProducer {
+    /// Copies one exact 20 ms frame into a preallocated slot. Returns false only for malformed
+    /// input or a violated pool invariant; it never blocks, allocates, or logs.
+    pub fn push(&self, metadata: CaptureFrameMetadata, samples: &[f32]) -> bool {
+        if samples.len() != FRAME_SAMPLES {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
-    }
 
-    pub fn push(&mut self, frame: AudioFrame) {
-        if self.queue.len() == self.capacity {
-            self.queue.pop_front();
-            self.dropped += 1;
+        let mut slot = match self.inner.free_rx.try_recv() {
+            Ok(slot) => slot,
+            Err(TryRecvError::Empty) => match self.inner.ready_rx.try_recv() {
+                Ok(slot) => {
+                    self.inner.note_removed(slot.sequence);
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    slot
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+            },
+            Err(TryRecvError::Disconnected) => return false,
+        };
+
+        slot.metadata = metadata;
+        slot.samples.copy_from_slice(samples);
+        let sequence = self.inner.next_sequence.fetch_add(1, Ordering::Relaxed);
+        slot.sequence = sequence;
+        let timestamp = &self.inner.timestamps[(sequence % self.inner.capacity) as usize];
+        timestamp.capture_ts_ns.store(
+            if metadata.capture_timestamp_valid {
+                metadata.capture_ts_ns
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
+        timestamp
+            .sequence_marker
+            .store(sequence.wrapping_add(1), Ordering::Release);
+
+        loop {
+            match self.inner.ready_tx.try_send(slot) {
+                Ok(()) => {
+                    self.inner
+                        .write_sequence
+                        .store(sequence.wrapping_add(1), Ordering::Release);
+                    return true;
+                }
+                Err(TrySendError::Full(returned)) => {
+                    slot = returned;
+                    if let Ok(oldest) = self.inner.ready_rx.try_recv() {
+                        self.inner.note_removed(oldest.sequence);
+                        self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                        self.inner.return_free(oldest);
+                    }
+                }
+                Err(TrySendError::Disconnected(returned)) => {
+                    self.inner.return_free(returned);
+                    return false;
+                }
+            }
         }
-        self.queue.push_back(frame);
-    }
-
-    pub fn pop(&mut self) -> Option<AudioFrame> {
-        self.queue.pop_front()
-    }
-
-    pub fn clear(&mut self) {
-        self.queue.clear();
     }
 
     pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    pub fn oldest_capture_ts_ns(&self) -> Option<u64> {
-        self.queue
-            .front()
-            .filter(|frame| frame.capture_timestamp_valid)
-            .map(|frame| frame.capture_ts_ns)
-    }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.inner.snapshot().len
     }
 }
 
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::len_without_is_empty)]
+impl CaptureFrameConsumer {
+    /// Copies the next owned slot into a caller-reused frame and immediately recycles the slot.
+    pub fn pop_into(&self, frame: &mut AudioFrame) -> bool {
+        let Ok(slot) = self.inner.ready_rx.try_recv() else {
+            return false;
+        };
+        self.inner.note_removed(slot.sequence);
+        frame.encoder_epoch = slot.metadata.encoder_epoch;
+        frame.capture_generation = slot.metadata.capture_generation;
+        frame.capture_open_attempt = slot.metadata.capture_open_attempt;
+        frame.capture_ts_ns = slot.metadata.capture_ts_ns;
+        frame.capture_callback_ts_ns = slot.metadata.capture_callback_ts_ns;
+        frame.capture_timestamp_valid = slot.metadata.capture_timestamp_valid;
+        if frame.samples.len() != FRAME_SAMPLES {
+            frame.samples.resize(FRAME_SAMPLES, 0.0);
+        }
+        frame.samples.copy_from_slice(&slot.samples);
+        self.inner.return_free(slot);
+        true
+    }
+
+    /// Safe from the control thread during stop/restart. A concurrently checked-out encoder frame
+    /// remains protected by its lifecycle generation and cannot be reclaimed out from under it.
+    pub fn discard_all(&self) -> usize {
+        let mut discarded = 0;
+        while let Ok(slot) = self.inner.ready_rx.try_recv() {
+            self.inner.note_removed(slot.sequence);
+            self.inner.return_free(slot);
+            discarded += 1;
+        }
+        discarded
+    }
+
+    /// Privacy-boundary alias: reset queue contents while retaining cumulative drop telemetry.
+    pub fn reset(&self) -> usize {
+        self.discard_all()
+    }
+
+    pub fn snapshot(&self) -> CaptureRingSnapshot {
+        self.inner.snapshot()
+    }
+
+    pub fn len(&self) -> usize {
+        self.snapshot().len
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity as usize
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn oldest_capture_ts_ns(&self) -> Option<u64> {
+        self.snapshot().oldest_capture_ts_ns
+    }
+}
+
+/// Preallocated single-producer/single-consumer stereo ring.
+///
+/// `PlaybackRing` is still commonly wrapped in `Arc<Mutex<_>>` by the control path, but the
+/// render callback takes a [`PlaybackConsumer`] once when the stream is opened. From that point
+/// on producer and consumer communicate only through atomics; a busy control/statistics lock can
+/// no longer turn an entire hardware callback into silence.
 pub struct PlaybackRing {
-    capacity_pairs: usize,
-    queue: VecDeque<(f32, f32)>,
-    dropped: u64,
+    inner: Arc<PlaybackRingInner>,
+}
+
+struct PlaybackRingInner {
+    capacity_pairs: u64,
+    slots: Box<[AtomicU64]>,
+    read_sequence: AtomicU64,
+    write_sequence: AtomicU64,
+    dropped: AtomicU64,
+}
+
+#[derive(Clone)]
+pub struct PlaybackConsumer {
+    inner: Arc<PlaybackRingInner>,
+}
+
+fn pack_stereo(left: f32, right: f32) -> u64 {
+    (u64::from(left.to_bits()) << 32) | u64::from(right.to_bits())
+}
+
+fn unpack_stereo(pair: u64) -> (f32, f32) {
+    (
+        f32::from_bits((pair >> 32) as u32),
+        f32::from_bits(pair as u32),
+    )
+}
+
+impl PlaybackRingInner {
+    fn len(&self) -> usize {
+        let written = self.write_sequence.load(Ordering::Acquire);
+        let read = self.read_sequence.load(Ordering::Acquire);
+        written.saturating_sub(read).min(self.capacity_pairs) as usize
+    }
+
+    fn pop_stereo(&self) -> Option<(f32, f32)> {
+        loop {
+            let read = self.read_sequence.load(Ordering::Acquire);
+            let written = self.write_sequence.load(Ordering::Acquire);
+            if read >= written {
+                return None;
+            }
+
+            // Load before claiming. If the producer had to discard this exact slot in order to
+            // make room, its compare-exchange below advances `read_sequence` and this claim
+            // fails, so the possibly-overwritten value is never returned.
+            let packed = self.slots[(read % self.capacity_pairs) as usize].load(Ordering::Acquire);
+            if self
+                .read_sequence
+                .compare_exchange_weak(read, read + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(unpack_stereo(packed));
+            }
+        }
+    }
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -200,34 +514,75 @@ impl PlaybackRing {
     pub fn new(capacity_pairs: usize) -> PlaybackRing {
         let cap = capacity_pairs.max(2);
         PlaybackRing {
-            capacity_pairs: cap,
-            queue: VecDeque::with_capacity(cap),
-            dropped: 0,
+            inner: Arc::new(PlaybackRingInner {
+                capacity_pairs: cap as u64,
+                slots: (0..cap).map(|_| AtomicU64::new(0)).collect(),
+                read_sequence: AtomicU64::new(0),
+                write_sequence: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
+            }),
         }
     }
 
     pub fn push(&mut self, interleaved: &[f32]) {
         let pairs = interleaved.len() / 2;
         for i in 0..pairs {
-            if self.queue.len() >= self.capacity_pairs {
-                self.queue.pop_front();
-                self.dropped += 1;
+            // There is one producer in the IPC/mixer path. The consumer may advance the read
+            // sequence concurrently; CAS lets either side win without a lock. On overflow the
+            // oldest pair is discarded, preserving the previous latest-audio-wins policy.
+            let written = self.inner.write_sequence.load(Ordering::Relaxed);
+            loop {
+                let read = self.inner.read_sequence.load(Ordering::Acquire);
+                if written.saturating_sub(read) < self.inner.capacity_pairs {
+                    break;
+                }
+                if self
+                    .inner
+                    .read_sequence
+                    .compare_exchange_weak(read, read + 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
             }
-            self.queue
-                .push_back((interleaved[2 * i], interleaved[2 * i + 1]));
+
+            let pair = pack_stereo(interleaved[2 * i], interleaved[2 * i + 1]);
+            self.inner.slots[(written % self.inner.capacity_pairs) as usize]
+                .store(pair, Ordering::Release);
+            self.inner
+                .write_sequence
+                .store(written + 1, Ordering::Release);
         }
     }
 
     pub fn pop_stereo(&mut self) -> Option<(f32, f32)> {
-        self.queue.pop_front()
+        self.inner.pop_stereo()
     }
 
     pub fn len(&self) -> usize {
-        self.queue.len()
+        self.inner.len()
     }
 
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn consumer(&self) -> PlaybackConsumer {
+        PlaybackConsumer {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+#[allow(clippy::len_without_is_empty)]
+impl PlaybackConsumer {
+    pub fn pop_stereo(&self) -> Option<(f32, f32)> {
+        self.inner.pop_stereo()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -259,10 +614,16 @@ pub enum InboundOp {
         ns: bool,
         hpf: bool,
     },
+    #[serde(rename = "set-diagnostics")]
+    SetDiagnostics { enabled: bool },
     #[serde(rename = "set-synthetic")]
     SetSynthetic { enabled: bool },
     #[serde(rename = "set-input")]
-    SetInput { gain: f32, vad_threshold: f32 },
+    SetInput {
+        gain: f32,
+        vad_threshold: f32,
+        noise_gate_threshold: f32,
+    },
     #[serde(rename = "peer-add")]
     PeerAdd {
         peer_id: String,
@@ -407,6 +768,11 @@ pub struct NativeStatsSnapshot {
     pub dsp_applied_hpf: bool,
     pub input_gain: f32,
     pub input_vad_threshold: f32,
+    pub input_noise_gate_threshold: f32,
+    pub media_receive: MediaReceiveStats,
+    pub network_paths: Vec<NetworkPathStats>,
+    pub encoder_packet_loss_percent: u64,
+    pub encoder_bitrate: u64,
     pub aec_delay_ms: u64,
     pub aec_recommended_delay_ms: u64,
     pub aec_measured_delay_ms: u64,
@@ -450,6 +816,51 @@ pub struct NativeStatsSnapshot {
     pub capture_ring_dropped: u64,
     pub playback_ring_len: u64,
     pub playback_ring_dropped: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MediaReceiveStats {
+    pub active_peers: u64,
+    pub ingress_queue_overflow: u64,
+    pub sequence_gaps: u64,
+    pub reordered_recovered: u64,
+    pub late_drops: u64,
+    pub duplicate_drops: u64,
+    pub encoded_overflow_drops: u64,
+    pub deadline_losses: u64,
+    pub dred_frames: u64,
+    pub fec_frames: u64,
+    pub plc_frames: u64,
+    pub decoder_resets: u64,
+    pub talkspurt_resets: u64,
+    pub underruns: u64,
+    pub rebuffers: u64,
+    pub target_frames_max: u64,
+    pub target_frames_current_max: u64,
+    pub depth_frames_max: u64,
+    pub depth_frames_current: u64,
+    pub rtp_jitter_ms_max: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NetworkPathStats {
+    pub peer_id: String,
+    pub generation: u32,
+    pub candidate_pair_id: String,
+    pub candidate_state: String,
+    pub local_candidate_type: String,
+    pub remote_candidate_type: String,
+    pub relay: bool,
+    pub current_rtt_ms: f64,
+    pub available_outgoing_bitrate: f64,
+    pub available_incoming_bitrate: f64,
+    pub remote_packets_received: u64,
+    pub remote_packets_lost: i64,
+    pub remote_fraction_lost: f64,
+    pub remote_report_rtt_ms: f64,
+    pub remote_rtt_measurements: u64,
 }
 
 #[derive(Serialize)]
@@ -613,7 +1024,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 8);
+        assert_eq!(PROTO_VERSION, 9);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -650,17 +1061,27 @@ mod tests {
 
     #[test]
     fn parse_v7_peer_and_capture_ops() {
+        match parse_inbound(r#"{"op":"set-diagnostics","enabled":false}"#).unwrap() {
+            InboundOp::SetDiagnostics { enabled } => assert!(!enabled),
+            other => panic!("expected set-diagnostics, got {other:?}"),
+        }
         match parse_inbound(r#"{"op":"set-synthetic","enabled":true}"#).unwrap() {
             InboundOp::SetSynthetic { enabled } => assert!(enabled),
             other => panic!("expected set-synthetic, got {other:?}"),
         }
-        match parse_inbound(r#"{"op":"set-input","gain":1.25,"vad_threshold":0.006}"#).unwrap() {
+        match parse_inbound(
+            r#"{"op":"set-input","gain":1.25,"vad_threshold":0.006,"noise_gate_threshold":0.003}"#,
+        )
+        .unwrap()
+        {
             InboundOp::SetInput {
                 gain,
                 vad_threshold,
+                noise_gate_threshold,
             } => {
                 assert_eq!(gain, 1.25);
                 assert_eq!(vad_threshold, 0.006);
+                assert_eq!(noise_gate_threshold, 0.003);
             }
             other => panic!("expected set-input, got {other:?}"),
         }
@@ -956,6 +1377,58 @@ mod tests {
     }
 
     #[test]
+    fn playback_consumer_reads_without_borrowing_control_path_ring() {
+        let mut ring = PlaybackRing::new(4);
+        let consumer = ring.consumer();
+        ring.push(&[1.0, -1.0, 2.0, -2.0]);
+        assert_eq!(consumer.len(), 2);
+        assert_eq!(consumer.pop_stereo(), Some((1.0, -1.0)));
+        ring.push(&[3.0, -3.0]);
+        assert_eq!(consumer.pop_stereo(), Some((2.0, -2.0)));
+        assert_eq!(consumer.pop_stereo(), Some((3.0, -3.0)));
+        assert_eq!(consumer.pop_stereo(), None);
+    }
+
+    #[test]
+    fn playback_spsc_never_returns_torn_or_reordered_pairs_under_overflow() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut ring = PlaybackRing::new(32);
+        for sequence in 1..=64u32 {
+            let value = sequence as f32;
+            ring.push(&[value, -value]);
+        }
+        let consumer = ring.consumer();
+        let complete = Arc::new(AtomicBool::new(false));
+        let producer_complete = complete.clone();
+        let producer = std::thread::spawn(move || {
+            for sequence in 65..=20_000u32 {
+                let value = sequence as f32;
+                ring.push(&[value, -value]);
+            }
+            producer_complete.store(true, Ordering::Release);
+            ring
+        });
+
+        let mut previous = 0.0f32;
+        while !complete.load(Ordering::Acquire) || consumer.len() > 0 {
+            if let Some((left, right)) = consumer.pop_stereo() {
+                assert_eq!(left, -right, "stereo pair was torn");
+                assert!(
+                    left > previous,
+                    "SPSC output reordered {left} after {previous}"
+                );
+                previous = left;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        let ring = producer.join().unwrap();
+        assert_eq!(previous, 20_000.0);
+        assert!(ring.dropped() > 0, "stress case should exercise overflow");
+    }
+
+    #[test]
     fn control_frame_roundtrips() {
         let json = r#"{"op":"hello","proto":1,"token":"abc"}"#;
         let bytes = encode_control(json);
@@ -975,6 +1448,7 @@ mod tests {
         samples[0] = 1.0;
         samples[FRAME_SAMPLES - 1] = -0.5;
         let frame = AudioFrame {
+            encoder_epoch: 0,
             capture_generation: 0,
             capture_open_attempt: 0,
             capture_ts_ns: 0x0102_0304_0506_0708,
@@ -1022,55 +1496,118 @@ mod tests {
         }
     }
 
-    fn frame_with(ts: u64) -> AudioFrame {
+    fn push_capture(producer: &CaptureFrameProducer, ts: u64, value: f32) {
+        assert!(producer.push(
+            CaptureFrameMetadata {
+                encoder_epoch: 7,
+                capture_generation: 1,
+                capture_open_attempt: 2,
+                capture_ts_ns: ts,
+                capture_callback_ts_ns: ts + 10,
+                capture_timestamp_valid: true,
+            },
+            &[value; FRAME_SAMPLES],
+        ));
+    }
+
+    fn reusable_capture_frame() -> AudioFrame {
         AudioFrame {
+            encoder_epoch: 0,
             capture_generation: 0,
             capture_open_attempt: 0,
-            capture_ts_ns: ts,
-            capture_callback_ts_ns: ts,
-            capture_timestamp_valid: true,
+            capture_ts_ns: 0,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
             samples: vec![0.0; FRAME_SAMPLES],
         }
     }
 
     #[test]
     fn ring_is_fifo_when_not_full() {
-        let mut ring = AudioRing::new(4);
-        ring.push(frame_with(1));
-        ring.push(frame_with(2));
-        ring.push(frame_with(3));
-        assert_eq!(ring.len(), 3);
-        assert_eq!(ring.dropped(), 0);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 1);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 2);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 3);
-        assert!(ring.pop().is_none());
+        let (producer, consumer) = capture_frame_ring(4);
+        push_capture(&producer, 1, 0.1);
+        push_capture(&producer, 2, 0.2);
+        push_capture(&producer, 3, 0.3);
+        assert_eq!(consumer.len(), 3);
+        assert_eq!(consumer.dropped(), 0);
+        assert_eq!(consumer.oldest_capture_ts_ns(), Some(1));
+        let mut frame = reusable_capture_frame();
+        for expected in [1, 2, 3] {
+            assert!(consumer.pop_into(&mut frame));
+            assert_eq!(frame.capture_ts_ns, expected);
+        }
+        assert!(!consumer.pop_into(&mut frame));
     }
 
     #[test]
     fn ring_drops_oldest_and_counts_when_full() {
-        let mut ring = AudioRing::new(3);
-        ring.push(frame_with(1));
-        ring.push(frame_with(2));
-        ring.push(frame_with(3));
-        ring.push(frame_with(4));
-        ring.push(frame_with(5));
-        assert_eq!(ring.len(), 3);
-        assert_eq!(ring.dropped(), 2);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 3);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 4);
-        assert_eq!(ring.pop().unwrap().capture_ts_ns, 5);
-        assert!(ring.pop().is_none());
+        let (producer, consumer) = capture_frame_ring(3);
+        for ts in 1..=5 {
+            push_capture(&producer, ts, ts as f32);
+        }
+        assert_eq!(consumer.len(), 3);
+        assert_eq!(consumer.dropped(), 2);
+        assert_eq!(consumer.oldest_capture_ts_ns(), Some(3));
+        let mut frame = reusable_capture_frame();
+        for expected in [3, 4, 5] {
+            assert!(consumer.pop_into(&mut frame));
+            assert_eq!(frame.capture_ts_ns, expected);
+            assert!(frame
+                .samples
+                .iter()
+                .all(|sample| *sample == expected as f32));
+        }
+        assert!(!consumer.pop_into(&mut frame));
     }
 
     #[test]
-    fn ring_clear_removes_stale_capture_frames() {
-        let mut ring = AudioRing::new(3);
-        ring.push(frame_with(1));
-        ring.push(frame_with(2));
-        ring.clear();
-        assert_eq!(ring.len(), 0);
-        assert!(ring.pop().is_none());
+    fn ring_discard_reset_removes_stale_frames_and_reuses_storage() {
+        let (producer, consumer) = capture_frame_ring(3);
+        push_capture(&producer, 1, 1.0);
+        push_capture(&producer, 2, 2.0);
+        assert_eq!(consumer.discard_all(), 2);
+        assert_eq!(consumer.len(), 0);
+
+        let mut frame = reusable_capture_frame();
+        let pointer = frame.samples.as_ptr();
+        let capacity = frame.samples.capacity();
+        for ts in 3..100 {
+            push_capture(&producer, ts, ts as f32);
+            assert!(consumer.pop_into(&mut frame));
+            assert_eq!(frame.samples.as_ptr(), pointer);
+            assert_eq!(frame.samples.capacity(), capacity);
+        }
+        assert_eq!(consumer.reset(), 0);
+    }
+
+    #[test]
+    fn ring_concurrent_overflow_never_returns_torn_frames() {
+        let (producer, consumer) = capture_frame_ring(8);
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let producer_done = done.clone();
+        let writer = std::thread::spawn(move || {
+            for sequence in 1..=20_000u64 {
+                push_capture(&producer, sequence, sequence as f32);
+            }
+            producer_done.store(true, Ordering::Release);
+        });
+
+        let mut frame = reusable_capture_frame();
+        let mut last = 0;
+        while !done.load(Ordering::Acquire) || consumer.len() > 0 {
+            if consumer.pop_into(&mut frame) {
+                assert!(frame.capture_ts_ns > last);
+                assert!(frame
+                    .samples
+                    .iter()
+                    .all(|sample| *sample == frame.capture_ts_ns as f32));
+                last = frame.capture_ts_ns;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        writer.join().unwrap();
+        assert!(last > 0);
     }
 
     #[test]
@@ -1130,7 +1667,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 8);
+        assert_eq!(v["proto"], 9);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

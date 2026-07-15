@@ -7,9 +7,16 @@ Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
 control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
 stdin token auth) to the PerfectComms BepInEx mod.
 
-Also runs DSP (WebRTC-APM AEC3/high noise suppression/HPF), Opus
-encode/decode, and the WebRTC (webrtc-rs) peer transport with proximity mixing,
-so mic, peer audio, and playback all live in this helper. Protocol version 7.
+Also runs DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus
+1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the WebRTC
+(webrtc-rs) peer transport with proximity mixing, so mic, peer audio, and
+playback all live in this helper. Android uses the same DRED-capable codec while
+intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 9.
+
+DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
+expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
+emit none), and encoder history is reset before the authorized receiver set expands so a newly
+added peer cannot recover speech from before it joined.
 
 ## Run
 
@@ -29,17 +36,20 @@ pc-capture --handshake <path> [--synthetic-tone]
 Frame: `[u8 type][u32 len little-endian][payload]`.
 - `0x01` CONTROL: payload = UTF-8 JSON.
 - `0x02` AUDIO: payload = `[u64 LE captureTsNs][f32 LE PCM * 960]` (helper->mod mic capture).
-- `0x03` AUDIO_OUT: legacy speaker block (`f32 LE interleaved-stereo * 960`). The sidecar now
-  owns the speaker mix end to end and parses-but-discards this; kept only for the wire contract.
+- `0x03` AUDIO_OUT: selected-output test block (`f32 LE interleaved-stereo * 960`), injected into
+  the same bounded playback path used by the live peer mix.
 
 Control ops (mod->helper): `hello`, `select-device`, `select-output-device`, `start`, `stop`,
-`ping`, `set-dsp`, `set-input`, `set-synthetic`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
+`ping`, `set-dsp`, `set-diagnostics`, `set-input`, `set-synthetic`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
 `add-ice-candidate`, `game-state`.
 Control ops (helper->mod): `ready`, `devices`, `outputDevices`, `level`, `error`, `pong`,
-`local-sdp`, `local-candidate`, `peer-state`, `peer-levels`.
+`local-sdp`, `local-candidate`, `peer-state`, `peer-levels`, `media-state`, `stats`.
 
-`set-input` carries finite/clamped `gain` and `vad_threshold`. Gain is applied before Opus;
-VAD only classifies the local speaking meter and never gates encoded audio. `level` and batched
+`set-input` carries finite/clamped `gain`, `vad_threshold`, and `noise_gate_threshold`. Gain is
+soft-limited before Opus; VAD only classifies the local speaking meter. The frame-aware gate has
+hysteresis, a 200 ms hangover, and preserves the full opening frame; it keeps encoding continuous
+RTP (DTX remains off). `set-diagnostics` controls expensive signal-window sampling without turning
+off structural health counters. `level` and batched
 decoded pre-route `peer-levels` telemetry are emitted every 100 ms through bounded latest-wins
 mailboxes, so a slow UI/IPC consumer cannot stall capture or playout. `set-synthetic` switches
 between the selected live microphone and the diagnostic tone without restarting the helper.

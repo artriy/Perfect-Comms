@@ -76,6 +76,7 @@ public static class HostSettingsPanel
         _shell.PaneRoot.anchoredPosition = Vector2.zero;
         _animT = 0f;
         _shown = true;
+        VoiceChatPatches.ReleaseHeldTransmitInputs();
 
         BuildContent();
 
@@ -130,6 +131,20 @@ public static class HostSettingsPanel
     }
 
     public static void ForceClose() => Hide();
+
+    internal static void RevokeForHostAuthorityChange(int newHostClientId, int localClientId)
+    {
+        if (!IsOpen || (newHostClientId >= 0 && newHostClientId == localClientId)) return;
+        Hide();
+        VoiceChatHudState.ShowToast("Host voice settings closed: host changed");
+        try
+        {
+            VoiceDiagnostics.Log(
+                "voice.ui.host_panel_revoked",
+                $"newHost={newHostClientId} localClient={localClientId}");
+        }
+        catch { }
+    }
 
     private static void Destroy()
     {
@@ -273,6 +288,14 @@ public static class HostSettingsPanel
         if (_shell == null) return;
         if (_shell.Root == null) { Destroy(); return; }
         if (!_shown) return;
+
+        // Host migration can occur without a scene change. Revoke editing immediately instead of
+        // leaving a stale host panel capable of mutating local options after authority moved.
+        if (AmongUsClient.Instance == null || !AmongUsClient.Instance.AmHost)
+        {
+            RevokeForHostAuthorityChange(newHostClientId: -1, localClientId: -1);
+            return;
+        }
 
         if (!VoiceUiKit.RebindRow.IsCapturing && Input.GetKeyDown(KeyCode.Escape))
         {

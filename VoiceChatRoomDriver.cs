@@ -12,26 +12,31 @@ internal static class VoiceChatRoomDriver
     private static float _roomRetryTimer = 0f;
     private static bool _pendingRemap;
     private static int _remapCountdown;
-
-    private static bool IsLocalServer()
-    {
-        var addr = AmongUsClient.Instance?.networkAddress;
-        return addr is "127.0.0.1" or "localhost";
-    }
+    private static VoiceChatRoom? _failureTrackedRoom;
+    private static int _consecutiveUpdateFailures;
+    private static int _updateFailureRebuilds;
+    private static float _nextUpdateFailureRebuildTime;
+    private static float _lastUpdateFailureLogTime = -999f;
 
     private static bool ShouldCloseRoom()
     {
+        bool localOrFreeplay = false;
+        try
+        {
+            localOrFreeplay = VoiceChatRoom.IsLocalVoiceEndpoint(
+                AmongUsClient.Instance?.networkAddress);
+        }
+        catch { }
         return VoiceRoomLifetimeGate.IsTerminalCondition(
             hasAmongUsClient: AmongUsClient.Instance != null,
-            isLocalServer: IsLocalServer(),
-            explicitDisconnectLatched: VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
+            isLocalServer: localOrFreeplay,
+            explicitDisconnectLatched: VoiceRoomLifetimeGate.IsExplicitDisconnectLatched)
+            || (VoiceChatRoom.Current != null && !VoiceChatRoom.IsCurrentSessionEligible(out _));
     }
 
     private static bool ShouldHaveRoom()
     {
-        if (AmongUsClient.Instance == null) return false;
-        if (IsLocalServer()) return false;
-        if (VoiceRoomLifetimeGate.IsExplicitDisconnectLatched) return false;
+        if (!VoiceChatRoom.IsCurrentSessionEligible(out _)) return false;
 
         if (ShipStatus.Instance != null) return true;
         if (LobbyBehaviour.Instance != null) return true;
@@ -51,6 +56,7 @@ internal static class VoiceChatRoomDriver
             _roomRetryTimer = 0f;
             _pendingRemap = false;
             _remapCountdown = 0;
+            ResetUpdateFailureState();
             VoiceSceneState.Reset();
             return;
         }
@@ -91,6 +97,12 @@ internal static class VoiceChatRoomDriver
 
         if (VoiceChatRoom.Current == null)
             return;
+
+        if (!ReferenceEquals(_failureTrackedRoom, VoiceChatRoom.Current))
+        {
+            ResetUpdateFailureState();
+            _failureTrackedRoom = VoiceChatRoom.Current;
+        }
 
         _roomRetryTimer = 0f;
 
@@ -150,11 +162,69 @@ internal static class VoiceChatRoomDriver
         try
         {
             VoiceChatRoom.Current.Update();
+            _consecutiveUpdateFailures = 0;
         }
         catch (Exception ex)
         {
-            VoiceDiagnostics.DebugError("[VC] Room update error: " + ex);
+            var room = VoiceChatRoom.Current;
+            _consecutiveUpdateFailures++;
+            float now = Time.realtimeSinceStartup;
+            var decision = DecideUpdateFailureRecovery(
+                _consecutiveUpdateFailures,
+                _updateFailureRebuilds,
+                now,
+                _nextUpdateFailureRebuildTime,
+                _lastUpdateFailureLogTime);
+
+            try { room?.FailClosedAfterUpdateFailure(); }
+            catch { }
+
+            if (decision.ShouldLog)
+            {
+                _lastUpdateFailureLogTime = now;
+                VoiceDiagnostics.DebugError(
+                    $"[VC] Room update failed closed count={_consecutiveUpdateFailures} " +
+                    $"rebuilds={_updateFailureRebuilds}: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            if (decision.ShouldRebuild && room != null)
+            {
+                int attempt = _updateFailureRebuilds + 1;
+                _updateFailureRebuilds = attempt;
+                _nextUpdateFailureRebuildTime = now + UpdateFailureRebuildDelaySeconds(attempt);
+                room.RequestBoundedUpdateFailureRecovery(attempt);
+            }
         }
+    }
+
+    internal readonly record struct UpdateFailureRecoveryDecision(bool ShouldLog, bool ShouldRebuild);
+
+    internal static UpdateFailureRecoveryDecision DecideUpdateFailureRecovery(
+        int consecutiveFailures,
+        int rebuildAttempts,
+        float now,
+        float nextRebuildTime,
+        float lastLogTime)
+    {
+        bool powerOfTwo = consecutiveFailures > 0
+                          && (consecutiveFailures & (consecutiveFailures - 1)) == 0;
+        bool shouldLog = consecutiveFailures == 1 || powerOfTwo || now - lastLogTime >= 5f;
+        bool shouldRebuild = consecutiveFailures >= 3
+                             && rebuildAttempts < 3
+                             && now >= nextRebuildTime;
+        return new UpdateFailureRecoveryDecision(shouldLog, shouldRebuild);
+    }
+
+    internal static float UpdateFailureRebuildDelaySeconds(int completedAttempts)
+        => 5f * (1 << Math.Min(Math.Max(completedAttempts - 1, 0), 2));
+
+    private static void ResetUpdateFailureState()
+    {
+        _failureTrackedRoom = null;
+        _consecutiveUpdateFailures = 0;
+        _updateFailureRebuilds = 0;
+        _nextUpdateFailureRebuildTime = 0f;
+        _lastUpdateFailureLogTime = -999f;
     }
 
     private static void ForceRemapRemotePeers()

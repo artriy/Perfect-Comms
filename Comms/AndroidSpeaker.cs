@@ -18,11 +18,18 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     private const int CallbackStallTimeoutMs = 3_000;
     private const int InitialRetryDelayMs = 250;
     private const int MaxRetryDelayMs = 10_000;
+    private const int ClipFrames = SampleRate / 2;
+    // A streaming PCM callback cannot ask for more samples than the complete clip. Allocate that
+    // upper bound before AudioClip.Create so the realtime callback never resizes or allocates.
+    internal const int MaximumCallbackSamples = ClipFrames * Channels;
     private readonly AudioSource _source;
     private readonly AudioClip _clip;
     private readonly MobileVoiceClient _voice;
     private int _readCallbacks;
     private int _readErrors;
+    private int _oversizeCallbacks;
+    private int _reportedReadErrors;
+    private int _reportedOversizeCallbacks;
     private int _recoveryAttempt;
     private long _lastReadMs;
     private long _nextHealthCheckMs;
@@ -39,7 +46,6 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         var host = VoiceChatPluginMain.ResidentObject
             ?? throw new InvalidOperationException("[VC] ResidentObject is null");
 
-        var clipSamples = SampleRate / 2;
         _source = host.AddComponent<AudioSource>();
         _source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
         _source.spatialBlend = 0f;
@@ -47,7 +53,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
 
         _clip = AudioClip.Create(
             "VCPcMobile",
-            clipSamples,
+            ClipFrames,
             Channels,
             SampleRate,
             true,
@@ -61,7 +67,10 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         VoiceDiagnostics.DebugInfo($"[VC] Android pc-mobile speaker initialised ({SampleRate} Hz, {Channels} ch).");
     }
 
-    private float[] _scratch = Array.Empty<float>();
+    private readonly float[] _scratch = new float[MaximumCallbackSamples];
+
+    internal static bool IsSupportedCallbackSize(int count)
+        => count >= 0 && count <= MaximumCallbackSamples;
 
     private void Read(Il2CppStructArray<float> data)
     {
@@ -70,19 +79,25 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         Interlocked.Exchange(ref _recoveryAttempt, 0);
         Volatile.Write(ref _nextRecoveryMs, 0);
         var count = data.Length;
-        if (_scratch.Length != count) _scratch = new float[count];
+        if (!IsSupportedCallbackSize(count))
+        {
+            // This should be impossible for the configured clip. Stay fail-silent without
+            // allocating or logging on Unity's realtime audio thread.
+            Interlocked.Increment(ref _oversizeCallbacks);
+            for (var i = 0; i < count; i++) data[i] = 0f;
+            return;
+        }
         if (_disposed)
         {
             Array.Clear(_scratch, 0, count);
         }
         else
         {
-            try { _voice.ReadPlayback(_scratch); }
-            catch (Exception ex)
+            try { _voice.ReadPlayback(_scratch, count); }
+            catch
             {
                 Array.Clear(_scratch, 0, count);
-                if (Interlocked.Increment(ref _readErrors) == 1)
-                    VoiceDiagnostics.DebugWarning($"[VC] Android pc-mobile speaker read failed; emitting silence: {ex.Message}");
+                Interlocked.Increment(ref _readErrors);
             }
         }
         for (var i = 0; i < count; i++) data[i] = _scratch[i];
@@ -100,6 +115,22 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         var now = Environment.TickCount64;
         if (now < _nextHealthCheckMs) return IsPlaying;
         _nextHealthCheckMs = now + HealthCheckIntervalMs;
+
+        // Diagnostics belong on the Unity/main thread, never in the realtime PCM callback.
+        var readErrors = Volatile.Read(ref _readErrors);
+        if (readErrors != _reportedReadErrors)
+        {
+            _reportedReadErrors = readErrors;
+            VoiceDiagnostics.DebugWarning(
+                $"[VC] Android pc-mobile speaker emitted silence after playback read errors count={readErrors}.");
+        }
+        var oversizeCallbacks = Volatile.Read(ref _oversizeCallbacks);
+        if (oversizeCallbacks != _reportedOversizeCallbacks)
+        {
+            _reportedOversizeCallbacks = oversizeCallbacks;
+            VoiceDiagnostics.DebugWarning(
+                $"[VC] Android speaker rejected oversized realtime callbacks count={oversizeCallbacks} maxSamples={MaximumCallbackSamples}.");
+        }
 
         bool focused;
         try { focused = Application.isFocused; }

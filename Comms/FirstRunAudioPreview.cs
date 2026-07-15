@@ -233,7 +233,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
             return;
         }
         _lease.SetDsp(draft.EchoCancellation, agc: false, draft.NoiseSuppression, hpf: true);
-        _lease.SetInput(draft.MicVolume, EffectiveVadThreshold(draft));
+        _lease.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
         _lease.SelectMicDevice(draft.MicrophoneDevice);
         _lease.SetMicActive(true);
         MarkListening();
@@ -268,7 +268,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
         if (!IsListening || IsPlayingTone) return;
 #if WINDOWS
         _lease?.SetDsp(draft.EchoCancellation, agc: false, draft.NoiseSuppression, hpf: true);
-        _lease?.SetInput(draft.MicVolume, EffectiveVadThreshold(draft));
+        _lease?.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
 #elif ANDROID
         _androidMicrophone?.SetVolume(draft.MicVolume);
 #endif
@@ -460,6 +460,10 @@ internal sealed class FirstRunAudioPreview : IDisposable
 
     private static float EffectiveVadThreshold(FirstRunSetupDraft draft)
         => draft.BaseVadThreshold / Math.Max(0.25f, draft.MicSensitivity);
+
+    private static float EffectiveNoiseGateThreshold(FirstRunSetupDraft draft)
+        => (VoiceSettings.Instance?.NoiseGateThreshold.Value ?? 0.003f) /
+           Math.Max(0.25f, draft.MicSensitivity);
 
     private MicrophoneRouteResolution ResolveMicrophoneRoute(FirstRunSetupDraft draft)
     {

@@ -20,6 +20,7 @@ scripts/
 scripts/*
 !scripts/live-turn-smoke.py
 !scripts/verify-release-assets.py
+!scripts/verify-package-layout.py
 # Track the deployable Cloudflare worker source/config/tests, but never local
 # Wrangler state or installed npm packages. TURN credentials live in bindings,
 # not in these files.

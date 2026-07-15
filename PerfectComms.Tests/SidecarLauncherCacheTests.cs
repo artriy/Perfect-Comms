@@ -5,7 +5,7 @@ using Xunit;
 public sealed class SidecarLauncherCacheTests
 {
     private const string Triple = "x86_64-pc-windows-msvc";
-    private const string OpusResource = "Lib.opus.x64.dll";
+    private const string HelperResource = "Lib.pc-capture.pc-capture-win-x64.exe";
 
     [Fact]
     public void NativeLaunchArgumentsIncludeManagedOwnerPid()
@@ -28,7 +28,7 @@ public sealed class SidecarLauncherCacheTests
     public void HelperAndDspMapToFixedNamesInsideSameVersionedBundle()
     {
         var assembly = typeof(SidecarLauncher).Assembly;
-        var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { OpusResource });
+        var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { HelperResource });
         var baseDirectory = Path.Combine(Path.GetTempPath(), "Perfect Comms cache mapping");
         var expectedDirectory = Path.Combine(
             baseDirectory,
@@ -64,14 +64,15 @@ public sealed class SidecarLauncherCacheTests
 
         var first = NativeLibraryCache.BuildContentVersion(
             assembly,
-            new[] { OpusResource, "missing.optional.resource" });
+            new[] { HelperResource, "missing.optional.resource" });
         var second = NativeLibraryCache.BuildContentVersion(
             assembly,
-            new[] { "missing.optional.resource", OpusResource, OpusResource });
+            new[] { "missing.optional.resource", HelperResource, HelperResource });
 
         Assert.Equal(first, second);
     }
 
+    #if WINDOWS
     [Fact]
     public void LockedLegacyTargetDoesNotBlockVersionedExtraction()
     {
@@ -92,10 +93,10 @@ public sealed class SidecarLauncherCacheTests
                        FileAccess.ReadWrite,
                        FileShare.Read))
             {
-                var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { OpusResource });
+                var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { HelperResource });
                 var extracted = NativeLibraryCache.Extract(
                     assembly,
-                    OpusResource,
+                    HelperResource,
                     "PerfectCommsAudio.exe",
                     Triple,
                     baseDirectory,
@@ -113,6 +114,7 @@ public sealed class SidecarLauncherCacheTests
             Directory.Delete(baseDirectory, true);
         }
     }
+    #endif
 
     [Fact]
     public void ExtractionFailureReportsExactStageAndTargetPath()

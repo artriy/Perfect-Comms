@@ -1,3 +1,4 @@
+#if WINDOWS
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -217,10 +218,10 @@ public sealed class SidecarVoiceHostTests
 
         private int StartCountBacking;
 
-        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool hpf, float gain, float vadThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
+        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
         public void SetDsp(bool aec, bool agc, bool ns, bool hpf) { }
         public void SetSynthetic(bool enabled) => SyntheticCalls.Add(enabled);
-        public void SetInput(float gain, float vadThreshold) { }
+        public void SetInput(float gain, float vadThreshold, float noiseGateThreshold) { }
         public void SetMicActive(bool active) => MicActiveCalls.Add(active);
         public void SelectMicDevice(string deviceId) { }
         public void SelectOutputDevice(string deviceId) { }
@@ -251,3 +252,4 @@ public sealed class SidecarVoiceHostTests
         private static int Count(Delegate? value) => value?.GetInvocationList().Length ?? 0;
     }
 }
+#endif

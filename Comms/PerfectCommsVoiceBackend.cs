@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
@@ -19,8 +20,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private const float SyntheticToneAmplitude = 0.012f;
     private static readonly TimeSpan RemoteActivityHold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MicCalibrationLogInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan QuietTailFlushDelay = TimeSpan.FromMilliseconds(30);
-    private static readonly TimeSpan QuietTailFlushTimerDelay = QuietTailFlushDelay + TimeSpan.FromMilliseconds(10);
     private static readonly IceServer[] DefaultIceServers =
     [
         new("stun:stun.l.google.com:19302"),
@@ -43,6 +42,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly Dictionary<int, PeerConnection> _routeClientScratch = new();
     private readonly Dictionary<int, PeerConnection> _canonicalRouteScratch = new();
     private readonly HashSet<int> _snapshotRouteClientIds = new();
+    private readonly List<SidecarProtocol.GameStatePeerInput> _helperGameStatePeers = new(32);
+    private readonly GameStateSendGate _gameStateSendGate = new();
     private readonly List<string> _staleSnapshotRoutePeerIds = new();
     private readonly Dictionary<int, DateTime> _duplicateRouteLogUtcByClient = new();
     private static readonly TimeSpan DuplicateRouteLogInterval = TimeSpan.FromSeconds(2);
@@ -93,6 +94,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID || WINDOWS
     private readonly object _unityEncodeSync = new();
     private readonly Queue<(float[] buffer, int samples, int epoch)> _unityEncodeQueue = new();
+    private readonly float[] _unityCaptureAccum = new float[AudioHelpers.FrameSize];
+    private int _unityCaptureFill;
+    private long _unityEncodeDroppedFrames;
     private Thread? _unityEncodeWorker;
     private bool _unityEncodeStop;
     private const int UnityEncodeQueueMaxFrames = 16;
@@ -256,8 +260,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _forceRelayForSession = forceRelayForSession;
 
         RefreshConfiguredIceServers("startup");
-        if (ShouldForceRelay() && UsesManagedTurn())
-            EnsureManagedTurnCredentials(forceRelay: true, refreshRelayPeers: false);
+        // Fetch short-lived relay credentials in parallel with normal direct ICE setup. Direct
+        // peers still use host/srflx candidates, but a symmetric-NAT failure can now escalate
+        // immediately instead of waiting for a credential round trip after the timeout.
+        if (UsesManagedTurn())
+            EnsureManagedTurnCredentials(forceRelay: ShouldForceRelay(), refreshRelayPeers: false);
         VoiceDiagnostics.Log("voice.engine.created", $"room={RoomCode} region={Region} signaling=among-us-rpc");
         if (WineEnvironment.IsWine)
         {
@@ -866,9 +873,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _androidMicrophone?.SetVolume(1f);
 #endif
 #if WINDOWS
-        _voice?.SetInput(_micVolume, _vadThreshold);
+        _voice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #elif ANDROID
-        _mobileVoice?.SetInput(_micVolume, _vadThreshold);
+        _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #endif
     }
 
@@ -881,9 +888,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             ? Mathf.Clamp(vadThreshold, 0.0005f, 0.080f)
             : 0.004f;
 #if WINDOWS
-        _voice?.SetInput(_micVolume, _vadThreshold);
+        _voice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #elif ANDROID
-        _mobileVoice?.SetInput(_micVolume, _vadThreshold);
+        _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #endif
     }
 
@@ -913,7 +920,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         captureVoice?.SetDsp(options.EchoCancellationEnabled, automaticMicGain, options.NoiseSuppressionEnabled, true);
         captureVoice?.SetSynthetic(options.SyntheticMicToneEnabled);
-        captureVoice?.SetInput(_micVolume, _vadThreshold);
+        captureVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         if (restartCapture)
         {
             var captureHealth = captureVoice?.Health ?? CaptureHealth.Dead;
@@ -933,7 +940,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         // Android intentionally uses managed synthetic PCM pushed into pc-mobile; keep native
         // synthetic generation off and the APM/DSP path disabled.
         _mobileVoice?.SetSynthetic(false);
-        _mobileVoice?.SetInput(_micVolume, _vadThreshold);
+        _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         if (restartCapture && !Mute && _microphoneReady)
             StartAndroidMicrophone("capture-options");
 #endif
@@ -1043,6 +1050,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _speakerReady = false;
             _microphoneReady = false;
             _voice = null;
+            _gameStateSendGate.Reset();
             BeginSidecarCaptureSourceGenerationLocked(awaitingFirstLevel: false);
             return true;
         }
@@ -1661,6 +1669,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             true,
             _micVolume,
             _vadThreshold,
+            _noiseGateThreshold,
             _captureOptions.SyntheticMicToneEnabled,
             micActive,
             pendingIce);
@@ -1686,6 +1695,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 _voiceReady = true;
                 _speakerReady = true;
+                // A fresh native GameState starts empty. Force the first mixer snapshot through
+                // even if the previous helper sent the same fingerprint less than one second ago.
+                _gameStateSendGate.Reset();
                 ArmSidecarCaptureEvidenceLocked(sourceGeneration, micActive);
                 StartVoicePump();
                 if (outputDevices.Length > 0)
@@ -1721,7 +1733,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         ScheduleVoiceRecovery(stage);
     }
 
-    private void StopVoiceSession(string reason, bool waitForStop = false)
+    private void StopVoiceSession(
+        string reason,
+        bool waitForStop = false,
+        bool cleanupInBackground = false)
     {
         SidecarVoiceLease? voice;
         Task startTask;
@@ -1736,6 +1751,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             BeginSidecarCaptureSourceGenerationLocked(awaitingFirstLevel: false);
             voice = _voice;
             _voice = null;
+            _gameStateSendGate.Reset();
             startTask = _voiceStartTask;
         }
         StopVoicePump();
@@ -1743,9 +1759,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         // coordinator remains reusable for a later lobby, while EndGame -> lobby continuity is
         // achieved by retaining the same room lease across the transition. Lease release is
         // serialized with Start/configuration so an old async start cannot configure a new owner.
-        try { voice?.Dispose(); } catch { }
-        if (waitForStop)
-            try { startTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        void CleanupLease()
+        {
+            try { voice?.Dispose(); } catch { }
+            if (waitForStop)
+                try { startTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            VoiceDiagnostics.Log("voice.sidecar", $"cleanup-complete reason={reason}");
+        }
+        if (cleanupInBackground)
+            _ = Task.Run(CleanupLease);
+        else
+            CleanupLease();
         VoiceDiagnostics.Log("voice.sidecar", $"stopped reason={reason}");
     }
 
@@ -1988,7 +2012,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 if (restartCapture)
                     voice.SetMicActive(false);
                 voice.SelectMicDevice(_lastMicDeviceName);
-                voice.SetInput(_micVolume, _vadThreshold);
+                voice.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
                 voice.SetSynthetic(_captureOptions.SyntheticMicToneEnabled);
                 voice.SetMicActive(!Mute);
             }
@@ -2265,6 +2289,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var existing = _mobileVoice;
         if (existing?.IsRunning == true)
         {
+            existing.SetDiagnostics(VoiceDiagnostics.IsEnabled);
             EnsureMobileSpeaker(existing, nowMs, force: false);
             return;
         }
@@ -2340,10 +2365,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         _mobileVoiceStartRetryAtMs = 0;
         if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
-        mv.SetInput(_micVolume, _vadThreshold);
+        mv.SetDiagnostics(VoiceDiagnostics.IsEnabled);
+        mv.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         mv.SetSynthetic(false);
         // Android intentionally ships without the desktop WebRTC APM side library.
         mv.SetDsp(false, false, false, false);
+        // A fresh engine is fail-closed. Explicit Stop when muted/not ready also resets any
+        // encoder history before peers can be authorized; an already-running source gets Start.
+        mv.SetMicActive(!Mute && _microphoneReady);
+        _gameStateSendGate.Reset();
         _mobileVoice = mv;
         EnsureMobileSpeaker(mv, nowMs, force: true);
         VoiceDiagnostics.Log("voice.mobile", $"state=started backend=pc-mobile generation={callbackGeneration} dsp=platform-passthrough");
@@ -2375,7 +2405,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _rpcSessionTickNextMs = 0;
 
         if (ReferenceEquals(_mobileVoice, voice))
+        {
             _mobileVoice = null;
+            _gameStateSendGate.Reset();
+        }
         try { voice.ResetMicInput(); } catch { }
         try { voice.Dispose(); } catch { }
         VoiceDiagnostics.Log("voice.mobile", $"state=invalidated reason={reason}");
@@ -2495,7 +2528,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID
             EnsureMobileVoice();
             _mobileVoice?.SetSynthetic(false);
-            _mobileVoice?.SetInput(_micVolume, _vadThreshold);
+            _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #endif
             if (_captureOptions.SyntheticMicToneEnabled)
             {
@@ -2514,6 +2547,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     $"requested={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} unityDevices=[{string.Join(",", AndroidMicrophone.GetDeviceNames().Select(VoiceDiagnostics.DescribeDevice))}]");
             }
 
+#if ANDROID
+            // Open only after the source reports ready. MobileVoiceClient drops PCM until the
+            // native Start reset succeeds, so a failed source or control call stays fail-closed.
+            _mobileVoice?.SetMicActive(_microphoneReady && !Mute);
+#endif
+
             VoiceDiagnostics.Log("voice.mic", $"ready={_microphoneReady} reason={reason} capture={DescribeCaptureMode()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} syntheticTone={_captureOptions.SyntheticMicToneEnabled} volume={_micVolume:0.00}");
         }
         catch (Exception ex)
@@ -2525,6 +2564,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void StopAndroidMicrophone(string reason)
     {
+#if ANDROID
+        // Close native transmission and clear Opus/DRED history before source teardown. Mute is
+        // already visible to capture callbacks, and the managed client closes its PCM gate first.
+        try { _mobileVoice?.SetMicActive(false); } catch { }
+#endif
         StopSyntheticMicTone();
         // Invalidate queued/device-old PCM before waiting for either Unity or the encode worker.
         // The worker rechecks both this epoch and Mute immediately before entering pc-mobile.
@@ -2569,14 +2613,29 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         Interlocked.Add(ref _micSamples, samples);
 
         var epoch = Volatile.Read(ref _captureEpoch);
-        var copy = new float[samples];
-        Array.Copy(buffer, 0, copy, 0, samples);
         lock (_unityEncodeSync)
         {
             if (_disposed) return;
-            while (_unityEncodeQueue.Count >= UnityEncodeQueueMaxFrames)
-                _unityEncodeQueue.Dequeue();
-            _unityEncodeQueue.Enqueue((copy, samples, epoch));
+            var offset = 0;
+            while (offset < samples)
+            {
+                var take = Math.Min(AudioHelpers.FrameSize - _unityCaptureFill, samples - offset);
+                Array.Copy(buffer, offset, _unityCaptureAccum, _unityCaptureFill, take);
+                _unityCaptureFill += take;
+                offset += take;
+                if (_unityCaptureFill != AudioHelpers.FrameSize) continue;
+
+                var frame = ArrayPool<float>.Shared.Rent(AudioHelpers.FrameSize);
+                Array.Copy(_unityCaptureAccum, 0, frame, 0, AudioHelpers.FrameSize);
+                _unityCaptureFill = 0;
+                while (_unityEncodeQueue.Count >= UnityEncodeQueueMaxFrames)
+                {
+                    var dropped = _unityEncodeQueue.Dequeue();
+                    ArrayPool<float>.Shared.Return(dropped.buffer, clearArray: false);
+                    Interlocked.Increment(ref _unityEncodeDroppedFrames);
+                }
+                _unityEncodeQueue.Enqueue((frame, AudioHelpers.FrameSize, epoch));
+            }
             if (_unityEncodeWorker == null)
             {
                 _unityEncodeStop = false;
@@ -2603,23 +2662,30 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 (buffer, samples, epoch) = _unityEncodeQueue.Dequeue();
             }
 
-            if (epoch != Volatile.Read(ref _captureEpoch)) continue;
-            lock (_captureFrameSync)
+            try
             {
-                if (epoch != _captureEpoch || Mute) continue;
-                try
+                if (epoch != Volatile.Read(ref _captureEpoch)) continue;
+                lock (_captureFrameSync)
                 {
+                    if (epoch != _captureEpoch || Mute) continue;
+                    try
+                    {
 #if ANDROID
-                    _mobileVoice?.PushMic(buffer, samples);
+                        _mobileVoice?.PushMic(buffer, samples);
 #else
-                    ProcessMicrophoneCaptureSamples(buffer, samples);
+                        ProcessMicrophoneCaptureSamples(buffer, samples);
 #endif
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref _micProcessingFailures);
+                        VoiceDiagnostics.Log("voice.mic.capture_error", $"source=android error=\"{ex.Message}\"");
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Interlocked.Increment(ref _micProcessingFailures);
-                    VoiceDiagnostics.Log("voice.mic.capture_error", $"source=android error=\"{ex.Message}\"");
-                }
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(buffer, clearArray: false);
             }
         }
     }
@@ -2632,7 +2698,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             worker = _unityEncodeWorker;
             _unityEncodeWorker = null;
             _unityEncodeStop = true;
-            _unityEncodeQueue.Clear();
+            _unityCaptureFill = 0;
+            while (_unityEncodeQueue.Count > 0)
+            {
+                var queued = _unityEncodeQueue.Dequeue();
+                ArrayPool<float>.Shared.Return(queued.buffer, clearArray: false);
+            }
             Monitor.PulseAll(_unityEncodeSync);
         }
         try { worker?.Join(500); } catch { }
@@ -2791,15 +2862,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             SnapshotPeersInto(_updatePeerScratch);
             foreach (var peer in _updatePeerScratch) peer.MuteAll();
 #if WINDOWS
-            _voice?.SendGameState(
-                deaf: true,
-                master: 0f,
-                peers: Array.Empty<SidecarProtocol.GameStatePeerInput>());
+            if (_voice != null)
+                SendNativeGameStateIfDue(true, 0f, Array.Empty<SidecarProtocol.GameStatePeerInput>());
 #elif ANDROID
-            _mobileVoice?.SendGameState(
-                deaf: true,
-                master: 0f,
-                peers: Array.Empty<SidecarProtocol.GameStatePeerInput>());
+            if (_mobileVoice != null)
+                SendNativeGameStateIfDue(true, 0f, Array.Empty<SidecarProtocol.GameStatePeerInput>());
 #endif
             MaybeLogStats(snapshot, "no-snapshot");
             return;
@@ -2844,11 +2911,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         List<SidecarProtocol.GameStatePeerInput>? helperGameStatePeers = null;
 #if WINDOWS
         if (_voice != null)
-            helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
+            helperGameStatePeers = _helperGameStatePeers;
 #elif ANDROID
         if (_mobileVoice != null)
-            helperGameStatePeers = new List<SidecarProtocol.GameStatePeerInput>();
+            helperGameStatePeers = _helperGameStatePeers;
 #endif
+        helperGameStatePeers?.Clear();
         foreach (var peer in _updatePeerScratch)
         {
             if (peer.ClientId >= 0 &&
@@ -2871,7 +2939,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             else
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
-            result = VoiceRoleMuteState.ApplyLocalListenerAudioMuffle(result);
+            if (result.Audible && VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame())
+                result = result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)
             {
@@ -2882,7 +2951,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     deadFocusProfile);
                 float gain = VoiceVolumeMath.ResolvePeerGain(result, peer.ClientVolume, groupVolume);
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
-                    peer.ClientId.ToString(CultureInfo.InvariantCulture),
+                    peer.ClientIdText,
                     gain, result.Pan, (int)result.FilterMode));
             }
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
@@ -2895,17 +2964,33 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
 #if WINDOWS
         if (helperGameStatePeers != null)
-        {
-            _voice?.SendGameState(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
-        }
+            SendNativeGameStateIfDue(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
 #elif ANDROID
         if (helperGameStatePeers != null)
-        {
-            _mobileVoice?.SendGameState(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
-        }
+            SendNativeGameStateIfDue(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
 #endif
 
         MaybeLogStats(snapshot, "ok");
+    }
+
+    private void SendNativeGameStateIfDue(
+        bool deaf,
+        float master,
+        IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
+    {
+        var fingerprint = SidecarProtocol.GameStateFingerprint(deaf, master, peers);
+#if WINDOWS
+        var desktopVoice = _voice;
+        if (!_voiceReady || desktopVoice == null || desktopVoice.Health != CaptureHealth.Healthy)
+            return;
+        if (!_gameStateSendGate.ShouldSend(Environment.TickCount64, fingerprint)) return;
+        desktopVoice.SendGameState(deaf, master, peers);
+#elif ANDROID
+        var mobileVoice = _mobileVoice;
+        if (mobileVoice?.IsRunning != true) return;
+        if (!_gameStateSendGate.ShouldSend(Environment.TickCount64, fingerprint)) return;
+        mobileVoice.SendGameState(deaf, master, peers);
+#endif
     }
 
     private PeerConnection ChooseDuplicateRouteWinner(PeerConnection first, PeerConnection second)
@@ -2954,7 +3039,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
         BestEffortDispose("microphone-worker-stop", StopMicrophoneWorkerForDispose);
         // This owns the SidecarVoiceLease release and must run even if capture/UI/signaling cleanup failed.
-        BestEffortDispose("sidecar-session-stop", () => StopVoiceSession("dispose", waitForStop: true));
+        BestEffortDispose("sidecar-session-stop", () => StopVoiceSession(
+            "dispose", waitForStop: true, cleanupInBackground: true));
 #elif ANDROID
         BestEffortDispose("android-microphone-stop", () => StopAndroidMicrophone("dispose"));
         BestEffortDispose("mobile-speaker-dispose", () => _mobileSpeaker?.Dispose());
@@ -2981,24 +3067,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             catch { }
         }
     }
-
-    internal static bool IsOpusPacketStructurallyInvalid(byte[] data)
-    {
-        if (data == null || data.Length == 0) return true;
-        int code = data[0] & 0x3;
-        if (code == 0)
-        {
-            if (data.Length > 1) return false;
-            return ((data[0] >> 3) & 0x1F) >= 12;
-        }
-
-        if (code == 1) return false;
-
-        return data.Length < 2;
-    }
-
-    internal static bool IsOpusDtxSilencePacket(byte[] data)
-        => data != null && data.Length == 1 && (data[0] & 0x3) <= 1 && ((data[0] >> 3) & 0x1F) >= 12;
 
     public void EscalateToRelayOnly(string reason)
     {
@@ -3605,8 +3673,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var silentPct = audibleTicks == 0 ? 0f : audibleSilentTicks * 100f / audibleTicks;
         var remoteMax = diagnostics.Length == 0 ? 0f : diagnostics.Max(item => item.LevelPeak);
         var peerWindows = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.ToCompactString()));
-        var peerJitter = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => item.Jitter.ToCompactString()));
-        var peerBuffers = diagnostics.Length == 0 ? "none" : string.Join("|", diagnostics.Select(item => $"{item.ClientId}:{item.BufferStats}"));
         var routeRecords = peers.Length;
         var engineRouteTargets = peers.Length == 0
             ? "none"
@@ -3691,14 +3757,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var micClipPct = micWindowSamples == 0 ? 0f : micNearClipSamples * 100f / micWindowSamples;
         var micZeroCrossRate = micWindowSamples <= 1 ? 0f : micZeroCrossings / (float)(micWindowSamples - 1);
         var micCrest = micRms <= 0.0 ? 0.0 : micPeak / micRms;
+        var mobilePlaybackText = string.Empty;
+#if ANDROID
+        var mobileVoice = _mobileVoice;
+        mobilePlaybackText = mobileVoice == null
+            ? " mobilePlayback=unavailable"
+            : $" mobilePlaybackDepthSamples={mobileVoice.PlaybackDepthSamples} mobilePlaybackHighWaterSamples={mobileVoice.PlaybackHighWaterSamples} mobilePlaybackDroppedSamples={mobileVoice.PlaybackDroppedSamples} mobilePlaybackSkippedSamples={mobileVoice.PlaybackSkippedSamples} mobilePlaybackZeroFilledSamples={mobileVoice.PlaybackZeroFilledSamples} mobilePlaybackLateCycles={mobileVoice.PlaybackPumpLateCycles} mobilePlaybackEmptyPulls={mobileVoice.PlaybackNativeEmptyPulls}";
+#endif
         VoiceDiagnostics.Log("voice.stats",
             $"reason={reason} room={RoomCode} region={Region} media=native-engine signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +
             $"routeRecords={routeRecords} engineRouteTargets={engineRouteTargets} audibleRoutes={peers.Count(peer => peer.CurrentRoute.Audible)} speakingRoutes={peers.Count(peer => peer.IsSpeaking)} {rpcDiagnosticsText} " +
             $"localLevel={LocalLevel:0.000} localSpeaking={LocalSpeaking} mute={Mute} remoteLevelMax={remoteMax:0.000} " +
-            $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} nativeJitter=not-exposed nativeBuffers=not-exposed legacyPeerJitter={peerJitter} legacyPeerBuffers={peerBuffers} " +
+            $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} " +
             $"sidecarLevelEventsWindow={sidecarLevelEventsWindow} sidecarLevelEventsTotal={sidecarLevelEventsTotal} sidecarLevelAgeMs={sidecarLevelAgeMs} sidecarPeerLevelBatchesTotal={sidecarPeerLevelBatchesTotal} sidecarPeerLevelsTotal={sidecarPeerLevelsTotal} sidecarPeerLevelsAgeMs={sidecarPeerLevelsAgeMs} sidecarPeerLevelsMappedWindow={sidecarPeerLevelsMappedWindow} sidecarPeerLevelsUnmappedWindow={sidecarPeerLevelsUnmappedWindow} " +
             $"managedMicCallbacks={Volatile.Read(ref _micCallbacks)} managedMicBytes={Volatile.Read(ref _micBytes)} managedMicSamples={Volatile.Read(ref _micSamples)} managedMicWindowSamples={micWindowSamples} managedMicPeak={micPeak:0.000000} managedMicRms={micRms:0.000000} managedMicCrest={micCrest:0.00} managedMicNonZeroSamples={micNonZeroSamples} managedMicSilentCallbacks={micSilentCallbacks} managedMicNearClipSamples={micNearClipSamples} managedMicClipPct={micClipPct:0.000} managedMicZeroCrossRate={micZeroCrossRate:0.0000} " +
-            $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicProcessingFailures={Volatile.Read(ref _micProcessingFailures)} " +
+            $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicProcessingFailures={Volatile.Read(ref _micProcessingFailures)} unityEncodeDroppedFrames={Volatile.Read(ref _unityEncodeDroppedFrames)}{mobilePlaybackText} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} " +
             $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerConfigured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDigitalSilence={Volatile.Read(ref _digitalSilenceDetected)}");
         if (CaptureUsesUnity)
@@ -3788,7 +3861,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         private readonly object _sync = new();
         private VoiceProximityResult _currentRoute = VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
         private float _levelPeakSinceStats;
-        private float _packetLevelPeakSinceStats;
         private float _recentVoiceLevel;
         private long _lastVoiceLevelTicks;
         private int _samplesSinceStats;
@@ -3809,6 +3881,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             SocketId = socketId;
             ClientId = clientId;
+            ClientIdText = clientId.ToString(CultureInfo.InvariantCulture);
             PlaybackGroupId = playbackGroupId;
         }
 
@@ -3833,6 +3906,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         public string SocketId { get; }
         public int ClientId { get; private set; }
+        public string ClientIdText { get; private set; }
         public int PlaybackGroupId { get; }
 
         private volatile byte _playerId = byte.MaxValue;
@@ -3872,6 +3946,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             if (clientId < 0 || ClientId == clientId) return false;
             ClientId = clientId;
+            ClientIdText = clientId.ToString(CultureInfo.InvariantCulture);
             return true;
         }
 
@@ -3971,9 +4046,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             lock (_sync)
             {
-                var result = new PeerDiagnostics(ClientId, _levelPeakSinceStats, _packetLevelPeakSinceStats, _samplesSinceStats, _audibleSamplesSinceStats, _audibleSilentSamplesSinceStats, _routeClearsSinceStats, _currentRoute, _appliedPan, default, "sidecar");
+                var result = new PeerDiagnostics(ClientId, _levelPeakSinceStats, _samplesSinceStats, _audibleSamplesSinceStats, _audibleSilentSamplesSinceStats, _routeClearsSinceStats, _currentRoute, _appliedPan);
                 _levelPeakSinceStats = 0f;
-                _packetLevelPeakSinceStats = 0f;
                 _samplesSinceStats = 0;
                 _audibleSamplesSinceStats = 0;
                 _audibleSilentSamplesSinceStats = 0;
@@ -3999,32 +4073,26 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private readonly struct PeerDiagnostics
     {
-        public PeerDiagnostics(int clientId, float levelPeak, float packetLevelPeak, int samples, int audibleSamples, int audibleSilentSamples, int routeClears, VoiceProximityResult route, float appliedPan, VoiceJitterWindowStats jitter, string bufferStats)
+        public PeerDiagnostics(int clientId, float levelPeak, int samples, int audibleSamples, int audibleSilentSamples, int routeClears, VoiceProximityResult route, float appliedPan)
         {
             ClientId = clientId;
             LevelPeak = levelPeak;
-            PacketLevelPeak = packetLevelPeak;
             Samples = samples;
             AudibleSamples = audibleSamples;
             AudibleSilentSamples = audibleSilentSamples;
             RouteClears = routeClears;
             Route = route;
             AppliedPan = appliedPan;
-            Jitter = jitter;
-            BufferStats = bufferStats;
         }
         public int ClientId { get; }
         public float LevelPeak { get; }
-        public float PacketLevelPeak { get; }
         public int Samples { get; }
         public int AudibleSamples { get; }
         public int AudibleSilentSamples { get; }
         public int RouteClears { get; }
         public VoiceProximityResult Route { get; }
         public float AppliedPan { get; }
-        public VoiceJitterWindowStats Jitter { get; }
-        public string BufferStats { get; }
-        public string ToCompactString() => $"{ClientId}:{LevelPeak:0.000}/{PacketLevelPeak:0.000}/{Samples}/{AudibleSamples}/{AudibleSilentSamples}/route={Route.Reason}:{Route.NormalVolume:0.00},{Route.GhostVolume:0.00},{Route.RadioVolume:0.00},pan={Route.Pan:0.00},appliedPan={AppliedPan:0.00},clears={RouteClears}";
+        public string ToCompactString() => $"{ClientId}:{LevelPeak:0.000}/{Samples}/{AudibleSamples}/{AudibleSilentSamples}/route={Route.Reason}:{Route.NormalVolume:0.00},{Route.GhostVolume:0.00},{Route.RadioVolume:0.00},pan={Route.Pan:0.00},appliedPan={AppliedPan:0.00},clears={RouteClears}";
     }
 
     private static string DiagnosticSafe(string value)

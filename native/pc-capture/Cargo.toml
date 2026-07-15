@@ -3,7 +3,7 @@ name = "pc-capture"
 version = "0.1.0"
 edition = "2021"
 description = "PerfectComms native host-side microphone capture helper (loopback TCP sidecar)."
-license = "MIT"
+license = "LGPL-2.1-only"
 
 [[bin]]
 name = "pc-capture"
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 apm-sys = { path = "../apm-sys" }
-audiopus = "0.3.0-rc.0"
+opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
 webrtc = "0.11"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
@@ -29,6 +29,7 @@ bytes = "1"
 # the Android build keeps the cross-compile free of the oboe/JNI backend.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 cpal = "0.15"
+crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -36,7 +37,7 @@ libc = "0.2"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
-[profile.dev.package.audiopus_sys]
+[profile.dev.package.opusic-sys]
 opt-level = 2
 
 [profile.release]

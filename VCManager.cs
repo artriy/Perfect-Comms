@@ -39,6 +39,7 @@ internal class VCManager : MonoBehaviour
         _activeSceneName = next.name;
         VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
         VoiceChatRoom.NotifyScenePhaseBoundary();
+        VoiceUiKit.ClosePersistentPanels($"active-scene:{previous.name}->{next.name}");
     }
 
     private static void OnSceneLoaded(Scene scene, LoadSceneMode _)
@@ -48,6 +49,7 @@ internal class VCManager : MonoBehaviour
         _activeSceneName = scene.name;
         VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
         VoiceChatRoom.NotifyScenePhaseBoundary();
+        VoiceUiKit.ClosePersistentPanels($"scene-loaded:{scene.name}");
         VoiceFirstRunSetup.CloseForSceneChange();
         EnsureManagerObject();
         switch (scene.name)
@@ -81,6 +83,14 @@ internal class VCManager : MonoBehaviour
     void OnApplicationQuit()
     {
         VoiceChatPluginMain.ShutdownVoiceRuntime("application-quit");
+    }
+
+    void OnApplicationFocus(bool hasFocus)
+    {
+        if (hasFocus) return;
+        // KeyboardJoystick.Update is not guaranteed to run after Windows/Android focus is lost.
+        // Release transmit holds from Unity's authoritative focus callback as well.
+        try { VoiceChatPatches.ReleaseHeldTransmitInputs(); } catch { }
     }
 
     void Update()

@@ -15,11 +15,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 8 requires AUDIO_OUT playback injection plus playback lifecycle acknowledgement
+    // Protocol 9 adds the speech-safe native noise-gate threshold and complete receive/path
+    // telemetry. Protocol 8 requires AUDIO_OUT playback injection plus lifecycle acknowledgement
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 8;
+    public const int Proto = 9;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -43,6 +44,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private int _startGeneration;
     private long _lastGameStateLogTick;
     private int _suppressedGameStateLogs;
+    private int _lastDiagnosticsEnabled = -1;
+    private ulong _cachedGameStateFingerprint;
+    private byte[]? _cachedGameStateFrame;
 
     public event Action<float[], int>? OnFrame;
     public event Action<string>? OnDead;
@@ -65,6 +69,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public bool Start(string? micDevice, string? spkDevice)
     {
         Stop();
+        Volatile.Write(ref _lastDiagnosticsEnabled, -1);
         _running = false;
         var generation = Volatile.Read(ref _startGeneration);
         VoiceDiagnostics.Log(
@@ -241,12 +246,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         SendCommand("set-synthetic", () => SidecarProtocol.SetSyntheticFrame(enabled), $"enabled={enabled}");
     }
 
-    public void SetInput(float gain, float vadThreshold)
+    public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)
     {
         SendCommand(
             "set-input",
-            () => SidecarProtocol.SetInputFrame(gain, vadThreshold),
-            $"gain={FormatFloat(gain)} vadThreshold={FormatFloat(vadThreshold)}");
+            () => SidecarProtocol.SetInputFrame(gain, vadThreshold, noiseGateThreshold),
+            $"gain={FormatFloat(gain)} vadThreshold={FormatFloat(vadThreshold)} noiseGateThreshold={FormatFloat(noiseGateThreshold)}");
     }
 
     public bool TryConfigureInitialCapture(
@@ -258,6 +263,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         bool hpf,
         float gain,
         float vadThreshold,
+        float noiseGateThreshold,
         bool synthetic,
         bool micActive,
         IEnumerable<IceServer>? iceServers)
@@ -285,10 +291,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 "set-dsp",
                 () => SidecarProtocol.SetDspFrame(aec, agc, ns, hpf),
                 $"aec={aec} agc={agc} ns={ns} hpf={hpf}")) return false;
+        var diagnosticsEnabled = VoiceDiagnostics.IsEnabled;
+        if (!SendCommand(
+                "set-diagnostics",
+                () => SidecarProtocol.SetDiagnosticsFrame(diagnosticsEnabled),
+                $"enabled={diagnosticsEnabled}")) return false;
+        Volatile.Write(ref _lastDiagnosticsEnabled, diagnosticsEnabled ? 1 : 0);
         if (!SendCommand(
                 "set-input",
-                () => SidecarProtocol.SetInputFrame(gain, vadThreshold),
-                $"gain={FormatFloat(gain)} vadThreshold={FormatFloat(vadThreshold)}")) return false;
+                () => SidecarProtocol.SetInputFrame(gain, vadThreshold, noiseGateThreshold),
+                $"gain={FormatFloat(gain)} vadThreshold={FormatFloat(vadThreshold)} noiseGateThreshold={FormatFloat(noiseGateThreshold)}")) return false;
         if (!SendCommand(
                 "set-synthetic",
                 () => SidecarProtocol.SetSyntheticFrame(synthetic),
@@ -409,6 +421,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
     {
         var diagnosticsEnabled = VoiceDiagnostics.IsEnabled;
+        SynchronizeDiagnosticsSampling(diagnosticsEnabled);
         if (!_running)
         {
             if (diagnosticsEnabled && ShouldLogGameState(out var notRunningSuppressed))
@@ -426,7 +439,17 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         byte[] frame;
         try
         {
-            frame = SidecarProtocol.GameStateFrame(deaf, master, peers);
+            var fingerprint = SidecarProtocol.GameStateFingerprint(deaf, master, peers);
+            if (_cachedGameStateFrame != null && fingerprint == _cachedGameStateFingerprint)
+            {
+                frame = _cachedGameStateFrame;
+            }
+            else
+            {
+                frame = SidecarProtocol.GameStateFrame(deaf, master, peers);
+                _cachedGameStateFingerprint = fingerprint;
+                _cachedGameStateFrame = frame;
+            }
         }
         catch (Exception ex)
         {
@@ -624,30 +647,52 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             _reader = null;
             _heartbeat = null;
         }
-        if (stream != null)
-        {
-            try
-            {
-                var stop = SidecarProtocol.StopFrame();
-                lock (_writeLock)
-                {
-                    stream.Write(stop, 0, stop.Length);
-                    stream.Flush();
-                }
-                LogCommand("stop", "written", stop.Length, "phase=shutdown");
-            }
-            catch (Exception ex)
-            {
-                LogCommand("stop", "failed", 0, "phase=shutdown error=" + ExceptionDiagnostic(ex));
-            }
-        }
-        try { client?.Close(); } catch { }
-        KillLaunch();
-        JoinWorker(reader);
-        JoinWorker(heartbeat);
+        var launch = Interlocked.Exchange(ref _launchResult, null);
         SetHealth(CaptureHealth.Dead);
         if (wasRunning || stream != null)
-            VoiceDiagnostics.Log("sidecar.lifecycle", "event=stopped health=Dead");
+            VoiceDiagnostics.Log("sidecar.lifecycle", "event=stop-detached health=Dead cleanup=background");
+
+        if (stream == null && client == null && launch == null)
+            return;
+
+        void Cleanup()
+        {
+            if (stream != null)
+            {
+                try
+                {
+                    var stop = SidecarProtocol.StopFrame();
+                    lock (_writeLock)
+                    {
+                        stream.Write(stop, 0, stop.Length);
+                        stream.Flush();
+                    }
+                    LogCommand("stop", "written", stop.Length, "phase=shutdown");
+                }
+                catch (Exception ex)
+                {
+                    LogCommand("stop", "failed", 0, "phase=shutdown error=" + ExceptionDiagnostic(ex));
+                }
+            }
+            try { client?.Close(); } catch { }
+            KillLaunch(launch);
+            JoinWorker(reader);
+            JoinWorker(heartbeat);
+            VoiceDiagnostics.Log("sidecar.lifecycle", "event=stopped health=Dead cleanup=complete");
+        }
+
+        try
+        {
+            new Thread(Cleanup)
+            {
+                IsBackground = true,
+                Name = "SidecarVoiceCleanup",
+            }.Start();
+        }
+        catch
+        {
+            Cleanup();
+        }
     }
 
     private static void JoinWorker(Thread? thread)
@@ -671,6 +716,24 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private void KillLaunch()
     {
         var launch = Interlocked.Exchange(ref _launchResult, null);
+        KillLaunch(launch);
+    }
+
+    private void SynchronizeDiagnosticsSampling(bool enabled)
+    {
+        var requested = enabled ? 1 : 0;
+        if (Volatile.Read(ref _lastDiagnosticsEnabled) == requested) return;
+        if (SendCommand(
+                "set-diagnostics",
+                () => SidecarProtocol.SetDiagnosticsFrame(enabled),
+                $"enabled={enabled}",
+                logSuccess: enabled,
+                logFailure: enabled))
+            Volatile.Write(ref _lastDiagnosticsEnabled, requested);
+    }
+
+    private static void KillLaunch(SidecarLaunchResult? launch)
+    {
         if (launch == null) return;
         var killed = false;
         var exited = false;
@@ -1028,12 +1091,15 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"peerLevelBatches={ReadU64(root, "peer_level_batches")} mixRounds={mixRounds} mixedPeerFrames={ReadU64(root, "mixed_peer_frames")} " +
                 $"mixNonzeroRounds={ReadU64(root, "mix_nonzero_rounds")} mixSilentRounds={ReadU64(root, "mix_silent_rounds")} mixSamples={ReadU64(root, "mix_samples")} mixNonzeroSamples={ReadU64(root, "mix_nonzero_samples")} mixPeak={ReadDouble(root, "mix_peak"):0.000000} mixRms={ReadDouble(root, "mix_rms"):0.000000} jitterIdleTicks={ReadU64(root, "jitter_idle_ticks")} " +
                 DescribeNativeDspInputForDiagnostics(root) + " " +
+                DescribeNativeMediaReceiveForDiagnostics(root) + " " +
+                $"encoderLossPercent={FormatOptionalU64(root, "encoder_packet_loss_percent")} encoderBitrate={FormatOptionalU64(root, "encoder_bitrate")} " +
                 DescribeNativeAecTimingForDiagnostics(root) + " " +
                 $"gameStateUpdates={ReadU64(root, "game_state_updates")} appliedDeaf={ReadBool(root, "applied_deaf").ToString().ToLowerInvariant()} appliedMaster={ReadDouble(root, "applied_master"):0.000} appliedPeers={ReadU64(root, "applied_peer_count")} appliedNonzeroGainPeers={ReadU64(root, "applied_nonzero_gain_peers")} " +
                 $"playbackQueuedPairs={playbackQueuedPairs} playbackSpawnAttempts={ReadU64(root, "playback_spawn_attempts")} playbackStarts={ReadU64(root, "playback_starts")} playbackStops={ReadU64(root, "playback_stops")} playbackErrors={ReadU64(root, "playback_errors")} playbackCallbackErrors={ReadU64(root, "playback_callback_errors")} " +
                 $"playbackCallbacks={ReadU64(root, "playback_callbacks")} playbackRequestedPairs={ReadU64(root, "playback_requested_pairs")} playbackConsumedPairs={ReadU64(root, "playback_consumed_pairs")} playbackUnderrunPairs={ReadU64(root, "playback_underrun_pairs")} " +
                 $"playbackLockContentionCallbacks={ReadU64(root, "playback_lock_contention_callbacks")} playbackLockContentionSilencePairs={ReadU64(root, "playback_lock_contention_silence_pairs")} playbackOutputNonzeroSamples={ReadU64(root, "playback_output_nonzero_samples")} playbackOutputPeak={ReadDouble(root, "playback_output_peak"):0.000000} " +
                 $"playbackRingLen={ReadU64(root, "playback_ring_len")} playbackDropped={ReadU64(root, "playback_ring_dropped")} mediaDiagnosticsPresent={hasMediaDiagnostics.ToString().ToLowerInvariant()} mediaDiagnosticsSchema={mediaDiagnosticsSchema} mediaDiagnosticsSchemaSupported={mediaDiagnosticsSchemaSupported} payloadBytes={payloadBytes}");
+            LogNativeNetworkPaths(root, payloadBytes, managedGeneration);
             LogNativeMediaDiagnostics(root, payloadBytes, managedGeneration);
         }
         catch (Exception ex)
@@ -1233,7 +1299,65 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
            $"dspRequestedAec={FormatOptionalBool(root, "dsp_requested_aec")} dspRequestedAgc={FormatOptionalBool(root, "dsp_requested_agc")} dspRequestedNs={FormatOptionalBool(root, "dsp_requested_ns")} dspRequestedHpf={FormatOptionalBool(root, "dsp_requested_hpf")} " +
            $"dspApmLoaded={FormatOptionalBool(root, "dsp_apm_loaded")} dspConfigFullyApplied={FormatOptionalBool(root, "dsp_config_fully_applied")} " +
            $"dspAppliedAec={FormatOptionalBool(root, "dsp_applied_aec")} dspAppliedAgc={FormatOptionalBool(root, "dsp_applied_agc")} dspAppliedNs={FormatOptionalBool(root, "dsp_applied_ns")} dspAppliedHpf={FormatOptionalBool(root, "dsp_applied_hpf")} " +
-           $"inputGain={FormatOptionalDouble(root, "input_gain", "0.#########")} vadThreshold={FormatOptionalDouble(root, "input_vad_threshold", "0.#########")}";
+           $"inputGain={FormatOptionalDouble(root, "input_gain", "0.#########")} vadThreshold={FormatOptionalDouble(root, "input_vad_threshold", "0.#########")} noiseGateThreshold={FormatOptionalDouble(root, "input_noise_gate_threshold", "0.#########")}";
+
+    private static string DescribeNativeMediaReceiveForDiagnostics(JsonElement root)
+    {
+        if (!root.TryGetProperty("media_receive", out var receive) ||
+            receive.ValueKind != JsonValueKind.Object)
+            return "mediaReceivePresent=false";
+        return "mediaReceivePresent=true " +
+               $"mediaPeers={FormatOptionalU64(receive, "active_peers")} ingressOverflow={FormatOptionalU64(receive, "ingress_queue_overflow")} " +
+               $"sequenceGaps={FormatOptionalU64(receive, "sequence_gaps")} reorderedRecovered={FormatOptionalU64(receive, "reordered_recovered")} lateDrops={FormatOptionalU64(receive, "late_drops")} duplicateDrops={FormatOptionalU64(receive, "duplicate_drops")} encodedOverflowDrops={FormatOptionalU64(receive, "encoded_overflow_drops")} deadlineLosses={FormatOptionalU64(receive, "deadline_losses")} " +
+               $"dredFrames={FormatOptionalU64(receive, "dred_frames")} fecFrames={FormatOptionalU64(receive, "fec_frames")} plcFrames={FormatOptionalU64(receive, "plc_frames")} decoderResets={FormatOptionalU64(receive, "decoder_resets")} talkspurtResets={FormatOptionalU64(receive, "talkspurt_resets")} underruns={FormatOptionalU64(receive, "underruns")} rebuffers={FormatOptionalU64(receive, "rebuffers")} " +
+               $"targetFramesMax={FormatOptionalU64(receive, "target_frames_max")} targetFramesCurrentMax={FormatOptionalU64(receive, "target_frames_current_max")} depthFramesMax={FormatOptionalU64(receive, "depth_frames_max")} depthFramesCurrent={FormatOptionalU64(receive, "depth_frames_current")} rtpJitterMsMax={FormatOptionalDouble(receive, "rtp_jitter_ms_max", "0.###")}";
+    }
+
+    private static void LogNativeNetworkPaths(JsonElement root, int payloadBytes, int managedGeneration)
+    {
+        foreach (var line in DescribeNativeNetworkPathsForDiagnostics(root, payloadBytes))
+            VoiceDiagnostics.Log(line.Category, $"managedGeneration={managedGeneration} {line.Details}");
+    }
+
+    internal static bool TryDescribeNativeNetworkPathsForDiagnostics(
+        string json,
+        int payloadBytes,
+        out SidecarDiagnosticLogLine[] lines)
+    {
+        lines = Array.Empty<SidecarDiagnosticLogLine>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            lines = DescribeNativeNetworkPathsForDiagnostics(doc.RootElement, payloadBytes);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static SidecarDiagnosticLogLine[] DescribeNativeNetworkPathsForDiagnostics(
+        JsonElement root,
+        int payloadBytes)
+    {
+        if (!root.TryGetProperty("network_paths", out var paths) ||
+            paths.ValueKind != JsonValueKind.Array)
+            return Array.Empty<SidecarDiagnosticLogLine>();
+        var lines = new List<SidecarDiagnosticLogLine>();
+        foreach (var path in paths.EnumerateArray())
+        {
+            if (path.ValueKind != JsonValueKind.Object || lines.Count >= SidecarProtocol.MaxPeerLevelsPerBatch)
+                continue;
+            lines.Add(new SidecarDiagnosticLogLine(
+                "sidecar.native.network-path",
+                $"peer=\"{FormatOptionalText(path, "peer_id", 64)}\" generation={FormatOptionalU64(path, "generation")} state={FormatOptionalText(path, "candidate_state", 32)} localType={FormatOptionalText(path, "local_candidate_type", 24)} remoteType={FormatOptionalText(path, "remote_candidate_type", 24)} relay={FormatOptionalBool(path, "relay")} " +
+                $"currentRttMs={FormatOptionalDouble(path, "current_rtt_ms", "0.###")} availableOutgoingBitrate={FormatOptionalDouble(path, "available_outgoing_bitrate", "0.###")} availableIncomingBitrate={FormatOptionalDouble(path, "available_incoming_bitrate", "0.###")} " +
+                $"remotePacketsReceived={FormatOptionalU64(path, "remote_packets_received")} remotePacketsLost={FormatOptionalI64(path, "remote_packets_lost")} remoteFractionLost={FormatOptionalDouble(path, "remote_fraction_lost", "0.######")} remoteReportRttMs={FormatOptionalDouble(path, "remote_report_rtt_ms", "0.###")} remoteRttMeasurements={FormatOptionalU64(path, "remote_rtt_measurements")} payloadBytes={payloadBytes}"));
+        }
+        return lines.ToArray();
+    }
 
     internal static bool TryDescribeNativeAecAvailabilityForDiagnostics(string json, out string details)
     {

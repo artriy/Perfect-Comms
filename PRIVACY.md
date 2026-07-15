@@ -12,6 +12,10 @@ candidates) inherent to a real-time voice connection. Audio is not stored by the
 Perfect Comms registry endpoints are used only for optional public-lobby discovery/publishing; the configured
 registry may also provide short-lived managed TURN credentials.
 
+Opus packets may carry up to 100 ms of encrypted speech redundancy so an authorized receiver can repair a
+short network loss. This history is transient, and the encoder is reset at microphone stop/start and before
+a newly authorized peer is added so that peer cannot recover speech from before its authorization boundary.
+
 ## Public lobby discovery and publishing
 
 Opening the in-game Voice Lobby browser connects to the selected public directory. The available sources

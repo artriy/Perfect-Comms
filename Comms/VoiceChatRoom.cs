@@ -5,6 +5,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Net;
 using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -100,7 +101,10 @@ public class VoiceChatRoom
         => _voiceBackend?.ResetPeerMappingsNoMute() ?? 0;
     public float LocalMicLevel => _voiceBackend?.LocalLevel ?? 0f;
     public bool LocalMicSpeaking => _voiceBackend?.LocalSpeaking == true;
-    public bool Mute  { get; private set; }
+    // Capture is fail-closed from construction through the first authoritative policy tick. The
+    // backend observes this value before opening a microphone, so StartMuted/PTT/deafen state can
+    // never race an early OnGameJoined transport bootstrap.
+    public bool Mute  { get; private set; } = true;
     public int  SampleRate => AudioHelpers.ClockRate;
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
 
@@ -226,6 +230,7 @@ public class VoiceChatRoom
     // later, while keeping the backend and sidecar lease continuously alive.
     internal static void NotifyScenePhaseBoundary()
     {
+        VoiceChatHudState.InvalidateAudioPolicyCache();
         var current = Current;
         if (current != null)
             current._snapshotRefreshTimer = 0f;
@@ -269,6 +274,8 @@ public class VoiceChatRoom
 
     private VoiceChatRoom()
     {
+        VoiceChatPatches.ReleaseHeldTransmitInputs();
+        VoiceChatHudState.BeginVoiceSession();
         ResetSettingsSyncState();
         RefreshLocalAudioSettings();
         VoiceDiagnostics.DebugInfo("[VC] VoiceChatRoom constructed.");
@@ -614,6 +621,39 @@ public class VoiceChatRoom
         MaybeLogTransitionTraceState(snapshot);
 
         TraceUpdateCost(updateStartTicks, updateStep, snapshot);
+    }
+
+    internal void FailClosedAfterUpdateFailure()
+    {
+        // A partially-applied transition can leave the native mixer holding the previous route
+        // generation. Mute capture and explicitly publish a null game state so stale routes cannot
+        // remain audible while the managed update loop recovers.
+        SetMute(true);
+        try
+        {
+            _voiceBackend?.Update(
+                null,
+                Array.Empty<SpeakerCache>(),
+                Array.Empty<IVoiceComponent>(),
+                localInVent: false,
+                commsSabActive: false);
+        }
+        catch
+        {
+            // The caller already owns rate-limited diagnostics and bounded recovery. This path is
+            // best-effort and must never replace the original update exception.
+        }
+    }
+
+    internal void RequestBoundedUpdateFailureRecovery(int attempt)
+    {
+        if (Volatile.Read(ref _closed) != 0) return;
+        _forceBackendRebuild = true;
+        _snapshotRefreshTimer = 0f;
+        StartBootstrapWindow($"managed-update-failure-{attempt}");
+        VoiceDiagnostics.Log(
+            "voice.room.update_recovery",
+            $"attempt={attempt} action=rebuild-next-update bounded=true");
     }
 
     private bool IsRefreshedSnapshotUsableForRouting(VoiceGameStateSnapshot snapshot)
@@ -1030,6 +1070,9 @@ public class VoiceChatRoom
                 VoiceDiagnostics.Log(
                     "settings.host.unresolved",
                     $"previousHost={_lastObservedHostClientId} action=request-fresh-policy transitionalSeconds={HostPolicySyncFallbackSeconds:0}");
+                HostSettingsPanel.RevokeForHostAuthorityChange(
+                    newHostClientId: -1,
+                    localClientId: ResolveLocalClientId(snapshot));
             }
             return;
         }
@@ -1037,6 +1080,9 @@ public class VoiceChatRoom
         if (_lastObservedHostClientId < 0)
         {
             _lastObservedHostClientId = hostClientId;
+            HostSettingsPanel.RevokeForHostAuthorityChange(
+                hostClientId,
+                ResolveLocalClientId(snapshot));
             return;
         }
 
@@ -1056,6 +1102,7 @@ public class VoiceChatRoom
 
         var localClientId = ResolveLocalClientId(snapshot);
         var localIsNewHost = localClientId >= 0 && localClientId == hostClientId;
+        HostSettingsPanel.RevokeForHostAuthorityChange(hostClientId, localClientId);
         VoiceDiagnostics.Log("settings.host.changed", $"oldHost={oldHostClientId} newHost={hostClientId} localClient={localClientId} localIsNewHost={localIsNewHost}");
 
         if (localIsNewHost)
@@ -1115,6 +1162,8 @@ public class VoiceChatRoom
     private void EnsureVoiceBackendCore(VoiceGameStateSnapshot? snapshot, VoiceChatLocalSettings? settings)
     {
         if (Volatile.Read(ref _closed) != 0)
+            return;
+        if (!IsCurrentSessionEligible(out _))
             return;
         if (!TryGetVoiceRoomIdentity(out var roomCode, out var region))
             return;
@@ -1479,10 +1528,90 @@ public class VoiceChatRoom
             .Where(IsExpectedRemotePlayer)
             .Select(player => $"{player.ClientId}:{LogSafe(player.PlayerName)}"));
 
+    internal static bool IsCurrentSessionEligible(out string reason)
+    {
+        reason = string.Empty;
+        AmongUsClient? client;
+        try { client = AmongUsClient.Instance; }
+        catch
+        {
+            reason = "client-unavailable";
+            return false;
+        }
+
+        if (client == null)
+        {
+            reason = "client-unavailable";
+            return false;
+        }
+        if (VoiceRoomLifetimeGate.IsExplicitDisconnectLatched)
+        {
+            reason = "disconnect-latched";
+            return false;
+        }
+
+        int gameId;
+        string? address;
+        try
+        {
+            gameId = client.GameId;
+            address = client.networkAddress;
+        }
+        catch
+        {
+            reason = "session-identity-unavailable";
+            return false;
+        }
+
+        if (gameId == 0)
+        {
+            reason = "missing-game-id";
+            return false;
+        }
+        if (IsLocalVoiceEndpoint(address))
+        {
+            reason = "local-or-freeplay";
+            return false;
+        }
+        if (!VoiceJoinGuard.CanStartVoiceForCurrentSession(gameId, out reason))
+            return false;
+        return true;
+    }
+
+    internal static bool IsLocalVoiceEndpoint(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+        var value = address.Trim();
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            && !string.IsNullOrWhiteSpace(uri.Host))
+            value = uri.Host;
+
+        if (value.StartsWith("[", StringComparison.Ordinal)
+            && value.IndexOf(']') is var bracket && bracket > 1)
+        {
+            value = value.Substring(1, bracket - 1);
+        }
+        else
+        {
+            // Strip an IPv4/hostname port without damaging an unbracketed IPv6 literal.
+            int firstColon = value.IndexOf(':');
+            if (firstColon > 0 && firstColon == value.LastIndexOf(':'))
+                value = value.Substring(0, firstColon);
+        }
+
+        value = value.Trim().TrimEnd('.');
+        if (value.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || value.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+            return true;
+        return IPAddress.TryParse(value, out var ip) && IPAddress.IsLoopback(ip);
+    }
+
     private static bool TryGetVoiceRoomIdentity(out string roomCode, out string region)
     {
         roomCode = string.Empty;
         region = "default";
+        if (!IsCurrentSessionEligible(out _))
+            return false;
         var client = AmongUsClient.Instance;
         if (client == null)
             return false;
@@ -1788,6 +1917,11 @@ public class VoiceChatRoom
         try { VoiceDiagnostics.Log("room.close", $"reason={LogSafe(reason)} state=cleared"); } catch { }
         RunCleanupStep("client-registry-reset", VoiceClientRegistry.Reset);
         RunCleanupStep("role-mute-reset", VoiceRoleMuteState.Reset);
+        RunCleanupStep("transmit-input-reset", VoiceChatPatches.ReleaseHeldTransmitInputs);
+        RunCleanupStep("hud-session-reset", VoiceChatHudState.EndVoiceSession);
+        RunCleanupStep("scene-state-reset", VoiceSceneState.Reset);
+        if (clearUi)
+            RunCleanupStep("persistent-panels", () => VoiceUiKit.ClosePersistentPanels($"session:{reason}"));
     }
 
     private void TryUpdateLocalProfile()  => UpdateLocalProfile(false);

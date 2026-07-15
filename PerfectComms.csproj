@@ -69,15 +69,6 @@
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' != 'Android'">
-		<EmbeddedResource Include="Libs\opus.x64.dll">
-			<LogicalName>Lib.opus.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\opus.x86.dll">
-			<LogicalName>Lib.opus.x86.dll</LogicalName>
-		</EmbeddedResource>
-	</ItemGroup>
-
-	<ItemGroup Condition="'$(Configuration)' != 'Android'">
 		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x64.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x64.exe')">
 			<LogicalName>Lib.pc-capture.pc-capture-win-x64.exe</LogicalName>
 		</EmbeddedResource>

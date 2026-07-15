@@ -227,6 +227,7 @@ internal static class VoiceRoomSettingsState
     public static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot)
     {
         _remoteSnapshot = snapshot.Clamp();
+        VoiceChatHudState.InvalidateAudioPolicyCache();
     }
 
     internal static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot, int gameId)
@@ -247,6 +248,7 @@ internal static class VoiceRoomSettingsState
     {
         _remoteSnapshot = null;
         VoiceModRemoteOptionState.Clear();
+        VoiceChatHudState.InvalidateAudioPolicyCache();
         // Drop any cached host-options rebuild so the next Current read after a host change is fresh.
         _frameCacheFrame = int.MinValue;
     }

@@ -7,6 +7,110 @@ using Xunit;
 
 public sealed class ManagedVoiceHardeningTests
 {
+#if ANDROID
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1920, true)]
+    [InlineData(48000, true)]
+    [InlineData(48001, false)]
+    [InlineData(-1, false)]
+    public void AndroidSpeakerUsesOnePreallocatedBoundedCallbackScratch(int samples, bool expected)
+    {
+        Assert.Equal(48_000, AndroidEnginePcmSpeaker.MaximumCallbackSamples);
+        Assert.Equal(expected, AndroidEnginePcmSpeaker.IsSupportedCallbackSize(samples));
+    }
+#endif
+
+    [Theory]
+    [InlineData(true, false, false, false, false)]
+    [InlineData(false, false, false, false, true)]
+    [InlineData(true, true, false, false, true)]
+    [InlineData(true, false, true, false, true)]
+    [InlineData(true, false, false, true, true)]
+    public void PrivacyBoundariesSuppressAllVoiceInput(
+        bool focused,
+        bool rebinding,
+        bool modalOpen,
+        bool chatOpen,
+        bool expected)
+    {
+        Assert.Equal(expected, VoiceChatPatches.ShouldSuppressVoiceInput(
+            focused, rebinding, modalOpen, chatOpen));
+    }
+
+    [Theory]
+    [InlineData(true, true, true, true, false, true)]
+    [InlineData(true, true, false, false, true, true)]
+    [InlineData(true, false, true, true, false, false)]
+    [InlineData(false, true, true, true, false, false)]
+    public void CriticalJoinAndDisconnectHooksAreAnAtomicHealthContract(
+        bool joined,
+        bool disconnect,
+        bool inject,
+        bool validate,
+        bool reactor,
+        bool expected)
+    {
+        Assert.Equal(expected, VoiceJoinGuard.IsCriticalPatchPairHealthy(
+            joined, disconnect, inject, validate, reactor));
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("127.0.0.1:22023", true)]
+    [InlineData("localhost", true)]
+    [InlineData("https://localhost:22023", true)]
+    [InlineData("[::1]:22023", true)]
+    [InlineData("192.0.2.10", false)]
+    [InlineData("region.example.test:22023", false)]
+    public void LocalAndFreeplayEndpointsCannotOwnVoice(string address, bool expected)
+        => Assert.Equal(expected, VoiceChatRoom.IsLocalVoiceEndpoint(address));
+
+    [Fact]
+    public void RoomUpdateFailuresLogSparselyAndRebuildAtMostThreeTimes()
+    {
+        var first = VoiceChatPlugin.VoiceChatRoomDriver.DecideUpdateFailureRecovery(
+            consecutiveFailures: 1, rebuildAttempts: 0,
+            now: 0f, nextRebuildTime: 0f, lastLogTime: -999f);
+        Assert.True(first.ShouldLog);
+        Assert.False(first.ShouldRebuild);
+
+        var third = VoiceChatPlugin.VoiceChatRoomDriver.DecideUpdateFailureRecovery(
+            consecutiveFailures: 3, rebuildAttempts: 0,
+            now: 0f, nextRebuildTime: 0f, lastLogTime: 0f);
+        Assert.True(third.ShouldRebuild);
+
+        var capped = VoiceChatPlugin.VoiceChatRoomDriver.DecideUpdateFailureRecovery(
+            consecutiveFailures: 128, rebuildAttempts: 3,
+            now: 999f, nextRebuildTime: 0f, lastLogTime: 998f);
+        Assert.False(capped.ShouldRebuild);
+        Assert.Equal(5f, VoiceChatPlugin.VoiceChatRoomDriver.UpdateFailureRebuildDelaySeconds(1));
+        Assert.Equal(10f, VoiceChatPlugin.VoiceChatRoomDriver.UpdateFailureRebuildDelaySeconds(2));
+        Assert.Equal(20f, VoiceChatPlugin.VoiceChatRoomDriver.UpdateFailureRebuildDelaySeconds(3));
+    }
+
+    [Fact]
+    public void ListenerBlindProviderIsEvaluatedOnlyOncePerUnityFrame()
+    {
+        int calls = 0;
+        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = () =>
+        {
+            calls++;
+            return true;
+        };
+        try
+        {
+            Assert.True(VoiceProximityCalculator.IsLocalListenerBlindedOrFlashedThisFrame());
+            Assert.True(VoiceProximityCalculator.IsLocalListenerBlindedOrFlashedThisFrame());
+            Assert.Equal(1, calls);
+        }
+        finally
+        {
+            VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = null;
+            VoiceProximityCalculator.ResetSightState();
+        }
+    }
+
     [Fact]
     public void JoinGuardVersionMatchesBuiltPluginVersion()
     {
@@ -122,14 +226,16 @@ public sealed class ManagedVoiceHardeningTests
     [Fact]
     public void NativeInputSettingsUseBoundedFiniteSnakeCaseContract()
     {
-        var root = DecodeControl(SidecarProtocol.SetInputFrame(float.NaN, float.PositiveInfinity));
+        var root = DecodeControl(SidecarProtocol.SetInputFrame(float.NaN, float.PositiveInfinity, float.NaN));
         Assert.Equal("set-input", root.GetProperty("op").GetString());
         Assert.Equal(1f, root.GetProperty("gain").GetSingle());
         Assert.Equal(0.004f, root.GetProperty("vad_threshold").GetSingle());
+        Assert.Equal(0.003f, root.GetProperty("noise_gate_threshold").GetSingle());
 
-        root = DecodeControl(SidecarProtocol.SetInputFrame(99f, -4f));
+        root = DecodeControl(SidecarProtocol.SetInputFrame(99f, -4f, 99f));
         Assert.Equal(2f, root.GetProperty("gain").GetSingle());
         Assert.Equal(0.0001f, root.GetProperty("vad_threshold").GetSingle());
+        Assert.Equal(1f, root.GetProperty("noise_gate_threshold").GetSingle());
     }
 
     [Fact]
@@ -138,8 +244,27 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(8, SidecarVoiceClient.Proto);
+        Assert.Equal(9, SidecarVoiceClient.Proto);
         Assert.Equal(3, SidecarProtocol.MobileAbi);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NativeDiagnosticsSamplingUsesExplicitRuntimeContract(bool enabled)
+    {
+        var root = DecodeControl(SidecarProtocol.SetDiagnosticsFrame(enabled));
+        Assert.Equal("set-diagnostics", root.GetProperty("op").GetString());
+        Assert.Equal(enabled, root.GetProperty("enabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(true, "start")]
+    [InlineData(false, "stop")]
+    public void NativeMicActivityUsesExplicitPrivacyBoundaryContract(bool active, string expectedOp)
+    {
+        var root = DecodeControl(active ? SidecarProtocol.StartFrame() : SidecarProtocol.StopFrame());
+        Assert.Equal(expectedOp, root.GetProperty("op").GetString());
     }
 
     [Fact]
@@ -188,6 +313,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.False(SidecarProtocol.TryReadPeerLevels(tooMany, out _));
     }
 
+    #if WINDOWS
     [Fact]
     public void DesktopRpcWaitsForConfiguredHealthyHelper()
     {
@@ -258,6 +384,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(1, decision.ImmediateRestarts);
         Assert.True(decision.ResetRecoveryBackoff);
     }
+    #endif
 
     [Theory]
     [InlineData(true, true, true)]
@@ -324,6 +451,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.True(VoiceChatHudState.ShouldApplyMicStateWhileHudUnavailable(VoiceGamePhase.Meeting));
     }
 
+    #if WINDOWS
     [Fact]
     public void RpcPumpDeadlinesAdvanceIndependently()
     {
@@ -380,4 +508,5 @@ public sealed class ManagedVoiceHardeningTests
             previous: 0.5f, previousTicks: start, next: 0.8f,
             nowTicks: start + TimeSpan.FromMilliseconds(10).Ticks));
     }
+    #endif
 }

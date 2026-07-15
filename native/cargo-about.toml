@@ -1,0 +1,25 @@
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "LGPL-2.1-only",
+    "Zlib",
+]
+
+# Generate one conservative union for every native target shipped by Perfect Comms.
+# cargo-about evaluates these together and therefore includes target-specific crates
+# from all six release builds in the single notice document.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "aarch64-linux-android",
+]
+
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false

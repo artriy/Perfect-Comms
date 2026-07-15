@@ -9,11 +9,29 @@ internal static class VoiceProximityCalculator
     private const float GhostVisionRangeMultiplier = 1f;
     private const float LowVolumeFloor = 0.06f;
     private static float _lastUnimpairedLocalLightRadius;
+    private static Func<bool>? _localListenerBlindedOrFlashedProvider;
+    private static int _listenerBlindFrame = -1;
+    private static bool _listenerBlindValue;
+    private static int _listenerMuffleFrame = -1;
+    private static bool _listenerMuffleValue;
 
-    internal static Func<bool>? LocalListenerBlindedOrFlashedProvider { get; set; }
+    internal static Func<bool>? LocalListenerBlindedOrFlashedProvider
+    {
+        get => _localListenerBlindedOrFlashedProvider;
+        set
+        {
+            _localListenerBlindedOrFlashedProvider = value;
+            _listenerBlindFrame = -1;
+        }
+    }
 
     // Clear stale light radius on lifecycle transitions so a prior game can't shrink new-game hearing range.
-    internal static void ResetSightState() => _lastUnimpairedLocalLightRadius = 0f;
+    internal static void ResetSightState()
+    {
+        _lastUnimpairedLocalLightRadius = 0f;
+        _listenerBlindFrame = -1;
+        _listenerMuffleFrame = -1;
+    }
 
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
@@ -291,7 +309,7 @@ internal static class VoiceProximityCalculator
         }
 
         float maxDistance = s.MaxChatDistance;
-        bool listenerBlindedOrFlashed = IsLocalListenerBlindedOrFlashed();
+        bool listenerBlindedOrFlashed = IsLocalListenerBlindedOrFlashedThisFrame();
         if (s.OnlyHearInSight)
             maxDistance = ResolveSightLimitedMaxDistance(maxDistance, localLightRadius, listenerBlindedOrFlashed);
 
@@ -512,9 +530,27 @@ internal static class VoiceProximityCalculator
     private static Vector2 ResolveListenerPosition(VoicePlayerSnapshot? localPlayer, Vector2 fallback)
         => IsMediatingMedium(localPlayer) ? localPlayer!.Value.MediumSpiritPosition : fallback;
 
-    private static bool IsLocalListenerBlindedOrFlashed()
-        => LocalListenerBlindedOrFlashedProvider?.Invoke() ??
-           VoiceRoleMuteState.IsLocalListenerBlindedOrFlashed();
+    internal static bool IsLocalListenerBlindedOrFlashedThisFrame()
+    {
+        int frame = Time.frameCount;
+        if (_listenerBlindFrame == frame) return _listenerBlindValue;
+        _listenerBlindFrame = frame;
+        _listenerBlindValue = _localListenerBlindedOrFlashedProvider?.Invoke()
+                              ?? VoiceRoleMuteState.IsLocalListenerBlindedOrFlashed();
+        return _listenerBlindValue;
+    }
+
+    // PerfectCommsVoiceBackend evaluates listener muffle once per remote route. Cache the
+    // reflection-heavy local modifier check for the whole Unity frame; route-specific audio shape
+    // remains untouched.
+    internal static bool IsLocalListenerAudioMuffledThisFrame()
+    {
+        int frame = Time.frameCount;
+        if (_listenerMuffleFrame == frame) return _listenerMuffleValue;
+        _listenerMuffleFrame = frame;
+        _listenerMuffleValue = VoiceRoleMuteState.IsLocalListenerAudioMuffled();
+        return _listenerMuffleValue;
+    }
 
     private static float ResolveSightLimitedMaxDistance(
         float maxDistance,

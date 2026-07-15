@@ -1,15 +1,19 @@
 # Third-Party Notices
 
-Perfect Comms embeds the following third-party native libraries as assembly resources and extracts them at
-runtime for the applicable desktop platform. Their licenses are reproduced or referenced below.
+Perfect Comms embeds native platform engines and DSP libraries as assembly resources and extracts them at
+runtime for the applicable platform. Their licenses are reproduced or referenced below.
 
-## libopus 1.6.1 (voice codec, with DRED + deep PLC + OSCE)
+## libopus (voice codec inside native media engines)
 
-- Files: `Libs/opus.x64.dll`, `Libs/opus.x86.dll`
-- Upstream: https://github.com/xiph/opus, tag `v1.6.1` (commit `22244de5a79bd1d6d623c32e72bf1954b56235be`)
-- License: BSD 3-Clause (Xiph.org Foundation). Full text in `Libs/opus.COPYING`.
-- Build recipe: `Libs/opus-build.md`. The embedded DNN model data is the official Xiph model fetched by the
-  pinned `dnn/download_model.sh` hash. Unmodified upstream source.
+- Files: statically linked inside the platform `pc-capture` and `pc-mobile` binaries; there is no
+  separately loaded managed-code Opus DLL.
+- Upstream: https://github.com/xiph/opus. Perfect Comms pins libopus 1.6.1 through
+  `opusic-c` 1.6.1 / `opusic-sys` 0.7.3, builds it from the binding's bundled source, and enables
+  the upstream DRED feature on desktop and Android.
+- License: BSD 3-Clause (Xiph.org Foundation). Full text is in source at `Libs/opus.COPYING`
+  and in release bundles at `licenses/libopus-BSD-3-Clause.txt`.
+- Rust binding license: BSD 3-Clause (Douman). Full text is in source at `Libs/opusic-c.COPYING`
+  and in release bundles at `licenses/opusic-c-BSD-3-Clause.txt`.
 
 ## webrtc-audio-processing (AEC3 + noise suppression + high-pass filter)
 
@@ -18,15 +22,29 @@ runtime for the applicable desktop platform. Their licenses are reproduced or re
 - Upstream: WebRTC AudioProcessingModule (Google), via the PulseAudio standalone fork
   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing (v2.1, WebRTC M131). Prebuilt Windows
   binaries from the `LSXPrime/webrtc-audio-processing` mirror.
-- License: BSD 3-Clause. Copyright The WebRTC project authors. Full text in `Libs/webrtc-apm.COPYING`.
+- License: BSD 3-Clause. Copyright The WebRTC project authors. Full text is in source at
+  `Libs/webrtc-apm.COPYING` and in release bundles at
+  `licenses/webrtc-audio-processing-BSD-3-Clause.txt`.
+- The APM build also compiles WebRTC's bundled FFT/DSP sources. Their exact upstream texts are
+  preserved in source as `Libs/webrtc-upstream.LICENSE`, `Libs/webrtc-ooura.LICENSE`,
+  `Libs/webrtc-spl-sqrt-floor.LICENSE`, `Libs/webrtc-fft.LICENSE`, `Libs/webrtc-pffft.LICENSE`,
+  and `Libs/webrtc-rnnoise.COPYING`; release bundles copy each one under `licenses/`.
 
 ## Bundled managed dependencies
 
-The plugin embeds these managed assemblies as resources and resolves them at runtime. Each is redistributed
-under its own open-source license; consult the upstream project for the full text. SPDX is listed where it is
-unambiguous, otherwise see upstream.
+The plugin embeds these managed assemblies as resources and resolves them at runtime.
 
-| Assembly | License |
-|----------|---------|
-| SocketIOClient, SocketIO.Core, SocketIO.Serializer.* | MIT |
-| System.Text.Encodings.Web, System.Text.Json | MIT (.NET Foundation) |
+| Assembly | Upstream and license text |
+|----------|---------------------------|
+| SocketIOClient, SocketIO.Core, SocketIO.Serializer.* 3.1.2 | [doghappy/socket.io-client-csharp](https://github.com/doghappy/socket.io-client-csharp), MIT. The exact license from the NuGet package's pinned upstream commit is in source at `Libs/socketio-client-csharp.LICENSE` and in release bundles at `licenses/SocketIOClient-MIT.txt`. |
+| System.Text.Encodings.Web 8.0.0 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is in source at `Libs/dotnet-runtime.LICENSE.TXT`; its package-specific notices are at `Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT`. Release bundles preserve both under `licenses/`. |
+| System.Text.Json 8.0.6 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is in source at `Libs/dotnet-runtime.LICENSE.TXT`; its package-specific notices are at `Libs/system-text-json.THIRD-PARTY-NOTICES.TXT`. Release bundles preserve both under `licenses/`. |
+
+## Native Rust dependencies
+
+The native desktop and Android media engines statically link their locked Rust dependency graphs,
+including the WebRTC transport, ICE/TURN, DTLS/SRTP, async runtime, cryptography, serialization,
+audio I/O, and platform support crates. A deterministic cargo-about inventory covering every shipped
+desktop target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` at
+`Libs/native-rust-dependencies.html` and shipped as `licenses/native-rust-dependencies.html`.
+CI regenerates this file from the locked graph and rejects drift.

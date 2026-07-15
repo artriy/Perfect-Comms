@@ -33,9 +33,10 @@ helper workflow builds and smoke-tests Windows x64/x86, Linux
 x64, the final APM-containing/signature-verified universal macOS app, desktop
 WebRTC APM libraries, and Android ARM64 with the pinned NDK r27d LTS toolchain.
 
-RustSec audits every native lockfile during CI. Informational advisories for
-the unmaintained `audiopus_sys` binding and WebRTC's transitive `bincode` 1.x
-remain visible in the log; neither currently has a published vulnerability.
+RustSec audits every native lockfile during CI. The codec is the bundled libopus
+1.6.1 source from the pinned `opusic-sys` binding, compiled with DRED on every
+native target. WebRTC's transitive `bincode` 1.x informational advisory remains
+visible in the log; it currently has no published vulnerability.
 
 Android intentionally uses the platform audio path without the desktop WebRTC
 APM side library. Its release requirement is only the ARM64
@@ -73,9 +74,12 @@ Before tagging, open **Actions -> Release -> Run workflow** and run it against
 managed, native, RTC, desktop, Android, and packaging gates, then uploads a
 `PerfectComms-packages-*` Actions artifact for 14 days containing:
 
-- `PerfectComms.dll` for every supported desktop platform;
-- `PerfectComms+dependencies.zip` with BepInEx;
-- `PerfectCommsAndroid.dll` for Android.
+- `PerfectComms-Release.zip` for every supported desktop platform;
+- `PerfectComms-Android.zip` for Android, including its manifest fragment and install notes.
+
+The platform ZIPs also carry `THIRD_PARTY_NOTICES.md` and the exact third-party license/notice
+texts under `licenses/`. Bare DLLs are intentionally not published as standalone release assets,
+because they embed redistributed native and managed dependencies whose notices must travel with them.
 
 ### Publishing a release
 
@@ -88,5 +92,5 @@ managed, native, RTC, desktop, Android, and packaging gates, then uploads a
 4. Create and push tag `vX.Y.Z` on that tested `main` commit.
 
 The tag run repeats every gate, verifies the tag is on `main`, checks every
-version field, publishes the three release assets, and generates GitHub release
+version field, publishes the two release ZIPs, and generates GitHub release
 notes automatically. A failed gate cannot publish a partial release.

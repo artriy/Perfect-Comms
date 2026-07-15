@@ -349,7 +349,8 @@ public sealed class SidecarDiagnosticsSafetyTests
              "dsp_apm_loaded":true,"dsp_config_fully_applied":false,
              "dsp_applied_aec":true,"dsp_applied_agc":false,
              "dsp_applied_ns":false,"dsp_applied_hpf":true,
-             "input_gain":1.25,"input_vad_threshold":0.0001}
+             "input_gain":1.25,"input_vad_threshold":0.0001,
+             "input_noise_gate_threshold":0.003}
             """;
 
         Assert.True(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics(current, out var details));
@@ -357,13 +358,41 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.Contains("dspRequestedAec=true dspRequestedAgc=true dspRequestedNs=false dspRequestedHpf=true", details);
         Assert.Contains("dspApmLoaded=true dspConfigFullyApplied=false", details);
         Assert.Contains("dspAppliedAec=true dspAppliedAgc=false dspAppliedNs=false dspAppliedHpf=true", details);
-        Assert.Contains("inputGain=1.25 vadThreshold=0.0001", details);
+        Assert.Contains("inputGain=1.25 vadThreshold=0.0001 noiseGateThreshold=0.003", details);
 
         Assert.True(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics("{}", out var oldDetails));
         Assert.Contains("dspConfigGeneration=na", oldDetails);
         Assert.Contains("dspApmLoaded=na dspConfigFullyApplied=na", oldDetails);
-        Assert.Contains("inputGain=na vadThreshold=na", oldDetails);
+        Assert.Contains("inputGain=na vadThreshold=na noiseGateThreshold=na", oldDetails);
         Assert.False(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics("{bad", out _));
+    }
+
+    [Fact]
+    public void NetworkPathStatsExposeQualityWithoutLeakingCandidateIdentifiersOrAddresses()
+    {
+        const string json = """
+            {"network_paths":[{
+              "peer_id":"peer-7\r\nforged","generation":4,
+              "candidate_pair_id":"192.0.2.1:5000-to-198.51.100.2:6000",
+              "candidate_state":"succeeded\nforged","local_candidate_type":"relay",
+              "remote_candidate_type":"srflx","relay":true,"current_rtt_ms":247.5,
+              "available_outgoing_bitrate":32000,"available_incoming_bitrate":64000,
+              "remote_packets_received":91,"remote_packets_lost":7,
+              "remote_fraction_lost":0.0714,"remote_report_rtt_ms":260.25,
+              "remote_rtt_measurements":9}]}
+            """;
+
+        Assert.True(SidecarVoiceClient.TryDescribeNativeNetworkPathsForDiagnostics(
+            json, json.Length, out var lines));
+        var line = Assert.Single(lines);
+        Assert.Equal("sidecar.native.network-path", line.Category);
+        Assert.Contains("peer=\"peer-7  forged\" generation=4 state=succeeded forged", line.Details);
+        Assert.Contains("localType=relay remoteType=srflx relay=true currentRttMs=247.5", line.Details);
+        Assert.Contains("remotePacketsLost=7 remoteFractionLost=0.0714", line.Details);
+        Assert.DoesNotContain("candidate_pair_id", line.Details);
+        Assert.DoesNotContain("192.0.2.1", line.Details);
+        Assert.DoesNotContain('\r', line.Details);
+        Assert.DoesNotContain('\n', line.Details);
     }
 
     [Fact]

@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -37,17 +38,26 @@ internal sealed class MobileVoiceClient : IDisposable
     private Thread? _pumpThread;
 
     private readonly object _ctrlLock = new();
+    private byte[] _controlBuffer = new byte[4 * 1024];
+    private int _lastDiagnosticsEnabled = -1;
+    private ulong _cachedGameStateFingerprint;
+    private byte[]? _cachedGameStateFrame;
 
     private readonly float[] _micAccum = new float[MicFrame];
     private int _micFill;
+    private int _micActive;
     private readonly object _micLock = new();
 
-    // Playback ring (interleaved stereo): the pump thread fills it from pc_pull_playback at 20ms,
-    // the Unity audio callback drains it via ReadPlayback. ponytail: one short lock, fine for audio.
-    private readonly float[] _ring = new float[PlaybackFrame * 8]; // ~160ms cushion
-    private int _ringRead, _ringWrite, _ringCount;
-    private readonly object _ringLock = new();
+    // The native pump is the sole producer and Unity's audio callback is the sole consumer.
+    // Keep enough local render cushion for scheduler jitter without ever taking a callback lock.
+    private readonly SpscFloatRing _playbackRing = new(
+        PlaybackFrame * 16,
+        channels: 2,
+        fadeFrames: 48,
+        targetLatencySamples: PlaybackFrame * 4); // 320ms hard bound, newest ~80ms retained
     private readonly float[] _pumpBuf = new float[PlaybackFrame];
+    private long _pumpLateCycles;
+    private long _nativeEmptyPulls;
 
     public event Action<string, int, string, string>? OnLocalSdp;
     public event Action<string, int, string>? OnLocalCandidate;
@@ -71,6 +81,13 @@ internal sealed class MobileVoiceClient : IDisposable
     }
     public bool StartWasDeferred { get; private set; }
     public int StartRetryAfterMs { get; private set; }
+    internal int PlaybackDepthSamples => _playbackRing.DepthSamples;
+    internal long PlaybackHighWaterSamples => _playbackRing.HighWaterSamples;
+    internal long PlaybackDroppedSamples => _playbackRing.DroppedSamples;
+    internal long PlaybackZeroFilledSamples => _playbackRing.ZeroFilledSamples;
+    internal long PlaybackSkippedSamples => _playbackRing.SkippedSamples;
+    internal long PlaybackPumpLateCycles => Interlocked.Read(ref _pumpLateCycles);
+    internal long PlaybackNativeEmptyPulls => Interlocked.Read(ref _nativeEmptyPulls);
 
     public bool Start()
     {
@@ -116,41 +133,80 @@ internal sealed class MobileVoiceClient : IDisposable
         }
     }
 
-    private void Control(byte[] framed)
+    private bool Control(byte[] framed)
     {
         int jsonLen = framed.Length - SidecarProtocol.HeaderBytes;
-        if (jsonLen <= 0) return;
-        var json = new byte[jsonLen + 1];
-        Array.Copy(framed, SidecarProtocol.HeaderBytes, json, 0, jsonLen);
-        json[jsonLen] = 0;
+        if (jsonLen <= 0) return false;
         lock (_ctrlLock)
         {
-            if (!TryAcquireNativeHandle(out var handle)) return;
-            try { PcMobileNative.pc_control(handle, json); }
+            if (_controlBuffer.Length < jsonLen + 1)
+                _controlBuffer = new byte[Math.Max(jsonLen + 1, _controlBuffer.Length * 2)];
+            Array.Copy(framed, SidecarProtocol.HeaderBytes, _controlBuffer, 0, jsonLen);
+            _controlBuffer[jsonLen] = 0;
+            if (!TryAcquireNativeHandle(out var handle)) return false;
+            try
+            {
+                PcMobileNative.pc_control(handle, _controlBuffer);
+                return true;
+            }
             finally { ReleaseNativeHandle(); }
         }
     }
 
     public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
-        => Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
+    {
+        // Serialize receiver-set expansion with mic pushes. This ensures an in-flight native push
+        // finishes before AddPeer resets encoder/DRED history; native enforces the same boundary
+        // for direct/concurrent FFI callers.
+        lock (_micLock)
+            Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
+    }
     public void RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
     public void SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
     public void AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
     public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf) => Control(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
+    public void SetDiagnostics(bool enabled)
+    {
+        var requested = enabled ? 1 : 0;
+        if (Volatile.Read(ref _lastDiagnosticsEnabled) == requested) return;
+        if (Control(SidecarProtocol.SetDiagnosticsFrame(enabled)))
+            Volatile.Write(ref _lastDiagnosticsEnabled, requested);
+    }
+    public void SetMicActive(bool active)
+    {
+        // Close the managed gate before waiting for an in-flight push. A successful Start opens
+        // it only after native Opus/DRED history has been reset; Stop always remains fail-closed.
+        Volatile.Write(ref _micActive, 0);
+        lock (_micLock)
+        {
+            ResetMicInputLocked();
+            if (Control(active ? SidecarProtocol.StartFrame() : SidecarProtocol.StopFrame()) && active)
+                Volatile.Write(ref _micActive, 1);
+        }
+    }
     public void SetSynthetic(bool enabled) => Control(SidecarProtocol.SetSyntheticFrame(enabled));
-    public void SetInput(float gain, float vadThreshold) => Control(SidecarProtocol.SetInputFrame(gain, vadThreshold));
+    public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)
+        => Control(SidecarProtocol.SetInputFrame(gain, vadThreshold, noiseGateThreshold));
     public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
-        => Control(SidecarProtocol.GameStateFrame(deaf, master, peers));
+    {
+        var fingerprint = SidecarProtocol.GameStateFingerprint(deaf, master, peers);
+        if (_cachedGameStateFrame == null || fingerprint != _cachedGameStateFingerprint)
+        {
+            _cachedGameStateFrame = SidecarProtocol.GameStateFrame(deaf, master, peers);
+            _cachedGameStateFingerprint = fingerprint;
+        }
+        Control(_cachedGameStateFrame);
+    }
 
     // Mic floats (mono 48k); accumulated into 960-sample frames and pushed to the engine, which
     // runs DSP + Opus + WebRTC send. Returns nothing; OnLevel fires per pushed frame.
     public void PushMic(float[] mono, int count)
     {
-        if (mono == null || count <= 0) return;
+        if (mono == null || count <= 0 || Volatile.Read(ref _micActive) == 0) return;
         lock (_micLock)
         {
-            if (ReadHandle() == IntPtr.Zero) return;
+            if (ReadHandle() == IntPtr.Zero || Volatile.Read(ref _micActive) == 0) return;
             int i = 0;
             while (i < count)
             {
@@ -176,27 +232,22 @@ internal sealed class MobileVoiceClient : IDisposable
     public void ResetMicInput()
     {
         lock (_micLock)
-        {
-            Array.Clear(_micAccum, 0, _micAccum.Length);
-            _micFill = 0;
-        }
+            ResetMicInputLocked();
+    }
+
+    private void ResetMicInputLocked()
+    {
+        Array.Clear(_micAccum, 0, _micAccum.Length);
+        _micFill = 0;
     }
 
     // Drain the playback ring into an interleaved-stereo buffer for the Unity audio callback.
-    public void ReadPlayback(float[] interleavedStereo)
+    public void ReadPlayback(float[] interleavedStereo, int count)
     {
-        int n = interleavedStereo.Length;
-        lock (_ringLock)
-        {
-            int avail = Math.Min(n, _ringCount);
-            for (int i = 0; i < avail; i++)
-            {
-                interleavedStereo[i] = _ring[_ringRead];
-                _ringRead = (_ringRead + 1) % _ring.Length;
-            }
-            _ringCount -= avail;
-            for (int i = avail; i < n; i++) interleavedStereo[i] = 0f;
-        }
+        if (interleavedStereo == null) throw new ArgumentNullException(nameof(interleavedStereo));
+        if ((uint)count > (uint)interleavedStereo.Length)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        _playbackRing.Read(interleavedStereo.AsSpan(0, count));
     }
 
     private void PumpLoop()
@@ -214,24 +265,13 @@ internal sealed class MobileVoiceClient : IDisposable
                     finally { ReleaseNativeHandle(); }
                 }
                 if (got > 0)
-                {
-                    lock (_ringLock)
-                    {
-                        for (int i = 0; i < got; i++)
-                        {
-                            if (_ringCount >= _ring.Length)
-                            {
-                                _ringRead = (_ringRead + 1) % _ring.Length;
-                                _ringCount--;
-                            }
-                            _ring[_ringWrite] = _pumpBuf[i];
-                            _ringWrite = (_ringWrite + 1) % _ring.Length;
-                            _ringCount++;
-                        }
-                    }
-                }
+                    _playbackRing.TryWrite(_pumpBuf.AsSpan(0, got));
+                else
+                    Interlocked.Increment(ref _nativeEmptyPulls);
 
                 var now = Stopwatch.GetTimestamp();
+                if (nextDeadline != 0 && now - nextDeadline > Stopwatch.Frequency / 200)
+                    Interlocked.Increment(ref _pumpLateCycles);
                 nextDeadline = MobilePlaybackCadence.NextDeadline(nextDeadline, now, Stopwatch.Frequency);
                 var delayMs = MobilePlaybackCadence.DelayMilliseconds(
                     Stopwatch.GetTimestamp(),
@@ -325,22 +365,104 @@ internal sealed class MobileVoiceClient : IDisposable
             case "peer-levels":
                 if (SidecarProtocol.TryReadPeerLevels(json, out var levels)) OnPeerLevels?.Invoke(levels);
                 break;
+            case "mobile-stats":
+                LogMobileDiagnostics(json);
+                break;
         }
         }
         catch (Exception) { }
     }
 
+    private static void LogMobileDiagnostics(string json)
+    {
+        if (!VoiceDiagnostics.IsEnabled) return;
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("media_receive", out var receive)) return;
+
+        int pathCount = 0;
+        int relayPaths = 0;
+        double maxRttMs = 0;
+        double maxRemoteLoss = 0;
+        double minimumOutgoingBitrate = 0;
+        var pathClasses = new StringBuilder(128);
+        if (root.TryGetProperty("network_paths", out var paths)
+            && paths.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var path in paths.EnumerateArray())
+            {
+                pathCount++;
+                if (ReadBool(path, "relay")) relayPaths++;
+                maxRttMs = Math.Max(maxRttMs, ReadFiniteDouble(path, "current_rtt_ms"));
+                maxRemoteLoss = Math.Max(maxRemoteLoss, ReadFiniteDouble(path, "remote_fraction_lost"));
+                var outgoing = ReadFiniteDouble(path, "available_outgoing_bitrate");
+                if (outgoing > 0 && (minimumOutgoingBitrate <= 0 || outgoing < minimumOutgoingBitrate))
+                    minimumOutgoingBitrate = outgoing;
+                if (pathCount <= 16)
+                {
+                    if (pathClasses.Length > 0) pathClasses.Append(',');
+                    pathClasses
+                        .Append(SafeRouteToken(path, "local_candidate_type"))
+                        .Append('-')
+                        .Append(SafeRouteToken(path, "remote_candidate_type"))
+                        .Append('/')
+                        .Append(SafeRouteToken(path, "candidate_state"))
+                        .Append(ReadBool(path, "relay") ? "/relay" : "/direct");
+                }
+            }
+        }
+
+        VoiceDiagnostics.Log("voice.mobile.native",
+            $"activePeers={ReadUInt64(receive, "active_peers")} ingressOverflow={ReadUInt64(receive, "ingress_queue_overflow")} " +
+            $"sequenceGaps={ReadUInt64(receive, "sequence_gaps")} reorderedRecovered={ReadUInt64(receive, "reordered_recovered")} " +
+            $"lateDrops={ReadUInt64(receive, "late_drops")} duplicateDrops={ReadUInt64(receive, "duplicate_drops")} encodedOverflowDrops={ReadUInt64(receive, "encoded_overflow_drops")} " +
+            $"deadlineLosses={ReadUInt64(receive, "deadline_losses")} dredFrames={ReadUInt64(receive, "dred_frames")} fecFrames={ReadUInt64(receive, "fec_frames")} plcFrames={ReadUInt64(receive, "plc_frames")} " +
+            $"decoderResets={ReadUInt64(receive, "decoder_resets")} talkspurtResets={ReadUInt64(receive, "talkspurt_resets")} underruns={ReadUInt64(receive, "underruns")} rebuffers={ReadUInt64(receive, "rebuffers")} " +
+            $"targetFrames={ReadUInt64(receive, "target_frames_current_max")} depthFrames={ReadUInt64(receive, "depth_frames_current")} jitterMsMax={ReadFiniteDouble(receive, "rtp_jitter_ms_max"):0.0} " +
+            $"encoderLossPercent={ReadUInt64(root, "encoder_packet_loss_percent")} encoderBitrate={ReadUInt64(root, "encoder_bitrate")} encoderGeneration={ReadUInt64(root, "encoder_policy_generation")} " +
+            $"paths={pathCount} relayPaths={relayPaths} maxRttMs={maxRttMs:0.0} maxRemoteLoss={maxRemoteLoss:0.000} minOutgoingBitrate={minimumOutgoingBitrate:0} pathClasses=\"{pathClasses}\"");
+    }
+
+    private static ulong ReadUInt64(JsonElement parent, string property)
+        => parent.TryGetProperty(property, out var value) && value.TryGetUInt64(out var result)
+            ? result
+            : 0;
+
+    private static bool ReadBool(JsonElement parent, string property)
+        => parent.TryGetProperty(property, out var value)
+           && value.ValueKind is JsonValueKind.True;
+
+    private static double ReadFiniteDouble(JsonElement parent, string property)
+    {
+        if (!parent.TryGetProperty(property, out var value)
+            || !value.TryGetDouble(out var result)
+            || !double.IsFinite(result))
+            return 0;
+        return Math.Max(0, result);
+    }
+
+    private static string SafeRouteToken(JsonElement parent, string property)
+    {
+        if (!parent.TryGetProperty(property, out var value)
+            || value.ValueKind != JsonValueKind.String)
+            return "unknown";
+        var token = value.GetString() ?? "unknown";
+        if (token.Length is < 1 or > 16) return "unknown";
+        foreach (var character in token)
+        {
+            // Candidate classes/states contain letters and hyphens only. Rejecting digits and
+            // punctuation ensures an address or candidate id can never be reflected into logs.
+            if (!char.IsLetter(character) && character != '-') return "unknown";
+        }
+        return token;
+    }
+
     public void Dispose()
     {
         _running = false;
+        Volatile.Write(ref _micActive, 0);
         ResetMicInput();
-        lock (_ringLock)
-        {
-            Array.Clear(_ring, 0, _ring.Length);
-            _ringRead = 0;
-            _ringWrite = 0;
-            _ringCount = 0;
-        }
+        _playbackRing.Clear();
         var handle = Interlocked.Exchange(ref _h, IntPtr.Zero);
         var hadRuntime = handle != IntPtr.Zero || _pollThread != null || _pumpThread != null;
         ShutdownDetachedHandle(handle, "dispose");
