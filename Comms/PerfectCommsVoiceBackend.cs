@@ -291,10 +291,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void RefreshConfiguredIceServers(string reason)
     {
         var configured = DefaultIceServers.ToList();
-        var natFix = NatFixEnabled();
         var customConfigured = TryGetCustomTurnServer(out var custom, out var customInvalid);
 
-        if (natFix && customConfigured)
+        if (customConfigured)
         {
             configured.Add(custom);
             if (WineEnvironment.IsWine && ShouldForceRelay())
@@ -306,7 +305,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     custom.Credential));
             }
         }
-        else if (natFix && !customInvalid)
+        else if (!customInvalid)
         {
             lock (_turnSync)
                 configured.AddRange(_managedIceServers);
@@ -316,16 +315,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         ApplyIceServers(configured);
         if (customInvalid)
             VoiceChatPluginMain.Logger.LogWarning(
-                "[VC] Custom TURN configuration is invalid; Nat Fix relay is disabled until the TURN URL, username, and credential are corrected.");
+                "[VC] Custom TURN configuration is invalid; automatic relay fallback is unavailable until the TURN URL, username, and credential are corrected.");
         VoiceDiagnostics.Log(
             "voice.ice.config",
-            $"reason={reason} natFix={natFix} source={(customConfigured ? "custom" : customInvalid ? "invalid-custom" : "managed")} " +
+            $"reason={reason} fallback=automatic source={(customConfigured ? "custom" : customInvalid ? "invalid-custom" : "managed")} " +
             $"relayAvailable={RelayAvailable()} iceServers={configured.Count}");
     }
 
     private void RequestRelayCredentials(int clientId)
     {
-        if (_disposed || !NatFixEnabled()) return;
+        if (_disposed) return;
         if (TryGetCustomTurnServer(out _, out _))
         {
             _mainThreadActions.Enqueue(() => _peerSession?.EscalatePeer(clientId, Environment.TickCount64));
@@ -522,22 +521,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         lock (_turnSync) return _pendingRelayPeerIds.Count;
     }
 
-    private static bool NatFixEnabled()
-        => VoiceSettings.Instance?.NatFix.Value != false;
-
     private bool ShouldForceRelay()
         => ShouldForceRelayPolicy(
-            NatFixEnabled(),
             _forceRelayForSession,
             WineEnvironment.IsWine,
             VoiceSettings.Instance?.WineForceRelay.Value == true);
 
     internal static bool ShouldForceRelayPolicy(
-        bool natFixEnabled,
         bool sessionRelayLatch,
         bool wineDetected,
         bool wineForceRelay)
-        => natFixEnabled && (sessionRelayLatch || (wineDetected && wineForceRelay));
+        => sessionRelayLatch || (wineDetected && wineForceRelay);
 
     private static bool TryGetCustomTurnServer(out IceServer server, out bool invalid)
     {
@@ -561,10 +555,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private static bool UsesManagedTurn()
     {
-        if (!NatFixEnabled()) return false;
         var hasCustom = TryGetCustomTurnServer(out _, out var invalid);
-        return !hasCustom && !invalid;
+        return ShouldUseManagedTurnPolicy(hasCustom, invalid);
     }
+
+    internal static bool ShouldUseManagedTurnPolicy(bool customConfigured, bool customInvalid)
+        => !customConfigured && !customInvalid;
 
     private static bool IsTurnUrl(string? url)
     {
@@ -598,7 +594,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private bool RelayAvailable()
     {
-        if (!NatFixEnabled()) return false;
         if (TryGetCustomTurnServer(out _, out _)) return true;
         lock (_turnSync)
             return _managedIceServers.Any(server => IsTurnUrl(server.Urls)) &&

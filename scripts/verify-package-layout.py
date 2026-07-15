@@ -57,6 +57,14 @@ def required_entries(kind: str) -> set[str]:
             "Android/AndroidManifest.xml",
             "Android/README.md",
         }
+    if kind == "dependencies":
+        return common | {
+            ".doorstop_version",
+            "doorstop_config.ini",
+            "winhttp.dll",
+            "DEPENDENCIES.txt",
+            "BepInEx/config/BepInEx.cfg",
+        }
     raise ValueError(f"unsupported package kind: {kind}")
 
 
@@ -99,10 +107,11 @@ def self_test() -> int:
     fixtures = [
         root / ".package-layout-self-test-Release.zip",
         root / ".package-layout-self-test-Android.zip",
+        root / ".package-layout-self-test-dependencies.zip",
         root / ".package-layout-self-test-unsafe.zip",
     ]
     try:
-        for kind in ("Release", "Android"):
+        for kind in ("Release", "Android", "dependencies"):
             archive_path = root / f".package-layout-self-test-{kind}.zip"
             with zipfile.ZipFile(archive_path, "w") as archive:
                 for name in sorted(required_entries(kind)):
@@ -129,7 +138,7 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=Path, nargs="?")
-    parser.add_argument("--kind", choices=("Release", "Android"))
+    parser.add_argument("--kind", choices=("Release", "Android", "dependencies"))
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 

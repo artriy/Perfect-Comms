@@ -105,10 +105,8 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 
 ## Install
 
-1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder using the [official BepInEx installation instructions](https://docs.bepinex.dev/master/articles/user_guide/installation/index.html).
-2. Download **`PerfectComms-Release.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest)
-   and extract it into the Among Us folder. This places `PerfectComms.dll` in `BepInEx/plugins`
-   while keeping its required third-party notices alongside the package.
+1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or grab **`PerfectComms+dependencies.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) which already bundles it.
+2. Drop `PerfectComms.dll` into `BepInEx/plugins`.
 3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
 ```text

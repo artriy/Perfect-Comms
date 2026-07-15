@@ -62,7 +62,7 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 ## CI
 
 - `.github/workflows/native-helpers.yml`: builds the five desktop targets on GitHub-hosted runners (`windows-latest` x64/x86, `ubuntu-latest` x64, `macos-latest` universal x64+arm64), uploads `helper-*` artifacts, and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP loading.
-- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then packages with `scripts/package-release.sh` and attaches `PerfectComms-Release.zip` to the GitHub Release. The final macOS app is ad-hoc signed after both DSP dylibs are staged.
+- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 

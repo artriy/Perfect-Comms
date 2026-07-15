@@ -19,6 +19,7 @@ scripts/
 !scripts/
 scripts/*
 !scripts/live-turn-smoke.py
+!scripts/fetch-bepinex.sh
 !scripts/verify-release-assets.py
 !scripts/verify-package-layout.py
 # Track the deployable Cloudflare worker source/config/tests, but never local

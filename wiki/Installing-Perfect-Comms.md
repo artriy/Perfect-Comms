@@ -2,21 +2,23 @@
 
 Perfect Comms is a standalone BepInEx plugin for Among Us. Its only hard dependency is **BepInEx**. It does **not** require MiraAPI or Reactor.
 
-## Install
+## Quick install (with dependencies)
 
-1. Install BepInEx 6 for Unity IL2CPP using the [official BepInEx installation instructions](https://docs.bepinex.dev/master/articles/user_guide/installation/index.html).
-2. Download `PerfectComms-Release.zip` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest)
-   and extract it into the Among Us folder. It installs the plugin at:
+1. Download `PerfectComms+dependencies.zip` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+2. Extract it into your Among Us install folder (the folder containing `Among Us.exe`).
+3. Launch the game. You should see Perfect Comms load in the BepInEx console.
+
+This bundle includes **BepInEx and `PerfectComms.dll` only**. It does not bundle MiraAPI, Reactor, or TOU-Mira - none of them are needed for Perfect Comms to run.
+
+## DLL-only install
+
+If you already have BepInEx 6 (Unity IL2CPP) set up, just drop the plugin in:
 
 ```text
 BepInEx/plugins/PerfectComms.dll
 ```
 
-3. Launch the game. You should see Perfect Comms load in the BepInEx console.
-
-Perfect Comms does not bundle MiraAPI, Reactor, or TOU-Mira; none of them are required.
-
-Android packagers use `PerfectComms-Android.zip` **and must
+Use `PerfectComms.dll` for Windows. Android packagers use `PerfectCommsAndroid.dll` **and must
 merge** [`release-assets/android/AndroidManifest.xml`](../release-assets/android/AndroidManifest.xml)
 into the final APK manifest before signing and installing it. That fragment declares
 `android.permission.RECORD_AUDIO`; placing the XML beside the DLL does not modify an existing APK.
@@ -33,7 +35,7 @@ continue in receive-only mode.
 
 | Component | Needed by Perfect Comms | In the zip? |
 | :--- | :--- | :--- |
-| BepInEx (Unity IL2CPP 6) | Yes | No; install it separately |
+| BepInEx (Unity IL2CPP 6) | Yes | Yes |
 | MiraAPI | No | No |
 | Reactor | No | No |
 | TOU-Mira | No (optional - unlocks extra role voice behaviours when present) | No |

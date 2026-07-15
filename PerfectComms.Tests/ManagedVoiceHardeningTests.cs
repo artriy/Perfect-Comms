@@ -159,19 +159,32 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Theory]
-    [InlineData(true, true, false, false, true)]
-    [InlineData(true, false, true, true, true)]
-    [InlineData(true, false, true, false, false)]
-    [InlineData(false, true, true, true, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, true, true)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
     public void RelayPolicyPreservesAutomaticSessionEscalation(
-        bool natFix,
         bool sessionLatch,
         bool wine,
         bool wineSetting,
         bool expected)
     {
         Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldForceRelayPolicy(
-            natFix, sessionLatch, wine, wineSetting));
+            sessionLatch, wine, wineSetting));
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    public void ManagedTurnIsAutomaticUnlessCustomConfigurationTakesPrecedence(
+        bool customConfigured,
+        bool customInvalid,
+        bool expected)
+    {
+        Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldUseManagedTurnPolicy(
+            customConfigured, customInvalid));
     }
 
     [Theory]

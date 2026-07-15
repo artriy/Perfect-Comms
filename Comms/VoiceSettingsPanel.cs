@@ -671,7 +671,6 @@ public static class VoiceSettingsPanel
             "Reopens the guided audio, controls, and HUD setup. Your current settings are kept unless you finish with changes.");
 
         Section(defs, "TROUBLESHOOTING");
-        Toggle(defs, "Nat Fix", s.NatFix);
         Toggle(defs, "Show Fake 15 Players", s.ShowFake15Players);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,

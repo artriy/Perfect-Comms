@@ -32,7 +32,7 @@ internal interface IVoiceBackend : IDisposable
     void UpdateProfile(byte playerId, string playerName);
     void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel);
     void Rejoin();
-    // Rebuild any pre-built ICE/peer-connection pool after a Nat Fix / TURN setting change, so the next
+    // Rebuild any pre-built ICE/peer-connection pool after a custom TURN / relay-policy setting change, so the next
     // peer-join uses the new policy without generating a DTLS certificate on the main thread. Backends with
     // Implementations without a prewarmed ICE pool may implement this as a no-op.
     void RebuildIceConnectionPool();
