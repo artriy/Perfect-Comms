@@ -548,7 +548,7 @@ internal static class VoiceFirstRunSetup
             new Vector2(1f, ContentTopY), new Vector2(pickerW - 2f, 20f));
 
         const float commonGap = 8f;
-        const float commonCardH = 78f;
+        const float commonCardH = 56f;
         const float commonY = ContentTopY - 24f;
         float commonCardW = (pickerW - commonGap * 2f) / 3f;
         for (int i = 0; i < FirstRunHudPresets.CommonCount; i++)
@@ -1560,7 +1560,6 @@ internal static class VoiceFirstRunSetup
         private Image _surface = null!;
         private Image _border = null!;
         private TextMeshProUGUI _title = null!;
-        private Image _selectedIndicator = null!;
         private float _hover;
         private float _selected;
 
@@ -1599,38 +1598,15 @@ internal static class VoiceFirstRunSetup
             _surface.color = SetupSurfaceRaised;
             _surface.raycastTarget = false;
 
-            float miniX = prominent ? 8f : 6f;
-            float miniY = prominent ? -5f : -6f;
-            float miniW = prominent ? width - 16f : 44f;
-            float miniH = prominent ? 34f : height - 12f;
-            var viewport = VoiceUiKit.Panel("MiniViewport", _visual,
-                new Color32(8, 13, 21, 255), rounded: true, soft: true);
-            PlaceTopLeft(viewport.rectTransform, miniX, miniY, miniW, miniH);
-            viewport.rectTransform.gameObject.AddComponent<RectMask2D>();
-            BuildMiniLayout(viewport.rectTransform, _previewSettings, miniW, miniH);
-
-            float textX = prominent ? 8f : miniW + 14f;
-            float titleY = prominent ? -39f : -3f;
-            float titleW = prominent ? width - 16f : width - textX - 28f;
-            const float titleSize = 18f;
+            float titleHeight = prominent ? 26f : 24f;
+            float titleSize = prominent ? 20f : 18f;
             _title = AddText(_visual, _name, titleSize, VoiceUiKit.TextPrimary,
-                prominent ? TextAlignmentOptions.Center : TextAlignmentOptions.Left, FontStyles.Bold,
-                new Vector2(textX, titleY), new Vector2(titleW, prominent ? 20f : 22f));
+                TextAlignmentOptions.Center, FontStyles.Bold,
+                new Vector2(10f, -(height - titleHeight) * 0.5f),
+                new Vector2(width - 20f, titleHeight));
             _title.enableAutoSizing = true;
             _title.fontSizeMax = titleSize;
             _title.fontSizeMin = 15f;
-            var trait = AddText(_visual, HudTrait(_previewSettings, _index == 0), 15f,
-                SetupTextSecondary,
-                prominent ? TextAlignmentOptions.Center : TextAlignmentOptions.Left, FontStyles.Normal,
-                new Vector2(textX, prominent ? -58f : -25f),
-                new Vector2(prominent ? width - 16f : width - textX - 8f, prominent ? 16f : 17f));
-            trait.enableAutoSizing = true;
-            trait.fontSizeMax = 15f;
-            trait.fontSizeMin = 13f;
-            var selected = VoiceUiKit.Panel("SelectedIndicator", _visual,
-                VoiceUiKit.Clear, rounded: true, soft: true);
-            PlaceTopLeft(selected.rectTransform, width - 22f, -7f, 13f, 13f);
-            _selectedIndicator = selected;
         }
 
         internal void Tick(float dt)
@@ -1667,143 +1643,8 @@ internal static class VoiceFirstRunSetup
                 Mathf.Max(_hover, _selected));
             _title.color = VoiceUiKit.Lerp(VoiceUiKit.TextPrimary, VoiceUiKit.TextBright,
                 Mathf.Max(_hover, _selected));
-            var selectedColor = VoiceUiKit.Accent;
-            selectedColor.a = (byte)Mathf.RoundToInt(255f * _selected);
-            _selectedIndicator.color = selectedColor;
         }
 
-        private static string HudTrait(SpeakingBarPreviewSettings settings, bool defaultChoice)
-        {
-            if (settings.ManualLayout)
-                return $"Manual {settings.ManualOrientation.ToString().ToLowerInvariant()} / " +
-                       $"{Mathf.RoundToInt(settings.Scale * 100f)}%";
-            bool singleLane = SpeakingBarLayoutPolicy.UsesSingleVerticalLaneFor(
-                settings.Position, settings.SideLayout);
-            string flow = singleLane ? "No wrap" : "Wrapped";
-            return defaultChoice
-                ? $"Default / {flow}"
-                : $"{flow} / {Mathf.RoundToInt(settings.Scale * 100f)}%";
-        }
-
-        private static void BuildMiniLayout(
-            RectTransform viewport,
-            SpeakingBarPreviewSettings settings,
-            float width,
-            float height)
-        {
-            var policy = SpeakingBarLayoutPolicy.ForPreset(settings.Position);
-            bool horizontal = settings.ManualLayout
-                ? settings.ManualOrientation == VoiceControlsLayout.Horizontal
-                : policy.Orientation == VoiceControlsLayout.Horizontal;
-            bool singleLane = !settings.ManualLayout &&
-                              SpeakingBarLayoutPolicy.UsesSingleVerticalLaneFor(
-                                  settings.Position, settings.SideLayout);
-            // One TMP object paints the whole miniature roster. The previous version created
-            // 15 Images per card (135 objects on HUD entry), which was a visible page hitch.
-            const int dotCount = 7;
-            int primaryCount = singleLane ? dotCount : 4;
-            int laneCount = Mathf.CeilToInt(dotCount / (float)primaryCount);
-            float primarySpace = horizontal ? width - 16f : height - 14f;
-            float crossSpace = horizontal ? height - 14f : width - 16f;
-            float primaryStep = primaryCount <= 1 ? 0f :
-                Mathf.Min(7f, primarySpace / (primaryCount - 1));
-            float crossStep = laneCount <= 1 ? 0f : Mathf.Min(7f, crossSpace / (laneCount - 1));
-            float dotSize = Mathf.Clamp(5.4f * settings.Scale, 4.2f, 6.8f);
-            float clusterW = horizontal
-                ? (primaryCount - 1) * primaryStep + dotSize
-                : (laneCount - 1) * crossStep + dotSize;
-            float clusterH = horizontal
-                ? (laneCount - 1) * crossStep + dotSize
-                : (primaryCount - 1) * primaryStep + dotSize;
-
-            float centerX;
-            float centerY;
-            if (settings.ManualLayout)
-            {
-                // ManualX/Y use viewport-normalized coordinates (0 = left/bottom,
-                // 1 = right/top). Clamp the miniature like the real HUD so an upgrader's
-                // saved custom layout is recognizable instead of borrowing the preset enum.
-                float minX = 7f + clusterW * 0.5f;
-                float maxX = width - 7f - clusterW * 0.5f;
-                float topY = 7f + clusterH * 0.5f;
-                float bottomY = height - 7f - clusterH * 0.5f;
-                centerX = Mathf.Lerp(minX, maxX, Mathf.Clamp01(settings.ManualX));
-                centerY = -Mathf.Lerp(bottomY, topY, Mathf.Clamp01(settings.ManualY));
-            }
-            else
-            {
-                centerX = settings.Position switch
-                {
-                    SpeakingBarPosition.TopLeft or SpeakingBarPosition.MiddleLeft or SpeakingBarPosition.BottomLeft
-                        => 7f + clusterW * 0.5f,
-                    SpeakingBarPosition.TopRight or SpeakingBarPosition.MiddleRight or SpeakingBarPosition.BottomRight
-                        => width - 7f - clusterW * 0.5f,
-                    _ => width * 0.5f,
-                };
-                centerY = settings.Position switch
-                {
-                    SpeakingBarPosition.TopLeft or SpeakingBarPosition.TopMiddle or SpeakingBarPosition.TopRight
-                        => -(7f + clusterH * 0.5f),
-                    SpeakingBarPosition.BottomLeft or SpeakingBarPosition.BottomMiddle or SpeakingBarPosition.BottomRight
-                        => -(height - 7f - clusterH * 0.5f),
-                    _ => -height * 0.5f,
-                };
-            }
-
-            if (settings.Backdrop)
-            {
-                var backdrop = VoiceUiKit.Panel("MiniBackdrop", viewport,
-                    new Color32(0, 0, 0, 150), rounded: true, soft: true);
-                PlaceTopLeft(backdrop.rectTransform,
-                    centerX - clusterW * 0.5f - 4f,
-                    centerY + clusterH * 0.5f + 4f,
-                    clusterW + 8f,
-                    clusterH + 8f);
-            }
-
-            string Dot(int index)
-                => index % 4 == 1
-                    ? "<color=#22D3EE>●</color>"
-                    : "<color=#687D97>●</color>";
-            var lines = new List<string>();
-            if (horizontal)
-            {
-                for (int lane = 0; lane < laneCount; lane++)
-                {
-                    string line = string.Empty;
-                    for (int primary = 0; primary < primaryCount; primary++)
-                    {
-                        int index = lane * primaryCount + primary;
-                        if (index >= dotCount) break;
-                        line += Dot(index);
-                    }
-                    lines.Add(line);
-                }
-            }
-            else
-            {
-                for (int primary = 0; primary < primaryCount; primary++)
-                {
-                    string line = string.Empty;
-                    for (int lane = 0; lane < laneCount; lane++)
-                    {
-                        int index = lane * primaryCount + primary;
-                        if (index < dotCount) line += Dot(index);
-                    }
-                    lines.Add(line);
-                }
-            }
-
-            var roster = AddText(viewport, string.Join("\n", lines), dotSize * 1.45f,
-                VoiceUiKit.TextMuted, TextAlignmentOptions.Center, FontStyles.Bold,
-                new Vector2(centerX - clusterW * 0.5f - 3f,
-                    centerY + clusterH * 0.5f + 3f),
-                new Vector2(clusterW + 6f, clusterH + 6f), wrap: false);
-            roster.richText = true;
-            roster.characterSpacing = 8f;
-            roster.lineSpacing = -20f;
-            roster.overflowMode = TextOverflowModes.Overflow;
-        }
     }
 
     private sealed class CelebrationDot
