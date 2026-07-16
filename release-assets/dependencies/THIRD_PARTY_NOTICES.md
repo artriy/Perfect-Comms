@@ -1,7 +1,7 @@
 # Dependency Bundle Third-Party Notices
 
-The `PerfectComms+dependencies-win-x86.zip` and
-`PerfectComms+dependencies-win-x64.zip` release assets redistribute the
+The `PerfectComms+dependencies-win-x86-steam-itch.zip` and
+`PerfectComms+dependencies-win-x64-epic-msstore.zip` release assets redistribute the
 matching official BepInEx Unity IL2CPP build 735 archive without modifying its
 loader or runtime binaries. Perfect Comms adds its plugin, configuration, Unity
 reference libraries, documentation, and checksum manifest around those files.

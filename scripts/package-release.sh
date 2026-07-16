@@ -276,19 +276,23 @@ if [[ "$config" != "Android" ]]; then
 	for index in "${!dependency_arches[@]}"; do
 		dependency_arch="${dependency_arches[$index]}"
 		dependency_source="${dependency_sources[$index]}"
-		dependency_name="PerfectComms+dependencies-$dependency_arch"
-		dependency_output="$root/artifacts/$dependency_name"
-		dependency_zip="$root/artifacts/$dependency_name.zip"
 		case "$dependency_arch" in
 			win-x86)
 				architecture_label="Windows x86 (32-bit)"
+				platform_label="Steam and itch.io"
+				platform_slug="steam-itch"
 				bepinex_archive_sha256="9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
 				;;
 			win-x64)
 				architecture_label="Windows x64 (64-bit)"
+				platform_label="Epic Games Store and Microsoft Store"
+				platform_slug="epic-msstore"
 				bepinex_archive_sha256="badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
 				;;
 		esac
+		dependency_name="PerfectComms+dependencies-$dependency_arch-$platform_slug"
+		dependency_output="$root/artifacts/$dependency_name"
+		dependency_zip="$root/artifacts/$dependency_name.zip"
 
 		for file in "${required_dependency_files[@]}"; do
 			test -e "$dependency_source/$file" || {
@@ -318,6 +322,7 @@ if [[ "$config" != "Android" ]]; then
 		cat >"$dependency_output/DEPENDENCIES.txt" <<EOF
 Perfect Comms with dependencies
 Architecture: $architecture_label
+Platforms: $platform_label
 Includes: PerfectComms.dll and official BepInEx Unity IL2CPP 6.0.0-be.735 loader/runtime files for $dependency_arch.
 BepInEx source archive SHA-256: $bepinex_archive_sha256
 Includes pinned Unity 2022.3.44 reference libraries for reliable offline first launch.

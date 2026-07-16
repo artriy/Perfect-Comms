@@ -1,27 +1,117 @@
-# Controls
+# Player Settings & Controls
 
-Defaults below. Every key is rebindable in **Voice Settings** (open with `F10`).
+Open **Voice Settings** from the Among Us Options menu or press `F10`. These settings are local: they change your own microphone, playback, controls, and HUD without changing the host's lobby rules.
 
-| Action | Key | | Action | Key |
-| :--- | :---: | :--- | :--- | :---: |
-| Open voice menu | `F10` | | Toggle speaker | `Shift+N` |
-| Open host voice settings | `F11` | | Player volumes | `Shift+B` |
-| Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
-| Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
-| Team radio (hold) | `V` | | Refresh voice (host) | `F8` |
-| Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
+On a new install, Perfect Comms first opens a guided setup for audio devices and tests, talk controls, a live HUD layout preview, and a final review. You can run it again at any time from **Advanced > First-Time Setup**.
 
-## Notes
+The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top Left, Top Right, Left Stack, Right Stack, Bottom Center, and Minimal.
 
-- **Open voice menu (`F10`)** is also reachable from the Options menu. This is where you set your mic/speaker device, push-to-talk vs open mic, noise suppression, and HUD layout.
-- **Setting help** is available by hovering the **!** beside any option in the local Voice Settings or host Voice Settings panels. Device selectors use a full-width wrapped row, and hovering the selected device shows its exact full name.
-- **Exact modifier bindings** are supported. Press and release `Left Shift`, `Right Ctrl`, or a similar modifier to bind it by itself, or hold that exact key and press another key to create a chord such as `Left Shift+F`. If a plain key or modifier overlaps one of its chords, the chord wins.
-- **Alive/dead voice focus** is local-only and applies whenever those voices are otherwise audible. Each action is unbound by default and works only while held; releasing it immediately restores both groups to 100%, while holding both actions is neutral. Use the settings icon immediately left of either binding to expand that action's independent **Alive Players** and **Dead Players** sliders (defaults: 200%/50% and 50%/200%).
-- **Host voice settings (`F11`)** opens only for the lobby host, from the game-settings console. See [Host Settings](Host-Settings).
-- **Push to talk (`C`)** works when open-mic is off. Hold to transmit.
-- **Team radio (`V`)** is held to talk on your team channel (when team radio is enabled by the host and your role qualifies). **Cycle (`G`)** switches between channels you can use.
-- **Android controls:** hold the mic button to transmit in push-to-talk mode. Tap the Team Radio button to cycle channels, or hold it to transmit.
-- **Mute / deafen reminder:** enable **Voice Settings > HUD > Mute / Deafen Status Reminder** for a small persistent status indicator.
-- **Refresh voice (`F7`)** re-establishes your own voice connection if audio drops. **Host refresh (`F8`)** asks all clients to refresh.
+## Audio tab
+
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Mic Volume** | 100% | How loudly your microphone is sent to other players. |
+| **Mic Sensitivity** | 1.00 | How easily quiet speech is detected. Higher values pick up quieter audio. |
+| **Speaker Volume** | 100% | Overall Perfect Comms voice volume you hear. |
+| **Mic Mode** | Open Mic | Choose voice activation or hold-to-talk. |
+| **Noise Suppression** | On | Cleans outgoing microphone noise on Windows desktop builds. |
+| **Echo Cancellation** | On | Reduces speaker audio feeding back into your microphone on Windows desktop builds. |
+| **Voice Falloff Softness** | 30% | Keeps voices clearer through more of the host's allowed range, then fades near the edge. It never extends that range. |
+| **Start Muted** | Off | Starts each voice session with your microphone muted. |
+| **Start Deafened** | Off | Starts each voice session with incoming voice muted. |
+
+Mic and speaker volume range from 10% to 200%. Mic Sensitivity ranges from 0.25 to 2.00, and Voice Falloff Softness ranges from 0% to 100%.
+
+## Devices tab
+
+- **Microphone** selects the recording device. **Default** follows the system input device.
+- **Speaker** selects the voice playback device on Windows. **Default** follows the system output device.
+- Android playback follows the current Android audio route, so it does not show a separate Speaker selector.
+- Device rows show the full selected name and keep a saved device visible if it is temporarily unavailable.
+
+The guided setup also provides an optional live microphone meter, mic test, and output test.
+
+## Keybinds tab
+
+Every binding can use a keyboard key, mouse button, exact modifier, or modifier chord. Select a binding and press the new key or chord; clear it to leave the action unbound.
+
+| Action | Default |
+| :--- | :---: |
+| Open voice menu | `F10` |
+| Open host voice settings | `F11` |
+| Mute / unmute mic | `Shift+M` |
+| Push to talk (hold) | `C` |
+| Team radio (hold) | `V` |
+| Cycle team radio channel | `G` |
+| Toggle open mic / push to talk | Unbound |
+| Toggle speaker | `Shift+N` |
+| Player volumes | `Shift+B` |
+| Alive louder / dead quieter (hold) | Unbound |
+| Alive quieter / dead louder (hold) | Unbound |
+| Refresh voice connection | `F7` |
+| Refresh voice connections (host) | `F8` |
+
+The settings icon beside either alive/dead focus binding expands that binding's independent **Alive Players** and **Dead Players** levels:
+
+- **Alive louder / dead quieter:** 200% alive and 50% dead by default.
+- **Alive quieter / dead louder:** 50% alive and 200% dead by default.
+
+These profiles apply only while held. Releasing restores both groups to 100%; holding both focus bindings at once is neutral.
+All four expanded sliders range from 0% to 200%; 0% is shown as **None**.
+
+Exact left/right modifiers are supported. Press and release a modifier to bind it alone, or hold it while pressing another key to create a chord. If a plain key overlaps one of its chords, the chord wins.
+
+## HUD tab
+
+### Voice controls
+
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Controls Layout** | Vertical | Places the microphone, speaker, and role controls vertically or horizontally. |
+| **Button Position X / Y** | 99% / 10% | Moves the voice controls around the screen. |
+| **Button Scale** | 130% | Changes the size of the voice HUD buttons. |
+| **Mute / Deafen Status Reminder** | On | Keeps a small persistent reminder visible while muted or deafened. |
+
+### Speaking bar
+
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Show All Players** | Off | Keeps a stable slot for every connected player instead of showing only current speakers. |
+| **Live Preview** | Off | Moves the settings panel aside and shows an isolated 15-player preview while you edit. |
+| **Speaking Bar Position** | Top Middle | Chooses a top, middle-side, or bottom screen preset. |
+| **Side Layout** | Single Lane | Uses one lane or wrapped columns for left/right presets. Center presets wrap automatically. |
+| **Speaking Bar Name Position** | Auto | Places names inside the screen automatically, or forces Bottom, Top, Left, or Right. |
+| **Speaking Bar Scale** | 100% | Changes the size of icons and names from 50% to 225%. |
+| **Speaking Bar Backdrop** | On | Shows a translucent backdrop behind the speaking bar. |
+| **Speaking Bar Manual Layout** | Off | Replaces the preset with manual layout, facing, and X/Y controls. |
+
+Manual layout adds **Speaking Bar Layout** (Horizontal by default), **Avatar Facing** (Right by default), and **Speaking Bar X / Y** controls ranging from 0% to 100% (50% / 85% by default).
+
+Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at the default Top Middle preset, both produce the same automatically wrapped center layout.
+
+### Meeting and role UI
+
+- **Meeting Speaking Overlay** adds a colored glow to speaking player cards while respecting concealment and blindness rules. It is on by default.
+- **Jail Unmute Placement** puts the Jailor's temporary unmute control on either the Voice HUD or the jailed player's meeting card. Meeting Card is the default.
+
+## Advanced tab
+
+- **First-Time Setup > Run Setup Again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes.
+- **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It is off by default.
+- **Diagnostics** writes detailed voice and microphone-calibration logs. It resets off on launch; leave it off unless you are investigating a problem.
+
+During guided setup, **Use existing settings** keeps every current value and marks onboarding complete without applying the draft choices.
+
+## Player volume mixer
+
+Press `Shift+B` to open **Player Volumes**. Each other player has a persistent local slider from 0% to 200%, a reset-to-100% action, and a live speaking meter. These adjustments affect only what you hear.
+
+## In-game and Android controls
+
+- **Push to talk (`C`)** transmits only while held when Mic Mode is Push To Talk.
+- **Team radio (`V`)** transmits on the selected eligible team channel; **Cycle (`G`)** changes channel.
+- **Refresh voice (`F7`)** rebuilds only your voice session and has a 10-second cooldown.
+- **Host refresh (`F8`)** asks every client to rebuild voice and is available only to the host, with a 10-second cooldown.
+- On Android, hold the microphone button to transmit in push-to-talk mode. Tap Team Radio to cycle channels or hold it to transmit.
 
 See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Host Settings](Host-Settings)

@@ -83,13 +83,12 @@ plugin, assembly, file, and informational versions.
 
 Before tagging, open **Actions -> Release -> Run workflow** and run it against
 `main`. A manual run never creates a GitHub Release. It runs the complete
-managed, native, RTC, desktop, Android, and packaging gates, then uploads a
-`PerfectComms-packages-*` Actions artifact for 14 days containing:
+managed, native, RTC, desktop, Android, and packaging gates, then uploads three
+Actions artifacts for 14 days:
 
-- `PerfectComms.dll` for every supported desktop platform;
-- `PerfectComms+dependencies-win-x86.zip` with the pinned x86 BepInEx build;
-- `PerfectComms+dependencies-win-x64.zip` with the pinned x64 BepInEx build;
-- `PerfectCommsAndroid.dll` for Android.
+- `PerfectComms+dependencies-win-x86-steam-itch.zip`, containing the Steam and itch.io x86 bundle with the pinned x86 BepInEx build;
+- `PerfectComms+dependencies-win-x64-epic-msstore.zip`, containing the Epic Games Store and Microsoft Store x64 bundle with the pinned x64 BepInEx build;
+- `PerfectComms-standalone-dlls-*`, containing `PerfectComms.dll` for every supported desktop platform and `PerfectCommsAndroid.dll` for Android.
 
 ### Publishing a release
 

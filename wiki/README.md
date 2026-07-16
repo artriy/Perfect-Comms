@@ -13,10 +13,12 @@ resolves to `Mod-Integration-Gate.md`). `_Sidebar.md` renders as the sidebar.
 # one-time clone of the wiki repo (must have at least one page created in the UI first)
 git clone https://github.com/artriy/Perfect-Comms.wiki.git
 
-# copy these pages in and push
-cp PerfectComms/wiki/*.md Perfect-Comms.wiki/
+# copy public pages (README.md is this source/publishing guide)
+for page in PerfectComms/wiki/*.md; do
+  [ "$(basename "$page")" = "README.md" ] || cp "$page" Perfect-Comms.wiki/
+done
 cd Perfect-Comms.wiki
-git add -A && git commit -m "docs: mod integration wiki" && git push
+git add -A && git commit -m "docs: update Perfect Comms wiki" && git push
 ```
 
 ## Pages
@@ -24,13 +26,15 @@ git add -A && git commit -m "docs: mod integration wiki" && git push
 | File | Page |
 | :--- | :--- |
 | `Home.md` | Wiki landing |
+| `Players.md` | Player guide landing |
+| `Installing-Perfect-Comms.md` | Player installation and troubleshooting |
+| `Controls.md` | Local settings tabs, controls, and defaults |
+| `Host-Settings.md` | Match-wide host settings tabs |
 | `Mod-Integration.md` | Mod API landing + setup |
+| `Mod-Integration-Examples.md` | Integration examples |
 | `Mod-Integration-Gate.md` | Gate: mute & muffle |
 | `Mod-Integration-Channels.md` | Channels: private & team radio |
 | `Mod-Integration-Listener-Origin.md` | Listener origin |
 | `Mod-Integration-Host-Options.md` | Host options & tabs |
 | `Mod-Integration-API-Reference.md` | API reference |
 | `_Sidebar.md` | Sidebar navigation |
-
-Player pages (`Installing-Perfect-Comms`, `Host-Settings`, `Controls`) are linked
-from the sidebar but not yet authored here - create them in the UI or add them later.

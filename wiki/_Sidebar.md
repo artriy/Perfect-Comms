@@ -1,8 +1,9 @@
 ### Players
 - [Home](Home)
+- [Player Guide](Players)
 - [Installing](Installing-Perfect-Comms)
 - [Host Settings](Host-Settings)
-- [Controls](Controls)
+- [Player Settings & Controls](Controls)
 
 ### Mod Developers
 - [Mod Integration](Mod-Integration)

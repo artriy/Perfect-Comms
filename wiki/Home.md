@@ -4,9 +4,10 @@ Proximity voice chat built directly into Among Us.
 
 ## For Players
 
+- **[Player Guide](Players)** - setup, local settings tabs, host tabs, and everyday controls.
 - **[Installing Perfect Comms](Installing-Perfect-Comms)** - get the mod running.
 - **[Host Settings](Host-Settings)** - match-wide voice rules.
-- **[Controls](Controls)** - keybinds and in-game UI.
+- **[Player Settings & Controls](Controls)** - every Audio, Devices, Keybinds, HUD, and Advanced option.
 
 ## For Mod Developers
 

@@ -1,39 +1,81 @@
 # Host Settings
 
-The host controls the match-wide voice rules. Every client obeys the host's settings, synced automatically. Players separately control their own audio (device, push-to-talk, volumes) in their local Voice Settings.
+The host controls the match-wide voice rules. Host changes sync automatically to every player; players separately control their own devices, volumes, keybinds, and HUD.
 
-Open the host panel from the lobby game-settings console (default `F11`, host only).
+Open **Host Voice Settings** from the lobby game-settings console or press `F11`. The panel is host-only and closes automatically if host authority moves to another player. Hover the **!** beside an option for its in-game explanation.
 
-## Tabs
+## Proximity tab
 
-The host panel is organised into tabs:
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Max Distance** | 6.0 | Maximum task-phase proximity distance, adjustable from 1.5 to 20.0. |
+| **Voice Falloff** | Smooth | Volume fade: Linear, Smooth, or Voice Focused. |
+| **Voice Occlusion** | Vision Only | Wall/vision behavior: Off, Soft Muffle, Soft Fade, Hard Block, or Vision Only. |
+| **Walls Block Audio** | On | Lets map walls obstruct voice using the selected occlusion mode. |
+| **Hear People in Vision Only** | On | Restricts ordinary task voice to players inside the listener's current vision range. |
+| **Hear Through Cameras** | On | Lets security-camera users hear around the active camera position. |
 
-| Tab | Controls |
-| :--- | :--- |
-| **Proximity** | Talk distance, falloff curve, occlusion mode, walls block sound, only-hear-in-sight, camera hearing |
-| **Lobby** | Public voice lobby and public-lobby directory source |
-| **Vents & Ghosts** | Hear in vent, vent private chat, impostors hear ghosts, comms-sab disables voice, only-ghosts-can-talk, ghosts hear each other, meetings/lobby-only mode |
-| **Team Radio** | Team radio on/off, per-team channels, usable in meetings, usable in tasks |
-| **Mod Behaviour** | Role voice rules from supported mods (see below). Each compatible mod gets its own tab here. |
+## Lobby tab
 
-## Role voice rules (Mod Behaviour)
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Public Voice Lobby** | Off | Publishes the voice-enabled lobby so other Perfect Comms players can find it. |
+| **Public Lobby Directory** | BetterCrewLink Live | Chooses BetterCrewLink Live or the Perfect Comms Registry for the listing. |
 
-These activate automatically when a supported mod is installed and stay dormant otherwise. With TOU-Mira present, the host can configure:
+The directory only handles public-lobby discovery; changing it does not change the host's voice rules.
 
-- Blackmailer: mute blackmailed in meetings / next round
-- Jailor: mute jailee in meetings, jailor can unmute, jail persists if jailor dies
-- Parasite / Puppeteer: mute controlled victim, hear from controlled victim
-- Swooper: mute while swooped
-- Glitch: mute hacked players
-- Crewpostor: use impostor voice
-- Eclipsal / Grenadier: muffle blinded/flashed hearing
-- Hypnotist: muffle hypnotized during hysteria
-- Medium: ghost voice mode
+## Meeting & Voice tab
 
-Other mods can add their own tab and rules through the [mod integration API](Mod-Integration).
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Meeting Floor Grace Period** | Off | Temporarily gives the meeting caller the voice floor when a meeting begins. |
+| **Grace Period Seconds** | 5 | Length of the enabled grace period, adjustable from 0 to 15 seconds. |
+| **Hear Impostors in Vents** | Off | Allows nearby players to hear an impostor inside a vent. |
+| **Private Talk in Vents** | On | Prevents players outside vents from hearing vented speech. |
+| **Impostors Hear Dead** | Off | Allows living impostors to hear dead players when the ghost rules permit speech. |
+| **Comms Sabotage Disables Voice** | On | Disables ordinary voice while Communications sabotage is active. |
+| **Only Ghosts can Talk/Hear** | Off | Restricts task-phase voice to dead players. |
+| **Ghosts Hear Each Other Anywhere** | Off | Removes proximity distance between dead players. |
+| **Meetings/Lobby Only** | Off | Disables living-player voice during tasks. |
+| **Ghosts Also Meeting/Lobby Only** | Off | Applies Meetings/Lobby Only to dead players too. |
 
-## How sync works
+Conditional rows appear only when their parent rule is enabled.
 
-When the host changes a setting, the new value is broadcast over an authenticated in-game RPC and applied on every client. Clients cannot forge host settings. Joining mid-match, a client requests the current settings automatically.
+## Team Radio tab
 
-See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Controls](Controls)
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Team Radio** | On | Enables private hold-to-talk channels for eligible teams and roles. |
+| **Team Radio - Impostors** | On | Enables the impostor team channel. |
+| **Team Radio - Usable in Meetings** | Off | Allows eligible channels during meetings. |
+| **Team Radio - Usable in Tasks Phase** | On | Allows eligible channels during ordinary task gameplay. |
+
+Players hold `V` to transmit and press `G` to cycle the channels available to their role. Additional radio rows appear as their related options are enabled.
+
+## TOU MIRA tab
+
+This built-in tab is always present. Its options take effect only when compatible TOU-Mira roles and game states are available:
+
+- **Blackmailer:** mute the blackmailed player in meetings; optionally keep the mute for the next task round.
+- **Parasite:** mute the controlled victim and optionally hear from the victim's position.
+- **Puppeteer:** mute the controlled victim and optionally hear from the victim's position.
+- **Swooper:** mute while swooped.
+- **Eclipsal / Grenadier:** muffle incoming voice for blinded or flashed players.
+- **Hypnotist:** muffle incoming voice for affected players during Mass Hysteria.
+- **Crewpostor:** use impostor private-voice and team-radio routing.
+- **Glitch:** mute hacked players.
+- **Jailor:** mute the jailee in meetings, allow temporary unmute, and optionally keep the jail active after the Jailor dies.
+- **Medium Ghost Voice:** choose None, Medium to Ghost, Ghost to Medium, or Both during tasks.
+- **Vampire and Lovers Team Radio:** enable their private team channels when Team Radio is on.
+
+Role rules activate automatically when their matching mod and role state are available and otherwise stay dormant.
+
+## Additional mod tabs
+
+Other compatible mods can add their own tab under **Mod Behaviour**, with synced options, through the [mod integration API](Mod-Integration). A client without that mod does not render its tab.
+
+## How synchronization works
+
+Host changes sync automatically. Joining players receive the current rules, and only the host can edit them.
+
+See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Player Settings & Controls](Controls)

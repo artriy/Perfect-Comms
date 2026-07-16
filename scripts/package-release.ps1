@@ -311,12 +311,16 @@ if ($Configuration -ne "Android") {
         [pscustomobject]@{
             Architecture = "win-x86"
             Label = "Windows x86 (32-bit)"
+            PlatformLabel = "Steam and itch.io"
+            PlatformSlug = "steam-itch"
             Source = $x86Source
             ArchiveSha256 = "9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
         },
         [pscustomobject]@{
             Architecture = "win-x64"
             Label = "Windows x64 (64-bit)"
+            PlatformLabel = "Epic Games Store and Microsoft Store"
+            PlatformSlug = "epic-msstore"
             Source = $x64Source
             ArchiveSha256 = "badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
         }
@@ -335,7 +339,7 @@ if ($Configuration -ne "Android") {
 
     foreach ($dependencyPackage in $dependencyPackages) {
         $dependencySource = $dependencyPackage.Source
-        $dependencyName = "PerfectComms+dependencies-$($dependencyPackage.Architecture)"
+        $dependencyName = "PerfectComms+dependencies-$($dependencyPackage.Architecture)-$($dependencyPackage.PlatformSlug)"
         $dependencyOutput = Join-Path $root "artifacts\$dependencyName"
         $dependencyZip = Join-Path $root "artifacts\$dependencyName.zip"
 
@@ -374,6 +378,7 @@ if ($Configuration -ne "Android") {
         @(
             "Perfect Comms with dependencies",
             "Architecture: $($dependencyPackage.Label)",
+            "Platforms: $($dependencyPackage.PlatformLabel)",
             "Includes: PerfectComms.dll and official BepInEx Unity IL2CPP 6.0.0-be.735 loader/runtime files for $($dependencyPackage.Architecture).",
             "BepInEx source archive SHA-256: $($dependencyPackage.ArchiveSha256)",
             "Includes pinned Unity 2022.3.44 reference libraries for reliable offline first launch.",

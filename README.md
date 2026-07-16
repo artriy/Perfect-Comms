@@ -31,7 +31,6 @@ Perfect Comms makes voice chat feel like part of the match. Players talk in-game
 - **Optional Meetings & Lobby Only mode** for a simpler setup
 - **Role-specific voice behavior**
 - **Built-in voice lobby discovery**
-- **Receive-only use is supported** when a player stays muted, has no microphone, or denies mic permission
 - **Simple in-game controls**, plug and play
 
 <br>
@@ -41,11 +40,6 @@ Perfect Comms makes voice chat feel like part of the match. Players talk in-game
 **Proximity by default.** Everyone talks through their own mic and hears each player by how close they are in-game, clear up close and quiet at a distance.
 
 **The host tunes the round.** Hearing range, wall and vision occlusion, ghost and meeting rules, and a meetings-only mode are all host options, so each lobby plays how its host sets it.
-
-**Voice is standalone.** Desktop audio runs in the bundled native Perfect Comms sidecar; Android uses the
-same native media engine in-process. Connection setup travels through authenticated Among Us RPCs and audio
-travels peer-to-peer over WebRTC (or TURN when needed). BetterCrewLink is used only as an optional public-lobby
-directory, not as a private voice backend.
 
 <br>
 
@@ -110,22 +104,13 @@ Deafen Status Reminder**.
 
 ## Install
 
-For the easiest install, download one architecture-specific bundle from the
-[latest release](https://github.com/artriy/Perfect-Comms/releases/latest):
+1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or download the bundle for your platform from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest), which already includes BepInEx and Perfect Comms:
+   - **`PerfectComms+dependencies-win-x86-steam-itch.zip`** for **Steam and itch.io** (x86).
+   - **`PerfectComms+dependencies-win-x64-epic-msstore.zip`** for **Epic Games Store and Microsoft Store** (x64).
 
-- **`PerfectComms+dependencies-win-x86.zip`** for a 32-bit `Among Us.exe`.
-- **`PerfectComms+dependencies-win-x64.zip`** for a 64-bit `Among Us.exe`.
-
-The architecture must match the game executable; do not mix files from the two
-ZIPs. The documented Steam 2026.3.31 target is 32-bit and uses the x86 bundle.
-The x64 loader bundle is for a compatible 64-bit game build; choosing it does
-not by itself make a different Among Us version compatible.
-
-Extract the selected ZIP into the Among Us folder, so `winhttp.dll` sits beside
-`Among Us.exe`, then launch the game. If BepInEx 6 Unity IL2CPP is already
-installed, download `PerfectComms.dll` instead and place it in
-`BepInEx/plugins`. Open Perfect Comms from the Options menu (`F10`); hosts open
-Voice Settings from the lobby game-settings console (`F11`).
+   Extract the selected bundle into the Among Us folder so `winhttp.dll` sits beside `Among Us.exe`.
+2. If you installed BepInEx separately, drop `PerfectComms.dll` into `BepInEx/plugins`.
+3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
 ```text
 BepInEx/
