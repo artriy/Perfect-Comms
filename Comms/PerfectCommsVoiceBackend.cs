@@ -293,14 +293,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (customConfigured)
         {
             configured.Add(custom);
-            if (WineEnvironment.IsWine && ShouldForceRelay())
-            {
-                var tcpUrl = WithTcpTransport(custom.Urls);
-                configured.Add(new IceServer(
-                    tcpUrl,
-                    custom.Username,
-                    custom.Credential));
-            }
         }
         else if (!customInvalid)
         {
@@ -529,7 +521,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (raw.Length == 0) return false;
         var username = VoiceSettings.Instance?.TurnUsername.Value ?? string.Empty;
         var credential = VoiceSettings.Instance?.TurnCredential.Value ?? string.Empty;
-        if (!IsTurnUrl(raw) || !HasIceEndpoint(raw) || raw.Length > 2048 ||
+        if (!IsSupportedUdpTurnUrl(raw) || !HasIceEndpoint(raw) || raw.Length > 2048 ||
             raw.Any(char.IsWhiteSpace) || raw.Any(char.IsControl) ||
             string.IsNullOrWhiteSpace(username) || username.Length > 512 || username.Any(char.IsControl) ||
             string.IsNullOrWhiteSpace(credential) || credential.Length > 512 || credential.Any(char.IsControl))
@@ -550,12 +542,26 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     internal static bool ShouldUseManagedTurnPolicy(bool customConfigured, bool customInvalid)
         => !customConfigured && !customInvalid;
 
-    private static bool IsTurnUrl(string? url)
+    internal static bool IsSupportedUdpTurnUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
         var trimmed = url.Trim();
-        return (trimmed.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) && trimmed.Length > 5) ||
-               (trimmed.StartsWith("turns:", StringComparison.OrdinalIgnoreCase) && trimmed.Length > 6);
+        if (!trimmed.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) || trimmed.Length <= 5)
+            return false;
+
+        var queryIndex = trimmed.IndexOf('?');
+        if (queryIndex < 0) return trimmed.IndexOf('#') < 0;
+        var query = trimmed.Substring(queryIndex + 1);
+        // webrtc-ice accepts either no query or exactly one decoded transport parameter. Parse a
+        // stricter raw subset here: rejecting escapes and extra delimiters prevents encoded keys,
+        // duplicates, or unknown options from being classified differently by the native parser.
+        if (query.Length == 0 || query.IndexOf('&') >= 0 || query.IndexOf('%') >= 0 || query.IndexOf('#') >= 0)
+            return false;
+        var separator = query.IndexOf('=');
+        return separator > 0
+               && query.IndexOf('=', separator + 1) < 0
+               && string.Equals(query.Substring(0, separator), "transport", StringComparison.OrdinalIgnoreCase)
+               && string.Equals(query.Substring(separator + 1), "udp", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasIceEndpoint(string url)
@@ -569,22 +575,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return endpoint.Length > 0 && endpoint.IndexOf('@') < 0;
     }
 
-    private static string WithTcpTransport(string url)
-    {
-        if (url.IndexOf("transport=", StringComparison.OrdinalIgnoreCase) >= 0)
-            return System.Text.RegularExpressions.Regex.Replace(
-                url,
-                @"([?&])transport=[^&]*",
-                "$1transport=tcp",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return url + (url.Contains('?') ? "&transport=tcp" : "?transport=tcp");
-    }
-
     private bool RelayAvailable()
     {
         if (TryGetCustomTurnServer(out _, out _)) return true;
         lock (_turnSync)
-            return _managedIceServers.Any(server => IsTurnUrl(server.Urls)) &&
+            return _managedIceServers.Any(server => IsSupportedUdpTurnUrl(server.Urls)) &&
                    !TurnCredentialClient.IsExpired(DateTime.UtcNow, TurnCredentialsUrl());
     }
 
@@ -2114,7 +2109,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
 
         manager.OnSignal(senderClientId, type, payload, nowMs);
-        if (type == SignalMsgType.Bye)
+        if (type == SignalMsgType.Bye && !manager.TryGetPeerState(senderClientId, out _))
             _rpcKnownClients.Remove(senderClientId);
     }
 
@@ -2166,6 +2161,22 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (_mobileVoice?.IsRunning != true)
             return;
 #endif
+        if (_peerSession != null && ShouldReplaceRpcSession(_peerSession.LocalClientId, localId))
+        {
+            var previousLocalId = _peerSession.LocalClientId;
+            _peerSession.Reset();
+            _peerSession = null;
+            _rpcTransport = null;
+            _rpcKnownClients.Clear();
+            _rpcPresentScratch.Clear();
+            _rpcLeftScratch.Clear();
+            _rpcRosterGapActive = false;
+            _rpcRosterPollNextMs = 0;
+            _rpcSessionTickNextMs = 0;
+            VoiceDiagnostics.Log(
+                "signaling.session.local-client-rollover",
+                $"previousLocal={previousLocalId} currentLocal={localId} action=recreate-manager");
+        }
         if (_peerSession == null)
         {
             _rpcRosterGapActive = false;
@@ -2266,6 +2277,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         nextMs = nowMs + Math.Max(1, intervalMs);
         return true;
     }
+
+    internal static bool ShouldReplaceRpcSession(int sessionLocalClientId, int currentLocalClientId)
+        => sessionLocalClientId != currentLocalClientId;
 
 #if WINDOWS
     internal static bool CanPumpDesktopRpc(bool configuredReady, CaptureHealth health)
@@ -3772,7 +3786,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var mobileVoice = _mobileVoice;
         mobilePlaybackText = mobileVoice == null
             ? " mobilePlayback=unavailable"
-            : $" mobilePlaybackDepthSamples={mobileVoice.PlaybackDepthSamples} mobilePlaybackHighWaterSamples={mobileVoice.PlaybackHighWaterSamples} mobilePlaybackDroppedSamples={mobileVoice.PlaybackDroppedSamples} mobilePlaybackSkippedSamples={mobileVoice.PlaybackSkippedSamples} mobilePlaybackZeroFilledSamples={mobileVoice.PlaybackZeroFilledSamples} mobilePlaybackLateCycles={mobileVoice.PlaybackPumpLateCycles} mobilePlaybackEmptyPulls={mobileVoice.PlaybackNativeEmptyPulls}";
+            : $" mobilePlaybackDepthSamples={mobileVoice.PlaybackDepthSamples} mobilePlaybackHighWaterSamples={mobileVoice.PlaybackHighWaterSamples} mobilePlaybackDroppedSamples={mobileVoice.PlaybackDroppedSamples} mobilePlaybackSkippedSamples={mobileVoice.PlaybackSkippedSamples} mobilePlaybackZeroFilledSamples={mobileVoice.PlaybackZeroFilledSamples} mobilePlaybackPrimingZeroFilledSamples={mobileVoice.PlaybackPrimingZeroFilledSamples} mobilePlaybackClockCorrectionSamples={mobileVoice.PlaybackClockCorrectionSamples} mobilePlaybackClockCorrectionCallbacks={mobileVoice.PlaybackClockCorrectionCallbacks} mobilePlaybackLateCycles={mobileVoice.PlaybackPumpLateCycles} mobilePlaybackEmptyPulls={mobileVoice.PlaybackNativeEmptyPulls}";
 #endif
         VoiceDiagnostics.Log("voice.stats",
             $"reason={reason} room={RoomCode} region={Region} media=native-engine signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +

@@ -353,50 +353,50 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             logSuccess: false);
     }
 
-    public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
     {
         if (string.IsNullOrEmpty(peerId))
         {
             LogCommand("peer-add", "rejected", 0, $"generation={generation} reason=missing-peer");
-            return;
+            return false;
         }
-        SendCommand(
+        return SendCommand(
             "peer-add",
             () => SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation),
             $"{DescribePeer(peerId)} generation={generation} offerer={isOfferer} relayOnly={relayOnly}");
     }
 
-    public void RemovePeer(string peerId)
+    public bool RemovePeer(string peerId)
     {
         if (string.IsNullOrEmpty(peerId))
         {
             LogCommand("peer-remove", "rejected", 0, "reason=missing-peer");
-            return;
+            return false;
         }
-        SendCommand("peer-remove", () => SidecarProtocol.RemovePeerFrame(peerId), DescribePeer(peerId));
+        return SendCommand("peer-remove", () => SidecarProtocol.RemovePeerFrame(peerId), DescribePeer(peerId));
     }
 
-    public void SetRemoteSdp(string peerId, string sdpType, string sdp)
+    public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
     {
         if (string.IsNullOrEmpty(peerId))
         {
             LogCommand("set-remote-sdp", "rejected", 0, $"type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)} reason=missing-peer");
-            return;
+            return false;
         }
-        SendCommand(
+        return SendCommand(
             "set-remote-sdp",
             () => SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp),
             $"{DescribePeer(peerId)} type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)}");
     }
 
-    public void AddIceCandidate(string peerId, string candidate)
+    public bool AddIceCandidate(string peerId, string candidate)
     {
         if (string.IsNullOrEmpty(peerId))
         {
             LogCommand("add-ice-candidate", "rejected", 0, $"candidateBytes={Utf8Bytes(candidate)} reason=missing-peer");
-            return;
+            return false;
         }
-        SendCommand(
+        return SendCommand(
             "add-ice-candidate",
             () => SidecarProtocol.AddIceCandidateFrame(peerId, candidate),
             $"{DescribePeer(peerId)} candidateBytes={Utf8Bytes(candidate)}");
@@ -1087,6 +1087,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"managedGeneration={managedGeneration} captureFrames={captureFrames} captureDropped={ReadU64(root, "capture_ring_dropped")} " +
                 $"opusEncoded={opusEncoded} opusEmpty={ReadU64(root, "opus_empty")} opusErrors={ReadU64(root, "opus_errors")} " +
                 $"rtpTxAttempts={ReadU64(root, "rtp_tx_attempts")} rtpTxOk={rtpTxOk} rtpTxErrors={ReadU64(root, "rtp_tx_errors")} " +
+                $"rtpTxQueueDropped={ReadU64(root, "rtp_tx_queue_dropped")} rtpTxStaleEpochDropped={ReadU64(root, "rtp_tx_stale_epoch_dropped")} rtpTxWriteTimeouts={ReadU64(root, "rtp_tx_write_timeouts")} rtpTxQueueDepthMax={ReadU64(root, "rtp_tx_queue_depth_max")} " +
                 $"rtpRxPackets={rtpRxPackets} rtpRxBytes={ReadU64(root, "rtp_rx_bytes")} staleRtpDropped={ReadU64(root, "stale_rtp_rx_dropped")} " +
                 $"decodePackets={ReadU64(root, "decode_packets")} decodeFrames={decodeFrames} decodeEmpty={ReadU64(root, "decode_empty")} decodeErrors={ReadU64(root, "decode_errors")} " +
                 $"peerLevelBatches={ReadU64(root, "peer_level_batches")} mixRounds={mixRounds} mixedPeerFrames={ReadU64(root, "mixed_peer_frames")} " +
@@ -1308,7 +1309,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             receive.ValueKind != JsonValueKind.Object)
             return "mediaReceivePresent=false";
         return "mediaReceivePresent=true " +
-               $"mediaPeers={FormatOptionalU64(receive, "active_peers")} ingressOverflow={FormatOptionalU64(receive, "ingress_queue_overflow")} " +
+               $"mediaPeers={FormatOptionalU64(receive, "active_peers")} ingressOverflow={FormatOptionalU64(receive, "ingress_queue_overflow")} ingressDepth={FormatOptionalU64(receive, "ingress_queue_depth_current")} ingressDepthMax={FormatOptionalU64(receive, "ingress_queue_depth_max")} ingressPeerDepthMax={FormatOptionalU64(receive, "ingress_peer_queue_depth_max")} " +
                $"sequenceGaps={FormatOptionalU64(receive, "sequence_gaps")} reorderedRecovered={FormatOptionalU64(receive, "reordered_recovered")} lateDrops={FormatOptionalU64(receive, "late_drops")} duplicateDrops={FormatOptionalU64(receive, "duplicate_drops")} encodedOverflowDrops={FormatOptionalU64(receive, "encoded_overflow_drops")} deadlineLosses={FormatOptionalU64(receive, "deadline_losses")} " +
                $"dredFrames={FormatOptionalU64(receive, "dred_frames")} fecFrames={FormatOptionalU64(receive, "fec_frames")} plcFrames={FormatOptionalU64(receive, "plc_frames")} decoderResets={FormatOptionalU64(receive, "decoder_resets")} talkspurtResets={FormatOptionalU64(receive, "talkspurt_resets")} underruns={FormatOptionalU64(receive, "underruns")} rebuffers={FormatOptionalU64(receive, "rebuffers")} " +
                $"targetFramesMax={FormatOptionalU64(receive, "target_frames_max")} targetFramesCurrentMax={FormatOptionalU64(receive, "target_frames_current_max")} depthFramesMax={FormatOptionalU64(receive, "depth_frames_max")} depthFramesCurrent={FormatOptionalU64(receive, "depth_frames_current")} rtpJitterMsMax={FormatOptionalDouble(receive, "rtp_jitter_ms_max", "0.###")}";
@@ -1354,7 +1355,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             lines.Add(new SidecarDiagnosticLogLine(
                 "sidecar.native.network-path",
                 $"peer=\"{FormatOptionalText(path, "peer_id", 64)}\" generation={FormatOptionalU64(path, "generation")} state={FormatOptionalText(path, "candidate_state", 32)} localType={FormatOptionalText(path, "local_candidate_type", 24)} remoteType={FormatOptionalText(path, "remote_candidate_type", 24)} relay={FormatOptionalBool(path, "relay")} " +
-                $"currentRttMs={FormatOptionalDouble(path, "current_rtt_ms", "0.###")} availableOutgoingBitrate={FormatOptionalDouble(path, "available_outgoing_bitrate", "0.###")} availableIncomingBitrate={FormatOptionalDouble(path, "available_incoming_bitrate", "0.###")} " +
+                $"currentRttMs={FormatOptionalDouble(path, "current_rtt_ms", "0.###")} bandwidthEstimateValid={FormatOptionalBool(path, "bandwidth_estimate_valid")} availableOutgoingBitrate={FormatOptionalDouble(path, "available_outgoing_bitrate", "0.###")} availableIncomingBitrate={FormatOptionalDouble(path, "available_incoming_bitrate", "0.###")} " +
                 $"remotePacketsReceived={FormatOptionalU64(path, "remote_packets_received")} remotePacketsLost={FormatOptionalI64(path, "remote_packets_lost")} remoteFractionLost={FormatOptionalDouble(path, "remote_fraction_lost", "0.######")} remoteReportRttMs={FormatOptionalDouble(path, "remote_report_rtt_ms", "0.###")} remoteRttMeasurements={FormatOptionalU64(path, "remote_rtt_measurements")} payloadBytes={payloadBytes}"));
         }
         return lines.ToArray();

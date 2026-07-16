@@ -35,7 +35,6 @@ const ENCODER_POLICY_RECOVERY_WINDOWS: usize = 5;
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EncoderFeedback {
     pub fraction_lost: f64,
-    pub available_outgoing_bitrate: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +56,8 @@ impl Default for EncoderPolicySnapshot {
 
 /// Hysteretic policy for PerfectComms' single fan-out encoder. Degradation is immediate; quality
 /// recovery requires five consecutive two-second windows so one optimistic RTCP report cannot
-/// oscillate bitrate/FEC configuration. RTT is deliberately absent from this API.
+/// oscillate bitrate/FEC configuration. RTT and candidate-pair bandwidth are deliberately absent
+/// from this API: webrtc-rs 0.11 exposes the latter as an unpopulated zero-valued stats field.
 pub struct EncoderNetworkController {
     current: EncoderPolicySnapshot,
     recovery_candidate: Option<(u8, i32)>,
@@ -80,44 +80,45 @@ impl EncoderNetworkController {
     }
 
     fn desired(feedback: &[EncoderFeedback]) -> (u8, i32) {
-        let worst_loss = feedback
+        let mut losses: Vec<f64> = feedback
             .iter()
             .map(|sample| sample.fraction_lost)
             .filter(|value| value.is_finite())
-            .fold(0.0f64, f64::max)
-            .clamp(0.0, 1.0);
-        let packet_loss_percent = if worst_loss < 0.01 {
+            .map(|value| value.clamp(0.0, 1.0))
+            .collect();
+        losses.sort_unstable_by(f64::total_cmp);
+        // One shared Opus frame must serve every recipient. The upper quartile protects the
+        // typical lossy route without allowing one isolated, severely broken peer to force lower
+        // fidelity on an otherwise healthy lobby. For one to three recipients nearest-rank P75
+        // is still the worst sample, which is the conservative behavior wanted for small calls.
+        let representative_loss = losses
+            .get((losses.len().saturating_mul(3).saturating_sub(1)) / 4)
+            .copied()
+            .unwrap_or(0.0);
+        let packet_loss_percent = if representative_loss < 0.01 {
             5
-        } else if worst_loss < 0.03 {
+        } else if representative_loss < 0.03 {
             10
-        } else if worst_loss < 0.07 {
+        } else if representative_loss < 0.07 {
             15
-        } else if worst_loss < 0.12 {
+        } else if representative_loss < 0.12 {
             20
-        } else if worst_loss < 0.20 {
+        } else if representative_loss < 0.20 {
             25
         } else {
             30
         };
 
-        let loss_limited = if worst_loss >= 0.20 {
+        let loss_limited = if representative_loss >= 0.20 {
             36_000
-        } else if worst_loss >= 0.12 {
+        } else if representative_loss >= 0.12 {
             40_000
-        } else if worst_loss >= 0.07 {
+        } else if representative_loss >= 0.07 {
             44_000
         } else {
             DEFAULT_ENCODER_BITRATE
         };
-        let capacity_limited = feedback
-            .iter()
-            .map(|sample| sample.available_outgoing_bitrate)
-            .filter(|bitrate| bitrate.is_finite() && *bitrate > 0.0)
-            .map(|bitrate| (bitrate * 0.60) as i32)
-            .min()
-            .unwrap_or(DEFAULT_ENCODER_BITRATE)
-            .clamp(24_000, DEFAULT_ENCODER_BITRATE);
-        (packet_loss_percent, loss_limited.min(capacity_limited))
+        (packet_loss_percent, loss_limited)
     }
 
     pub fn observe(&mut self, fresh_feedback: &[EncoderFeedback]) -> EncoderPolicySnapshot {
@@ -175,6 +176,9 @@ impl EncoderNetworkController {
 pub struct MediaReceiveSnapshot {
     pub active_peers: u64,
     pub ingress_queue_overflow: u64,
+    pub ingress_queue_depth_current: u64,
+    pub ingress_queue_depth_max: u64,
+    pub ingress_peer_queue_depth_max: u64,
     pub sequence_gaps: u64,
     pub reordered_recovered: u64,
     pub late_drops: u64,
@@ -207,6 +211,9 @@ struct PeerMediaGauge {
 #[derive(Default)]
 pub struct MediaReceiveCounters {
     ingress_queue_overflow: AtomicU64,
+    ingress_queue_depth_current: AtomicU64,
+    ingress_queue_depth_max: AtomicU64,
+    ingress_peer_queue_depth_max: AtomicU64,
     sequence_gaps: AtomicU64,
     reordered_recovered: AtomicU64,
     late_drops: AtomicU64,
@@ -241,6 +248,13 @@ impl MediaReceiveCounters {
         self.ingress_queue_overflow.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_ingress_queue_depth(&self, total: usize, per_peer: usize) {
+        self.ingress_queue_depth_current
+            .store(total as u64, Ordering::Relaxed);
+        Self::observe_max(&self.ingress_queue_depth_max, total as u64);
+        Self::observe_max(&self.ingress_peer_queue_depth_max, per_peer as u64);
+    }
+
     fn update_peer(&self, peer: &str, target: usize, depth: usize, jitter_ms: f64) {
         Self::observe_max(&self.target_frames_max, target as u64);
         Self::observe_max(&self.depth_frames_max, depth as u64);
@@ -266,6 +280,9 @@ impl MediaReceiveCounters {
         MediaReceiveSnapshot {
             active_peers: peers.len() as u64,
             ingress_queue_overflow: self.ingress_queue_overflow.load(Ordering::Relaxed),
+            ingress_queue_depth_current: self.ingress_queue_depth_current.load(Ordering::Relaxed),
+            ingress_queue_depth_max: self.ingress_queue_depth_max.load(Ordering::Relaxed),
+            ingress_peer_queue_depth_max: self.ingress_peer_queue_depth_max.load(Ordering::Relaxed),
             sequence_gaps: self.sequence_gaps.load(Ordering::Relaxed),
             reordered_recovered: self.reordered_recovered.load(Ordering::Relaxed),
             late_drops: self.late_drops.load(Ordering::Relaxed),
@@ -1874,17 +1891,13 @@ mod tests {
         let mut controller = EncoderNetworkController::new();
         let bad = [EncoderFeedback {
             fraction_lost: 0.16,
-            available_outgoing_bitrate: 70_000.0,
         }];
         let degraded = controller.observe(&bad);
         assert_eq!(degraded.packet_loss_percent, 25);
         assert_eq!(degraded.bitrate, 40_000);
         assert_eq!(degraded.generation, 1);
 
-        let healthy = [EncoderFeedback {
-            fraction_lost: 0.0,
-            available_outgoing_bitrate: 1_000_000.0,
-        }];
+        let healthy = [EncoderFeedback { fraction_lost: 0.0 }];
         for _ in 0..ENCODER_POLICY_RECOVERY_WINDOWS - 1 {
             assert_eq!(controller.observe(&healthy), degraded);
         }
@@ -1895,21 +1908,36 @@ mod tests {
     }
 
     #[test]
-    fn encoder_policy_uses_conservative_shared_peer_aggregate() {
+    fn encoder_policy_uses_upper_quartile_without_sacrificing_a_lobby_to_one_outlier() {
         let mut controller = EncoderNetworkController::new();
         let peers = [
+            EncoderFeedback { fraction_lost: 0.0 },
             EncoderFeedback {
-                fraction_lost: 0.0,
-                available_outgoing_bitrate: 1_000_000.0,
+                fraction_lost: 0.01,
             },
             EncoderFeedback {
-                fraction_lost: 0.09,
-                available_outgoing_bitrate: 50_000.0,
+                fraction_lost: 0.02,
+            },
+            EncoderFeedback {
+                fraction_lost: 0.04,
+            },
+            EncoderFeedback {
+                fraction_lost: 0.60,
             },
         ];
         let policy = controller.observe(&peers);
-        assert_eq!(policy.packet_loss_percent, 20);
-        assert_eq!(policy.bitrate, 30_000);
+        assert_eq!(policy.packet_loss_percent, 15);
+        assert_eq!(policy.bitrate, DEFAULT_ENCODER_BITRATE);
+
+        let mut small_call = EncoderNetworkController::new();
+        let small_policy = small_call.observe(&[
+            EncoderFeedback { fraction_lost: 0.0 },
+            EncoderFeedback {
+                fraction_lost: 0.09,
+            },
+        ]);
+        assert_eq!(small_policy.packet_loss_percent, 20);
+        assert_eq!(small_policy.bitrate, 44_000);
     }
 
     #[test]
@@ -1917,10 +1945,9 @@ mod tests {
         let mut controller = EncoderNetworkController::new();
         let degraded = controller.observe(&[EncoderFeedback {
             fraction_lost: 0.30,
-            available_outgoing_bitrate: 40_000.0,
         }]);
         assert_eq!(degraded.packet_loss_percent, 30);
-        assert_eq!(degraded.bitrate, 24_000);
+        assert_eq!(degraded.bitrate, 36_000);
         for _ in 0..ENCODER_POLICY_RECOVERY_WINDOWS - 1 {
             assert_eq!(controller.observe(&[]), degraded);
         }

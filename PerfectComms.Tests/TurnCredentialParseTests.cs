@@ -1,4 +1,5 @@
 using System.Linq;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -10,8 +11,15 @@ public sealed class TurnCredentialParseTests
 {
     private sealed class RecordingHandler : HttpMessageHandler
     {
+        private readonly string _content;
         public int Calls;
         public HttpMethod? Method;
+
+        public RecordingHandler(string? content = null)
+        {
+            _content = content ??
+                "{\"ttl\":3600,\"iceServers\":[{\"urls\":\"turn:relay.example:3478\",\"username\":\"u\",\"credential\":\"c\"}]}";
+        }
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -21,8 +29,7 @@ public sealed class TurnCredentialParseTests
             Method = request.Method;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(
-                    "{\"ttl\":3600,\"iceServers\":[{\"urls\":\"turn:relay.example:3478\",\"username\":\"u\",\"credential\":\"c\"}]}")
+                Content = new StringContent(_content)
             });
         }
     }
@@ -105,5 +112,18 @@ public sealed class TurnCredentialParseTests
         Xunit.Assert.Equal(1, handler.Calls);
         Xunit.Assert.Equal(HttpMethod.Post, handler.Method);
         Xunit.Assert.Single(servers);
+    }
+
+    [Fact]
+    public async Task CredentialFetchRejectsTcpOrTlsOnlyRelayResponses()
+    {
+        var handler = new RecordingHandler(
+            "{\"ttl\":3600,\"iceServers\":[{\"urls\":[\"turn:relay.example:80?transport=tcp\",\"turns:relay.example:5349?transport=tcp\"],\"username\":\"u\",\"credential\":\"c\"}]}");
+        using var http = new HttpClient(handler);
+
+        var error = await Xunit.Assert.ThrowsAsync<InvalidDataException>(() =>
+            TurnCredentialClient.FetchAsync(http, "https://worker.example/turn-credentials-tcp-only"));
+
+        Xunit.Assert.Contains("TURN-over-UDP", error.Message);
     }
 }

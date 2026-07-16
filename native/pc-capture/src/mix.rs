@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::gamestate::GameState;
@@ -483,9 +484,54 @@ const JITTER_TARGET_GAIN: f64 = 2.5;
 const JITTER_STABLE_ARRIVALS_TO_DECAY: usize = 250;
 const JITTER_QUIET_PEAK: f32 = 0.003;
 const JITTER_QUIET_RMS: f32 = 0.001;
+// Concealment may decode as many as five missing 20 ms frames together with the live frame.  A
+// plain FIFO would replay that whole batch at 1x and permanently move the talkspurt 20-100 ms
+// behind real time.  Consume at most ten percent extra PCM per playout round and remove it with a
+// correlation-selected overlap, which bounds catch-up to one second for the largest supported gap
+// without dropping an entire voiced frame or changing the output cadence.
+const JITTER_CATCHUP_MAX_RATE_DIVISOR: usize = 10;
+const JITTER_CATCHUP_OVERLAP_DIVISOR: usize = 15;
+const JITTER_CATCHUP_SEARCH_STEP: usize = 8;
+const JITTER_TAIL_FADE_SAMPLES: usize = 48;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodedPlayoutSnapshot {
+    pub recovery_batches: u64,
+    pub recovery_frames: u64,
+    pub catchup_rounds: u64,
+    pub catchup_samples: u64,
+    pub overflow_evicted_frames: u64,
+    pub overflow_evicted_samples: u64,
+}
+
+#[derive(Default)]
+struct DecodedPlayoutMetrics {
+    recovery_batches: AtomicU64,
+    recovery_frames: AtomicU64,
+    catchup_rounds: AtomicU64,
+    catchup_samples: AtomicU64,
+    overflow_evicted_frames: AtomicU64,
+    overflow_evicted_samples: AtomicU64,
+}
+
+impl DecodedPlayoutMetrics {
+    fn snapshot(&self) -> DecodedPlayoutSnapshot {
+        DecodedPlayoutSnapshot {
+            recovery_batches: self.recovery_batches.load(Ordering::Relaxed),
+            recovery_frames: self.recovery_frames.load(Ordering::Relaxed),
+            catchup_rounds: self.catchup_rounds.load(Ordering::Relaxed),
+            catchup_samples: self.catchup_samples.load(Ordering::Relaxed),
+            overflow_evicted_frames: self.overflow_evicted_frames.load(Ordering::Relaxed),
+            overflow_evicted_samples: self.overflow_evicted_samples.load(Ordering::Relaxed),
+        }
+    }
+}
 
 struct PeerQueue {
     frames: VecDeque<Vec<f32>>,
+    front_offset: usize,
+    frame_samples: usize,
+    recovery_debt_samples: usize,
     primed: bool,
     target: usize,
     last_arrival: Option<Instant>,
@@ -494,10 +540,93 @@ struct PeerQueue {
     shed_quiet_frame: bool,
 }
 
+impl PeerQueue {
+    fn new(base_prime: usize) -> Self {
+        Self {
+            frames: VecDeque::new(),
+            front_offset: 0,
+            frame_samples: 0,
+            recovery_debt_samples: 0,
+            primed: false,
+            target: base_prime,
+            last_arrival: None,
+            jitter_frames: 0.0,
+            stable_arrivals: 0,
+            shed_quiet_frame: false,
+        }
+    }
+
+    fn reset_playout(&mut self) {
+        self.frames.clear();
+        self.front_offset = 0;
+        self.recovery_debt_samples = 0;
+        self.primed = false;
+        self.shed_quiet_frame = false;
+    }
+
+    fn available_samples(&self) -> usize {
+        self.frames
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_sub(self.front_offset)
+    }
+
+    fn front_samples(&self) -> Option<&[f32]> {
+        self.frames
+            .front()
+            .map(|frame| &frame[self.front_offset.min(frame.len())..])
+    }
+
+    fn copy_prefix(&self, count: usize) -> Vec<f32> {
+        let mut output = Vec::with_capacity(count);
+        for (index, frame) in self.frames.iter().enumerate() {
+            let start = if index == 0 { self.front_offset } else { 0 };
+            if start >= frame.len() {
+                continue;
+            }
+            let take = (count - output.len()).min(frame.len() - start);
+            output.extend_from_slice(&frame[start..start + take]);
+            if output.len() == count {
+                break;
+            }
+        }
+        output
+    }
+
+    fn consume_prefix(&mut self, mut count: usize) {
+        while count > 0 {
+            let Some(front) = self.frames.front() else {
+                self.front_offset = 0;
+                return;
+            };
+            let remaining = front.len().saturating_sub(self.front_offset);
+            if count < remaining {
+                self.front_offset += count;
+                return;
+            }
+            count = count.saturating_sub(remaining);
+            self.frames.pop_front();
+            self.front_offset = 0;
+        }
+    }
+
+    fn drop_front_frame(&mut self) -> usize {
+        let removed = self
+            .frames
+            .pop_front()
+            .map_or(0, |frame| frame.len().saturating_sub(self.front_offset));
+        self.front_offset = 0;
+        removed
+    }
+}
+
 pub struct PeerJitter {
     peers: HashMap<String, PeerQueue>,
     prime: usize,
     cap: usize,
+    adaptive: bool,
+    metrics: DecodedPlayoutMetrics,
 }
 
 impl Default for PeerJitter {
@@ -512,11 +641,24 @@ impl PeerJitter {
     }
 
     pub fn with_limits(prime: usize, cap: usize) -> PeerJitter {
+        Self::with_mode(prime, cap, true)
+    }
+
+    /// Constructs the decoded staging layer used after the adaptive encoded jitter buffer.  It
+    /// deliberately does not learn a second network-latency target; recovery batches are instead
+    /// returned to the one-frame target with bounded overlap-add catch-up.
+    pub fn with_staging_limits(prime: usize, cap: usize) -> PeerJitter {
+        Self::with_mode(prime, cap, false)
+    }
+
+    fn with_mode(prime: usize, cap: usize, adaptive: bool) -> PeerJitter {
         let prime = prime.max(1);
         PeerJitter {
             peers: HashMap::new(),
             prime,
             cap: cap.max(prime),
+            adaptive,
+            metrics: DecodedPlayoutMetrics::default(),
         }
     }
 
@@ -524,35 +666,84 @@ impl PeerJitter {
         self.push_at(peer, frame, Instant::now());
     }
 
+    /// Enqueues one decoder drain atomically from the playout layer's point of view.  `recovered`
+    /// is the number of leading DRED/FEC/PLC frames; the final frame is normally the live RTP
+    /// packet.  Recording exact recovered sample debt lets playout catch up only the time that was
+    /// reconstructed, rather than treating ordinary encoded jitter-buffer depth as stale audio.
+    pub fn push_batch(&mut self, peer: &str, frames: Vec<Vec<f32>>, recovered: usize) {
+        self.push_batch_at(peer, frames, recovered, Instant::now());
+    }
+
+    fn push_batch_at(&mut self, peer: &str, frames: Vec<Vec<f32>>, recovered: usize, now: Instant) {
+        if frames.is_empty() {
+            return;
+        }
+        let recovered = recovered.min(frames.len());
+        let recovered_samples = frames.iter().take(recovered).map(Vec::len).sum::<usize>();
+
+        // Every decoded frame in one drain has the same network arrival.  Reusing one timestamp
+        // keeps the arrival estimator from mistaking FEC/PLC frames for a zero-millisecond burst.
+        for frame in frames {
+            self.push_at(peer, frame, now);
+        }
+
+        if recovered_samples > 0 {
+            self.metrics
+                .recovery_batches
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .recovery_frames
+                .fetch_add(recovered as u64, Ordering::Relaxed);
+
+            // Credit debt only after format/talkspurt resets and hard-cap eviction have settled.
+            // Never credit more than the retained excess above one live playout frame, otherwise
+            // a dropped/empty current decode could leave stale debt after the queue drains.
+            if let Some(q) = self.peers.get_mut(peer) {
+                let retained_excess = q.available_samples().saturating_sub(q.frame_samples);
+                let credit_capacity = retained_excess.saturating_sub(q.recovery_debt_samples);
+                let credited = recovered_samples.min(credit_capacity);
+                q.recovery_debt_samples = q.recovery_debt_samples.saturating_add(credited);
+            }
+        }
+    }
+
     fn push_at(&mut self, peer: &str, frame: Vec<f32>, now: Instant) {
+        if frame.is_empty() {
+            return;
+        }
         let base_prime = self.prime;
         let cap = self.cap;
+        let adaptive = self.adaptive;
         let q = self
             .peers
             .entry(peer.to_string())
-            .or_insert_with(|| PeerQueue {
-                frames: VecDeque::new(),
-                primed: false,
-                target: base_prime,
-                last_arrival: None,
-                jitter_frames: 0.0,
-                stable_arrivals: 0,
-                shed_quiet_frame: false,
-            });
+            .or_insert_with(|| PeerQueue::new(base_prime));
+
+        // A decoder format change cannot be spliced into an old partial frame safely.  Opus is
+        // fixed at 960 samples in production, but resetting here keeps the queue fail-safe if a
+        // future decoder mode changes frame duration.
+        if q.frame_samples != 0 && q.frame_samples != frame.len() {
+            q.reset_playout();
+        }
+        q.frame_samples = frame.len();
 
         let interval = q
             .last_arrival
             .map(|previous| now.saturating_duration_since(previous));
         let was_empty = q.frames.is_empty();
-        Self::observe_arrival(q, now, base_prime, cap);
+        if adaptive {
+            Self::observe_arrival(q, now, base_prime, cap);
+        } else {
+            q.last_arrival = Some(now);
+            q.target = base_prime;
+        }
 
         // A long transport stall or a measured empty-queue underrun starts a new playout
         // generation. The quiet-frame hold in playout_round grows a live buffer without freezing
         // speech; this reset is the fallback when no quiet audio is available.
         if interval.is_some_and(|elapsed| elapsed >= JITTER_TALKSPURT_RESET) {
-            q.frames.clear();
-            q.primed = false;
-            q.shed_quiet_frame = false;
+            q.reset_playout();
+            q.frame_samples = frame.len();
         } else if q.primed
             && was_empty
             && interval.is_some_and(|elapsed| elapsed >= JITTER_UNDERRUN_REBUFFER)
@@ -560,7 +751,17 @@ impl PeerJitter {
             q.primed = false;
         }
         if q.frames.len() >= cap {
-            q.frames.pop_front();
+            if let Some(evicted) = q.frames.pop_front() {
+                let evicted_samples = evicted.len().saturating_sub(q.front_offset);
+                q.front_offset = 0;
+                q.recovery_debt_samples = q.recovery_debt_samples.saturating_sub(evicted_samples);
+                self.metrics
+                    .overflow_evicted_frames
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .overflow_evicted_samples
+                    .fetch_add(evicted_samples as u64, Ordering::Relaxed);
+            }
         }
         q.frames.push_back(frame);
     }
@@ -615,6 +816,7 @@ impl PeerJitter {
 
     pub fn playout_round(&mut self) -> Vec<(String, Vec<f32>)> {
         let mut out = Vec::new();
+        let metrics = &self.metrics;
         for (peer, q) in self.peers.iter_mut() {
             if !q.primed {
                 if q.frames.len() >= q.target {
@@ -628,28 +830,79 @@ impl PeerJitter {
             // cushion, hold only decoded near-silence for one round so the queue can grow. When
             // the target later falls, discard at most one quiet surplus frame to shed latency.
             // Voiced frames are never held or dropped; they wait for a real underrun boundary.
-            if q.frames.len() < q.target
-                && q.frames.front().is_some_and(|frame| is_quiet_frame(frame))
-            {
+            if q.frames.len() < q.target && q.front_samples().is_some_and(is_quiet_frame) {
                 continue;
             }
             if q.shed_quiet_frame
                 && q.frames.len() > q.target
-                && q.frames.front().is_some_and(|frame| is_quiet_frame(frame))
+                && q.front_samples().is_some_and(is_quiet_frame)
             {
-                q.frames.pop_front();
+                let removed = q.drop_front_frame();
+                q.recovery_debt_samples = q.recovery_debt_samples.saturating_sub(removed);
                 q.shed_quiet_frame = false;
             }
-            match q.frames.pop_front() {
-                Some(frame) => out.push((peer.clone(), frame)),
-                None => q.primed = false,
+
+            let available = q.available_samples();
+            if available == 0 {
+                q.primed = false;
+                continue;
             }
+            let output_samples = q.frame_samples.max(1);
+            if available < output_samples {
+                // Catch-up advances through frame boundaries, so a transport stall can leave a
+                // partial decoded tail. Never hand a short vector to the fixed-cadence mixer: fade
+                // the retained PCM to zero, pad the rest, and retire debt now that no backlog exists.
+                let source = q.copy_prefix(available);
+                q.consume_prefix(available);
+                q.recovery_debt_samples = 0;
+                q.primed = false;
+                q.shed_quiet_frame = false;
+                out.push((peer.clone(), fade_and_pad_tail(&source, output_samples)));
+                continue;
+            }
+            let max_extra = (output_samples / JITTER_CATCHUP_MAX_RATE_DIVISOR).max(1);
+            let extra = q
+                .recovery_debt_samples
+                .min(max_extra)
+                .min(available.saturating_sub(output_samples));
+            let input_samples = output_samples + extra;
+            let frame = if extra == 0
+                && q.front_offset == 0
+                && q.frames
+                    .front()
+                    .is_some_and(|frame| frame.len() == output_samples)
+            {
+                // Preserve the allocation-free steady-state path. Copying is required only while
+                // overlap-add catch-up leaves the read cursor partway through a decoded frame.
+                q.frames.pop_front().expect("front frame checked above")
+            } else if extra > 0 {
+                let source = q.copy_prefix(input_samples);
+                debug_assert_eq!(source.len(), input_samples);
+                metrics.catchup_rounds.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .catchup_samples
+                    .fetch_add(extra as u64, Ordering::Relaxed);
+                q.recovery_debt_samples -= extra;
+                let frame = overlap_accelerate(&source, output_samples, extra);
+                q.consume_prefix(input_samples);
+                frame
+            } else {
+                let frame = q.copy_prefix(input_samples);
+                debug_assert_eq!(frame.len(), input_samples);
+                q.consume_prefix(input_samples);
+                frame
+            };
+            out.push((peer.clone(), frame));
         }
         out
     }
 
     pub fn is_idle(&self) -> bool {
         self.peers.values().all(|q| q.frames.is_empty())
+    }
+
+    pub fn metrics_snapshot(&self) -> DecodedPlayoutSnapshot {
+        self.metrics.snapshot()
     }
 
     #[cfg(test)]
@@ -661,6 +914,98 @@ impl PeerJitter {
     fn primed_for(&self, peer: &str) -> Option<bool> {
         self.peers.get(peer).map(|q| q.primed)
     }
+
+    #[cfg(test)]
+    fn depth_samples_for(&self, peer: &str) -> Option<usize> {
+        self.peers.get(peer).map(PeerQueue::available_samples)
+    }
+
+    #[cfg(test)]
+    fn recovery_debt_samples_for(&self, peer: &str) -> Option<usize> {
+        self.peers.get(peer).map(|q| q.recovery_debt_samples)
+    }
+}
+
+/// Removes `extra` samples from a fixed-cadence playout frame without an abrupt whole-frame drop.
+/// The best low-error splice in the middle half of the frame is crossfaded with a raised-cosine
+/// window.  Samples outside the overlap retain their original rate, so pitch is preserved except
+/// for the short transition and consecutive output frames remain exactly the decoder frame size.
+fn overlap_accelerate(source: &[f32], output_samples: usize, extra: usize) -> Vec<f32> {
+    debug_assert_eq!(source.len(), output_samples + extra);
+    if extra == 0 || output_samples < 8 {
+        return source[..output_samples].to_vec();
+    }
+
+    let overlap = (output_samples / JITTER_CATCHUP_OVERLAP_DIVISOR)
+        .clamp(4, 96)
+        .min(output_samples.saturating_sub(1));
+    let search_start = output_samples / 4;
+    let search_end = output_samples
+        .saturating_mul(3)
+        .checked_div(4)
+        .unwrap_or(output_samples)
+        .min(output_samples.saturating_sub(overlap));
+    let cut = best_overlap_cut(source, extra, overlap, search_start, search_end);
+
+    let mut output = Vec::with_capacity(output_samples);
+    output.extend_from_slice(&source[..cut]);
+    for index in 0..overlap {
+        let phase = (index + 1) as f32 / (overlap + 1) as f32;
+        let weight = 0.5 - 0.5 * (std::f32::consts::PI * phase).cos();
+        let left = source[cut + index];
+        let right = source[cut + extra + index];
+        output.push(left + (right - left) * weight);
+    }
+    output.extend_from_slice(&source[cut + extra + overlap..]);
+    debug_assert_eq!(output.len(), output_samples);
+    output
+}
+
+fn fade_and_pad_tail(source: &[f32], output_samples: usize) -> Vec<f32> {
+    let copied = source.len().min(output_samples);
+    let mut output = vec![0.0; output_samples];
+    output[..copied].copy_from_slice(&source[..copied]);
+    let fade = copied.min(JITTER_TAIL_FADE_SAMPLES);
+    if fade > 0 {
+        let start = copied - fade;
+        for index in 0..fade {
+            let phase = (index + 1) as f32 / fade as f32;
+            let gain = 0.5 + 0.5 * (std::f32::consts::PI * phase).cos();
+            output[start + index] *= gain;
+        }
+    }
+    output
+}
+
+fn best_overlap_cut(
+    source: &[f32],
+    extra: usize,
+    overlap: usize,
+    search_start: usize,
+    search_end: usize,
+) -> usize {
+    if search_start >= search_end {
+        return search_start.min(source.len().saturating_sub(extra + overlap));
+    }
+    let mut best_cut = search_start;
+    let mut best_error = f64::INFINITY;
+    for cut in (search_start..=search_end).step_by(JITTER_CATCHUP_SEARCH_STEP) {
+        let mut difference = 0.0f64;
+        let mut energy = 1.0e-12f64;
+        for index in 0..overlap {
+            let left = f64::from(source[cut + index]);
+            let right = f64::from(source[cut + extra + index]);
+            let delta = left - right;
+            difference += delta * delta;
+            energy += left * left + right * right;
+        }
+        let normalized = difference / energy;
+        if normalized < best_error {
+            best_error = normalized;
+            best_cut = cut;
+        }
+    }
+    best_cut
 }
 
 fn is_quiet_frame(frame: &[f32]) -> bool {
@@ -721,6 +1066,137 @@ mod tests {
         }
         let got: Vec<f32> = (0..3).map(|_| jb.playout_round()[0].1[0]).collect();
         assert_eq!(got, vec![2.0, 3.0, 4.0], "cap keeps the 3 newest frames");
+        assert_eq!(
+            jb.metrics_snapshot(),
+            DecodedPlayoutSnapshot {
+                overflow_evicted_frames: 2,
+                overflow_evicted_samples: 2,
+                ..DecodedPlayoutSnapshot::default()
+            },
+            "a hard-cap eviction must be observable rather than silent"
+        );
+    }
+
+    #[test]
+    fn recovered_batch_smoothly_returns_to_live_depth_during_continuous_speech() {
+        let mut jb = PeerJitter::with_staging_limits(1, 8);
+        let mut phase = 0usize;
+        let mut next_frame = || {
+            let frame = (0..FRAME_SIZE)
+                .map(|sample| {
+                    let value = ((phase + sample) as f32 * 0.017).sin() * 0.25;
+                    if value.is_finite() {
+                        value
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            phase += FRAME_SIZE;
+            frame
+        };
+
+        // Five concealed frames plus the live packet is the largest supported decoder drain.
+        let batch = (0..6).map(|_| next_frame()).collect::<Vec<_>>();
+        jb.push_batch("a", batch, 5);
+        let first = jb.playout_round();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1.len(), FRAME_SIZE);
+        assert!(first[0].1.iter().all(|sample| sample.is_finite()));
+        assert!(jb.depth_samples_for("a").unwrap() < FRAME_SIZE * 5);
+
+        // At ten-percent acceleration the exact 4,800-sample recovery debt is retired in fifty
+        // output rounds.  Normal 20 ms packets continue arriving while catch-up is in progress.
+        for _ in 1..50 {
+            jb.push("a", next_frame());
+            let round = jb.playout_round();
+            assert_eq!(round.len(), 1);
+            assert_eq!(round[0].1.len(), FRAME_SIZE);
+            assert!(round[0].1.iter().all(|sample| sample.is_finite()));
+        }
+        assert_eq!(jb.recovery_debt_samples_for("a"), Some(0));
+        assert_eq!(jb.depth_samples_for("a"), Some(0));
+        assert!(
+            jb.is_idle(),
+            "recovered history must not remain as permanent latency"
+        );
+
+        let metrics = jb.metrics_snapshot();
+        assert_eq!(metrics.recovery_batches, 1);
+        assert_eq!(metrics.recovery_frames, 5);
+        assert_eq!(metrics.catchup_rounds, 50);
+        assert_eq!(metrics.catchup_samples, (FRAME_SIZE * 5) as u64);
+        assert_eq!(metrics.overflow_evicted_frames, 0);
+        assert_eq!(metrics.overflow_evicted_samples, 0);
+    }
+
+    #[test]
+    fn recovered_batch_without_future_packets_fades_and_pads_a_fixed_tail() {
+        let mut jb = PeerJitter::with_staging_limits(1, 8);
+        jb.push_batch("a", vec![vec![1.0; FRAME_SIZE]; 6], 5);
+
+        let mut emitted = Vec::new();
+        for _ in 0..8 {
+            let round = jb.playout_round();
+            if round.is_empty() {
+                break;
+            }
+            assert_eq!(round.len(), 1);
+            assert_eq!(round[0].1.len(), FRAME_SIZE);
+            assert!(round[0].1.iter().all(|sample| sample.is_finite()));
+            emitted.push(round[0].1.clone());
+        }
+
+        assert_eq!(emitted.len(), 6);
+        assert!(jb.is_idle());
+        assert_eq!(jb.recovery_debt_samples_for("a"), Some(0));
+        let tail = emitted.last().unwrap();
+        assert_eq!(tail[0], 1.0);
+        assert_eq!(tail[FRAME_SIZE / 2 - 1], 0.0);
+        assert!(tail[FRAME_SIZE / 2..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn recovered_debt_survives_the_batch_talkspurt_reset() {
+        let mut jb = PeerJitter::with_staging_limits(1, 8);
+        let start = Instant::now();
+        jb.push_at("a", vec![0.0; FRAME_SIZE], start);
+        assert_eq!(jb.playout_round().len(), 1);
+
+        jb.push_batch_at(
+            "a",
+            vec![vec![0.1; FRAME_SIZE], vec![0.2; FRAME_SIZE]],
+            1,
+            start + JITTER_TALKSPURT_RESET,
+        );
+
+        assert_eq!(jb.recovery_debt_samples_for("a"), Some(FRAME_SIZE));
+        let round = jb.playout_round();
+        assert_eq!(round.len(), 1);
+        assert_eq!(round[0].1.len(), FRAME_SIZE);
+        assert_eq!(
+            jb.recovery_debt_samples_for("a"),
+            Some(FRAME_SIZE - FRAME_SIZE / JITTER_CATCHUP_MAX_RATE_DIVISOR)
+        );
+    }
+
+    #[test]
+    fn catchup_overlap_is_bounded_and_keeps_fixed_frame_size() {
+        let frame = (0..FRAME_SIZE + FRAME_SIZE / JITTER_CATCHUP_MAX_RATE_DIVISOR)
+            .map(|sample| (sample as f32 * 0.031).sin())
+            .collect::<Vec<_>>();
+        let extra = FRAME_SIZE / JITTER_CATCHUP_MAX_RATE_DIVISOR;
+        let output = overlap_accelerate(&frame, FRAME_SIZE, extra);
+        assert_eq!(output.len(), FRAME_SIZE);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(
+            output
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0f32, f32::max)
+                < 0.2,
+            "overlap-add catch-up introduced an abrupt discontinuity"
+        );
     }
 
     #[test]

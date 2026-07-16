@@ -62,6 +62,22 @@ struct DecodeState {
     stereo: Vec<f32>,
 }
 
+pub(crate) fn reset_decoded_peer_timeline(
+    decoders: &mut HashMap<String, OpusCodec>,
+    last_seq: &mut HashMap<String, u16>,
+    jitter: &mut PeerJitter,
+    peer: &str,
+) -> Result<(), crate::opus_native::OpusError> {
+    // An encoded-buffer fast-forward starts a new decoder timeline. Any staged/catch-up PCM was
+    // decoded against the old sequence history and must not play in front of the restart packet.
+    last_seq.remove(peer);
+    jitter.remove(peer);
+    if let Some(codec) = decoders.get_mut(peer) {
+        codec.reset_decoder()?;
+    }
+    Ok(())
+}
+
 pub struct Engine {
     rtc: Arc<RtcEngine>,
     dsp: Mutex<Dsp>,
@@ -112,7 +128,7 @@ impl Engine {
                 // Network variance is handled while packets are still encoded. This queue only
                 // stages decoded/FEC/PLC frames for the mixer and must not add a second adaptive
                 // 40-300 ms delay.
-                jitter: PeerJitter::with_limits(1, 8),
+                jitter: PeerJitter::with_staging_limits(1, 8),
                 peer_levels: PeerLevelCadence::new(Instant::now()),
                 stereo: vec![0.0; FRAME_SIZE * 2],
             }),
@@ -144,6 +160,10 @@ impl Engine {
             .load(Ordering::Relaxed)
             .checked_add(1)
             .expect("pc-capture: encoder privacy epoch exhausted");
+        assert!(
+            self.rtc.advance_encoder_epoch(epoch),
+            "pc-capture: RTP privacy drain timed out"
+        );
         self.encoder_epoch.store(epoch, Ordering::Release);
         epoch
     }
@@ -257,11 +277,14 @@ impl Engine {
                 continue;
             };
             if packet.reset_decoder {
-                state.last_seq.remove(&peer);
-                if let Some(codec) = state.decoders.get_mut(&peer) {
-                    if let Err(error) = codec.reset_decoder() {
-                        panic!("pc-capture: Opus decoder reset failed: {error}");
-                    }
+                let DecodeState {
+                    decoders,
+                    last_seq,
+                    jitter,
+                    ..
+                } = &mut *state;
+                if let Err(error) = reset_decoded_peer_timeline(decoders, last_seq, jitter, &peer) {
+                    panic!("pc-capture: Opus decoder reset failed: {error}");
                 }
             }
             if !state.decoders.contains_key(&peer) {
@@ -280,10 +303,11 @@ impl Engine {
             if let Some(buffer) = state.encoded.get(&peer) {
                 buffer.record_decode(report);
             }
-            for frame in frames {
-                state.peer_levels.observe(&peer, peak(&frame));
-                state.jitter.push(&peer, frame);
+            let recovered_frames = report.dred_frames + report.fec_frames + report.plc_frames;
+            for frame in &frames {
+                state.peer_levels.observe(&peer, peak(frame));
             }
+            state.jitter.push_batch(&peer, frames, recovered_frames);
             if advance {
                 state.last_seq.insert(peer, packet.sequence);
             }
@@ -332,6 +356,7 @@ impl Engine {
             self.rtc.media_receive_snapshot(),
             self.rtc.network_path_snapshots(),
             self.rtc.encoder_policy_snapshot(),
+            self.rtc.native_transport_snapshot(),
         ))
     }
 
@@ -535,6 +560,23 @@ mod tests {
     }
 
     #[test]
+    fn decoder_timeline_reset_discards_staged_recovery_audio() {
+        let mut decoders = HashMap::new();
+        decoders.insert("peer".to_string(), OpusCodec::new().expect("decoder"));
+        let mut last_seq = HashMap::from([("peer".to_string(), 42u16)]);
+        let mut jitter = PeerJitter::with_staging_limits(1, 8);
+        jitter.push_batch("peer", vec![vec![0.1; FRAME_SIZE]; 4], 3);
+        assert!(!jitter.is_idle());
+
+        reset_decoded_peer_timeline(&mut decoders, &mut last_seq, &mut jitter, "peer")
+            .expect("decoder timeline reset");
+
+        assert!(!last_seq.contains_key("peer"));
+        assert!(jitter.is_idle());
+        assert!(jitter.playout_round().is_empty());
+    }
+
+    #[test]
     fn mobile_engine_reorders_encoded_rtp_before_opus_decode() {
         let engine = Engine::new();
         engine.control(r#"{"op":"game-state","lx":0,"ly":0,"facing":0,"deaf":false,"master":1.0,"maxd":5.0,"falloff":0,"peers":[{"id":"peer","gain":1.0,"pan":0.0,"mode":0}]}"#);
@@ -702,6 +744,7 @@ mod tests {
             remote_candidate_type: "srflx".to_string(),
             relay: true,
             current_rtt_ms: 212.5,
+            bandwidth_estimate_valid: true,
             available_outgoing_bitrate: 64_000.0,
             available_incoming_bitrate: 72_000.0,
             remote_packets_received: 123,
@@ -714,6 +757,7 @@ mod tests {
             receive,
             vec![path],
             crate::codec::EncoderPolicySnapshot::default(),
+            crate::proto::NativeStatsSnapshot::default(),
         );
         assert!(!json.contains("peer_id"));
         assert!(!json.contains("candidate_pair_id"));
@@ -788,6 +832,7 @@ struct MobileNetworkPathStats {
     remote_candidate_type: String,
     relay: bool,
     current_rtt_ms: f64,
+    bandwidth_estimate_valid: bool,
     available_outgoing_bitrate: f64,
     available_incoming_bitrate: f64,
     remote_packets_received: u64,
@@ -805,16 +850,24 @@ struct MobileDiagnosticsMsg {
     encoder_packet_loss_percent: u8,
     encoder_bitrate: i32,
     encoder_policy_generation: u64,
+    rtp_tx_queue_dropped: u64,
+    rtp_tx_stale_epoch_dropped: u64,
+    rtp_tx_write_timeouts: u64,
+    rtp_tx_queue_depth_max: u64,
 }
 
 fn mobile_diagnostics_json(
     receive: crate::codec::MediaReceiveSnapshot,
     paths: Vec<PeerNetworkPathSnapshot>,
     encoder: crate::codec::EncoderPolicySnapshot,
+    transport: crate::proto::NativeStatsSnapshot,
 ) -> String {
     let media_receive = MediaReceiveStats {
         active_peers: receive.active_peers,
         ingress_queue_overflow: receive.ingress_queue_overflow,
+        ingress_queue_depth_current: receive.ingress_queue_depth_current,
+        ingress_queue_depth_max: receive.ingress_queue_depth_max,
+        ingress_peer_queue_depth_max: receive.ingress_peer_queue_depth_max,
         sequence_gaps: receive.sequence_gaps,
         reordered_recovered: receive.reordered_recovered,
         late_drops: receive.late_drops,
@@ -843,6 +896,7 @@ fn mobile_diagnostics_json(
             remote_candidate_type: path.remote_candidate_type,
             relay: path.relay,
             current_rtt_ms: path.current_rtt_ms,
+            bandwidth_estimate_valid: path.bandwidth_estimate_valid,
             available_outgoing_bitrate: path.available_outgoing_bitrate,
             available_incoming_bitrate: path.available_incoming_bitrate,
             remote_packets_received: path.remote_packets_received,
@@ -859,6 +913,10 @@ fn mobile_diagnostics_json(
         encoder_packet_loss_percent: encoder.packet_loss_percent,
         encoder_bitrate: encoder.bitrate,
         encoder_policy_generation: encoder.generation,
+        rtp_tx_queue_dropped: transport.rtp_tx_queue_dropped,
+        rtp_tx_stale_epoch_dropped: transport.rtp_tx_stale_epoch_dropped,
+        rtp_tx_write_timeouts: transport.rtp_tx_write_timeouts,
+        rtp_tx_queue_depth_max: transport.rtp_tx_queue_depth_max,
     })
     .expect("mobile diagnostics serialize")
 }

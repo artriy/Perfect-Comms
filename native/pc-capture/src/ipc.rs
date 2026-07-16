@@ -9,6 +9,7 @@ use crate::diagnostics::{
     media_state_json, send_media_state, CaptureDiagnostics, MediaDiagnostics, MediaStateEvent,
     StreamDescriptor,
 };
+use crate::engine::reset_decoded_peer_timeline;
 use crate::gamestate::{GameState, LocalState, PeerState};
 use crate::input::{
     InputConfig, LevelCadence, NoiseGate, PeerLevelCadence, TelemetryMailbox, TELEMETRY_INTERVAL,
@@ -959,6 +960,9 @@ fn spawn_telemetry_writer(
                 snapshot.media_receive = MediaReceiveStats {
                     active_peers: receive.active_peers,
                     ingress_queue_overflow: receive.ingress_queue_overflow,
+                    ingress_queue_depth_current: receive.ingress_queue_depth_current,
+                    ingress_queue_depth_max: receive.ingress_queue_depth_max,
+                    ingress_peer_queue_depth_max: receive.ingress_peer_queue_depth_max,
                     sequence_gaps: receive.sequence_gaps,
                     reordered_recovered: receive.reordered_recovered,
                     late_drops: receive.late_drops,
@@ -991,6 +995,7 @@ fn spawn_telemetry_writer(
                         remote_candidate_type: path.remote_candidate_type,
                         relay: path.relay,
                         current_rtt_ms: path.current_rtt_ms,
+                        bandwidth_estimate_valid: path.bandwidth_estimate_valid,
                         available_outgoing_bitrate: path.available_outgoing_bitrate,
                         available_incoming_bitrate: path.available_incoming_bitrate,
                         remote_packets_received: path.remote_packets_received,
@@ -1634,6 +1639,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                     eprintln!("pc-capture: Opus privacy reset failed: {error}");
                     return;
                 }
+                if !writer_rtc.advance_encoder_epoch(requested_epoch) {
+                    writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                    writer_privacy.fail();
+                    eprintln!("pc-capture: RTP privacy drain exceeded {}ms", 500);
+                    return;
+                }
                 noise_gate.reset();
                 last_capture_stream = None;
                 applied_encoder_policy_generation = 0;
@@ -1789,7 +1800,7 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
 
             // The encoded buffer owns network jitter adaptation. Keep only a one-frame decoded
             // staging queue so the two layers do not double the configured playout delay.
-            let mut jitter = PeerJitter::with_limits(1, 8);
+            let mut jitter = PeerJitter::with_staging_limits(1, 8);
             let mut stereo = [0f32; crate::codec::FRAME_SIZE * 2];
 
             let frame_dur = Duration::from_millis(20);
@@ -1855,15 +1866,15 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                         .decode_packets
                         .fetch_add(1, Ordering::Relaxed);
                     if packet.reset_decoder {
-                        last_seq.remove(&peer);
-                        if let Some(codec) = decoders.get_mut(&peer) {
-                            if let Err(error) = codec.reset_decoder() {
-                                drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
-                                eprintln!(
-                                    "pc-capture: opus decoder reset failed peer={peer}: {error}"
-                                );
-                                return;
-                            }
+                        if let Err(error) = reset_decoded_peer_timeline(
+                            &mut decoders,
+                            &mut last_seq,
+                            &mut jitter,
+                            &peer,
+                        ) {
+                            drain_counters.decode_errors.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("pc-capture: opus decoder reset failed peer={peer}: {error}");
+                            return;
                         }
                     }
                     if !decoders.contains_key(&peer) {
@@ -1900,10 +1911,12 @@ pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()>
                             .decode_frames
                             .fetch_add(frames.len() as u64, Ordering::Relaxed);
                     }
-                    for f in frames {
-                        peer_levels.observe(&peer, peak(&f));
-                        jitter.push(&peer, f);
+                    let recovered_frames =
+                        report.dred_frames + report.fec_frames + report.plc_frames;
+                    for f in &frames {
+                        peer_levels.observe(&peer, peak(f));
                     }
+                    jitter.push_batch(&peer, frames, recovered_frames);
                     if advance {
                         last_seq.insert(peer, packet.sequence);
                     }

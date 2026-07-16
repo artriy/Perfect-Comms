@@ -109,4 +109,122 @@ public sealed class SpscFloatRingTests
         Assert.Equal(new float[] { 0.4f, -0.2f }, second);
         Assert.Equal(new float[] { 0.8f, -0.4f }, third);
     }
+
+    [Fact]
+    public void PlaybackWaitsForConfiguredPrimeWithoutConsumingEarlyAudio()
+    {
+        var ring = new SpscFloatRing(
+            24,
+            channels: 2,
+            targetLatencySamples: 8,
+            primeLatencySamples: 8,
+            maximumLatencySamples: 16,
+            enableClockDriftCorrection: true);
+        Assert.True(ring.TryWrite(new float[] { 1, -1, 2, -2, 3, -3 }));
+
+        var held = new float[4];
+        Assert.Equal(0, ring.Read(held));
+        Assert.Equal(new float[] { 0, 0, 0, 0 }, held);
+        Assert.Equal(6, ring.DepthSamples);
+        Assert.Equal(4, ring.PrimingZeroFilledSamples);
+        Assert.False(ring.IsPrimed);
+
+        Assert.True(ring.TryWrite(new float[] { 4, -4 }));
+        var started = new float[4];
+        Assert.Equal(4, ring.Read(started));
+        Assert.Equal(new float[] { 1, -1, 2, -2 }, started);
+        Assert.True(ring.IsPrimed);
+    }
+
+    [Fact]
+    public void ClockDriftCorrectionConsumesOnlyOneHalfPercentPerCallback()
+    {
+        const int outputSamples = 400; // 200 stereo frames => one-frame correction.
+        var ring = new SpscFloatRing(
+            2_000,
+            channels: 2,
+            targetLatencySamples: 800,
+            primeLatencySamples: 0,
+            maximumLatencySamples: 1_600,
+            enableClockDriftCorrection: true);
+        Assert.True(ring.TryWrite(Enumerable.Range(0, 1_000).Select(i => i / 1_000f).ToArray()));
+
+        var output = new float[outputSamples];
+        Assert.Equal(outputSamples, ring.Read(output));
+        Assert.Equal(2, ring.ClockCorrectionSamples);
+        Assert.Equal(1, ring.ClockCorrectionCallbacks);
+        Assert.Equal(0, ring.SkippedSamples);
+        Assert.Equal(598, ring.DepthSamples);
+        Assert.All(output, sample => Assert.True(float.IsFinite(sample)));
+    }
+
+    [Fact]
+    public void SustainedSchedulerStallFastForwardsInsteadOfLingeringForSeconds()
+    {
+        const int outputSamples = 400;
+        var ring = new SpscFloatRing(
+            2_000,
+            channels: 2,
+            targetLatencySamples: 800,
+            primeLatencySamples: 0,
+            maximumLatencySamples: 1_600,
+            enableClockDriftCorrection: true);
+        Assert.True(ring.TryWrite(Enumerable.Range(0, 1_000).Select(i => i / 1_000f).ToArray()));
+
+        // The first high-depth observation remains smooth and bounded to the 0.5% drift path.
+        Assert.Equal(outputSamples, ring.Read(new float[outputSamples]));
+        Assert.Equal(2, ring.ClockCorrectionSamples);
+        Assert.Equal(0, ring.SkippedSamples);
+
+        // Equal producer/consumer cadence keeps the one-frame scheduler excess present. The next
+        // callback must classify it as a stall and recover immediately, not over ~5 seconds.
+        Assert.True(ring.TryWrite(new float[outputSamples]));
+        Assert.Equal(outputSamples, ring.Read(new float[outputSamples]));
+        Assert.Equal(198, ring.SkippedSamples);
+        Assert.Equal(400, ring.DepthSamples);
+    }
+
+    [Fact]
+    public void ClockDriftCorrectionStretchesWhenDepthFallsBelowTarget()
+    {
+        const int outputSamples = 400;
+        var ring = new SpscFloatRing(
+            2_000,
+            channels: 2,
+            targetLatencySamples: 800,
+            primeLatencySamples: 0,
+            maximumLatencySamples: 1_600,
+            enableClockDriftCorrection: true);
+        Assert.True(ring.TryWrite(Enumerable.Range(0, outputSamples).Select(i => i / 400f).ToArray()));
+
+        var output = new float[outputSamples];
+        Assert.Equal(outputSamples, ring.Read(output));
+        Assert.Equal(-2, ring.ClockCorrectionSamples);
+        Assert.Equal(1, ring.ClockCorrectionCallbacks);
+        Assert.Equal(2, ring.DepthSamples);
+        Assert.All(output, sample => Assert.True(float.IsFinite(sample)));
+    }
+
+    [Fact]
+    public void ClearAfterWorkersStopRestoresUnprimedLifecycleState()
+    {
+        var ring = new SpscFloatRing(
+            24,
+            channels: 2,
+            targetLatencySamples: 8,
+            primeLatencySamples: 8,
+            maximumLatencySamples: 16,
+            enableClockDriftCorrection: true);
+        Assert.True(ring.TryWrite(new float[] { 1, -1, 2, -2, 3, -3, 4, -4 }));
+        Assert.Equal(4, ring.Read(new float[4]));
+        Assert.True(ring.IsPrimed);
+
+        ring.Clear();
+
+        Assert.Equal(0, ring.DepthSamples);
+        Assert.False(ring.IsPrimed);
+        Assert.True(ring.TryWrite(new float[] { 5, -5, 6, -6 }));
+        Assert.Equal(0, ring.Read(new float[4]));
+        Assert.Equal(4, ring.DepthSamples);
+    }
 }

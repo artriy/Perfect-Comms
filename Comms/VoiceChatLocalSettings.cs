@@ -638,7 +638,7 @@ public class VoiceChatLocalSettings
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
             "",
-            new ConfigDescription("Optional custom TURN relay for automatic fallback. Leave empty to use the project's managed TURN credentials (fetched at runtime); set your own coturn/TURN server here to override."));
+            new ConfigDescription("Optional custom TURN-over-UDP relay for automatic fallback (turn: URL, with no transport parameter or transport=udp). Leave empty to use the project's managed TURN credentials fetched at runtime."));
         TurnUsername = config.Bind("Voice Server", "TurnUsername",
             "",
             new ConfigDescription("Username for a custom TURN relay (only used when TurnServerUrl is set)."));

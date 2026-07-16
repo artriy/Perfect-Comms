@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -33,6 +33,10 @@ use crate::codec::{
 };
 
 const RTP_INGRESS_QUEUE_CAPACITY: usize = 512;
+const RTP_INGRESS_PER_PEER_CAPACITY: usize = 32;
+const RTP_EGRESS_QUEUE_CAPACITY: usize = 4;
+const RTP_EGRESS_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+const RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const ENCODER_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const ENCODER_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(6);
 
@@ -46,6 +50,198 @@ pub struct ReceivedPacket {
     pub payload: Vec<u8>,
 }
 
+#[derive(Default)]
+struct ReceiveQueueState {
+    queues: HashMap<String, VecDeque<ReceivedPacket>>,
+    ready: VecDeque<String>,
+    queued: usize,
+}
+
+/// Bounded round-robin RTP ingress. A burst from one peer can consume at most 32 slots and its
+/// oldest packet is discarded first, so it cannot starve every other talker in the shared decoder
+/// path. The consumer receives at most one packet per peer before that peer is scheduled again.
+struct SharedReceiveQueue {
+    state: Mutex<ReceiveQueueState>,
+    counters: Arc<MediaReceiveCounters>,
+}
+
+impl SharedReceiveQueue {
+    fn new(counters: Arc<MediaReceiveCounters>) -> Self {
+        Self {
+            state: Mutex::new(ReceiveQueueState::default()),
+            counters,
+        }
+    }
+
+    fn push(&self, packet: ReceivedPacket) {
+        let peer_id = packet.peer_id.clone();
+        let mut state = self.state.lock().unwrap();
+        let mut dropped = 0u64;
+
+        if state.queued >= RTP_INGRESS_QUEUE_CAPACITY {
+            // The game has fewer peers than the global/per-peer ratio in normal operation. Keep
+            // the global bound defensive as well: evict from the largest queue, not whichever
+            // peer happens to arrive next.
+            if let Some(victim) = state
+                .queues
+                .iter()
+                .max_by_key(|(_, queue)| queue.len())
+                .map(|(peer, _)| peer.clone())
+            {
+                let became_empty = state.queues.get_mut(&victim).is_some_and(|queue| {
+                    let removed = queue.pop_front().is_some();
+                    removed && queue.is_empty()
+                });
+                state.queued = state.queued.saturating_sub(1);
+                dropped += 1;
+                if became_empty {
+                    state.queues.remove(&victim);
+                    state.ready.retain(|peer| peer != &victim);
+                }
+            }
+        }
+
+        let was_empty;
+        let per_peer_depth;
+        let mut grew = false;
+        {
+            let queue = state.queues.entry(peer_id.clone()).or_default();
+            was_empty = queue.is_empty();
+            if queue.len() >= RTP_INGRESS_PER_PEER_CAPACITY {
+                queue.pop_front();
+                dropped += 1;
+            } else {
+                grew = true;
+            }
+            queue.push_back(packet);
+            per_peer_depth = queue.len();
+        }
+        if grew {
+            state.queued += 1;
+        }
+        if was_empty {
+            state.ready.push_back(peer_id);
+        }
+        let total_depth = state.queued;
+        drop(state);
+
+        for _ in 0..dropped {
+            self.counters.record_ingress_queue_overflow();
+        }
+        self.counters
+            .record_ingress_queue_depth(total_depth, per_peer_depth);
+    }
+
+    fn pop(&self) -> Option<ReceivedPacket> {
+        let mut state = self.state.lock().unwrap();
+        while let Some(peer_id) = state.ready.pop_front() {
+            let (packet, has_more) = match state.queues.get_mut(&peer_id) {
+                Some(queue) => (queue.pop_front(), !queue.is_empty()),
+                None => continue,
+            };
+            let Some(packet) = packet else {
+                state.queues.remove(&peer_id);
+                continue;
+            };
+            state.queued = state.queued.saturating_sub(1);
+            if has_more {
+                state.ready.push_back(peer_id);
+            } else {
+                state.queues.remove(&peer_id);
+            }
+            let total_depth = state.queued;
+            drop(state);
+            self.counters.record_ingress_queue_depth(total_depth, 0);
+            return Some(packet);
+        }
+        None
+    }
+
+    fn remove_peer(&self, peer_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(queue) = state.queues.remove(peer_id) {
+            state.queued = state.queued.saturating_sub(queue.len());
+        }
+        state.ready.retain(|peer| peer != peer_id);
+        let total_depth = state.queued;
+        drop(state);
+        self.counters.record_ingress_queue_depth(total_depth, 0);
+    }
+}
+
+#[derive(Default)]
+struct OutboundEpochState {
+    floor: u64,
+    in_flight: usize,
+}
+
+#[derive(Default)]
+struct SharedOutboundEpoch {
+    state: Mutex<OutboundEpochState>,
+    idle: Condvar,
+}
+
+impl SharedOutboundEpoch {
+    fn begin(self: &Arc<Self>, epoch: u64) -> Option<OutboundPermit> {
+        let mut state = self.state.lock().unwrap();
+        if epoch < state.floor {
+            return None;
+        }
+        state.in_flight += 1;
+        Some(OutboundPermit { gate: self.clone() })
+    }
+
+    fn advance_to(&self, epoch: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        state.floor = state.floor.max(epoch);
+        while state.in_flight != 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, wait) = self.idle.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if wait.timed_out() && state.in_flight != 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+struct OutboundPermit {
+    gate: Arc<SharedOutboundEpoch>,
+}
+
+impl Drop for OutboundPermit {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock().unwrap();
+        state.in_flight = state.in_flight.saturating_sub(1);
+        if state.in_flight == 0 {
+            self.gate.idle.notify_all();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct OutboundPacket {
+    payload: Bytes,
+    encoder_epoch: u64,
+    media_sequence: u64,
+}
+
+fn dropped_packets_between(previous: Option<u64>, current: u64) -> u16 {
+    let Some(previous) = previous else {
+        return 0;
+    };
+    let distance = current.wrapping_sub(previous);
+    if distance <= 1 {
+        return 0;
+    }
+    u16::try_from(distance - 1).unwrap_or(u16::MAX)
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PeerNetworkPathSnapshot {
     pub peer_id: String,
@@ -56,6 +252,8 @@ pub struct PeerNetworkPathSnapshot {
     pub remote_candidate_type: String,
     pub relay: bool,
     pub current_rtt_ms: f64,
+    /// False with the pinned webrtc-rs stats implementation, whose BWE fields are placeholders.
+    pub bandwidth_estimate_valid: bool,
     pub available_outgoing_bitrate: f64,
     pub available_incoming_bitrate: f64,
     pub remote_packets_received: u64,
@@ -136,21 +334,6 @@ impl SharedNetworkPathCache {
             .collect();
         snapshots.sort_unstable_by(|left, right| left.peer_id.cmp(&right.peer_id));
         snapshots
-    }
-}
-
-fn try_enqueue_received(
-    sender: &SyncSender<ReceivedPacket>,
-    counters: &MediaReceiveCounters,
-    packet: ReceivedPacket,
-) -> bool {
-    match sender.try_send(packet) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_)) => {
-            counters.record_ingress_queue_overflow();
-            true
-        }
-        Err(TrySendError::Disconnected(_)) => false,
     }
 }
 
@@ -321,9 +504,6 @@ fn active_nominated_candidate_pair(
 fn encoder_feedback_from_stats(
     report: &webrtc::stats::StatsReport,
 ) -> Option<(EncoderFeedback, u64, u64)> {
-    let available_outgoing_bitrate = active_nominated_candidate_pair(report)
-        .map(|pair| finite_nonnegative(pair.available_outgoing_bitrate))
-        .unwrap_or(0.0);
     report
         .reports
         .values()
@@ -345,7 +525,6 @@ fn encoder_feedback_from_stats(
                     } else {
                         0.0
                     },
-                    available_outgoing_bitrate,
                 },
                 remote.packets_received,
                 remote.round_trip_time_measurements,
@@ -388,8 +567,10 @@ fn network_path_from_stats(
         snapshot.relay = snapshot.local_candidate_type.eq_ignore_ascii_case("relay")
             || snapshot.remote_candidate_type.eq_ignore_ascii_case("relay");
         snapshot.current_rtt_ms = finite_nonnegative(pair.current_round_trip_time * 1000.0);
-        snapshot.available_outgoing_bitrate = finite_nonnegative(pair.available_outgoing_bitrate);
-        snapshot.available_incoming_bitrate = finite_nonnegative(pair.available_incoming_bitrate);
+        // webrtc-rs 0.11 leaves both available-bitrate fields at their zero defaults. Preserve
+        // the wire fields for backward-compatible diagnostics, but mark them unsupported and do
+        // not feed them into encoder policy.
+        snapshot.bandwidth_estimate_valid = false;
     }
 
     let mut remote_feedback_packets = 0u64;
@@ -438,6 +619,10 @@ pub struct NativeCounters {
     pub rtp_tx_attempts: AtomicU64,
     pub rtp_tx_ok: AtomicU64,
     pub rtp_tx_errors: AtomicU64,
+    pub rtp_tx_queue_dropped: AtomicU64,
+    pub rtp_tx_stale_epoch_dropped: AtomicU64,
+    pub rtp_tx_write_timeouts: AtomicU64,
+    pub rtp_tx_queue_depth_max: AtomicU64,
     pub rtp_rx_packets: AtomicU64,
     pub rtp_rx_bytes: AtomicU64,
     pub stale_rtp_rx_dropped: AtomicU64,
@@ -477,6 +662,21 @@ pub struct NativeCounters {
 }
 
 impl NativeCounters {
+    fn record_rtp_tx_queue_depth(&self, depth: usize) {
+        let mut current = self.rtp_tx_queue_depth_max.load(Ordering::Relaxed);
+        while depth as u64 > current {
+            match self.rtp_tx_queue_depth_max.compare_exchange_weak(
+                current,
+                depth as u64,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     pub fn record_game_state(
         &self,
         deaf: bool,
@@ -601,6 +801,10 @@ impl NativeCounters {
             rtp_tx_attempts: self.rtp_tx_attempts.load(Ordering::Relaxed),
             rtp_tx_ok: self.rtp_tx_ok.load(Ordering::Relaxed),
             rtp_tx_errors: self.rtp_tx_errors.load(Ordering::Relaxed),
+            rtp_tx_queue_dropped: self.rtp_tx_queue_dropped.load(Ordering::Relaxed),
+            rtp_tx_stale_epoch_dropped: self.rtp_tx_stale_epoch_dropped.load(Ordering::Relaxed),
+            rtp_tx_write_timeouts: self.rtp_tx_write_timeouts.load(Ordering::Relaxed),
+            rtp_tx_queue_depth_max: self.rtp_tx_queue_depth_max.load(Ordering::Relaxed),
             rtp_rx_packets: self.rtp_rx_packets.load(Ordering::Relaxed),
             rtp_rx_bytes: self.rtp_rx_bytes.load(Ordering::Relaxed),
             stale_rtp_rx_dropped: self.stale_rtp_rx_dropped.load(Ordering::Relaxed),
@@ -675,9 +879,33 @@ pub enum LocalSignal {
 
 struct PeerHandle {
     pc: Arc<RTCPeerConnection>,
-    track: Arc<TrackLocalStaticSample>,
+    outbound_tx: tokio::sync::mpsc::Sender<OutboundPacket>,
+    outbound_writer: tokio::task::JoinHandle<()>,
     generation: u32,
     min_encoder_epoch: u64,
+}
+
+async fn cancel_outbound_writer(
+    outbound_tx: tokio::sync::mpsc::Sender<OutboundPacket>,
+    outbound_writer: tokio::task::JoinHandle<()>,
+) {
+    // Closing an mpsc sender normally lets the receiver drain buffered packets. Removal is an
+    // authorization boundary, so abort the task as well and await cancellation before closing the
+    // peer connection. Dropping the task future also drops any active epoch permit immediately.
+    drop(outbound_tx);
+    outbound_writer.abort();
+    let _ = outbound_writer.await;
+}
+
+async fn close_peer_handle(handle: PeerHandle) {
+    let PeerHandle {
+        pc,
+        outbound_tx,
+        outbound_writer,
+        ..
+    } = handle;
+    cancel_outbound_writer(outbound_tx, outbound_writer).await;
+    let _ = pc.close().await;
 }
 
 #[derive(Clone, Copy)]
@@ -693,8 +921,9 @@ pub struct RtcEngine {
     peer_configs: Mutex<HashMap<String, PeerConfig>>,
     ice_servers: Mutex<Vec<RTCIceServer>>,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: SyncSender<ReceivedPacket>,
-    recv_rx: Mutex<Receiver<ReceivedPacket>>,
+    receive_queue: Arc<SharedReceiveQueue>,
+    outbound_epoch: Arc<SharedOutboundEpoch>,
+    outbound_media_sequence: Mutex<u64>,
     counters: Arc<NativeCounters>,
     media_receive: Arc<MediaReceiveCounters>,
     encoder_policy: Arc<SharedEncoderPolicy>,
@@ -738,9 +967,9 @@ struct CreatePeerArgs {
     relay_only: bool,
     generation: u32,
     out_local_signal: Sender<LocalSignal>,
-    recv_tx: SyncSender<ReceivedPacket>,
+    receive_queue: Arc<SharedReceiveQueue>,
+    outbound_epoch: Arc<SharedOutboundEpoch>,
     counters: Arc<NativeCounters>,
-    media_receive: Arc<MediaReceiveCounters>,
     encoder_policy: Arc<SharedEncoderPolicy>,
     network_paths: Arc<SharedNetworkPathCache>,
     min_encoder_epoch: u64,
@@ -754,9 +983,9 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
         relay_only,
         generation,
         out_local_signal,
-        recv_tx,
+        receive_queue,
+        outbound_epoch,
         counters,
-        media_receive,
         encoder_policy,
         network_paths,
         min_encoder_epoch,
@@ -784,6 +1013,60 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
     tokio::spawn(async move {
         let mut buf = vec![0u8; 1500];
         while rtp_sender.read(&mut buf).await.is_ok() {}
+    });
+
+    // Isolate each peer's potentially blocking WebRTC write behind a small bounded queue. A
+    // congested route can shed its own stale voice packets without delaying capture or every
+    // healthy peer. Epoch permits retain the synchronous privacy guarantee despite async writes.
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::channel::<OutboundPacket>(RTP_EGRESS_QUEUE_CAPACITY);
+    let writer_track = track.clone();
+    let writer_counters = counters.clone();
+    let writer_epoch = outbound_epoch.clone();
+    let outbound_writer = tokio::spawn(async move {
+        let mut last_packetized_media_sequence = None;
+        while let Some(packet) = outbound_rx.recv().await {
+            let Some(_permit) = writer_epoch.begin(packet.encoder_epoch) else {
+                writer_counters
+                    .rtp_tx_stale_epoch_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
+            // Track the shared capture timeline independently for every peer. Queue-full shedding
+            // can remove different Opus frames on different routes; telling TrackLocalStaticSample
+            // exactly how many frames were omitted advances both RTP sequence and timestamp so the
+            // receiver observes a real gap and can use FEC/PLC/DRED. Epoch-rejected packets remain
+            // uncommitted here, so the next authorized packet includes them in its gap.
+            let prev_dropped_packets =
+                dropped_packets_between(last_packetized_media_sequence, packet.media_sequence);
+            last_packetized_media_sequence = Some(packet.media_sequence);
+            let sample = Sample {
+                data: packet.payload,
+                duration: Duration::from_millis(20),
+                prev_dropped_packets,
+                ..Default::default()
+            };
+            match tokio::time::timeout(RTP_EGRESS_WRITE_TIMEOUT, writer_track.write_sample(&sample))
+                .await
+            {
+                Ok(Ok(())) => {
+                    writer_counters.rtp_tx_ok.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(Err(_)) => {
+                    writer_counters
+                        .rtp_tx_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    writer_counters
+                        .rtp_tx_write_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
+                    writer_counters
+                        .rtp_tx_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     });
 
     let cand_signal = out_local_signal.clone();
@@ -822,12 +1105,11 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
 
     let track_peer = peer_id.clone();
     let track_counters = counters.clone();
-    let track_media_receive = media_receive.clone();
+    let track_receive_queue = receive_queue.clone();
     pc.on_track(Box::new(move |track, _receiver, _transceiver| {
-        let tx = recv_tx.clone();
+        let queue = track_receive_queue.clone();
         let pid = track_peer.clone();
         let counters = track_counters.clone();
-        let media_receive = track_media_receive.clone();
         Box::pin(async move {
             tokio::spawn(async move {
                 while let Ok((pkt, _attr)) = track.read_rtp().await {
@@ -844,9 +1126,7 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
                             arrival: Instant::now(),
                             payload: pkt.payload.to_vec(),
                         };
-                        if !try_enqueue_received(&tx, &media_receive, received) {
-                            break;
-                        }
+                        queue.push(received);
                     }
                 }
             });
@@ -888,8 +1168,19 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
     });
 
     if offerer {
-        let offer = pc.create_offer(None).await?;
-        pc.set_local_description(offer).await?;
+        let offer = match pc.create_offer(None).await {
+            Ok(offer) => offer,
+            Err(error) => {
+                cancel_outbound_writer(outbound_tx, outbound_writer).await;
+                let _ = pc.close().await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = pc.set_local_description(offer).await {
+            cancel_outbound_writer(outbound_tx, outbound_writer).await;
+            let _ = pc.close().await;
+            return Err(error);
+        }
         if let Some(local) = pc.local_description().await {
             let _ = out_local_signal.send(LocalSignal::Sdp {
                 peer_id: peer_id.clone(),
@@ -902,25 +1193,45 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
 
     Ok(PeerHandle {
         pc,
-        track,
+        outbound_tx,
+        outbound_writer,
         generation,
         min_encoder_epoch,
     })
 }
 
-fn is_turn_url(url: &str) -> bool {
-    let trimmed = url.trim();
-    trimmed
+fn is_stun_url(url: &str) -> bool {
+    url.trim()
         .get(..5)
-        .is_some_and(|p| p.eq_ignore_ascii_case("turn:"))
-        || trimmed
-            .get(..6)
-            .is_some_and(|p| p.eq_ignore_ascii_case("turns:"))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("stun:"))
+}
+
+fn is_supported_udp_turn_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if !trimmed
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("turn:"))
+    {
+        return false;
+    }
+    let Some((_, query)) = trimmed.split_once('?') else {
+        return !trimmed.contains('#');
+    };
+    if query.is_empty() || query.contains(['&', '%', '#']) {
+        return false;
+    }
+    let Some((key, value)) = query.split_once('=') else {
+        return false;
+    };
+    !value.contains('=')
+        && key.eq_ignore_ascii_case("transport")
+        && value.eq_ignore_ascii_case("udp")
 }
 
 /// Direct attempts deliberately omit TURN URLs so healthy peers never allocate a relay.
-/// Relay retries receive only TURN URLs and use WebRTC's relay-only gather policy. Splitting
-/// mixed URL entries preserves the username/credential attached to the original ICE server.
+/// Relay retries receive only the UDP TURN URLs implemented by the pinned WebRTC stack. Keeping
+/// unsupported TCP/TLS URLs out of its configuration prevents a skipped URL from being mistaken
+/// for a real fallback. Splitting mixed entries preserves the original credentials.
 fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceServer> {
     servers
         .iter()
@@ -928,7 +1239,13 @@ fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceS
             let urls: Vec<String> = server
                 .urls
                 .iter()
-                .filter(|url| is_turn_url(url) == relay_only)
+                .filter(|url| {
+                    if relay_only {
+                        is_supported_udp_turn_url(url)
+                    } else {
+                        is_stun_url(url)
+                    }
+                })
                 .cloned()
                 .collect();
             if urls.is_empty() {
@@ -956,8 +1273,9 @@ impl RtcEngine {
             .enable_all()
             .build()
             .expect("rtc tokio runtime");
-        let (recv_tx, recv_rx) = std::sync::mpsc::sync_channel(RTP_INGRESS_QUEUE_CAPACITY);
         let media_receive = Arc::new(MediaReceiveCounters::default());
+        let receive_queue = Arc::new(SharedReceiveQueue::new(media_receive.clone()));
+        let outbound_epoch = Arc::new(SharedOutboundEpoch::default());
         let encoder_policy = Arc::new(SharedEncoderPolicy::default());
         let network_paths = Arc::new(SharedNetworkPathCache::default());
         let policy_worker = encoder_policy.clone();
@@ -983,8 +1301,9 @@ impl RtcEngine {
                 ..Default::default()
             }]),
             out_local_signal,
-            recv_tx,
-            recv_rx: Mutex::new(recv_rx),
+            receive_queue,
+            outbound_epoch,
+            outbound_media_sequence: Mutex::new(0),
             counters,
             media_receive,
             encoder_policy,
@@ -1045,6 +1364,7 @@ impl RtcEngine {
         };
         self.encoder_policy.register_peer(&peer_id, generation);
         self.network_paths.register_peer(&peer_id, generation);
+        self.receive_queue.remove_peer(&peer_id);
 
         let existing = self.peers.lock().unwrap().remove(&peer_id);
         if let Some(mut handle) = existing {
@@ -1057,10 +1377,9 @@ impl RtcEngine {
                 );
                 return;
             }
-            let _ = self.rt.block_on(async move { handle.pc.close().await });
+            self.rt.block_on(close_peer_handle(handle));
         }
         let signal = self.out_local_signal.clone();
-        let recv_tx = self.recv_tx.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
         let pid = peer_id.clone();
         match self.rt.block_on(create_peer(CreatePeerArgs {
@@ -1070,9 +1389,9 @@ impl RtcEngine {
             relay_only,
             generation,
             out_local_signal: signal,
-            recv_tx,
+            receive_queue: self.receive_queue.clone(),
+            outbound_epoch: self.outbound_epoch.clone(),
             counters: self.counters.clone(),
-            media_receive: self.media_receive.clone(),
             encoder_policy: self.encoder_policy.clone(),
             network_paths: self.network_paths.clone(),
             min_encoder_epoch: config.min_encoder_epoch,
@@ -1095,9 +1414,10 @@ impl RtcEngine {
         self.peer_configs.lock().unwrap().remove(peer_id);
         self.encoder_policy.remove_peer(peer_id, None);
         self.network_paths.remove_peer(peer_id, None);
+        self.receive_queue.remove_peer(peer_id);
         let handle = self.peers.lock().unwrap().remove(peer_id);
         if let Some(h) = handle {
-            let _ = self.rt.block_on(async move { h.pc.close().await });
+            self.rt.block_on(close_peer_handle(h));
         }
         eprintln!("pc-capture: rtc peer-remove peer={peer_id}");
     }
@@ -1126,7 +1446,6 @@ impl RtcEngine {
                     }
                 };
                 let signal = self.out_local_signal.clone();
-                let recv_tx = self.recv_tx.clone();
                 let servers = self.ice_servers.lock().unwrap().clone();
                 let pid = peer_id.to_string();
                 match self.rt.block_on(create_peer(CreatePeerArgs {
@@ -1136,9 +1455,9 @@ impl RtcEngine {
                     relay_only: config.relay_only,
                     generation: config.generation,
                     out_local_signal: signal,
-                    recv_tx,
+                    receive_queue: self.receive_queue.clone(),
+                    outbound_epoch: self.outbound_epoch.clone(),
                     counters: self.counters.clone(),
-                    media_receive: self.media_receive.clone(),
                     encoder_policy: self.encoder_policy.clone(),
                     network_paths: self.network_paths.clone(),
                     min_encoder_epoch: config.min_encoder_epoch,
@@ -1303,7 +1622,15 @@ impl RtcEngine {
     /// `packet_encoder_epoch`. A newly added track is invisible to any packet encoded before its
     /// reset boundary, closing the encode-before-peer-add race for DRED history.
     pub fn send_opus(&self, pkt: &[u8], packet_encoder_epoch: u64) {
-        let tracks: Vec<Arc<TrackLocalStaticSample>> = self
+        // One sequence belongs to the shared encoded frame, not to an individual peer. Per-peer
+        // writers compare this value with their last packetized frame to make route-local queue
+        // shedding visible as an RTP gap. Keep assignment and fan-out in one tiny critical section:
+        // current callers are single-writer, but this also prevents future concurrent callers from
+        // assigning N/N+1 and enqueueing them in reverse order. Wrapping is intentional.
+        let mut next_media_sequence = self.outbound_media_sequence.lock().unwrap();
+        let media_sequence = *next_media_sequence;
+        *next_media_sequence = next_media_sequence.wrapping_add(1);
+        let senders: Vec<tokio::sync::mpsc::Sender<OutboundPacket>> = self
             .peers
             .lock()
             .unwrap()
@@ -1311,41 +1638,49 @@ impl RtcEngine {
             .filter(|handle| {
                 encoder_epoch_authorizes_peer(packet_encoder_epoch, handle.min_encoder_epoch)
             })
-            .map(|h| Arc::clone(&h.track))
+            .map(|handle| handle.outbound_tx.clone())
             .collect();
-        if tracks.is_empty() {
+        if senders.is_empty() {
             return;
         }
         self.counters
             .rtp_tx_attempts
-            .fetch_add(tracks.len() as u64, Ordering::Relaxed);
-        let data = Bytes::copy_from_slice(pkt);
-        let (ok, errors) = self.rt.block_on(async move {
-            let mut ok = 0u64;
-            let mut errors = 0u64;
-            for t in tracks {
-                let sample = Sample {
-                    data: data.clone(),
-                    duration: Duration::from_millis(20),
-                    ..Default::default()
-                };
-                if t.write_sample(&sample).await.is_ok() {
-                    ok += 1;
-                } else {
-                    errors += 1;
+            .fetch_add(senders.len() as u64, Ordering::Relaxed);
+        let payload = Bytes::copy_from_slice(pkt);
+        for sender in senders {
+            let packet = OutboundPacket {
+                payload: payload.clone(),
+                encoder_epoch: packet_encoder_epoch,
+                media_sequence,
+            };
+            match sender.try_send(packet) {
+                Ok(()) => {
+                    let depth = sender.max_capacity().saturating_sub(sender.capacity());
+                    self.counters.record_rtp_tx_queue_depth(depth);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.counters
+                        .rtp_tx_queue_dropped
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.counters.rtp_tx_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            (ok, errors)
-        });
-        self.counters.rtp_tx_ok.fetch_add(ok, Ordering::Relaxed);
-        self.counters
-            .rtp_tx_errors
-            .fetch_add(errors, Ordering::Relaxed);
+        }
+        drop(next_media_sequence);
+    }
+
+    /// Raises the global privacy floor and waits for every already-started per-peer write to
+    /// finish. Queued packets from an older epoch are rejected by the writer before WebRTC sees
+    /// them. Returning false is fail-closed: callers must stop the media session.
+    pub fn advance_encoder_epoch(&self, epoch: u64) -> bool {
+        self.outbound_epoch
+            .advance_to(epoch, RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT)
     }
 
     pub fn recv(&self) -> Option<ReceivedPacket> {
-        let receiver = self.recv_rx.lock().unwrap();
-        while let Ok(packet) = receiver.try_recv() {
+        while let Some(packet) = self.receive_queue.pop() {
             let is_current = self
                 .peer_configs
                 .lock()
@@ -1368,6 +1703,10 @@ impl RtcEngine {
 
     pub fn media_receive_snapshot(&self) -> MediaReceiveSnapshot {
         self.media_receive.snapshot()
+    }
+
+    pub fn native_transport_snapshot(&self) -> crate::proto::NativeStatsSnapshot {
+        self.counters.snapshot(0, 0, 0)
     }
 
     pub fn encoder_policy_snapshot(&self) -> EncoderPolicySnapshot {
@@ -1403,24 +1742,29 @@ impl RtcEngine {
                 min_encoder_epoch: 0,
             },
         );
-        self.recv_tx
-            .send(ReceivedPacket {
-                peer_id: peer_id.to_string(),
-                generation,
-                sequence,
-                timestamp,
-                arrival,
-                payload,
-            })
-            .expect("test receive queue");
+        self.receive_queue.push(ReceivedPacket {
+            peer_id: peer_id.to_string(),
+            generation,
+            sequence,
+            timestamp,
+            arrival,
+            payload,
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use std::sync::mpsc::channel;
     use std::time::Instant;
+
+    #[derive(Deserialize)]
+    struct LiveTurnResponse {
+        #[serde(rename = "iceServers")]
+        ice_servers: Vec<crate::proto::IceServer>,
+    }
 
     #[test]
     fn native_counter_snapshot_distinguishes_routed_audio_from_silence() {
@@ -1492,6 +1836,13 @@ mod tests {
                 urls: vec![
                     "stun:stun.example.com:3478".to_string(),
                     "turn:turn.example.com:3478?transport=udp".to_string(),
+                    "turn:turn.example.com:3478?foo=bar".to_string(),
+                    "turn:turn.example.com:3478?transport=udp&transport=udp".to_string(),
+                    "turn:turn.example.com:3478?transport=udp&transport=tcp".to_string(),
+                    "turn:turn.example.com:3478?transport".to_string(),
+                    "turn:turn.example.com:80?trans%70ort=tcp".to_string(),
+                    "turn:turn.example.com:3478#fragment".to_string(),
+                    "turn:turn.example.com:80?transport=tcp".to_string(),
                     "turns:turn.example.com:5349?transport=tcp".to_string(),
                 ],
                 username: "user".to_string(),
@@ -1509,11 +1860,15 @@ mod tests {
         assert_eq!(direct[0].urls, vec!["stun:stun.example.com:3478"]);
         assert_eq!(direct[1].urls, vec!["STUN:backup.example.com:3478"]);
 
-        let relay = servers_for_policy(&mixed, true);
-        assert_eq!(relay.len(), 1);
-        assert_eq!(relay[0].urls.len(), 2);
-        assert_eq!(relay[0].username, "user");
-        assert_eq!(relay[0].credential, "secret");
+        let udp = servers_for_policy(&mixed, true);
+        assert_eq!(udp.len(), 1);
+        assert_eq!(
+            udp[0].urls,
+            vec!["turn:turn.example.com:3478?transport=udp"]
+        );
+
+        assert_eq!(udp[0].username, "user");
+        assert_eq!(udp[0].credential, "secret");
     }
 
     #[test]
@@ -1549,28 +1904,22 @@ mod tests {
                 min_encoder_epoch: 0,
             },
         );
-        engine
-            .recv_tx
-            .send(ReceivedPacket {
-                peer_id: "peer".to_string(),
-                generation: 41,
-                sequence: 1,
-                timestamp: 960,
-                arrival: Instant::now(),
-                payload: vec![1],
-            })
-            .unwrap();
-        engine
-            .recv_tx
-            .send(ReceivedPacket {
-                peer_id: "peer".to_string(),
-                generation: 42,
-                sequence: 2,
-                timestamp: 1_920,
-                arrival: Instant::now(),
-                payload: vec![2],
-            })
-            .unwrap();
+        engine.receive_queue.push(ReceivedPacket {
+            peer_id: "peer".to_string(),
+            generation: 41,
+            sequence: 1,
+            timestamp: 960,
+            arrival: Instant::now(),
+            payload: vec![1],
+        });
+        engine.receive_queue.push(ReceivedPacket {
+            peer_id: "peer".to_string(),
+            generation: 42,
+            sequence: 2,
+            timestamp: 1_920,
+            arrival: Instant::now(),
+            payload: vec![2],
+        });
 
         let packet = engine.recv().expect("current generation packet");
         assert_eq!(packet.peer_id, "peer");
@@ -1582,24 +1931,127 @@ mod tests {
     }
 
     #[test]
-    fn ingress_queue_is_bounded_and_reports_backpressure() {
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(RTP_INGRESS_QUEUE_CAPACITY);
-        let counters = MediaReceiveCounters::default();
-        for sequence in 0..RTP_INGRESS_QUEUE_CAPACITY + 7 {
-            assert!(try_enqueue_received(
-                &sender,
-                &counters,
-                ReceivedPacket {
-                    peer_id: "peer".to_string(),
-                    generation: 1,
-                    sequence: sequence as u16,
-                    timestamp: sequence as u32 * crate::codec::RTP_FRAME_TICKS,
-                    arrival: Instant::now(),
-                    payload: vec![1],
-                }
-            ));
+    fn ingress_queue_is_bounded_per_peer_and_keeps_the_fresh_tail() {
+        let counters = Arc::new(MediaReceiveCounters::default());
+        let queue = SharedReceiveQueue::new(counters.clone());
+        for sequence in 0..RTP_INGRESS_PER_PEER_CAPACITY + 7 {
+            queue.push(ReceivedPacket {
+                peer_id: "peer".to_string(),
+                generation: 1,
+                sequence: sequence as u16,
+                timestamp: sequence as u32 * crate::codec::RTP_FRAME_TICKS,
+                arrival: Instant::now(),
+                payload: vec![1],
+            });
         }
-        assert_eq!(counters.snapshot().ingress_queue_overflow, 7);
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.ingress_queue_overflow, 7);
+        assert_eq!(snapshot.ingress_queue_depth_current, 32);
+        assert_eq!(snapshot.ingress_peer_queue_depth_max, 32);
+        assert_eq!(queue.pop().unwrap().sequence, 7);
+    }
+
+    #[test]
+    fn ingress_queue_round_robins_talkers_instead_of_draining_one_burst_first() {
+        let counters = Arc::new(MediaReceiveCounters::default());
+        let queue = SharedReceiveQueue::new(counters);
+        let packet = |peer: &str, sequence: u16| ReceivedPacket {
+            peer_id: peer.to_string(),
+            generation: 1,
+            sequence,
+            timestamp: u32::from(sequence) * crate::codec::RTP_FRAME_TICKS,
+            arrival: Instant::now(),
+            payload: vec![1],
+        };
+        queue.push(packet("noisy", 1));
+        queue.push(packet("noisy", 2));
+        queue.push(packet("noisy", 3));
+        queue.push(packet("quiet", 10));
+
+        assert_eq!(queue.pop().unwrap().peer_id, "noisy");
+        assert_eq!(queue.pop().unwrap().peer_id, "quiet");
+        assert_eq!(queue.pop().unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn outbound_epoch_gate_waits_for_in_flight_writes_and_rejects_stale_packets() {
+        let gate = Arc::new(SharedOutboundEpoch::default());
+        let permit = gate.begin(4).expect("initial epoch accepted");
+        let advancing = gate.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(advancing.advance_to(5, Duration::from_secs(1)))
+                .unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(permit);
+        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        worker.join().unwrap();
+        assert!(gate.begin(4).is_none());
+        assert!(gate.begin(5).is_some());
+    }
+
+    #[test]
+    fn outbound_media_sequence_reports_healthy_one_and_multiple_frame_gaps() {
+        assert_eq!(dropped_packets_between(None, 41), 0);
+        assert_eq!(dropped_packets_between(Some(41), 42), 0);
+        assert_eq!(dropped_packets_between(Some(41), 43), 1);
+        assert_eq!(dropped_packets_between(Some(41), 46), 4);
+    }
+
+    #[test]
+    fn outbound_media_sequence_wraps_saturates_and_leaves_epoch_rejections_uncommitted() {
+        // From MAX-1 to 1, MAX and 0 were omitted across the u64 wrap.
+        assert_eq!(dropped_packets_between(Some(u64::MAX - 1), 1), 2);
+        assert_eq!(
+            dropped_packets_between(Some(0), u64::from(u16::MAX) + 2),
+            u16::MAX,
+            "Sample can represent at most u16::MAX preceding packet drops"
+        );
+
+        // Sequence 8 was rejected by the epoch gate, so the writer retains 7 as its last
+        // packetized value and reports that omitted frame when sequence 9 is authorized.
+        assert_eq!(dropped_packets_between(Some(7), 9), 1);
+    }
+
+    #[test]
+    fn cancelling_outbound_writer_discards_buffered_frames_before_returning() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let processed = Arc::new(AtomicU64::new(0));
+        let observed = processed.clone();
+
+        runtime.block_on(async move {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::channel::<OutboundPacket>(RTP_EGRESS_QUEUE_CAPACITY);
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let writer = tokio::spawn(async move {
+                if rx.recv().await.is_some() {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    let _ = started_tx.send(());
+                    std::future::pending::<()>().await;
+                }
+            });
+            let packet = |media_sequence| OutboundPacket {
+                payload: Bytes::from_static(b"opus"),
+                encoder_epoch: 1,
+                media_sequence,
+            };
+            tx.try_send(packet(1)).unwrap();
+            tx.try_send(packet(2)).unwrap();
+            started_rx.await.unwrap();
+
+            cancel_outbound_writer(tx, writer).await;
+        });
+
+        assert_eq!(
+            processed.load(Ordering::Relaxed),
+            1,
+            "the buffered second frame must not drain after removal"
+        );
     }
 
     #[test]
@@ -1697,7 +2149,6 @@ mod tests {
             6,
             EncoderFeedback {
                 fraction_lost: 0.30,
-                available_outgoing_bitrate: 40_000.0,
             },
             100,
             1,
@@ -1715,7 +2166,6 @@ mod tests {
             7,
             EncoderFeedback {
                 fraction_lost: 0.30,
-                available_outgoing_bitrate: 40_000.0,
             },
             100,
             1,
@@ -1724,7 +2174,7 @@ mod tests {
         policy.evaluate(start);
         let degraded = policy.snapshot();
         assert_eq!(degraded.packet_loss_percent, 30);
-        assert_eq!(degraded.bitrate, 24_000);
+        assert_eq!(degraded.bitrate, 36_000);
 
         // Once RTCP stops advancing, five stale windows recover to the safe baseline.
         for window in 0..5 {
@@ -1832,5 +2282,95 @@ mod tests {
         assert!(!path.local_candidate_type.is_empty());
         assert!(!path.remote_candidate_type.is_empty());
         assert!(path.current_rtt_ms >= 0.0);
+    }
+
+    /// Opt-in release lab: obtains short-lived credentials outside the test process, then proves
+    /// that two relay-only engines exchange media over the exact TURN-over-UDP path used in game.
+    /// Keeping the credential JSON in an environment variable avoids committing or printing it.
+    #[test]
+    #[ignore = "requires PERFECTCOMMS_LIVE_TURN_JSON and internet access"]
+    fn live_turn_udp_two_engines_exchange_opus_bidirectionally() {
+        let json = std::env::var("PERFECTCOMMS_LIVE_TURN_JSON")
+            .expect("set PERFECTCOMMS_LIVE_TURN_JSON to the credential response");
+        let response: LiveTurnResponse =
+            serde_json::from_str(&json).expect("credential response must contain iceServers");
+        assert!(
+            response
+                .ice_servers
+                .iter()
+                .flat_map(|server| server.urls.iter())
+                .any(|url| is_supported_udp_turn_url(url)),
+            "credential response contained no supported TURN-over-UDP URL"
+        );
+
+        let (a_tx, a_rx) = channel::<LocalSignal>();
+        let (b_tx, b_rx) = channel::<LocalSignal>();
+        let a = RtcEngine::new(a_tx);
+        let b = RtcEngine::new(b_tx);
+        a.set_ice_servers(&response.ice_servers);
+        b.set_ice_servers(&response.ice_servers);
+        a.add_peer("B".to_string(), true, true, 71, 0);
+        b.add_peer("A".to_string(), false, true, 72, 0);
+
+        let payload_a: Vec<u8> = (0..96u8).map(|value| value ^ 0xa5).collect();
+        let payload_b: Vec<u8> = (0..96u8).map(|value| value ^ 0x5a).collect();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut received_at_a = false;
+        let mut received_at_b = false;
+        let mut connected_a = false;
+        let mut connected_b = false;
+
+        while Instant::now() < deadline {
+            while let Ok(signal) = a_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        b.set_remote_sdp("A", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        b.add_ice_candidate("A", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => connected_a |= state == "connected",
+                }
+            }
+            while let Ok(signal) = b_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        a.set_remote_sdp("B", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        a.add_ice_candidate("B", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => connected_b |= state == "connected",
+                }
+            }
+
+            a.send_opus(&payload_a, 0);
+            b.send_opus(&payload_b, 0);
+            while let Some(packet) = a.recv() {
+                received_at_a |= packet.payload == payload_b;
+            }
+            while let Some(packet) = b.recv() {
+                received_at_b |= packet.payload == payload_a;
+            }
+
+            let relay_a = a
+                .network_path_snapshots()
+                .iter()
+                .any(|path| path.peer_id == "B" && path.relay);
+            let relay_b = b
+                .network_path_snapshots()
+                .iter()
+                .any(|path| path.peer_id == "A" && path.relay);
+            if connected_a && connected_b && received_at_a && received_at_b && relay_a && relay_b {
+                a.remove_peer("B");
+                b.remove_peer("A");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        panic!(
+            "TURN/UDP relay did not complete bidirectional media: connected_a={connected_a} connected_b={connected_b} received_at_a={received_at_a} received_at_b={received_at_b}"
+        );
     }
 }

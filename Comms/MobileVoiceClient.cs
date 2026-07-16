@@ -54,7 +54,10 @@ internal sealed class MobileVoiceClient : IDisposable
         PlaybackFrame * 16,
         channels: 2,
         fadeFrames: 48,
-        targetLatencySamples: PlaybackFrame * 4); // 320ms hard bound, newest ~80ms retained
+        targetLatencySamples: PlaybackFrame * 4,
+        primeLatencySamples: PlaybackFrame * 4,
+        maximumLatencySamples: PlaybackFrame * 8,
+        enableClockDriftCorrection: true); // 80ms target/prime, 160ms recovery bound, 320ms capacity
     private readonly float[] _pumpBuf = new float[PlaybackFrame];
     private long _pumpLateCycles;
     private long _nativeEmptyPulls;
@@ -86,6 +89,9 @@ internal sealed class MobileVoiceClient : IDisposable
     internal long PlaybackDroppedSamples => _playbackRing.DroppedSamples;
     internal long PlaybackZeroFilledSamples => _playbackRing.ZeroFilledSamples;
     internal long PlaybackSkippedSamples => _playbackRing.SkippedSamples;
+    internal long PlaybackPrimingZeroFilledSamples => _playbackRing.PrimingZeroFilledSamples;
+    internal long PlaybackClockCorrectionSamples => _playbackRing.ClockCorrectionSamples;
+    internal long PlaybackClockCorrectionCallbacks => _playbackRing.ClockCorrectionCallbacks;
     internal long PlaybackPumpLateCycles => Interlocked.Read(ref _pumpLateCycles);
     internal long PlaybackNativeEmptyPulls => Interlocked.Read(ref _nativeEmptyPulls);
 
@@ -112,6 +118,10 @@ internal sealed class MobileVoiceClient : IDisposable
 
             Interlocked.Exchange(ref _h, handle);
             Volatile.Write(ref _faulted, 0);
+            // Clear only before either worker (and before AndroidSpeaker) can access the ring.
+            // Dispose intentionally does not reset SPSC cursors while a final audio callback may
+            // still be unwinding on Unity's realtime thread.
+            _playbackRing.Clear();
             _running = true;
             var now = Environment.TickCount64;
             Volatile.Write(ref _pollHeartbeatMs, now);
@@ -153,17 +163,17 @@ internal sealed class MobileVoiceClient : IDisposable
         }
     }
 
-    public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
     {
         // Serialize receiver-set expansion with mic pushes. This ensures an in-flight native push
         // finishes before AddPeer resets encoder/DRED history; native enforces the same boundary
         // for direct/concurrent FFI callers.
         lock (_micLock)
-            Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
+            return Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
     }
-    public void RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
-    public void SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
-    public void AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
+    public bool RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
+    public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
+    public bool AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
     public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
     public void SetDsp(bool aec, bool agc, bool ns, bool hpf) => Control(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
     public void SetDiagnostics(bool enabled)
@@ -385,6 +395,7 @@ internal sealed class MobileVoiceClient : IDisposable
         double maxRttMs = 0;
         double maxRemoteLoss = 0;
         double minimumOutgoingBitrate = 0;
+        bool bandwidthEstimateValid = false;
         var pathClasses = new StringBuilder(128);
         if (root.TryGetProperty("network_paths", out var paths)
             && paths.ValueKind == JsonValueKind.Array)
@@ -395,9 +406,13 @@ internal sealed class MobileVoiceClient : IDisposable
                 if (ReadBool(path, "relay")) relayPaths++;
                 maxRttMs = Math.Max(maxRttMs, ReadFiniteDouble(path, "current_rtt_ms"));
                 maxRemoteLoss = Math.Max(maxRemoteLoss, ReadFiniteDouble(path, "remote_fraction_lost"));
-                var outgoing = ReadFiniteDouble(path, "available_outgoing_bitrate");
-                if (outgoing > 0 && (minimumOutgoingBitrate <= 0 || outgoing < minimumOutgoingBitrate))
-                    minimumOutgoingBitrate = outgoing;
+                if (ReadBool(path, "bandwidth_estimate_valid"))
+                {
+                    bandwidthEstimateValid = true;
+                    var outgoing = ReadFiniteDouble(path, "available_outgoing_bitrate");
+                    if (outgoing > 0 && (minimumOutgoingBitrate <= 0 || outgoing < minimumOutgoingBitrate))
+                        minimumOutgoingBitrate = outgoing;
+                }
                 if (pathCount <= 16)
                 {
                     if (pathClasses.Length > 0) pathClasses.Append(',');
@@ -413,14 +428,15 @@ internal sealed class MobileVoiceClient : IDisposable
         }
 
         VoiceDiagnostics.Log("voice.mobile.native",
-            $"activePeers={ReadUInt64(receive, "active_peers")} ingressOverflow={ReadUInt64(receive, "ingress_queue_overflow")} " +
+            $"activePeers={ReadUInt64(receive, "active_peers")} ingressOverflow={ReadUInt64(receive, "ingress_queue_overflow")} ingressDepth={ReadUInt64(receive, "ingress_queue_depth_current")} ingressDepthMax={ReadUInt64(receive, "ingress_queue_depth_max")} ingressPeerDepthMax={ReadUInt64(receive, "ingress_peer_queue_depth_max")} " +
             $"sequenceGaps={ReadUInt64(receive, "sequence_gaps")} reorderedRecovered={ReadUInt64(receive, "reordered_recovered")} " +
             $"lateDrops={ReadUInt64(receive, "late_drops")} duplicateDrops={ReadUInt64(receive, "duplicate_drops")} encodedOverflowDrops={ReadUInt64(receive, "encoded_overflow_drops")} " +
             $"deadlineLosses={ReadUInt64(receive, "deadline_losses")} dredFrames={ReadUInt64(receive, "dred_frames")} fecFrames={ReadUInt64(receive, "fec_frames")} plcFrames={ReadUInt64(receive, "plc_frames")} " +
             $"decoderResets={ReadUInt64(receive, "decoder_resets")} talkspurtResets={ReadUInt64(receive, "talkspurt_resets")} underruns={ReadUInt64(receive, "underruns")} rebuffers={ReadUInt64(receive, "rebuffers")} " +
             $"targetFrames={ReadUInt64(receive, "target_frames_current_max")} depthFrames={ReadUInt64(receive, "depth_frames_current")} jitterMsMax={ReadFiniteDouble(receive, "rtp_jitter_ms_max"):0.0} " +
             $"encoderLossPercent={ReadUInt64(root, "encoder_packet_loss_percent")} encoderBitrate={ReadUInt64(root, "encoder_bitrate")} encoderGeneration={ReadUInt64(root, "encoder_policy_generation")} " +
-            $"paths={pathCount} relayPaths={relayPaths} maxRttMs={maxRttMs:0.0} maxRemoteLoss={maxRemoteLoss:0.000} minOutgoingBitrate={minimumOutgoingBitrate:0} pathClasses=\"{pathClasses}\"");
+            $"rtpTxQueueDropped={ReadUInt64(root, "rtp_tx_queue_dropped")} rtpTxStaleEpochDropped={ReadUInt64(root, "rtp_tx_stale_epoch_dropped")} rtpTxWriteTimeouts={ReadUInt64(root, "rtp_tx_write_timeouts")} rtpTxQueueDepthMax={ReadUInt64(root, "rtp_tx_queue_depth_max")} " +
+            $"paths={pathCount} relayPaths={relayPaths} maxRttMs={maxRttMs:0.0} maxRemoteLoss={maxRemoteLoss:0.000} bandwidthEstimateValid={bandwidthEstimateValid.ToString().ToLowerInvariant()} minOutgoingBitrate={minimumOutgoingBitrate:0} pathClasses=\"{pathClasses}\"");
     }
 
     private static ulong ReadUInt64(JsonElement parent, string property)
@@ -462,7 +478,6 @@ internal sealed class MobileVoiceClient : IDisposable
         _running = false;
         Volatile.Write(ref _micActive, 0);
         ResetMicInput();
-        _playbackRing.Clear();
         var handle = Interlocked.Exchange(ref _h, IntPtr.Zero);
         var hadRuntime = handle != IntPtr.Zero || _pollThread != null || _pumpThread != null;
         ShutdownDetachedHandle(handle, "dispose");

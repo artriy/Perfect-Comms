@@ -147,7 +147,7 @@ internal static class AmongUsRpcSignaling
 
     internal static bool DeferHello(int senderClientId, uint senderNetId, byte[] payload, string reason)
     {
-        if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible)
+        if (!SignalPayload.TryReadHello(payload, out var version, out var minCompatible, out _)
             || !PeerSessionManager.IsCompatible(version, minCompatible)
             || !TryGetCurrentScope(out var scope))
             return false;
@@ -298,8 +298,8 @@ internal static class AmongUsRpcSignaling
         switch (type)
         {
             case SignalMsgType.Hello:
-                return SignalPayload.TryReadHello(payload, out var version, out var minCompatible)
-                    ? $"protocol={version} minCompatible={minCompatible}"
+                return SignalPayload.TryReadHello(payload, out var version, out var minCompatible, out var sessionId)
+                    ? $"protocol={version} minCompatible={minCompatible} session={sessionId}"
                     : "metadata=unparseable";
             case SignalMsgType.Offer:
             case SignalMsgType.Answer:
@@ -311,12 +311,16 @@ internal static class AmongUsRpcSignaling
                     ? $"negotiation={candidateNegotiationId} candidateBytes={Encoding.UTF8.GetByteCount(candidate)}"
                     : "metadata=unparseable";
             case SignalMsgType.IceMode:
+                if (SignalPayload.TryReadIceMode(payload, out var iceSession, out var iceNegotiation, out var scopedRelayOnly))
+                    return $"session={iceSession} negotiation={iceNegotiation} relayOnly={scopedRelayOnly.ToString().ToLowerInvariant()}";
                 return SignalPayload.TryReadIceMode(payload, out var relayOnly)
-                    ? $"relayOnly={relayOnly.ToString().ToLowerInvariant()}"
+                    ? $"relayOnly={relayOnly.ToString().ToLowerInvariant()} legacy=true"
                     : "metadata=unparseable";
             case SignalMsgType.Bye:
             case SignalMsgType.Restart:
-                return payload.Length == 0 ? "metadata=empty" : "metadata=unexpected-payload";
+                if (SignalPayload.TryReadControl(payload, out var controlSession, out var controlNegotiation))
+                    return $"session={controlSession} negotiation={controlNegotiation}";
+                return payload.Length == 0 ? "metadata=empty legacy=true" : "metadata=unexpected-payload";
             default:
                 return "metadata=unknown-type";
         }

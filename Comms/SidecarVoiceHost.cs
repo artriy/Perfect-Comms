@@ -55,10 +55,10 @@ internal interface ISidecarVoiceClient : IDisposable
     void SelectMicDevice(string deviceId);
     void SelectOutputDevice(string deviceId);
     void SendOutputTestFrame(float[] interleavedStereo);
-    void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation);
-    void RemovePeer(string peerId);
-    void SetRemoteSdp(string peerId, string sdpType, string sdp);
-    void AddIceCandidate(string peerId, string candidate);
+    bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation);
+    bool RemovePeer(string peerId);
+    bool SetRemoteSdp(string peerId, string sdpType, string sdp);
+    bool AddIceCandidate(string peerId, string candidate);
     void SetIceServers(IEnumerable<IceServer> servers);
     void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers);
 }
@@ -218,22 +218,24 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client => client.SelectOutputDevice(deviceId));
     public void SendOutputTestFrame(float[] interleavedStereo)
         => _host.Use(this, client => client.SendOutputTestFrame(interleavedStereo));
-    public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
         => _host.Use(this, client =>
         {
+            if (!client.AddPeer(peerId, isOfferer, relayOnly, generation)) return false;
             TrackPeer(peerId);
-            client.AddPeer(peerId, isOfferer, relayOnly, generation);
-        });
-    public void RemovePeer(string peerId)
+            return true;
+        }, false);
+    public bool RemovePeer(string peerId)
         => _host.Use(this, client =>
         {
-            client.RemovePeer(peerId);
-            UntrackPeer(peerId);
-        });
-    public void SetRemoteSdp(string peerId, string sdpType, string sdp)
-        => _host.Use(this, client => client.SetRemoteSdp(peerId, sdpType, sdp));
-    public void AddIceCandidate(string peerId, string candidate)
-        => _host.Use(this, client => client.AddIceCandidate(peerId, candidate));
+            var written = client.RemovePeer(peerId);
+            if (written) UntrackPeer(peerId);
+            return written;
+        }, false);
+    public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
+        => _host.Use(this, client => client.SetRemoteSdp(peerId, sdpType, sdp), false);
+    public bool AddIceCandidate(string peerId, string candidate)
+        => _host.Use(this, client => client.AddIceCandidate(peerId, candidate), false);
     public void SetIceServers(IEnumerable<IceServer> servers)
         => _host.Use(this, client => client.SetIceServers(servers));
     public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)

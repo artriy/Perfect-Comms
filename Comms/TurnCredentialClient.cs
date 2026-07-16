@@ -78,8 +78,8 @@ internal static class TurnCredentialClient
             throw new InvalidDataException("TURN credential response was too large");
         var json = await ReadBoundedUtf8Async(response.Content, cancellationToken).ConfigureAwait(false);
         var servers = ParseIceServers(json);
-        if (!ContainsTurnServer(servers))
-            throw new InvalidDataException("TURN credential response contained no TURN URLs");
+        if (!ContainsSupportedTurnServer(servers))
+            throw new InvalidDataException("TURN credential response contained no supported TURN-over-UDP URLs");
 
         var ttl = ParseCredentialTtl(json);
         var fetchedAt = DateTime.UtcNow;
@@ -195,17 +195,8 @@ internal static class TurnCredentialClient
         result.Add(new IceServer(url, isTurn ? username : string.Empty, isTurn ? credential : string.Empty));
     }
 
-    private static bool ContainsTurnServer(IEnumerable<IceServer> servers)
-    {
-        foreach (var server in servers)
-        {
-            var url = server.Urls?.Trim();
-            if (url != null && (url.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) ||
-                                url.StartsWith("turns:", StringComparison.OrdinalIgnoreCase)))
-                return true;
-        }
-        return false;
-    }
+    private static bool ContainsSupportedTurnServer(IEnumerable<IceServer> servers)
+        => servers.Any(server => PerfectCommsVoiceBackend.IsSupportedUdpTurnUrl(server.Urls));
 
     private static bool HasIceEndpoint(string url)
     {

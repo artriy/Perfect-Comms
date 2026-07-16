@@ -15,25 +15,39 @@ internal sealed class SpscFloatRing
     private readonly float[] _lastByChannel;
     private readonly float[] _fadeFromByChannel;
     private readonly float[] _resumeFromByChannel;
+    private readonly float[] _readScratch;
     private readonly int _channels;
     private readonly int _fadeFrames;
     private readonly int _targetLatencySamples;
+    private readonly int _primeLatencySamples;
+    private readonly int _maximumLatencySamples;
+    private readonly int _driftHysteresisSamples;
+    private readonly int _schedulerStallThresholdSamples;
+    private readonly bool _enableClockDriftCorrection;
     private long _readPosition;
     private long _writePosition;
     private long _droppedSamples;
     private long _zeroFilledSamples;
     private long _highWaterSamples;
     private long _skippedSamples;
+    private long _primingZeroFilledSamples;
+    private long _clockCorrectionSamples;
+    private long _clockCorrectionCallbacks;
     private long _lastObservedDroppedSamples;
     private int _underrunFadeFrame;
     private int _recoveryFadeFrame;
     private bool _starved;
+    private bool _primed;
+    private bool _schedulerStallArmed;
 
     public SpscFloatRing(
         int capacitySamples,
         int channels = 1,
         int fadeFrames = 0,
-        int targetLatencySamples = 0)
+        int targetLatencySamples = 0,
+        int primeLatencySamples = 0,
+        int maximumLatencySamples = 0,
+        bool enableClockDriftCorrection = false)
     {
         if (capacitySamples <= 0) throw new ArgumentOutOfRangeException(nameof(capacitySamples));
         if (channels <= 0) throw new ArgumentOutOfRangeException(nameof(channels));
@@ -43,15 +57,56 @@ internal sealed class SpscFloatRing
             throw new ArgumentOutOfRangeException(
                 nameof(targetLatencySamples),
                 "Target latency must be channel-aligned and within the ring capacity.");
+        if (primeLatencySamples < 0 || primeLatencySamples > capacitySamples || primeLatencySamples % channels != 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(primeLatencySamples),
+                "Prime latency must be channel-aligned and within the ring capacity.");
+        if (maximumLatencySamples < 0 || maximumLatencySamples > capacitySamples || maximumLatencySamples % channels != 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumLatencySamples),
+                "Maximum latency must be channel-aligned and within the ring capacity.");
+        if (enableClockDriftCorrection && targetLatencySamples == 0)
+            throw new ArgumentException(
+                "Clock-drift correction requires a non-zero target latency.",
+                nameof(targetLatencySamples));
+
+        var effectiveMaximum = maximumLatencySamples > 0
+            ? maximumLatencySamples
+            : targetLatencySamples;
+        if (effectiveMaximum > 0 && effectiveMaximum < targetLatencySamples)
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumLatencySamples),
+                "Maximum latency cannot be below the target latency.");
+        if (effectiveMaximum > 0 && primeLatencySamples > effectiveMaximum)
+            throw new ArgumentOutOfRangeException(
+                nameof(primeLatencySamples),
+                "Prime latency cannot exceed the maximum latency.");
 
         _samples = new float[capacitySamples];
+        _readScratch = new float[capacitySamples];
         _channels = channels;
         _fadeFrames = Math.Max(0, fadeFrames);
         _targetLatencySamples = targetLatencySamples;
+        _primeLatencySamples = primeLatencySamples;
+        _maximumLatencySamples = effectiveMaximum;
+        _enableClockDriftCorrection = enableClockDriftCorrection;
+        _driftHysteresisSamples = targetLatencySamples == 0
+            ? 0
+            : AlignToChannels(Math.Max(channels, targetLatencySamples / 8), channels);
+        // Clock drift is gradual, while a missed Unity callback creates a one-frame depth jump.
+        // Arm recovery at a narrow target-plus-25% threshold and require the excess to survive
+        // one callback before discarding it. This preserves the inaudible 0.5% drift correction
+        // for transient phase jitter without letting a real callback stall linger for seconds.
+        _schedulerStallThresholdSamples = targetLatencySamples > 0 && effectiveMaximum > targetLatencySamples
+            ? Math.Min(
+                effectiveMaximum,
+                targetLatencySamples + Math.Max(channels, _driftHysteresisSamples * 2))
+            : effectiveMaximum;
         _lastByChannel = new float[channels];
         _fadeFromByChannel = new float[channels];
         _resumeFromByChannel = new float[channels];
         _recoveryFadeFrame = _fadeFrames;
+        _primed = primeLatencySamples == 0;
     }
 
     public int CapacitySamples => _samples.Length;
@@ -59,6 +114,14 @@ internal sealed class SpscFloatRing
     public long ZeroFilledSamples => Interlocked.Read(ref _zeroFilledSamples);
     public long HighWaterSamples => Interlocked.Read(ref _highWaterSamples);
     public long SkippedSamples => Interlocked.Read(ref _skippedSamples);
+    public long PrimingZeroFilledSamples => Interlocked.Read(ref _primingZeroFilledSamples);
+    /// <summary>
+    /// Signed extra input samples consumed by bounded clock correction. Positive values mean
+    /// catch-up; negative values mean the consumer stretched audio to rebuild its target depth.
+    /// </summary>
+    public long ClockCorrectionSamples => Interlocked.Read(ref _clockCorrectionSamples);
+    public long ClockCorrectionCallbacks => Interlocked.Read(ref _clockCorrectionCallbacks);
+    public bool IsPrimed => Volatile.Read(ref _primed);
 
     public int DepthSamples
     {
@@ -117,55 +180,90 @@ internal sealed class SpscFloatRing
                 Interlocked.Add(ref _skippedSamples, available);
                 available = 0;
             }
+            Volatile.Write(ref _primed, _primeLatencySamples == 0);
+            _schedulerStallArmed = false;
         }
-        else if (_targetLatencySamples > 0 && available > _targetLatencySamples)
+        else
         {
-            // No data was lost, but a stalled Unity callback accumulated excess latency. Retain
-            // only the newest bounded, channel-aligned tail and crossfade into it immediately.
-            var skip = available - _targetLatencySamples;
-            skip -= skip % _channels;
-            if (skip > 0)
+            var retain = _targetLatencySamples > 0 ? _targetLatencySamples : _maximumLatencySamples;
+            var hardMaximumExceeded = _maximumLatencySamples > 0
+                                      && available > retain
+                                      && available >= _maximumLatencySamples;
+            var sustainedSchedulerStall = false;
+            if (!hardMaximumExceeded && _schedulerStallArmed)
             {
-                read += skip;
-                Volatile.Write(ref _readPosition, read);
-                Interlocked.Add(ref _skippedSamples, skip);
-                available -= skip;
-                _starved = true;
+                sustainedSchedulerStall = available > retain + _driftHysteresisSamples;
+                if (!sustainedSchedulerStall) _schedulerStallArmed = false;
+            }
+            else if (!hardMaximumExceeded
+                     && _schedulerStallThresholdSamples > retain
+                     && available >= _schedulerStallThresholdSamples)
+            {
+                _schedulerStallArmed = true;
+            }
+
+            if (hardMaximumExceeded || sustainedSchedulerStall)
+            {
+                // A suspended Unity callback accumulates stale history much faster than oscillator
+                // drift. Retain the newest target-depth tail and crossfade into it after either the
+                // absolute bound or a two-callback scheduler-stall observation is reached.
+                var skip = available - retain;
+                skip -= skip % _channels;
+                if (skip > 0)
+                {
+                    read += skip;
+                    Volatile.Write(ref _readPosition, read);
+                    Interlocked.Add(ref _skippedSamples, skip);
+                    available -= skip;
+                    _starved = true;
+                }
+                _schedulerStallArmed = false;
             }
         }
-        var copied = Math.Min(destination.Length, available);
 
-        CopyFromRing(destination[..copied], read);
-        Volatile.Write(ref _readPosition, read + copied);
-
-        if (copied > 0) ApplyRecoveryFade(destination[..copied]);
-
-        var missing = destination.Length - copied;
-        if (missing > 0)
+        // Do not begin (or resume after a true underrun) on a nearly empty ring. Holding silence
+        // until the configured cushion exists decouples the Stopwatch producer phase from Unity's
+        // callback phase and gives the drift controller room to work in both directions.
+        if (!Volatile.Read(ref _primed) && available < _primeLatencySamples)
         {
-            Interlocked.Add(ref _zeroFilledSamples, missing);
-            if (!_starved)
-            {
-                _starved = true;
-                _underrunFadeFrame = 0;
-                _recoveryFadeFrame = _fadeFrames;
-                Array.Copy(_lastByChannel, _fadeFromByChannel, _channels);
-            }
-            for (var i = 0; i < missing; i++)
-            {
-                var frame = _underrunFadeFrame + i / _channels;
-                var channel = (copied + i) % _channels;
-                var scale = frame < _fadeFrames
-                    ? 1f - (frame + 1f) / (_fadeFrames + 1f)
-                    : 0f;
-                var output = _fadeFromByChannel[channel] * scale;
-                destination[copied + i] = output;
-                _lastByChannel[channel] = output;
-            }
-            _underrunFadeFrame = Math.Min(
-                _fadeFrames,
-                _underrunFadeFrame + (missing + _channels - 1) / _channels);
+            FillUnderrun(destination, copied: 0, priming: true);
+            return 0;
         }
+        if (!Volatile.Read(ref _primed)) Volatile.Write(ref _primed, true);
+
+        if (available >= destination.Length)
+        {
+            var correction = DetermineClockCorrection(available, destination.Length);
+            var inputSamples = destination.Length + correction;
+            if (correction == 0)
+            {
+                CopyFromRing(destination, read);
+            }
+            else
+            {
+                CopyFromRing(_readScratch.AsSpan(0, inputSamples), read);
+                ResampleInterleaved(
+                    _readScratch.AsSpan(0, inputSamples),
+                    destination,
+                    _channels);
+                Interlocked.Add(ref _clockCorrectionSamples, correction);
+                Interlocked.Increment(ref _clockCorrectionCallbacks);
+            }
+            Volatile.Write(ref _readPosition, read + inputSamples);
+            ApplyRecoveryFade(destination);
+            return destination.Length;
+        }
+
+        var copied = available;
+        if (copied > 0)
+        {
+            CopyFromRing(destination[..copied], read);
+            Volatile.Write(ref _readPosition, read + copied);
+            ApplyRecoveryFade(destination[..copied]);
+        }
+        FillUnderrun(destination, copied, priming: false);
+        if (_primeLatencySamples > 0) Volatile.Write(ref _primed, false);
+        _schedulerStallArmed = false;
 
         return copied;
     }
@@ -182,8 +280,100 @@ internal sealed class SpscFloatRing
         _underrunFadeFrame = 0;
         _recoveryFadeFrame = _fadeFrames;
         _starved = false;
+        _schedulerStallArmed = false;
         _lastObservedDroppedSamples = Interlocked.Read(ref _droppedSamples);
+        Volatile.Write(ref _primed, _primeLatencySamples == 0);
     }
+
+    private int DetermineClockCorrection(int available, int outputSamples)
+    {
+        if (!_enableClockDriftCorrection || outputSamples % _channels != 0) return 0;
+        var outputFrames = outputSamples / _channels;
+        // A whole channel frame is already more than 0.5% for smaller callbacks, so leave those
+        // untouched instead of violating the audible-rate bound.
+        if (outputFrames < 200) return 0;
+
+        // Half a percent is inaudible as a short linear rate adjustment but can continuously
+        // cancel hundreds of ppm of device/Stopwatch drift. The depth hysteresis prevents the
+        // correction direction from toggling on ordinary callback scheduling jitter.
+        var correctionFrames = Math.Max(1, outputFrames / 200);
+        var correctionSamples = correctionFrames * _channels;
+        if (available > _targetLatencySamples + _driftHysteresisSamples
+            && available >= outputSamples + correctionSamples)
+            return correctionSamples;
+        if (available < _targetLatencySamples - _driftHysteresisSamples
+            && outputSamples > correctionSamples)
+            return -correctionSamples;
+        return 0;
+    }
+
+    private void FillUnderrun(Span<float> destination, int copied, bool priming)
+    {
+        var missing = destination.Length - copied;
+        if (missing <= 0) return;
+        Interlocked.Add(ref _zeroFilledSamples, missing);
+        if (priming) Interlocked.Add(ref _primingZeroFilledSamples, missing);
+        if (!_starved)
+        {
+            _starved = true;
+            _underrunFadeFrame = 0;
+            _recoveryFadeFrame = _fadeFrames;
+            Array.Copy(_lastByChannel, _fadeFromByChannel, _channels);
+        }
+        for (var i = 0; i < missing; i++)
+        {
+            var frame = _underrunFadeFrame + i / _channels;
+            var channel = (copied + i) % _channels;
+            var scale = frame < _fadeFrames
+                ? 1f - (frame + 1f) / (_fadeFrames + 1f)
+                : 0f;
+            var output = _fadeFromByChannel[channel] * scale;
+            destination[copied + i] = output;
+            _lastByChannel[channel] = output;
+        }
+        _underrunFadeFrame = Math.Min(
+            _fadeFrames,
+            _underrunFadeFrame + (missing + _channels - 1) / _channels);
+    }
+
+    private static void ResampleInterleaved(
+        ReadOnlySpan<float> source,
+        Span<float> destination,
+        int channels)
+    {
+        var inputFrames = source.Length / channels;
+        var outputFrames = destination.Length / channels;
+        if (inputFrames <= 0 || outputFrames <= 0)
+        {
+            destination.Clear();
+            return;
+        }
+        if (inputFrames == 1 || outputFrames == 1)
+        {
+            for (var frame = 0; frame < outputFrames; frame++)
+                source[..channels].CopyTo(destination.Slice(frame * channels, channels));
+            return;
+        }
+
+        var denominator = outputFrames - 1;
+        for (var outputFrame = 0; outputFrame < outputFrames; outputFrame++)
+        {
+            var position = (long)outputFrame * (inputFrames - 1);
+            var leftFrame = (int)(position / denominator);
+            var remainder = (int)(position % denominator);
+            var rightFrame = Math.Min(leftFrame + 1, inputFrames - 1);
+            var weight = remainder / (float)denominator;
+            for (var channel = 0; channel < channels; channel++)
+            {
+                var left = source[leftFrame * channels + channel];
+                var right = source[rightFrame * channels + channel];
+                destination[outputFrame * channels + channel] = left + (right - left) * weight;
+            }
+        }
+    }
+
+    private static int AlignToChannels(int value, int channels)
+        => value - value % channels;
 
     private void ApplyRecoveryFade(Span<float> samples)
     {

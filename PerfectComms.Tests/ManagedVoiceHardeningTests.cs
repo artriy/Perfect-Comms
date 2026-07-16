@@ -173,6 +173,23 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Theory]
+    [InlineData("turn:relay.example:3478", true)]
+    [InlineData("TURN:relay.example:53?transport=UDP", true)]
+    [InlineData("turn:relay.example:3478?foo=bar", false)]
+    [InlineData("turn:relay.example:80?transport=tcp", false)]
+    [InlineData("turn:relay.example:3478?transport=udp&transport=udp", false)]
+    [InlineData("turn:relay.example:3478?transport=udp&transport=tcp", false)]
+    [InlineData("turn:relay.example:3478?transport", false)]
+    [InlineData("turn:relay.example:80?trans%70ort=tcp", false)]
+    [InlineData("turn:relay.example:3478#fragment", false)]
+    [InlineData("turns:relay.example:5349?transport=tcp", false)]
+    [InlineData("stun:relay.example:3478", false)]
+    public void CustomTurnAcceptsOnlyTheUdpTransportSupportedByNativeIce(string url, bool expected)
+    {
+        Assert.Equal(expected, PerfectCommsVoiceBackend.IsSupportedUdpTurnUrl(url));
+    }
+
+    [Theory]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]
     [InlineData(false, false, true)]
@@ -494,6 +511,13 @@ public sealed class ManagedVoiceHardeningTests
         Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_100, ref sessionNext, 100));
         Assert.False(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_100, ref rosterNext, 250));
         Assert.True(PerfectCommsVoiceBackend.AdvancePumpDeadline(1_250, ref rosterNext, 250));
+    }
+
+    [Fact]
+    public void RpcSessionIsReplacedWhenLocalClientIdChangesInPlace()
+    {
+        Assert.False(PerfectCommsVoiceBackend.ShouldReplaceRpcSession(7, 7));
+        Assert.True(PerfectCommsVoiceBackend.ShouldReplaceRpcSession(7, 11));
     }
 
     [Fact]

@@ -54,6 +54,22 @@ public sealed class SidecarVoiceHostTests
     }
 
     [Fact]
+    public void FailedExplicitRemoveStaysTrackedAndReleaseRetriesIt()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+        Assert.True(lease.AddPeer("42", isOfferer: true, relayOnly: false, generation: 1));
+        fake.RemoveFailuresRemaining = 1;
+
+        Assert.False(lease.RemovePeer("42"));
+        lease.Dispose();
+
+        Assert.Equal(new[] { "42", "42" }, fake.RemovedPeers);
+    }
+
+    [Fact]
     public void HostAllowsOnlyOneActiveLease()
     {
         var host = new SidecarVoiceHostCore(() => new FakeSidecarVoiceClient());
@@ -202,6 +218,7 @@ public sealed class SidecarVoiceHostTests
         public List<bool> MicActiveCalls { get; } = new();
         public List<bool> SyntheticCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
+        public int RemoveFailuresRemaining { get; set; }
         public List<(bool Deaf, float Master, int Peers)> GameStates { get; } = new();
 
         public int HandlerCount =>
@@ -227,10 +244,16 @@ public sealed class SidecarVoiceHostTests
         public void SelectMicDevice(string deviceId) { }
         public void SelectOutputDevice(string deviceId) { }
         public void SendOutputTestFrame(float[] interleavedStereo) { }
-        public void AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation) { }
-        public void RemovePeer(string peerId) => RemovedPeers.Add(peerId);
-        public void SetRemoteSdp(string peerId, string sdpType, string sdp) { }
-        public void AddIceCandidate(string peerId, string candidate) { }
+        public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation) => true;
+        public bool RemovePeer(string peerId)
+        {
+            RemovedPeers.Add(peerId);
+            if (RemoveFailuresRemaining <= 0) return true;
+            RemoveFailuresRemaining--;
+            return false;
+        }
+        public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => true;
+        public bool AddIceCandidate(string peerId, string candidate) => true;
         public void SetIceServers(IEnumerable<IceServer> servers) { }
         public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
             => GameStates.Add((deaf, master, peers.Count));

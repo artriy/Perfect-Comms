@@ -24,14 +24,14 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
-        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation);
+    public bool AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation) == true;
 
-    public void RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId));
+    public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
 
-    public void SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp);
+    public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
 
-    public void AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate);
+    public bool AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate) == true;
 }
 #endif
 
@@ -50,13 +50,13 @@ internal sealed class MobileVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public void AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
-        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation);
+    public bool AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation) == true;
 
-    public void RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId));
+    public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
 
-    public void SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp);
+    public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
 
-    public void AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate);
+    public bool AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate) == true;
 }
 #endif
