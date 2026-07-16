@@ -362,7 +362,7 @@ public static class PingTrackerPatch
                 {
                     CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(existing.IconGO, player, id);
                     existing.CosmeticsComplete = true;
-                    existing.GhostAlphaIcon = null;
+                    existing.GhostAppearanceIcon = null;
                     _layoutDirty = true;
                     _sortingDirty = true;
                 }
@@ -413,24 +413,42 @@ public static class PingTrackerPatch
         _layoutDirty = true;
     }
 
-    private static void ApplyPublicGhostAlpha()
+    private static void ApplyPublicGhostAppearance()
     {
         foreach (var kv in _slots)
         {
-            bool ghost = _showFake15Players ? IsPreviewGhost(kv.Key) : _publiclyDead.Contains(kv.Key);
-            float target = ghost ? 0.45f : 1f;
+            bool publiclyDead = _showFake15Players
+                ? IsPreviewGhost(kv.Key)
+                : _publiclyDead.Contains(kv.Key);
             var slot = kv.Value;
             if (slot.IconGO == null)
             {
-                slot.GhostAlphaIcon = null;
-                slot.AppliedGhostAlpha = 1f;
+                slot.GhostAppearanceIcon = null;
+                slot.HasAppliedPublicGhost = false;
+                slot.AppliedPublicGhost = false;
                 continue;
             }
-            if (ReferenceEquals(slot.GhostAlphaIcon, slot.IconGO) && Mathf.Approximately(slot.AppliedGhostAlpha, target))
+
+            bool iconChanged = !ReferenceEquals(slot.GhostAppearanceIcon, slot.IconGO);
+            bool stateChanged = SpeakingBarGhostAppearancePolicy.RequiresBodyRefresh(
+                slot.HasAppliedPublicGhost,
+                slot.AppliedPublicGhost,
+                publiclyDead);
+            if (!iconChanged && !stateChanged)
                 continue;
-            SetIconAlpha(slot.IconGO, target);
-            slot.GhostAlphaIcon = slot.IconGO;
-            slot.AppliedGhostAlpha = target;
+
+            // Real slots are requested only from the privacy-gated _publiclyDead snapshot, never
+            // live IsDead. Fake-roster ghost ids use the same artwork switch for visual testing.
+            bool vanillaGhostActive = CrewmateAvatarRenderer.SetPublicGhostAppearance(
+                slot.IconGO,
+                publiclyDead);
+            var appearance = SpeakingBarGhostAppearancePolicy.Resolve(
+                publiclyDead,
+                vanillaGhostActive);
+            SetIconAlpha(slot.IconGO, appearance.Alpha);
+            slot.GhostAppearanceIcon = slot.IconGO;
+            slot.HasAppliedPublicGhost = true;
+            slot.AppliedPublicGhost = publiclyDead;
         }
     }
 
@@ -634,7 +652,7 @@ public static class PingTrackerPatch
                             // The player's cosmetics finished loading — attach them in place (no destroy/recreate pop).
                             CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(slot.IconGO, player, id);
                             slot.CosmeticsComplete = true;
-                            slot.GhostAlphaIcon = null;
+                            slot.GhostAppearanceIcon = null;
                             _layoutDirty = true;
                             _sortingDirty = true;
                         }
@@ -685,7 +703,7 @@ public static class PingTrackerPatch
                 ApplyDynamicRosterOrder();
             }
 
-            ApplyPublicGhostAlpha();
+            ApplyPublicGhostAppearance();
 
             LayoutSlotsIfDirty();
 
@@ -720,7 +738,7 @@ public static class PingTrackerPatch
         }
 
         UpdateSlotRings();
-        ApplyPublicGhostAlpha();
+        ApplyPublicGhostAppearance();
         LayoutSlotsIfDirty();
         KeepSpeakingBarOnTop(template);
     }
@@ -751,10 +769,28 @@ public static class PingTrackerPatch
             // Palette assets can be transiently unavailable while scenes change. Keep the
             // ring/name slot and retry just the optional body instead of rebuilding everything.
             if (slot.IconGO == null
-                && CrewmateAvatarRenderer.TryCreatePreview(i, _barRoot!.transform, out var iconGO))
+                && CrewmateAvatarRenderer.TryCreateSpeakingBarPreview(
+                    i,
+                    _barRoot!.transform,
+                    out var iconGO,
+                    out bool ghostArtworkReady))
             {
                 slot.IconGO = iconGO;
+                slot.PreviewGhostArtReady = ghostArtworkReady;
                 _layoutDirty = true;
+                _sortingDirty = true;
+            }
+
+            // The fake roster can be enabled before a live PlayerControl has exposed the game's
+            // normal body asset. Retry just the five ghost slots; the renderer limits roster scans
+            // to once per frame and caches the game-owned sprite after the first successful lookup.
+            if (IsPreviewGhost(id)
+                && slot.IconGO != null
+                && !slot.PreviewGhostArtReady
+                && CrewmateAvatarRenderer.TryEnsureSpeakingBarPreviewGhost(i, slot.IconGO))
+            {
+                slot.PreviewGhostArtReady = true;
+                slot.GhostAppearanceIcon = null;
                 _sortingDirty = true;
             }
         }
@@ -1232,8 +1268,15 @@ public static class PingTrackerPatch
             CosmeticsComplete = true,
         };
 
-        if (CrewmateAvatarRenderer.TryCreatePreview(previewIndex, _barRoot.transform, out var iconGO))
+        if (CrewmateAvatarRenderer.TryCreateSpeakingBarPreview(
+                previewIndex,
+                _barRoot.transform,
+                out var iconGO,
+                out bool ghostArtworkReady))
+        {
             slot.IconGO = iconGO;
+            slot.PreviewGhostArtReady = ghostArtworkReady;
+        }
 
         CreateRing(playerId, slot);
 
@@ -2095,7 +2138,9 @@ public static class PingTrackerPatch
         public float             LabelHeight;
         public bool              LabelMeasurePending;
         public int               VanillaStyleVersion;
-        public float             AppliedGhostAlpha;
-        public GameObject?       GhostAlphaIcon;
+        public GameObject?       GhostAppearanceIcon;
+        public bool              HasAppliedPublicGhost;
+        public bool              AppliedPublicGhost;
+        public bool              PreviewGhostArtReady;
     }
 }

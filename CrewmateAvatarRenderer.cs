@@ -19,6 +19,8 @@ internal static class CrewmateAvatarRenderer
     private const int FrontCosmeticOrder = VCSorting.Base;
     private const int RainbowFrameCount = 48;
     private const float RainbowHueSpeed = 0.3f;
+    private const string AliveBodyName = "VC_Body_Base";
+    private const string GhostBodyName = "VC_Body_Ghost";
     private const string BaseCrewmatePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAYAAABw4pVUAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsEAAA7BAbiRa+0AABUTSURBVHhe7Z0LlB9Vfcd/M/99b14mEB4KJJCYZHfNCe+YYM9RKVIKVA5VS4s1lJQe6oGWh3porS0iYIUeC5xCUaQptAEVqIJteUhFsRFIiGiSjYZAIJKEkGwe+/rv/l/T73ce2fnfvTM7r///v+nhs+f3n5k7M3fu3N/93ffclXd5l3d5l8MHw90eJvQsws+ZIlYPtidCZuMVjuaZaiy+1zBkJ/bfEDF/I1LpxXabyMaf25dMUg4DhXQtQ6RegQj9lEhTmxNkyzllo3sF//lxlEUKW+DXauw/KrJ5s+M8OZjECun+Xfx8DUHsco5rARVXgPXIP4o03yfS2287N5BJqJBFRyFYSL3mhxFhCF8tg+i3JKsCK/wKFHSryOsjrmPdmWQKef/ZSKnfQ7A6cBAhbGMR6r9Yn2FFeVXeaeGncI3I1jsct/oyiRSy4Hzk648hSE2IFIQrOGg5RNzxZlnmGkXpyRVlfq4ksw0UDS6M1hJkc7lZNkG2Vppkc6UFhcdEr+tXZRFlS9NyZGP7XYe6MEkU8v6zYBk/xE6rPkhORC0wC3JF67Bc1JyXuSZymBgU4MV3i+2yqtApPyq1RlAOKUGvxY+JvPY/rkPNmSQK6R7AzxRnf3yQTjFH5eb2g3Juy6jjYOsnftB5G+VAxZDrRmbIo4V2GRDTPheMfcflIjvud45rS87dNpCFdyEYyBoMxHB1JL9PivLElD1yS/uAzMvRInjek/h4d7bj5+PNI3J164DsgQuztWCLse/4PfxAc0PP2U41JCgUdeIkFN5tzKNb1KBc2jIk93Xsl1YDKTShRUyEZzHvVEw5f+gIebmMYATCK3f/mcjebzjHtWEie60xbd9BRPuU4UTRVDlD7m0fopZwyHO1STf0lRFwFCoEazp3y6VNg7a7Hl599L0iHSjvakeDFSLnulsfc+TGtqnSZhTc4/qQQ3yv6twvj3fusWtxwRyDykfbLPcgc2qT9CLRdQPSw83YqQpDTp6S7dM+Kseab7suCbDj00AJZMk+1Mb2mZYMI+tzqwQTsgvp9PcHjoA/SK8suuwtgwmxLXb3QyL7/pDXZk2DFNKF56IhobQ3DJkHhTwq+emzpcnXrojD20ZFNubKcnvHiDzdUh5L60nzAp2xDKPoax7+LPa+KW9A7xnSKIXgjUxk2GoD8E45v3lUnuj8A+xPHDQvrgx4sx4NxKumDsua1njtk1TA8CCXQ74vr0nedU1Fo8qQv3K3CqfKsqYX3P1o9CMrunB6v5w2a1DWtNRRGcSQDsTgasgbMO6TXddUNMhCejQZwRzI47J56hmyILc1NGD2zfjZglxv2cwBlBE4jvIm/qdm/+YWypsVslUecI8T0QAL6Wp1dxSusn/bI1r+ICzjghmDjjImgs3fNshUyHQI60ieoOyuOvYLrw9rmqiYssqYZ1zqHiWiARbSMxc/rzv7fthdNEu2TVssJ5g7QgNWQko/a0a/vMgsyn+hZwFU+SmQZZBPQt4DCYM5HaTVapWLcxfLEmNJlTU9ZDwk21/ZLvm1ecm/mBdrPU4O4QSvGZ8gLBTz3bJNEg18NUAhXffjLS5zD3y8CGmT3dPmyZHm/tCA3dKel7+e4lZiVYUcA/l7OC81cOiL1TBw2ZTyFNlj7ZGWXItUKhUx2JPjwzvegL/ri9fLc795TkqXldDMt539MOtiQXgWsq/YhVoDsixzhbvjw8ALM09hgEIiEafKkFs7oAzGjxdnvIXyUch5kKU8DPFHw1eNr0qz2SyWZY1TBqE7pcfqkSebnpT8nLzMf26+yHKcrI5FA8cfxO9H3ONY1FkhPQHlx5UQJyhtRnjz7c62ERnUhZrZ02xIt30Um9UcpIxJr9Urs+/DQ1neqBjyt+5eLOptIc3uVuESe5zOMMKDw1bLY+1oh6kJ+CjICc6uHTnxjMNmLf6KVtHOrrwsS2cpHt75D1gfEPkt17Ga5XKiaGbEhFNHhfScjp+znX2VJnc7MVvsbniF490tmeluY1LEX4fRIV80vijPGs/KFvxFYZexS+Qa90DFCFBVCDVSyEJkIN0PQVDqdZchjEWW2o/Zp8fhDMvQSjqN/DgD8GCz+J2cJvkzq/JIMuDKB0Is05LbcrfJebnzZJGxSHJGzi5XWswWWW2tlhFr5FBZQm7BX6/R61Sd/WHwMOM3FoNtMjZdJ8K7VTDjZQivp+iI/nPummMl1ozgOuomWEfPLM1MnU9BvCexUq2pNqQGSQqZFELZZG+ZXdGqKoZrsaxMvObsHsKSp+RVXY92MBlYyMIFUMZuBBc2bnwIyog5CsnWV9RbNNbRCfGrfRvkl85uptCC0BgtGkUpGAUZReXjkDKI/hU4uzIWKRWyENrPbYA3nNLpDxKjKKJ1oFDMmv+AZD0f0Xsj3Zvtg+g7GGLHb0qF5NgE85XITMFhokI3v0U7rQfdlYSjuZFgwv02hI1/9uL7pRbwOWq9JGpYFVIopOskRNFi7FSlFzbsfrspL7e1HZBHOvbKlqm75IH2PjndDGpfnAZxvDg59wt7G8SCiia4Qd4yQn4MuR3CbKxGGO8g7CjX7axTRbWkCKRQCCvg1dzUekAGpu+Up6f0yfVtg3Jxy4jMz5Xl0ta8PDNlr3uVCuupTnJqRiEZhomGSCdTvz/1cUZc2MRPzoF/EELFPE8HDfQvyIJ4zv88P8/g1D/jJO/TXWPJm+5eZFIoxKjqGlicK8gNbUP2FBsnaVRLUfsonhsrevx36KD7THsoVYF5+ERQMT+CfBnyD5DvQl6An4Wgp1Vj7MV1nAR0N+TrkJsgP4V4SmTlb7xXb7jbyEQLjZYuFJvmQvdA7mg/IFe1OrM2VE+ZePqQ3RzZf6zjUAWrvFSKIWfm1soLU8+xXXWw+r/0Pf3yUrNdBx2DVd0znd1EsP+A/rEcUANPo6UEWQnhucch/oKdbpaslK3yLcchGgktpGsKbkV1d4xPNA/b76K+j4evgqgQIwjwfE4FylMfwoyBFpAURjgnudAPdqv7he5hyiDrIbpalmkX97FImmXBMtiz5HAUQjzTrLiJQmRL6Xi5c3SlXDl8uy23j35W+mSafe14glQ4Hvp9fgHJWY0gapv9ABNFXC3YCHnV2a1iFLaxJX51InpsVNF1AW6FkTq3n2yW5Z4pbfKFoTtkQ6VL9llq9ydjbA9E7criKNIqZxd+TZRl0Rd2n8w84qAUdUmJo8BLnd2aw7KDlYSg2UoH5I/lHbs6EYuEFmJ4fas2vZUzZWn/Wvlx+SwoQ9e7R8Ul1L0P+tCJ33MKyOypHdUimB6fgFD3uvNZwBrdGgh75XbRQYHP7JedSZRBkipkvrtjM2qPkdKroIgPU0jYuWq8K28bbJcmXWTzJPN95tyU7ZAsYBm1FvJfkO+5x7QQXbBZlvTJnzgH8UmoEKtKIdX93zoYe7p5s97gRbykvAAF+70D7e6RBnrHZs/PIKzePgn5X8gmyFuQAwHCnmJG9ksQVnH/G/IwhP6w4/AgJCiojElWCnbJalQSnrLdEpBQIWqnmVdvDGOru/UTu+/tECsKrXLTkDPsGwpTMiObn3ZugLDtQAXphNHIyOcUDJYNVIAfz0R1r7rnSCi74xU8789dl0QkzbKqyhCHeKncofoewyrbY+beeEMQXpzcMNQqj+7vkHavvEgShKSwh4Ay2Inm3zxkUxwUmcP+AFWNsUigkC4OS7rfi2fBWJJbV1kSKU69OygXohq8qW+qXD3Uoi9XMoZjIeSkEWSZO5Fz70TVrkBLZVQmzXDGSOKDZpz4OHebjlLQkHsAjBq+wAllU+4Y6pC3+qbJqv52OXsEjUe/xXAbpdblXee3OFdOLJmyMt8ijx3okH17pst1+1H+jXDOhqMgF6VsjU+Vb9HoPhe3sbjzQUv9mLOrhW/FbzqvtY/GuALizFh0qMjQ9GOl3RhNErAx8LiDhiW/yJXkLZjNy01l+RWkD277TYYlGPaVHYk271w0dBaVc7IQijgRlYhj4WYiVF4KXlNqluWDHLf1h7R4l8ivr3YPEpHgvXv4XcS/O/se2Slk//Q5Mt0YSK2QQxt6hDLJ3tjH0XxWx168fgnv7t0VU47u56w8z4U3jD6CyssnnONkJMmy3utua8KIFTB1Kw6MIwjj3t61d5xxcPfUhKI6eLses+3Psv0uhCOn6UiikPe5WwUlSSVk0NKN9Ew+WMGaruojAxIoxHK/J68N2yqaGvUkpN/qkOGqbiJbO/FqJRqSWAi78BSyi8THi5xPM/l5vHAhGuRcksWDOUSJHzukIomF+GeXuOhGdpLxcPEid29y80iRq0ep0ZfjnKZUJFCIbgW3KFSNZwVgyF7rCDlQSZ3QagbtgLKhzFndLNj9GDPcncTEVghqKkmUCAnpDDwErzNluxVQb5gkvFU5Rt6y2Bj2K8TOIRLETTWpPUgHe/28NDfG3aP8nme8++TAki/nP4dfNers8Gqy83g0WCG6HmCRbxRWyFAki6o/bNI8WeSEG1qEbRU+7E6tVCRQSD1SrSHri4snpX1sKZ0kO8SbPaOGUC1T4pORhaSJOl1KM+Tq/Nekkj4HyJwVw3fjbb15o1zmy0N9h2TEVohlWbvdXR8c/UmKnfc6uz5eqSyWl8qnBJxtAAjEsNUmv7RrVx7eLDmSTSiTWIhmNm34FNBgfu1uVRyr+aPh++xImBRYpnw+fyPKNnZUeNagTgazUi9hlEQhmtiPMrVPZ9KckRDMtspxcnP+WlglP3HOKg0mg1NhHyj4O3J/5W79lHTzUGKRQCGmZi5HlDnFQeWBYw16LLm1cK3cOfqnKE+CrqkPfzFyE0oM/2Q/XTadPowJFGKx8aAQbTkMPWFp33nBa0ZulQcLn2yIpfBZDxcuknsKKx2HQ+gUUowy7TuU2ApBPVwzV49za8JSB88FnQ+rKjJ4tCxLLsv/k3wp/wUZsvwderXn24WPoyy7F3usWfmtnB+FqORSf4kSWyGWpZt+xoSRNN1Guc9R5s2Fz0nPwBpZVzpZyihkOTmFdyd9sornF6WEyL9p5Dq5ZPhbSDK67FZnIZX6KwTQHBQ4wyyraNHhWYopb1ZOkDMGfwh5BlXQLhmx4izXMzFFtH1+UDxHjjjwqnxphMt68dm6aNLk3JJLU/+3SaIQluCIfb8CNE2TKsKUlUyR68tLZMngT+W4gc3yd8jKtpbnyCCzM9tsHLG/Kce1wTL2u68yQ54vLZU5gxvkwqGH5KC9jlMYun+k0MEJp6kIy/hD6GY5wv9i4BzafB8SNBORr8yppFyQRIXvMG46TUzov7M9AZXAi5r/U04zX5HTcuulLeDbxlFYFts4PyudLvcXPi3rKqe6Z6KEgwO46poADIOBONk4fn2gGCRVCGP/wrHbGRjOKAmaY8zzbHN80D6qJluFjEfnr/86b9/LLKKEgwU6VyvwQ7PclCTHqSKpBz9xty58CX7yGgTPB71o+g65Mf/5Oqp45/ziP8+yieKdi4LuI/jRsFWYI8MQJcBCslZnLnFquTe+oaJzO1zhu+gWVClGaR1PSEKF9MJCyv6uTsC8+kZIUOT/f1KK7sOTMj98SE1ChRDzLieS/RHN2Yk0Z9WdBM2QySLLSosXXn+Yde9A6KbrFG3lVyWpSaEQ+VcEThNiLoL8HQg7PtnpSGGtJKhHOE7eXUuYMLhwGbcMb9jnt7pPfttecXdSkTImur+Jn5UTe+O9mO46rheZdLaiP8L+DcIvcvg1F4XjFvyAPQxG/DoIc19+A8eKCSOb4bwE8nmImmapMH68yg8ZCcNA6c0kVaX0pGcW8k603HMpBi1Yg2bEJQmKp5BbIPz2LCv45ahmPqANFcKvh73BKYYhj9rM6xMtRhuJNFkW2NgHZSxxDxKSurcBZPXPOzk19OfItoKUQWhR/pFCMrzT3UlNSoWQjSjhKkgd5S1j5lsvaFWUpP8P0gsv5XIIF0Np0paMY/AzXJUKv1DMhAwUQnphssYi5MVdIoMxU0vQ+kr1YB7kGcg6WMVfYhslOnTL1XUGrCUZn4wUQnqRuW5HnffN9yLF0F+U1Pa3BdOx5RTL2diiQakmv6yXfiP2M7ykr4HrcHCBEqZ2fnTTNoFV+NE1CtuiLWEagQwV4qcXr7cR1ZVNkI3ITzYdxBbVEuNZ94J6sBwJI2BZWk7CS/LlAPvj1OyxjPrxZq/KlZoaKSQQjUJYa6kFu+bj9Zi/aCwlfHKFHhbkXINJZTSr9SJs6q0Q5BNqH5huKDQrNnI9B03qTdrt9AN366f0tLuTCXVWiKVpruvn96aDNa99bn2a5ZbKy+42Ooa96OoO56CKkfCFImNSbwth01ghaC3GtPDfcROD3dAKXF8jCboe9uZMy8V6KySgwEhajnjFg3bRKm+9Q009lfPZNEVLKKyV+avovHcUAd+prmedijorhP8qT0fagl0bsW5BUdG0i+JbpWWxe0Z9TiGzFrpHnRWyQZNlkQA9TYjXUlfxF1WWZvIas55/gUxsIc4n7ux45Dp+6rNGYq+pOBH1zrKApcnAA/QUCc2sJKn6rzABtYY7IVwzNvzfKVjWbZDrsKezYivzf1SsS141pvvreCz7KXw8D0nyvSRTOIsI9R+jjSJPevVI9wB0/QRp70PugQLTJL9pVKf9UKfM9YK6dtih+Hrmq1o0wEJ0syHS9NZqZxAqyd681d3RwJTPth3HUvzC3pCwfraDF7g7mdKILIu9eQpcXIipfeI8vRoaOGud3n2eH6bSt2R32TC/j/sADfRi11dE+ljtypxGWIimwKBCwlJjEPdAdM0Ai4P7PjYUYAkXwT1lJLKy8CYsvO9vnOPsaUAZ4v9P0cQLAmc1fgY1mqUoRNUC1IQ72w57cI5dLWx8s7WtFsiHLGW+SK+mMO/mjDwO+nPYeflYGPx4Tn5jYgfiQbQ3+lC6F7hIbKpl/MLQBKgedPP/qLv/oNgfBC8SuH6hP0I44UCZdaQNOu+xnoQyfsc5DqMHhb41DTITfs2CKAV0BSZrcPBth8jmzNsbQTRIIV3IKi3EsNmRTRCoCHZaWg8iW7kSBbJuWshhQSPKEMDBrNxcRKCuEZGAytvw69Mimz5zOCuDNEghhLPEe49DRK6AsLC185tDmyo8N1VG0YCpfFikBQ2JTcqyg4cnDcqydHTNQ3CWQk5FRWwhCtLjEenucrSMfFLuhwK2QQGPiDQ/DYXWqqu4QYj8HwweNyYvNBQWAAAAAElFTkSuQmCC";
 
     private static readonly Dictionary<int, Sprite> BaseSpriteCache = new();
@@ -33,6 +35,9 @@ internal static class CrewmateAvatarRenderer
     private static int templateWidth;
     private static int templateHeight;
     private static Sprite? concealedBaseSprite;
+    // Game-owned canonical ghost artwork. This is only a borrowed reference and must never be destroyed.
+    private static Sprite? vanillaGhostSprite;
+    private static int vanillaGhostLookupFrame = -1;
     // Neutral grey for concealed players: grey body, no cosmetics, no name.
     private static readonly Color32 ConcealedColor = new(0x7f, 0x7f, 0x7f, 0xff);
     private static readonly Color32 ConcealedShadowColor = new(0x4a, 0x4a, 0x4a, 0xff);
@@ -60,18 +65,21 @@ internal static class CrewmateAvatarRenderer
         public readonly bool IsRainbow;
         public readonly bool Concealed;
         public readonly bool CosmeticsResolved;
+        public readonly Sprite? GhostSprite;
         public readonly List<CachedCosmeticLayer> Layers;
         public CachedOutfit(
             int colorId,
             bool isRainbow,
             bool concealed,
             bool cosmeticsResolved,
+            Sprite? ghostSprite,
             List<CachedCosmeticLayer> layers)
         {
             ColorId = colorId;
             IsRainbow = isRainbow;
             Concealed = concealed;
             CosmeticsResolved = cosmeticsResolved;
+            GhostSprite = ghostSprite;
             Layers = layers;
         }
     }
@@ -126,14 +134,16 @@ internal static class CrewmateAvatarRenderer
         root.transform.localScale = Vector3.one * RootScale;
         root.transform.localPosition = Vector3.zero;
 
-        var bodyRenderer = AddSprite(root.transform, "VC_Body_Base", baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
+        var bodyRenderer = AddSprite(root.transform, AliveBodyName, baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
         if (isRainbow) AddRainbowBodyAnimator(bodyRenderer);
+        var ghostSprite = TryGetVanillaGhostSprite(pc);
+        TryAddVanillaGhostBody(root.transform, ghostSprite, colorId, isRainbow, concealed);
         // Cosmetics are built straight from the player's live outfit (hat/skin/visor), so they render
         // immediately and reliably — no idle-pose capture, GameObject-name matching, or fingerprint gate.
         var capturedLayers = new List<CachedCosmeticLayer>();
         if (!concealed)
             TryAddOutfitCosmetics(root.transform, pc, capturedLayers);
-        CacheOutfit(playerId, pc, capturedLayers);
+        CacheOutfit(playerId, pc, ghostSprite, capturedLayers);
         ApplySorting(root);
         VCOverlayCamera.EnsureOnTop(root);
         iconGO = root;
@@ -141,17 +151,29 @@ internal static class CrewmateAvatarRenderer
     }
 
     /// <summary>
-    /// Creates a body-only crewmate for local speaking-bar layout previews. The preview index maps
-    /// deterministically onto the currently registered palette and never reads or caches player,
-    /// outfit, network, or voice state.
+    /// Creates an avatar for the in-game 15-player fake speaking-bar roster. The living body remains
+    /// deterministic; fake ghost entries may also borrow the already-loaded canonical game ghost
+    /// sprite. Settings/setup previews use the isolated overload below and never enter this path.
     /// </summary>
-    internal static bool TryCreatePreview(int previewIndex, Transform parent, out GameObject? iconGO)
-        => TryCreatePreview(
-            previewIndex,
-            parent,
-            VCOverlayCamera.OverlayLayer,
-            attachToOverlayCamera: true,
-            out iconGO);
+    internal static bool TryCreateSpeakingBarPreview(
+        int previewIndex,
+        Transform parent,
+        out GameObject? iconGO,
+        out bool ghostArtworkReady)
+    {
+        ghostArtworkReady = !SpeakingBarPreviewRoster.IsGhost(previewIndex);
+        if (!TryCreatePreview(
+                previewIndex,
+                parent,
+                VCOverlayCamera.OverlayLayer,
+                attachToOverlayCamera: true,
+                out iconGO))
+            return false;
+
+        if (SpeakingBarPreviewRoster.IsGhost(previewIndex) && iconGO != null)
+            ghostArtworkReady = TryEnsureSpeakingBarPreviewGhost(previewIndex, iconGO);
+        return true;
+    }
 
     /// <summary>
     /// Creates the same deterministic preview avatar on a caller-owned rendering layer.
@@ -182,7 +204,7 @@ internal static class CrewmateAvatarRenderer
 
             AddSprite(
                 root.transform,
-                "VC_Body_Base",
+                AliveBodyName,
                 baseSprite,
                 Vector3.zero,
                 Quaternion.identity,
@@ -203,6 +225,37 @@ internal static class CrewmateAvatarRenderer
             if (root != null) Object.Destroy(root);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Adds the real vanilla ghost body to an existing in-game fake-roster icon. This is deliberately
+    /// separate from the caller-owned settings/setup preview overload so opening those surfaces never
+    /// touches PlayerControl, game body assets, overlay materials, or the overlay camera.
+    /// </summary>
+    internal static bool TryEnsureSpeakingBarPreviewGhost(int previewIndex, GameObject? iconRoot)
+    {
+        if (iconRoot == null || !SpeakingBarPreviewRoster.IsGhost(previewIndex)) return false;
+        for (int i = 0; i < iconRoot.transform.childCount; i++)
+            if (iconRoot.transform.GetChild(i).name == GhostBodyName)
+                return true;
+
+        if (!TryGetPreviewColorId(previewIndex, out int colorId)) return false;
+        var ghostSprite = TryGetAnyVanillaGhostSprite();
+        if (ghostSprite == null) return false;
+
+        bool added = TryAddVanillaGhostBody(
+            iconRoot.transform,
+            ghostSprite,
+            colorId,
+            // The synthetic alive-body path is intentionally static, so keep its paired ghost
+            // static too even when a modded palette exposes a Rainbow color id.
+            isRainbow: false,
+            concealed: false);
+        if (!added) return false;
+
+        ApplySorting(iconRoot);
+        VCOverlayCamera.EnsureOnTop(iconRoot);
+        return true;
     }
 
     /// <summary>
@@ -296,8 +349,14 @@ internal static class CrewmateAvatarRenderer
         root.transform.localScale = Vector3.one * RootScale;
         root.transform.localPosition = Vector3.zero;
 
-        var bodyRenderer = AddSprite(root.transform, "VC_Body_Base", baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
+        var bodyRenderer = AddSprite(root.transform, AliveBodyName, baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
         if (outfit.IsRainbow) AddRainbowBodyAnimator(bodyRenderer);
+        TryAddVanillaGhostBody(
+            root.transform,
+            outfit.GhostSprite,
+            outfit.ColorId,
+            outfit.IsRainbow,
+            outfit.Concealed);
         if (!outfit.Concealed)
         {
             foreach (var layer in outfit.Layers)
@@ -496,10 +555,19 @@ internal static class CrewmateAvatarRenderer
     {
         if (iconRoot == null || pc?.Data == null) return;
         RemoveCosmeticLayers(iconRoot);
+        var ghostSprite = TryGetVanillaGhostSprite(pc);
+        bool concealed = RenderAsConcealed(pc);
+        int colorId = GetPlayerColorId(pc);
+        TryAddVanillaGhostBody(
+            iconRoot.transform,
+            ghostSprite,
+            colorId,
+            !concealed && IsRainbowColorId(colorId),
+            concealed);
         var capturedLayers = new List<CachedCosmeticLayer>();
-        if (!RenderAsConcealed(pc))
+        if (!concealed)
             TryAddOutfitCosmetics(iconRoot.transform, pc, capturedLayers);
-        CacheOutfit(playerId, pc, capturedLayers);
+        CacheOutfit(playerId, pc, ghostSprite, capturedLayers);
         ApplySorting(iconRoot);
         VCOverlayCamera.EnsureOnTop(iconRoot);
     }
@@ -508,7 +576,11 @@ internal static class CrewmateAvatarRenderer
     // this avatar without a live PlayerControl. Concealed speakers cache as a grey, cosmetic-less body so the
     // end-game screen never leaks a hidden identity. Called only from the avatar (re)build path, so it runs at
     // most once per speaker per outfit change -- never per frame.
-    private static void CacheOutfit(byte playerId, PlayerControl pc, List<CachedCosmeticLayer> layers)
+    private static void CacheOutfit(
+        byte playerId,
+        PlayerControl pc,
+        Sprite? ghostSprite,
+        List<CachedCosmeticLayer> layers)
     {
         // Never overwrite the cache with a disguise; keep the last real outfit so a meeting/roster can rebuild it.
         if (IsDisguised(pc)) return;
@@ -517,12 +589,188 @@ internal static class CrewmateAvatarRenderer
         if (ShowRealIdentity && IsConcealed(pc)) return;
         bool concealed = IsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
+        // Preserve a previously captured game-owned sprite through transient cosmetics/body loading.
+        if (ghostSprite == null && OutfitCache.TryGetValue(playerId, out var previous))
+            ghostSprite = previous.GhostSprite;
         OutfitCache[playerId] = new CachedOutfit(
             colorId,
             !concealed && IsRainbowColorId(colorId),
             concealed,
             concealed || OutfitCosmeticsResolved(pc),
+            ghostSprite,
             concealed ? new List<CachedCosmeticLayer>() : layers);
+    }
+
+    /// <summary>
+    /// Switches an already-created real speaking-bar avatar between its living body and the
+    /// canonical vanilla ghost body. The caller supplies only publicly-known death state; this
+    /// method never reads live IsDead and therefore cannot reveal a task-phase death early.
+    /// </summary>
+    /// <returns>True only when genuine vanilla ghost artwork is active.</returns>
+    internal static bool SetPublicGhostAppearance(GameObject? iconRoot, bool publiclyDead)
+    {
+        if (iconRoot == null) return false;
+
+        GameObject? aliveBody = null;
+        GameObject? ghostBody = null;
+        var skinLayers = new List<GameObject>();
+        var root = iconRoot.transform;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var child = root.GetChild(i);
+            if (child.name == AliveBodyName)
+                aliveBody = child.gameObject;
+            else if (child.name == GhostBodyName)
+                ghostBody = child.gameObject;
+            else if (child.name.StartsWith("VC_Skin", StringComparison.Ordinal))
+                skinLayers.Add(child.gameObject);
+        }
+
+        SpriteRenderer? ghostRenderer = null;
+        bool ghostBodyReady = false;
+        if (ghostBody != null)
+        {
+            ghostRenderer = ghostBody.GetComponent<SpriteRenderer>();
+            ghostBodyReady = ghostRenderer != null && ghostRenderer.sprite != null;
+        }
+        bool useVanillaGhost = publiclyDead && ghostBodyReady;
+        if (aliveBody != null) aliveBody.SetActive(!useVanillaGhost);
+        if (ghostBody != null && ghostRenderer != null)
+        {
+            var owner = ghostBody.GetComponent<OwnedGhostBodyMaterial>();
+            if (useVanillaGhost)
+                owner?.RefreshNow();
+            ghostRenderer.enabled = useVanillaGhost;
+            if (owner != null) owner.enabled = useVanillaGhost;
+        }
+
+        // This exactly matches CosmeticsLayer.SetGhost(): vanilla ghosts retain hats/visors but
+        // SkinLayer clears its sprite so living legs/full-body skins do not cover the ghost tail.
+        foreach (var skinLayer in skinLayers)
+            skinLayer.SetActive(!useVanillaGhost);
+
+        return useVanillaGhost;
+    }
+
+    private static Sprite? TryGetVanillaGhostSprite(PlayerControl? pc)
+    {
+        if (vanillaGhostSprite != null) return vanillaGhostSprite;
+        try
+        {
+            // This HUD intentionally renders the canonical upright/normal body. Special Long/Horse
+            // bodies require ExtraGhostSprites plus game-mode callbacks, so copying only their main
+            // sprite would be incomplete. normalBodySprite.GhostSprite is the complete standard art.
+            var bodySet = pc?.cosmetics?.normalBodySprite;
+            var sprite = bodySet?.GhostSprite;
+            if (sprite != null) vanillaGhostSprite = sprite;
+            return sprite;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Sprite? TryGetAnyVanillaGhostSprite()
+    {
+        if (vanillaGhostSprite != null) return vanillaGhostSprite;
+
+        // Five fake ghost slots can ask during the same update. Scan the live roster at most once
+        // per frame until a normal body asset becomes available, then reuse the borrowed reference.
+        int frame = Time.frameCount;
+        if (vanillaGhostLookupFrame == frame) return null;
+        vanillaGhostLookupFrame = frame;
+
+        Sprite? sprite = null;
+        try
+        {
+            // PlayerPrefab is serialized before the menu PingTracker exists, so fake ghosts work
+            // on the main menu where there is intentionally no joined LocalPlayer yet.
+            sprite = TryGetVanillaGhostSprite(AmongUsClient.Instance?.PlayerPrefab);
+        }
+        catch
+        {
+            // Fall through to live players for modded clients that replace the prefab late.
+        }
+        if (sprite != null) return sprite;
+
+        sprite = TryGetVanillaGhostSprite(PlayerControl.LocalPlayer);
+        if (sprite != null) return sprite;
+        try
+        {
+            var players = PlayerControl.AllPlayerControls;
+            if (players == null) return null;
+            foreach (var player in players)
+            {
+                sprite = TryGetVanillaGhostSprite(player);
+                if (sprite != null) return sprite;
+            }
+        }
+        catch
+        {
+            // Scene transitions can temporarily invalidate the IL2CPP player collection.
+        }
+        return null;
+    }
+
+    private static bool TryAddVanillaGhostBody(
+        Transform root,
+        Sprite? ghostSprite,
+        int colorId,
+        bool isRainbow,
+        bool concealed)
+    {
+        if (root == null || ghostSprite == null) return false;
+        for (int i = 0; i < root.childCount; i++)
+            if (root.GetChild(i).name == GhostBodyName)
+                return true;
+
+        GameObject? ghostObject = null;
+        Material? ownedMaterial = null;
+        try
+        {
+            var template = CosmeticsLayer.GetBodyMaterial(PlayerMaterial.MaskType.None);
+            if (template == null) return false;
+
+            ownedMaterial = new Material(template)
+            {
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            // Vanilla SetBodyAsGhost only swaps this canonical renderer's sprite. Its transform is
+            // unchanged, so native scale 1 aligns with the game-owned hat/visor sprites and anchors.
+            var ghostRenderer = AddSprite(
+                root,
+                GhostBodyName,
+                ghostSprite,
+                Vector3.zero,
+                Quaternion.identity,
+                Vector3.one,
+                Color.white,
+                BodyOrder);
+            ghostObject = ghostRenderer.gameObject;
+            ghostRenderer.sharedMaterial = ownedMaterial;
+            if (isRainbow)
+                PlayerMaterial.SetColors(GetRainbowMaterialColor(GetRainbowFrameIndex(Time.time)), ownedMaterial);
+            else if (concealed)
+                PlayerMaterial.SetColors((Color)ConcealedColor, ownedMaterial);
+            else
+                PlayerMaterial.SetColors(ClampColorId(colorId), ownedMaterial);
+
+            var owner = ghostObject.AddComponent<OwnedGhostBodyMaterial>();
+            owner.Init(ghostRenderer, ownedMaterial, isRainbow);
+            ownedMaterial = null; // ownership transferred to the component
+            // Keep the object active and hide only rendering/animation. Unity can skip OnDestroy for
+            // objects that were never active, which would strand the owned material on an alive-only slot.
+            ghostRenderer.enabled = false;
+            owner.enabled = false;
+            return true;
+        }
+        catch
+        {
+            if (ownedMaterial != null) Object.Destroy(ownedMaterial);
+            if (ghostObject != null) Object.Destroy(ghostObject);
+            return false;
+        }
     }
 
     private static readonly List<GameObject> _cosmeticRemovalScratch = new();
@@ -549,6 +797,8 @@ internal static class CrewmateAvatarRenderer
     {
         RainbowColorIdCache.Clear();
         OutfitCache.Clear();
+        vanillaGhostSprite = null;
+        vanillaGhostLookupFrame = -1;
         DestroySpriteCache(BaseSpriteCache);
         DestroySpriteCache(RainbowSpriteCache);
         if (concealedBaseSprite != null) { DestroySprite(concealedBaseSprite); concealedBaseSprite = null; }
@@ -757,6 +1007,9 @@ internal static class CrewmateAvatarRenderer
         float hue = Mathf.PingPong(time * RainbowHueSpeed, 1f);
         return Mathf.Clamp(Mathf.RoundToInt(hue * (RainbowFrameCount - 1)), 0, RainbowFrameCount - 1);
     }
+
+    internal static Color GetRainbowMaterialColor(int frameIndex)
+        => (Color)RainbowBodyColor(frameIndex);
 
     private static Sprite? CreateBaseSprite(Color32 main, Color32 shadow)
     {
@@ -1035,5 +1288,69 @@ internal sealed class RainbowBodyAnimator : MonoBehaviour
             _renderer.sprite = sprite;
             _lastFrame = frame;
         }
+    }
+}
+
+/// <summary>
+/// Owns the cloned material used by a vanilla ghost body and optionally updates its Rainbow
+/// palette. PlayerMaterial's Renderer overload instantiates materials internally, so this owner
+/// deliberately uses the Material overload and destroys exactly the clone it created.
+/// </summary>
+internal sealed class OwnedGhostBodyMaterial : MonoBehaviour
+{
+    private SpriteRenderer? _renderer;
+    private Material? _material;
+    private bool _animateRainbow;
+    private int _lastFrame = -1;
+
+    static OwnedGhostBodyMaterial()
+    {
+        ClassInjector.RegisterTypeInIl2Cpp<OwnedGhostBodyMaterial>();
+    }
+
+    public void Init(SpriteRenderer renderer, Material material, bool animateRainbow)
+    {
+        _renderer = renderer;
+        _material = material;
+        _animateRainbow = animateRainbow;
+        if (_animateRainbow)
+            UpdateRainbow(true);
+    }
+
+    public void RefreshNow()
+    {
+        if (_animateRainbow)
+            UpdateRainbow(true);
+    }
+
+    void Update()
+    {
+        if (_animateRainbow)
+            UpdateRainbow(false);
+    }
+
+    void OnDestroy()
+    {
+        if (_material != null)
+        {
+            Object.Destroy(_material);
+            _material = null;
+        }
+        _renderer = null;
+    }
+
+    private void UpdateRainbow(bool force)
+    {
+        if (_renderer == null || _material == null)
+        {
+            Object.Destroy(this);
+            return;
+        }
+
+        int frame = CrewmateAvatarRenderer.GetRainbowFrameIndex(Time.time);
+        if (!force && frame == _lastFrame) return;
+
+        PlayerMaterial.SetColors(CrewmateAvatarRenderer.GetRainbowMaterialColor(frame), _material);
+        _lastFrame = frame;
     }
 }
