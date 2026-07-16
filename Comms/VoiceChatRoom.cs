@@ -385,6 +385,18 @@ public class VoiceChatRoom
         _voiceBackend?.SetMicrophone(deviceName, settings?.MicVolume.Value ?? 1f);
     }
 
+    internal void ReapplyDefaultMicrophone()
+    {
+#if WINDOWS
+        var settings = VoiceSettings.Instance;
+        // Repeating the empty selection is intentional here: the persisted choice is still
+        // "Default", but the OS endpoint behind that choice changed and CPAL streams do not
+        // migrate to it automatically.
+        _voiceBackend?.SetMicrophone(
+            string.Empty, settings?.MicVolume.Value ?? 1f, forceRestart: true);
+#endif
+    }
+
 #if ANDROID
     internal void StartMicAfterPermission(string deviceName)
     {
@@ -402,6 +414,13 @@ public class VoiceChatRoom
     public void SetSpeaker(string deviceName)
     {
         _voiceBackend?.SetSpeaker(deviceName ?? string.Empty);
+    }
+
+    internal void ReapplyDefaultSpeaker()
+    {
+#if WINDOWS
+        _voiceBackend?.SetSpeaker(string.Empty);
+#endif
     }
 
     internal static void SendJailVoicePacket(byte jailedPlayerId, bool allowed)
@@ -422,6 +441,9 @@ public class VoiceChatRoom
     {
         long updateStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         string updateStep = "speaker-check";
+#if WINDOWS
+        VoiceChatLocalSettings.MaybeRefreshActiveRoomDeviceLists();
+#endif
         updateStep = "transport";        TryUpdateLocalProfile();
         TryRunBootstrapRefresh();        TickVoiceBackend(CurrentSnapshot);
         MaybeLogNetworkStats();
@@ -830,7 +852,7 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("voice.refresh.applied",
             $"{sender.ToDiagnosticFields()} nonce={nonce} trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
 
-        VoiceChatHudState.ShowToast(trigger == "rpc"
+        VoiceChatHudState.ShowCompactStatus(trigger == "rpc"
             ? "Host refreshed voice connections"
             : "You refreshed voice for everyone");
 
@@ -845,7 +867,7 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("voice.refresh.local.applied",
             $"trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
 
-        VoiceChatHudState.ShowToast("Voice connection refreshed");
+        VoiceChatHudState.ShowCompactStatus("Voice connection refreshed");
 
         // Rejoin() begins with ClearVoiceUiForLifecycleReset, so the UI teardown runs exactly once.
         StartTransitionTrace($"local voice refresh: {trigger}", snapshot);

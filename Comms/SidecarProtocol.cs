@@ -20,6 +20,30 @@ internal readonly struct IceServer
     }
 }
 
+/// <summary>
+/// A selectable audio endpoint. <see cref="Id"/> is the opaque stable identifier sent back to
+/// the helper; <see cref="Name"/> is presentation-only and may be duplicated or change over time.
+/// </summary>
+internal readonly record struct VoiceDeviceInfo(
+    string Id,
+    string Name,
+    bool IsDefault,
+    bool IsAvailable = true)
+{
+    public static VoiceDeviceInfo FromName(string name, bool isDefault = false)
+    {
+        var normalized = name?.Trim() ?? string.Empty;
+        return new VoiceDeviceInfo(normalized, normalized, isDefault);
+    }
+
+    public static VoiceDeviceInfo Unavailable(string id, string lastKnownName, string fallbackName)
+        => new(
+            id ?? string.Empty,
+            string.IsNullOrWhiteSpace(lastKnownName) ? fallbackName : lastKnownName.Trim(),
+            false,
+            false);
+}
+
 internal static class SidecarProtocol
 {
     public const byte TypeControl = 0x01;
@@ -306,54 +330,73 @@ internal static class SidecarProtocol
         }
     }
 
-    public static bool TryReadDevices(string json, out List<string> names)
+    public static bool TryReadDevices(string json, out List<VoiceDeviceInfo> devices)
     {
-        names = new List<string>();
+        devices = new List<VoiceDeviceInfo>();
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("devices", out var devices) || devices.ValueKind != JsonValueKind.Array)
+            if (!doc.RootElement.TryGetProperty("devices", out var values) || values.ValueKind != JsonValueKind.Array)
                 return false;
-            foreach (var device in devices.EnumerateArray())
-            {
-                if (device.TryGetProperty("name", out var n))
-                {
-                    var name = n.GetString();
-                    if (!string.IsNullOrEmpty(name))
-                        names.Add(name!);
-                }
-            }
-            return true;
+            var valid = TryReadDeviceArray(values, devices);
+            if (!valid) devices.Clear();
+            return valid;
         }
         catch
         {
+            devices.Clear();
             return false;
         }
     }
 
-    public static bool TryReadOutputDevices(string json, out List<string> names)
+    public static bool TryReadOutputDevices(string json, out List<VoiceDeviceInfo> devices)
     {
-        names = new List<string>();
+        devices = new List<VoiceDeviceInfo>();
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("outputDevices", out var devices) || devices.ValueKind != JsonValueKind.Array)
+            if (!doc.RootElement.TryGetProperty("outputDevices", out var values) || values.ValueKind != JsonValueKind.Array)
                 return false;
-            foreach (var device in devices.EnumerateArray())
-            {
-                if (device.TryGetProperty("name", out var n))
-                {
-                    var name = n.GetString();
-                    if (!string.IsNullOrEmpty(name))
-                        names.Add(name!);
-                }
-            }
-            return true;
+            var valid = TryReadDeviceArray(values, devices);
+            if (!valid) devices.Clear();
+            return valid;
         }
         catch
         {
+            devices.Clear();
             return false;
         }
+    }
+
+    private static bool TryReadDeviceArray(JsonElement values, List<VoiceDeviceInfo> devices)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in values.EnumerateArray())
+        {
+            if (value.ValueKind != JsonValueKind.Object ||
+                !value.TryGetProperty("id", out var idElement) ||
+                idElement.ValueKind != JsonValueKind.String ||
+                !value.TryGetProperty("name", out var nameElement) ||
+                nameElement.ValueKind != JsonValueKind.String)
+                return false;
+
+            // Device IDs are opaque CPAL values. Never case-fold, trim, or otherwise normalize
+            // them before persistence/round-tripping.
+            var id = idElement.GetString() ?? string.Empty;
+            var name = nameElement.GetString()?.Trim() ?? string.Empty;
+            if (id.Length == 0 || name.Length == 0 || !ids.Add(id))
+                return false;
+
+            var isDefault = false;
+            if (value.TryGetProperty("default", out var defaultElement))
+            {
+                if (defaultElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    return false;
+                isDefault = defaultElement.GetBoolean();
+            }
+            devices.Add(new VoiceDeviceInfo(id, name, isDefault));
+        }
+        return true;
     }
 
     public static bool TryReadPong(string json, out ulong capTs)

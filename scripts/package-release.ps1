@@ -1,4 +1,4 @@
-# Release example: .\scripts\package-release.ps1 -Version 1.2.3 -SidecarProtocolVersion 9
+# Release example: .\scripts\package-release.ps1 -Version 1.2.3 -SidecarProtocolVersion 10
 # Keep the protocol unchanged for compatible releases; increment it only when the
 # managed DLL <-> native sidecar contract changes.
 param(
@@ -80,6 +80,45 @@ function Copy-ThirdPartyLicenseTexts([string]$DestinationRoot) {
     foreach ($entry in $licenses.GetEnumerator()) {
         Assert-ReleaseAsset $entry.Value
         Copy-Item (Join-Path $root $entry.Value) (Join-Path $licenseDirectory $entry.Key) -Force
+    }
+}
+
+function Copy-DependencyLicenseTexts([string]$DestinationRoot) {
+    $sourceRoot = Join-Path $root "release-assets\dependencies"
+    $noticeSource = Join-Path $sourceRoot "THIRD_PARTY_NOTICES.md"
+    if (-not (Test-Path -LiteralPath $noticeSource -PathType Leaf) -or (Get-Item -LiteralPath $noticeSource).Length -eq 0) {
+        throw "missing dependency notice: release-assets\dependencies\THIRD_PARTY_NOTICES.md"
+    }
+    Copy-Item $noticeSource (Join-Path $DestinationRoot "DEPENDENCY_THIRD_PARTY_NOTICES.md") -Force
+
+    $licenseDestination = Join-Path $DestinationRoot "licenses\dependencies"
+    New-Item -ItemType Directory -Force -Path $licenseDestination | Out-Null
+    @(
+        "BepInEx-LGPL-2.1.txt",
+        "UnityDoorstop-LGPL-2.1.txt",
+        "CoreCLR-MIT.txt",
+        "CoreCLR-THIRD-PARTY-NOTICES.txt",
+        "Il2CppInterop-LGPL-3.0.txt",
+        "HarmonyX-MIT.txt",
+        "Harmony-upstream-MIT.txt",
+        "MonoMod-MIT.txt",
+        "SemanticVersioning-MIT.txt",
+        "AssetRipper.Primitives-MIT.txt",
+        "AsmResolver-MIT.txt",
+        "Cpp2IL-MIT.txt",
+        "AssetRipper.CIL-MIT.txt",
+        "Capstone.NET-MIT.txt",
+        "Disarm-MIT.txt",
+        "Iced-MIT.txt",
+        "Mono.Cecil-MIT.txt",
+        "Dobby-Apache-2.0.txt",
+        "UnityReferenceLibraries-NOTICE.txt"
+    ) | ForEach-Object {
+        $source = Join-Path $sourceRoot "licenses\$_"
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or (Get-Item -LiteralPath $source).Length -eq 0) {
+            throw "missing dependency license: release-assets\dependencies\licenses\$_"
+        }
+        Copy-Item $source (Join-Path $licenseDestination $_) -Force
     }
 }
 
@@ -255,13 +294,33 @@ Write-LiveMatch "Epic" "D:\Epic Games Games\AmongUs\BepInEx\plugins\PerfectComms
 Write-LiveMatch "Steam" "D:\SteamLibrary\steamapps\common\Among Us - TOU\BepInEx\plugins\PerfectComms.dll" $releaseHash
 
 if ($Configuration -ne "Android") {
-    $dependencySource = if ($env:PC_DEPENDENCY_SOURCE) {
-        $env:PC_DEPENDENCY_SOURCE
-    } else {
-        Join-Path $root "TouMira"
+    if ($env:PC_DEPENDENCY_SOURCE) {
+        throw "PC_DEPENDENCY_SOURCE is ambiguous; use PC_DEPENDENCY_SOURCE_WIN_X86 and PC_DEPENDENCY_SOURCE_WIN_X64."
     }
-    $dependencyOutput = Join-Path $root "artifacts\PerfectComms+dependencies"
-    $dependencyZip = Join-Path $root "artifacts\PerfectComms+dependencies.zip"
+    $x86Source = if ($env:PC_DEPENDENCY_SOURCE_WIN_X86) {
+        $env:PC_DEPENDENCY_SOURCE_WIN_X86
+    } else {
+        Join-Path $root "artifacts\bepinex-win-x86"
+    }
+    $x64Source = if ($env:PC_DEPENDENCY_SOURCE_WIN_X64) {
+        $env:PC_DEPENDENCY_SOURCE_WIN_X64
+    } else {
+        Join-Path $root "artifacts\bepinex-win-x64"
+    }
+    $dependencyPackages = @(
+        [pscustomobject]@{
+            Architecture = "win-x86"
+            Label = "Windows x86 (32-bit)"
+            Source = $x86Source
+            ArchiveSha256 = "9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
+        },
+        [pscustomobject]@{
+            Architecture = "win-x64"
+            Label = "Windows x64 (64-bit)"
+            Source = $x64Source
+            ArchiveSha256 = "badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
+        }
+    )
 
     $requiredDependencyFiles = @(
         ".doorstop_version",
@@ -270,69 +329,88 @@ if ($Configuration -ne "Android") {
         "dotnet",
         "BepInEx\core",
         "BepInEx\patchers",
-        "BepInEx\unity-libs",
+        "BepInEx\unity-libs\2022.3.44.zip",
         "BepInEx\config\BepInEx.cfg"
     )
-    foreach ($file in $requiredDependencyFiles) {
-        if (-not (Test-Path (Join-Path $dependencySource $file))) {
-            throw "missing dependency bundle source: $file"
-        }
-    }
 
-    if (Test-Path $dependencyOutput) { Remove-Item $dependencyOutput -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path (Join-Path $dependencyOutput "BepInEx\plugins") | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $dependencyOutput "BepInEx\config") | Out-Null
+    foreach ($dependencyPackage in $dependencyPackages) {
+        $dependencySource = $dependencyPackage.Source
+        $dependencyName = "PerfectComms+dependencies-$($dependencyPackage.Architecture)"
+        $dependencyOutput = Join-Path $root "artifacts\$dependencyName"
+        $dependencyZip = Join-Path $root "artifacts\$dependencyName.zip"
 
-    Copy-Item (Join-Path $dependencySource ".doorstop_version") $dependencyOutput
-    Copy-Item (Join-Path $dependencySource "doorstop_config.ini") $dependencyOutput
-    Copy-Item (Join-Path $dependencySource "winhttp.dll") $dependencyOutput
-    Copy-Item (Join-Path $dependencySource "dotnet") (Join-Path $dependencyOutput "dotnet") -Recurse
-    Copy-Item (Join-Path $dependencySource "BepInEx\core") (Join-Path $dependencyOutput "BepInEx\core") -Recurse
-    Copy-Item (Join-Path $dependencySource "BepInEx\patchers") (Join-Path $dependencyOutput "BepInEx\patchers") -Recurse
-    Copy-Item (Join-Path $dependencySource "BepInEx\unity-libs") (Join-Path $dependencyOutput "BepInEx\unity-libs") -Recurse
-    Copy-Item (Join-Path $dependencySource "BepInEx\config\BepInEx.cfg") (Join-Path $dependencyOutput "BepInEx\config\BepInEx.cfg")
-    Copy-Item $dll (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll")
-    Copy-Item $readme (Join-Path $dependencyOutput "README.md")
-    Copy-Item (Join-Path $root "LICENSE") (Join-Path $dependencyOutput "LICENSE")
-    Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") (Join-Path $dependencyOutput "THIRD_PARTY_NOTICES.md")
-    Copy-Item (Join-Path $root "PRIVACY.md") (Join-Path $dependencyOutput "PRIVACY.md")
-    Copy-ThirdPartyLicenseTexts $dependencyOutput
-
-    @(
-        "Perfect Comms with dependencies",
-        "Includes: PerfectComms.dll and BepInEx Unity IL2CPP 6.0.0-be.735.",
-        "Perfect Comms is standalone and does NOT require MiraAPI or Reactor.",
-        "Does not include TOU-Mira. Supported mod behaviours activate only when matching mods are installed.",
-        "Install by extracting into the Among Us install folder so winhttp.dll sits next to Among Us.exe."
-    ) | Set-Content -Encoding UTF8 (Join-Path $dependencyOutput "DEPENDENCIES.txt")
-
-    if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\TownOfUsMira.dll")) { throw "dependency bundle includes TownOfUsMira.dll" }
-    if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\Mini.RegionInstall.dll")) { throw "dependency bundle includes Mini.RegionInstall.dll" }
-    if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\MiraAPI.dll")) { throw "dependency bundle includes MiraAPI.dll (this fork is standalone)" }
-    if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\Reactor.dll")) { throw "dependency bundle includes Reactor.dll (this fork is standalone)" }
-    if (-not (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll"))) { throw "dependency bundle missing PerfectComms.dll" }
-
-    Push-Location $dependencyOutput
-    $dependencyHashLines = Get-ChildItem -Recurse -File |
-        Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
-        Sort-Object FullName |
-        ForEach-Object {
-            $relative = Resolve-Path -Relative $_.FullName
-            if ($relative.StartsWith(".\") -or $relative.StartsWith("./")) {
-                $relative = $relative.Substring(2)
+        foreach ($file in $requiredDependencyFiles) {
+            if (-not (Test-Path (Join-Path $dependencySource $file))) {
+                throw "missing $($dependencyPackage.Architecture) dependency bundle source: $file (source: $dependencySource)"
             }
-            $relative = $relative.Replace("\", "/")
-            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
-            "$hash *$relative"
         }
-    $dependencyHashLines | Set-Content -Encoding ASCII "SHA256SUMS.txt"
-    Pop-Location
+        $unityLibrariesPath = Join-Path $dependencySource "BepInEx\unity-libs\2022.3.44.zip"
+        $unityLibrariesHash = (Get-FileHash -Algorithm SHA256 $unityLibrariesPath).Hash.ToLowerInvariant()
+        $expectedUnityLibrariesHash = "e9e6c943619867f0aafb6888bd57ec49e46f833b92ec0e43223346370d69e0bd"
+        if ($unityLibrariesHash -ne $expectedUnityLibrariesHash) {
+            throw "Unity 2022.3.44 reference-library checksum mismatch for $($dependencyPackage.Architecture): expected $expectedUnityLibrariesHash, got $unityLibrariesHash"
+        }
 
-    Compress-InstallRoot $dependencyOutput $dependencyZip
-    Assert-PackageLayout $dependencyZip "dependencies"
-    Write-ArtifactHash (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll")
-    Write-ArtifactHash $dependencyZip
-    Write-Host "Dependency package $dependencyZip"
+        if (Test-Path $dependencyOutput) { Remove-Item $dependencyOutput -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Join-Path $dependencyOutput "BepInEx\plugins") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $dependencyOutput "BepInEx\config") | Out-Null
+
+        Copy-Item (Join-Path $dependencySource ".doorstop_version") $dependencyOutput
+        Copy-Item (Join-Path $dependencySource "doorstop_config.ini") $dependencyOutput
+        Copy-Item (Join-Path $dependencySource "winhttp.dll") $dependencyOutput
+        Copy-Item (Join-Path $dependencySource "dotnet") (Join-Path $dependencyOutput "dotnet") -Recurse
+        Copy-Item (Join-Path $dependencySource "BepInEx\core") (Join-Path $dependencyOutput "BepInEx\core") -Recurse
+        Copy-Item (Join-Path $dependencySource "BepInEx\patchers") (Join-Path $dependencyOutput "BepInEx\patchers") -Recurse
+        Copy-Item (Join-Path $dependencySource "BepInEx\unity-libs") (Join-Path $dependencyOutput "BepInEx\unity-libs") -Recurse
+        Copy-Item (Join-Path $dependencySource "BepInEx\config\BepInEx.cfg") (Join-Path $dependencyOutput "BepInEx\config\BepInEx.cfg")
+        Copy-Item $dll (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll")
+        Copy-Item $readme (Join-Path $dependencyOutput "README.md")
+        Copy-Item (Join-Path $root "LICENSE") (Join-Path $dependencyOutput "LICENSE")
+        Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") (Join-Path $dependencyOutput "THIRD_PARTY_NOTICES.md")
+        Copy-Item (Join-Path $root "PRIVACY.md") (Join-Path $dependencyOutput "PRIVACY.md")
+        Copy-ThirdPartyLicenseTexts $dependencyOutput
+        Copy-DependencyLicenseTexts $dependencyOutput
+
+        @(
+            "Perfect Comms with dependencies",
+            "Architecture: $($dependencyPackage.Label)",
+            "Includes: PerfectComms.dll and official BepInEx Unity IL2CPP 6.0.0-be.735 loader/runtime files for $($dependencyPackage.Architecture).",
+            "BepInEx source archive SHA-256: $($dependencyPackage.ArchiveSha256)",
+            "Includes pinned Unity 2022.3.44 reference libraries for reliable offline first launch.",
+            "Perfect Comms is standalone and does NOT require MiraAPI or Reactor.",
+            "Does not include TOU-Mira. Supported mod behaviours activate only when matching mods are installed.",
+            "Install by extracting into the Among Us install folder so winhttp.dll sits next to Among Us.exe.",
+            "The x86/x64 label must match Among Us.exe; the package verifier rejects mixed or cross-labeled native files."
+        ) | Set-Content -Encoding UTF8 (Join-Path $dependencyOutput "DEPENDENCIES.txt")
+
+        if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\TownOfUsMira.dll")) { throw "dependency bundle includes TownOfUsMira.dll" }
+        if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\Mini.RegionInstall.dll")) { throw "dependency bundle includes Mini.RegionInstall.dll" }
+        if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\MiraAPI.dll")) { throw "dependency bundle includes MiraAPI.dll (this fork is standalone)" }
+        if (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\Reactor.dll")) { throw "dependency bundle includes Reactor.dll (this fork is standalone)" }
+        if (-not (Test-Path (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll"))) { throw "dependency bundle missing PerfectComms.dll" }
+
+        Push-Location $dependencyOutput
+        $dependencyHashLines = Get-ChildItem -Recurse -File |
+            Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+            Sort-Object FullName |
+            ForEach-Object {
+                $relative = Resolve-Path -Relative $_.FullName
+                if ($relative.StartsWith(".\") -or $relative.StartsWith("./")) {
+                    $relative = $relative.Substring(2)
+                }
+                $relative = $relative.Replace("\", "/")
+                $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+                "$hash *$relative"
+            }
+        $dependencyHashLines | Set-Content -Encoding ASCII "SHA256SUMS.txt"
+        Pop-Location
+
+        Compress-InstallRoot $dependencyOutput $dependencyZip
+        Assert-PackageLayout $dependencyZip "dependencies-$($dependencyPackage.Architecture)"
+        Write-ArtifactHash (Join-Path $dependencyOutput "BepInEx\plugins\PerfectComms.dll")
+        Write-ArtifactHash $dependencyZip
+        Write-Host "Dependency package $dependencyZip"
+    }
 }
 
 Write-Host "Packaged $output"

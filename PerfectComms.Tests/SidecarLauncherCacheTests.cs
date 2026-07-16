@@ -25,6 +25,63 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
+    public void DeviceEnumerationFileRequiresStructuredInputAndOutputLists()
+    {
+        var directory = NewTemporaryDirectory();
+        var path = Path.Combine(directory, "devices.json");
+        try
+        {
+            File.WriteAllText(path,
+                "{\"op\":\"devices\",\"devices\":[{\"id\":\"mic-1\",\"name\":\"Mic\"}]," +
+                "\"outputDevices\":[{\"id\":\"spk-1\",\"name\":\"Speaker\"}]}");
+            Assert.True(SidecarLauncher.TryReadDevicesFile(path, out var input, out var output));
+            Assert.Equal("mic-1", Assert.Single(input).Id);
+            Assert.Equal("spk-1", Assert.Single(output).Id);
+
+            File.WriteAllText(path,
+                "{\"op\":\"devices\",\"devices\":[],\"outputDevices\":[]}");
+            Assert.True(SidecarLauncher.TryReadDevicesFile(path, out input, out output));
+            Assert.Empty(input);
+            Assert.Empty(output);
+
+            File.WriteAllText(path,
+                "{\"op\":\"devices\",\"devices\":[{\"id\":\"mic-1\",\"name\":\"Mic\"}]," +
+                "\"outputDevices\":[{\"name\":\"Missing stable ID\"}]}");
+            Assert.False(SidecarLauncher.TryReadDevicesFile(path, out _, out _));
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+#if WINDOWS
+    [Fact]
+    public void FailedEnumerationIsDistinctFromAuthoritativeEmptyEnumeration()
+    {
+        var directory = NewTemporaryDirectory();
+        try
+        {
+            var failure = SidecarLauncher.EnumerateDevices(
+                Path.Combine(directory, "missing-helper.exe"),
+                wine: false,
+                static path => path);
+            var empty = SidecarDeviceEnumerationResult.Success(
+                Array.Empty<VoiceDeviceInfo>(), Array.Empty<VoiceDeviceInfo>());
+
+            Assert.False(failure.IsAuthoritative);
+            Assert.True(empty.IsAuthoritative);
+            Assert.Empty(empty.Input);
+            Assert.Empty(empty.Output);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+#endif
+
+    [Fact]
     public void HelperAndDspMapToFixedNamesInsideSameVersionedBundle()
     {
         var assembly = typeof(SidecarLauncherCacheTests).Assembly;

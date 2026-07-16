@@ -1240,19 +1240,66 @@ pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
 }
 
+fn choose_device_display_name(
+    primary_name: &str,
+    extended: &[String],
+    prefer_extended_friendly_name: bool,
+) -> Option<String> {
+    // CPAL 0.17's WASAPI backend exposes DEVPKEY_Device_DeviceDesc as `name()`
+    // (usually just "Microphone", "Speakers", or "Headphones") and preserves the
+    // Windows endpoint FriendlyName as the first extended line. Other backends use
+    // `name()` as their actual user-facing label, so only Windows opts into extended.
+    if prefer_extended_friendly_name {
+        if let Some(friendly_name) = extended
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty())
+        {
+            return Some(friendly_name.to_string());
+        }
+    }
+
+    let primary_name = primary_name.trim();
+    (!primary_name.is_empty()).then(|| primary_name.to_string())
+}
+
+fn device_display_name(description: &cpal::DeviceDescription) -> Option<String> {
+    choose_device_display_name(
+        description.name(),
+        description.extended(),
+        cfg!(target_os = "windows"),
+    )
+}
+
 pub fn enumerate_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
-    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_id = host
+        .default_input_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string());
     let mut out = Vec::new();
     if let Ok(devices) = host.input_devices() {
-        for d in devices {
-            let name = match d.name() {
-                Ok(n) => n,
+        for device in devices {
+            // Only publish devices with a stable identifier and a stream format the helper can
+            // actually process. A picker entry that can never be opened is worse than omitting it.
+            let id = match device.id() {
+                Ok(id) => id.to_string(),
                 Err(_) => continue,
             };
-            let is_default = Some(&name) == default_name.as_ref();
+            let name = match device
+                .description()
+                .ok()
+                .and_then(|description| device_display_name(&description))
+            {
+                Some(name) => name,
+                _ => continue,
+            };
+            if pick_input_config(&device).is_err() {
+                continue;
+            }
+            let is_default = Some(&id) == default_id.as_ref();
             out.push(DeviceInfo {
-                id: name.clone(),
+                id,
                 name,
                 default: is_default,
             });
@@ -1273,27 +1320,24 @@ struct SelectedDevice {
 
 fn pick_device(device_id: &Option<String>) -> Result<SelectedDevice, String> {
     let host = cpal::default_host();
-    if let Some(id) = device_id {
-        if let Ok(devices) = host.input_devices() {
-            for d in devices {
-                if d.name().ok().as_deref() == Some(id.as_str()) {
-                    let resolved = d.name().unwrap_or_else(|_| id.clone());
-                    return Ok(SelectedDevice {
-                        device: d,
-                        requested_device: id.clone(),
-                        resolved_device: resolved,
-                        requested_default: false,
-                        requested_matched: true,
-                        fell_back_to_default: false,
-                    });
-                }
+    if let Some(id) = device_id.as_ref().filter(|id| !id.is_empty()) {
+        if let Ok(parsed) = id.parse::<cpal::DeviceId>() {
+            if let Some(device) = host.device_by_id(&parsed) {
+                return Ok(SelectedDevice {
+                    device,
+                    requested_device: id.clone(),
+                    resolved_device: parsed.to_string(),
+                    requested_default: false,
+                    requested_matched: true,
+                    fell_back_to_default: false,
+                });
             }
         }
     }
     let device = host
         .default_input_device()
         .ok_or_else(|| "no input device".to_string())?;
-    let resolved_device = device.name().unwrap_or_default();
+    let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
     Ok(SelectedDevice {
         device,
         requested_device: device_id.clone().unwrap_or_default(),
@@ -1302,6 +1346,73 @@ fn pick_device(device_id: &Option<String>) -> Result<SelectedDevice, String> {
         requested_matched: device_id.as_ref().is_none_or(String::is_empty),
         fell_back_to_default: device_id.as_ref().is_some_and(|id| !id.is_empty()),
     })
+}
+
+fn supported_sample_format(format: cpal::SampleFormat) -> bool {
+    matches!(
+        format,
+        cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16
+    )
+}
+
+fn input_config_score(
+    channels: u16,
+    format: cpal::SampleFormat,
+    sample_rate: u32,
+) -> (u8, u8, u32, u16) {
+    let channel_rank = match channels {
+        1 => 0,
+        2 => 1,
+        _ => 2,
+    };
+    let format_rank = match format {
+        cpal::SampleFormat::F32 => 0,
+        cpal::SampleFormat::I16 => 1,
+        cpal::SampleFormat::U16 => 2,
+        _ => u8::MAX,
+    };
+    (
+        channel_rank,
+        format_rank,
+        sample_rate.abs_diff(SAMPLE_RATE),
+        channels,
+    )
+}
+
+fn pick_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(default) = device.default_input_config() {
+        let rate = default.sample_rate();
+        if supported_sample_format(default.sample_format())
+            && (MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_CAPTURE_RATE).contains(&rate)
+        {
+            return Ok(default);
+        }
+    }
+
+    let ranges = device
+        .supported_input_configs()
+        .map_err(|e| format!("supported input configs: {e}"))?;
+    let mut best: Option<(cpal::SupportedStreamConfigRange, u32)> = None;
+    for range in ranges {
+        if !supported_sample_format(range.sample_format()) {
+            continue;
+        }
+        let min_rate = range.min_sample_rate().max(MIN_REALTIME_CAPTURE_RATE);
+        let max_rate = range.max_sample_rate().min(MAX_REALTIME_CAPTURE_RATE);
+        if min_rate > max_rate {
+            continue;
+        }
+        let rate = SAMPLE_RATE.clamp(min_rate, max_rate);
+        let better = best.as_ref().is_none_or(|(current, current_rate)| {
+            input_config_score(range.channels(), range.sample_format(), rate)
+                < input_config_score(current.channels(), current.sample_format(), *current_rate)
+        });
+        if better {
+            best = Some((range, rate));
+        }
+    }
+    best.map(|(range, rate)| range.with_sample_rate(rate))
+        .ok_or_else(|| "no supported input stream format".to_string())
 }
 
 fn supported_buffer_details(config: &cpal::SupportedStreamConfig) -> (String, u32, u32) {
@@ -1346,11 +1457,8 @@ pub fn spawn_cpal_capture(
     aec_timing.reset_capture_path();
     let open_attempt = diagnostics.begin_open_attempt();
     let selected = pick_device(&device_id)?;
-    let config = selected
-        .device
-        .default_input_config()
-        .map_err(|e| format!("default input config: {e}"))?;
-    let in_rate = config.sample_rate().0;
+    let config = pick_input_config(&selected.device)?;
+    let in_rate = config.sample_rate();
     let channels = config.channels() as usize;
     if !(MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_CAPTURE_RATE).contains(&in_rate) {
         return Err(format!(
@@ -1584,17 +1692,31 @@ pub fn spawn_cpal_capture(
 
 pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
-    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let default_id = host
+        .default_output_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string());
     let mut out = Vec::new();
     if let Ok(devices) = host.output_devices() {
-        for d in devices {
-            let name = match d.name() {
-                Ok(n) => n,
+        for device in devices {
+            let id = match device.id() {
+                Ok(id) => id.to_string(),
                 Err(_) => continue,
             };
-            let is_default = Some(&name) == default_name.as_ref();
+            let name = match device
+                .description()
+                .ok()
+                .and_then(|description| device_display_name(&description))
+            {
+                Some(name) => name,
+                _ => continue,
+            };
+            if pick_output_config(&device).is_err() {
+                continue;
+            }
+            let is_default = Some(&id) == default_id.as_ref();
             out.push(DeviceInfo {
-                id: name.clone(),
+                id,
                 name,
                 default: is_default,
             });
@@ -1608,27 +1730,24 @@ fn pick_output_device(
     host: &cpal::Host,
     device_id: &Option<String>,
 ) -> Result<SelectedDevice, String> {
-    if let Some(id) = device_id {
-        if let Ok(devices) = host.output_devices() {
-            for d in devices {
-                if d.name().ok().as_deref() == Some(id.as_str()) {
-                    let resolved = d.name().unwrap_or_else(|_| id.clone());
-                    return Ok(SelectedDevice {
-                        device: d,
-                        requested_device: id.clone(),
-                        resolved_device: resolved,
-                        requested_default: false,
-                        requested_matched: true,
-                        fell_back_to_default: false,
-                    });
-                }
+    if let Some(id) = device_id.as_ref().filter(|id| !id.is_empty()) {
+        if let Ok(parsed) = id.parse::<cpal::DeviceId>() {
+            if let Some(device) = host.device_by_id(&parsed) {
+                return Ok(SelectedDevice {
+                    device,
+                    requested_device: id.clone(),
+                    resolved_device: parsed.to_string(),
+                    requested_default: false,
+                    requested_matched: true,
+                    fell_back_to_default: false,
+                });
             }
         }
     }
     let device = host
         .default_output_device()
         .ok_or_else(|| "no output device".to_string())?;
-    let resolved_device = device.name().unwrap_or_default();
+    let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
     Ok(SelectedDevice {
         device,
         requested_device: device_id.clone().unwrap_or_default(),
@@ -1643,7 +1762,10 @@ fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConf
     if let Ok(ranges) = device.supported_output_configs() {
         let mut best: Option<cpal::SupportedStreamConfigRange> = None;
         for r in ranges {
-            if r.min_sample_rate().0 <= SAMPLE_RATE && r.max_sample_rate().0 >= SAMPLE_RATE {
+            if !supported_sample_format(r.sample_format()) {
+                continue;
+            }
+            if r.min_sample_rate() <= SAMPLE_RATE && r.max_sample_rate() >= SAMPLE_RATE {
                 let better = match &best {
                     None => true,
                     Some(b) => {
@@ -1657,12 +1779,19 @@ fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConf
             }
         }
         if let Some(r) = best {
-            return Ok(r.with_sample_rate(cpal::SampleRate(SAMPLE_RATE)));
+            return Ok(r.with_sample_rate(SAMPLE_RATE));
         }
     }
-    device
+    let default = device
         .default_output_config()
-        .map_err(|e| format!("default output config: {e}"))
+        .map_err(|e| format!("default output config: {e}"))?;
+    if !supported_sample_format(default.sample_format()) {
+        return Err(format!(
+            "unsupported default output sample format: {:?}",
+            default.sample_format()
+        ));
+    }
+    Ok(default)
 }
 
 fn output_config_score(channels: u16, format: cpal::SampleFormat) -> (u8, u8, u16) {
@@ -1779,7 +1908,7 @@ pub fn spawn_cpal_playback(
     let selected = pick_output_device(&host, &device_id)?;
     let config = pick_output_config(&selected.device)?;
     let out_channels = config.channels() as usize;
-    let out_rate = config.sample_rate().0;
+    let out_rate = config.sample_rate();
     let sample_format = config.sample_format();
     let (buffer_mode, buffer_min_frames, buffer_max_frames) = supported_buffer_details(&config);
     let descriptor = StreamDescriptor {
@@ -2014,6 +2143,38 @@ pub fn spawn_cpal_playback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_device_label_prefers_endpoint_friendly_name() {
+        let extended = vec!["Microphone (Razer Seiren Mini)".to_string()];
+        assert_eq!(
+            choose_device_display_name("Microphone", &extended, true).as_deref(),
+            Some("Microphone (Razer Seiren Mini)")
+        );
+    }
+
+    #[test]
+    fn windows_device_label_ignores_blank_extended_lines_and_falls_back() {
+        let extended = vec!["  ".to_string(), "".to_string()];
+        assert_eq!(
+            choose_device_display_name("  Headphones  ", &extended, true).as_deref(),
+            Some("Headphones")
+        );
+    }
+
+    #[test]
+    fn non_windows_device_label_keeps_primary_name() {
+        let extended = vec!["diagnostic metadata".to_string()];
+        assert_eq!(
+            choose_device_display_name("Built-in Audio Analog Stereo", &extended, false).as_deref(),
+            Some("Built-in Audio Analog Stereo")
+        );
+    }
+
+    #[test]
+    fn device_label_rejects_empty_presentation_data() {
+        assert_eq!(choose_device_display_name("  ", &[], true), None);
+    }
     use crate::proto::{FRAME_SAMPLES, SAMPLE_RATE};
 
     fn timed_frame(capture_ns: u64, callback_ns: u64, valid: bool) -> AudioFrame {
@@ -2651,6 +2812,14 @@ mod tests {
             output_config_score(2, cpal::SampleFormat::F32)
                 < output_config_score(2, cpal::SampleFormat::I16)
         );
+    }
+
+    #[test]
+    fn stream_format_filter_matches_the_formats_with_callback_implementations() {
+        assert!(supported_sample_format(cpal::SampleFormat::F32));
+        assert!(supported_sample_format(cpal::SampleFormat::I16));
+        assert!(supported_sample_format(cpal::SampleFormat::U16));
+        assert!(!supported_sample_format(cpal::SampleFormat::I32));
     }
 
     #[test]

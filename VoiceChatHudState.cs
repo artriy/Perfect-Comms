@@ -13,12 +13,23 @@ namespace VoiceChatPlugin.VoiceChat;
 
 public static class VoiceChatHudState
 {
+    internal enum SharedMicTooltipOwner
+    {
+        None,
+        Microphone,
+        Radio,
+    }
+
     private static PassiveButton?  _micButton;
     private static GameObject?     _micButtonObj;
     private static PassiveButton?  _spkButton;
     private static GameObject?     _spkButtonObj;
     private static PassiveButton?  _jailButton;
     private static GameObject?     _jailButtonObj;
+#if ANDROID
+    private static PassiveButton?  _radioTouchButton;
+    private static GameObject?     _radioTouchButtonObj;
+#endif
 
     // Cached child SpriteRenderers so the per-frame refresh/sort paths avoid Transform.Find + GetComponent
     // and GetComponentsInChildren (managed array alloc + IL2CPP interop) every frame. Captured when the
@@ -28,6 +39,19 @@ public static class VoiceChatHudState
     private static SpriteRenderer[]? _micButtonSrs;
     private static SpriteRenderer[]? _spkButtonSrs;
     private static SpriteRenderer[]? _jailButtonSrs;
+#if ANDROID
+    private static SpriteRenderer? _radioTouchIconSr;
+    private static SpriteRenderer[]? _radioTouchButtonSrs;
+    private static int _micTouchFingerId = -1;
+    private static int _radioTouchFingerId = -1;
+    private static float _radioTouchStartTime;
+    private static bool _radioTouchTransmitStarted;
+    private static bool _touchPushToTalkHeld;
+    private static bool _touchTeamRadioHeld;
+    private static float _suppressMicClickUntilUnscaledTime;
+    private const float RadioTouchHoldThresholdSeconds = 0.18f;
+    private const float HandledTouchClickSuppressionSeconds = 0.35f;
+#endif
     private const float ButtonScale = 0.42f;
     private const int   ButtonSortOrder = 32760;
     private const int   TooltipSortOrder = 32767;
@@ -50,6 +74,7 @@ public static class VoiceChatHudState
     private static GameObject?  _spkTooltip;
     private static TextMeshPro? _micTooltipTmp;
     private static TextMeshPro? _spkTooltipTmp;
+    private static SharedMicTooltipOwner _sharedMicTooltipOwner;
     // Fix 4-HUD-b: KeepTooltipOnTop ran GetComponentsInChildren<Renderer>(true) AND
     // GetComponentsInChildren<TextMeshPro>(true) for BOTH tooltips EVERY frame (the largest avoidable
     // per-frame managed-array alloc on the HUD path). The tooltip hierarchy is static, so cache each
@@ -68,10 +93,29 @@ public static class VoiceChatHudState
     private static float _toastExpiry;
     private const float ToastDurationSeconds = 4f;
     private const float ToastViewportY = 0.84f;
+    private static GameObject?    _compactStatusObj;
+    private static TextMeshPro?   _compactStatusTmp;
+    private static Renderer[]?    _compactStatusRenderers;
+    private static TextMeshPro[]? _compactStatusTmps;
+    private static string _compactStatusMessage = "";
+    private static float _compactStatusExpiry;
+    private static string _lastCompactTransient = "";
+    private static string _lastCompactWarning = "";
+    private static string _lastCompactRendered = "";
+    private static bool _lastCompactMicMuted;
+    private static bool _lastCompactDeafened;
+    private static bool _lastCompactStateEnabled = true;
+    private const float CompactStatusDurationSeconds = 2.5f;
+    private const float CompactStatusViewportGap = 0.055f;
+    private const float CompactStatusViewportPadding = 0.01f;
+    private const float CompactStatusFallbackHalfWidthViewport = 0.145f;
+    private const float CompactStatusFallbackHalfHeightViewport = 0.065f;
     private static bool _micMuted;
     private static bool _teamRadioHeld;
+    private static bool _keyboardTeamRadioHeld;
     private static VoiceTeamRadioChannel _teamRadioChannel = VoiceTeamRadioChannel.None;
     private static bool _pushToTalkHeld;
+    private static bool _keyboardPushToTalkHeld;
     private static bool _speakerMuted;
     private static bool _initialized;
     private static int _audioPolicyRevision;
@@ -99,6 +143,7 @@ public static class VoiceChatHudState
         _cachedMainCamera = null;
         DestroyButtons();
         DestroyTooltips();
+        DestroyCompactStatus();
         // Preserve the HUD-independent privacy contract even when setup/role/UI work threw before
         // the normal policy point in UpdateHud.
         ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
@@ -123,6 +168,17 @@ public static class VoiceChatHudState
     internal static void ShowToastThreadSafe(string message)
         => _pendingToast = message ?? "";
 
+    /// <summary>
+    /// Shows an existing routine voice notification on the small status surface. Deliberately
+    /// separate from ShowToast: helper failures and compatibility notices retain the prominent
+    /// banner, while refresh/mode/mix confirmations no longer occupy the center of the screen.
+    /// </summary>
+    internal static void ShowCompactStatus(string message)
+    {
+        _compactStatusMessage = message ?? "";
+        _compactStatusExpiry = Time.unscaledTime + CompactStatusDurationSeconds;
+    }
+
     internal static void Init()
     {
         if (_initialized) return;
@@ -136,6 +192,7 @@ public static class VoiceChatHudState
                 DestroyButtons();
                 DestroyTooltips();
                 DestroyToast();
+                DestroyCompactStatus();
             });
 
         var settings = VoiceSettings.Instance;
@@ -154,9 +211,17 @@ public static class VoiceChatHudState
     /// </summary>
     internal static void BeginVoiceSession()
     {
+        // The setup canvas and its microphone preview are persistent. A newly authenticated room
+        // must take capture ownership before any HUD/input state is applied.
+        try { VoiceFirstRunSetup.ForceClose(); } catch { }
         _teamRadioHeld = false;
+        _keyboardTeamRadioHeld = false;
         _teamRadioChannel = VoiceTeamRadioChannel.None;
         _pushToTalkHeld = false;
+        _keyboardPushToTalkHeld = false;
+#if ANDROID
+        ResetAndroidTouchState();
+#endif
         _lastTrustedLocalAudioState = null;
 
         var settings = VoiceSettings.Instance;
@@ -174,9 +239,16 @@ public static class VoiceChatHudState
     internal static void EndVoiceSession()
     {
         _teamRadioHeld = false;
+        _keyboardTeamRadioHeld = false;
         _teamRadioChannel = VoiceTeamRadioChannel.None;
         _pushToTalkHeld = false;
+        _keyboardPushToTalkHeld = false;
+#if ANDROID
+        ResetAndroidTouchState();
+#endif
         _lastTrustedLocalAudioState = null;
+        _compactStatusMessage = "";
+        _compactStatusExpiry = 0f;
         InvalidateAudioPolicyCache();
     }
 
@@ -184,7 +256,12 @@ public static class VoiceChatHudState
     {
         bool changed = _teamRadioHeld || _pushToTalkHeld;
         _teamRadioHeld = false;
+        _keyboardTeamRadioHeld = false;
         _pushToTalkHeld = false;
+        _keyboardPushToTalkHeld = false;
+#if ANDROID
+        ResetAndroidTouchState();
+#endif
         if (!changed) return;
 
         InvalidateAudioPolicyCache();
@@ -253,29 +330,61 @@ public static class VoiceChatHudState
         float spacing = scale * 0.8f;
 
         Vector3 micPos, spkPos, jailPos;
+#if ANDROID
+        Vector3 radioPos;
+        bool radioInLayout = _radioTouchButtonObj != null && _radioTouchButtonObj.activeSelf;
+#endif
         if (_controlsLayout == VoiceControlsLayout.Vertical)
         {
             micPos  = new Vector3(worldPt.x, worldPt.y,             -100f);
             spkPos  = new Vector3(worldPt.x, worldPt.y - spacing,   -100f);
+#if ANDROID
+            radioPos = radioInLayout
+                ? new Vector3(worldPt.x, worldPt.y + spacing, -100f)
+                : micPos;
+            jailPos = new Vector3(
+                worldPt.x,
+                worldPt.y + spacing * (radioInLayout ? 2f : 1f),
+                -100f);
+#else
             jailPos = new Vector3(worldPt.x, worldPt.y + spacing,   -100f);
+#endif
         }
         else
         {
             micPos  = new Vector3(worldPt.x,             worldPt.y, -100f);
             spkPos  = new Vector3(worldPt.x + spacing,   worldPt.y, -100f);
+#if ANDROID
+            radioPos = radioInLayout
+                ? new Vector3(worldPt.x + spacing * 2f, worldPt.y, -100f)
+                : micPos;
+            jailPos = new Vector3(
+                worldPt.x + spacing * (radioInLayout ? 3f : 2f),
+                worldPt.y,
+                -100f);
+#else
             jailPos = new Vector3(worldPt.x + spacing * 2f, worldPt.y, -100f);
+#endif
         }
 
         // When the jail button lives on a meeting card, keep it out of the button-group clamp
         // so it can't drag the mic/speaker layout around.
         if (_jailOnCard) jailPos = micPos;
+#if ANDROID
+        ClampVoiceButtonViewportPositions(cam, ref micPos, ref spkPos, ref radioPos, ref jailPos);
+#else
         ClampVoiceButtonViewportPositions(cam, ref micPos, ref spkPos, ref jailPos);
+#endif
 
         var parent = _micButtonObj.transform.parent;
         if (parent != null)
         {
             _micButtonObj.transform.localPosition = parent.InverseTransformPoint(micPos);
             _spkButtonObj.transform.localPosition = parent.InverseTransformPoint(spkPos);
+#if ANDROID
+            if (_radioTouchButtonObj != null)
+                _radioTouchButtonObj.transform.localPosition = parent.InverseTransformPoint(radioPos);
+#endif
             if (_jailButtonObj != null && !_jailOnCard)
                 _jailButtonObj.transform.localPosition = parent.InverseTransformPoint(jailPos);
         }
@@ -283,42 +392,184 @@ public static class VoiceChatHudState
         {
             _micButtonObj.transform.position = micPos;
             _spkButtonObj.transform.position = spkPos;
+#if ANDROID
+            if (_radioTouchButtonObj != null)
+                _radioTouchButtonObj.transform.position = radioPos;
+#endif
             if (_jailButtonObj != null && !_jailOnCard)
                 _jailButtonObj.transform.position = jailPos;
         }
     }
 
+#if ANDROID
+    private static void ClampVoiceButtonViewportPositions(
+        Camera cam,
+        ref Vector3 micPos,
+        ref Vector3 spkPos,
+        ref Vector3 radioPos,
+        ref Vector3 jailPos)
+    {
+        float minX = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity;
+        float minY = float.PositiveInfinity;
+        float maxY = float.NegativeInfinity;
+        IncludeProposedButtonViewportBounds(
+            cam, _micButtonObj, _micButtonSrs, micPos, ref minX, ref maxX, ref minY, ref maxY);
+        IncludeProposedButtonViewportBounds(
+            cam, _spkButtonObj, _spkButtonSrs, spkPos, ref minX, ref maxX, ref minY, ref maxY);
+        if (_radioTouchButtonObj != null && _radioTouchButtonObj.activeSelf)
+            IncludeProposedButtonViewportBounds(
+                cam, _radioTouchButtonObj, _radioTouchButtonSrs, radioPos,
+                ref minX, ref maxX, ref minY, ref maxY);
+        if (!_jailOnCard && _jailButtonObj != null && _jailButtonObj.activeSelf)
+            IncludeProposedButtonViewportBounds(
+                cam, _jailButtonObj, _jailButtonSrs, jailPos,
+                ref minX, ref maxX, ref minY, ref maxY);
+
+        var delta = ButtonGroupClampDelta(cam, minX, maxX, minY, maxY);
+        micPos += delta;
+        spkPos += delta;
+        radioPos += delta;
+        jailPos += delta;
+    }
+#endif
+
     private static void ClampVoiceButtonViewportPositions(Camera cam, ref Vector3 micPos, ref Vector3 spkPos, ref Vector3 jailPos)
     {
-        var depthWorld = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ButtonViewportDepth));
-        var micViewport = cam.WorldToViewportPoint(new Vector3(micPos.x, micPos.y, depthWorld.z));
-        var spkViewport = cam.WorldToViewportPoint(new Vector3(spkPos.x, spkPos.y, depthWorld.z));
-        var jailViewport = cam.WorldToViewportPoint(new Vector3(jailPos.x, jailPos.y, depthWorld.z));
+        float minX = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity;
+        float minY = float.PositiveInfinity;
+        float maxY = float.NegativeInfinity;
+        IncludeProposedButtonViewportBounds(
+            cam, _micButtonObj, _micButtonSrs, micPos, ref minX, ref maxX, ref minY, ref maxY);
+        IncludeProposedButtonViewportBounds(
+            cam, _spkButtonObj, _spkButtonSrs, spkPos, ref minX, ref maxX, ref minY, ref maxY);
+        if (!_jailOnCard && _jailButtonObj != null && _jailButtonObj.activeSelf)
+            IncludeProposedButtonViewportBounds(
+                cam, _jailButtonObj, _jailButtonSrs, jailPos,
+                ref minX, ref maxX, ref minY, ref maxY);
 
-        float minX = Mathf.Min(Mathf.Min(micViewport.x, spkViewport.x), jailViewport.x);
-        float maxX = Mathf.Max(Mathf.Max(micViewport.x, spkViewport.x), jailViewport.x);
-        float minY = Mathf.Min(Mathf.Min(micViewport.y, spkViewport.y), jailViewport.y);
-        float maxY = Mathf.Max(Mathf.Max(micViewport.y, spkViewport.y), jailViewport.y);
-
-        float shiftX = CalculateViewportShift(minX, maxX);
-        float shiftY = CalculateViewportShift(minY, maxY);
-        if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f))
-            return;
-
-        var origin = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ButtonViewportDepth));
-        var shifted = cam.ViewportToWorldPoint(new Vector3(shiftX, shiftY, ButtonViewportDepth));
-        var delta = shifted - origin;
-        delta.z = 0f;
-
+        var delta = ButtonGroupClampDelta(cam, minX, maxX, minY, maxY);
         micPos += delta;
         spkPos += delta;
         jailPos += delta;
     }
 
-    private static float CalculateViewportShift(float min, float max)
+    private static void IncludeProposedButtonViewportBounds(
+        Camera cam,
+        GameObject? button,
+        SpriteRenderer[]? renderers,
+        Vector3 proposedPosition,
+        ref float minX,
+        ref float maxX,
+        ref float minY,
+        ref float maxY)
     {
-        float minAllowed = ButtonViewportPadding;
-        float maxAllowed = 1f - ButtonViewportPadding;
+        bool includedRenderer = false;
+        if (button != null && renderers != null)
+        {
+            var currentPosition = button.transform.position;
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null || renderer.sprite == null) continue;
+                var bounds = renderer.bounds;
+                if (bounds.size.x <= 0f || bounds.size.y <= 0f) continue;
+
+                float worldMinX = proposedPosition.x + bounds.min.x - currentPosition.x;
+                float worldMaxX = proposedPosition.x + bounds.max.x - currentPosition.x;
+                float worldMinY = proposedPosition.y + bounds.min.y - currentPosition.y;
+                float worldMaxY = proposedPosition.y + bounds.max.y - currentPosition.y;
+                IncludeWorldRectViewportBounds(
+                    cam,
+                    worldMinX,
+                    worldMaxX,
+                    worldMinY,
+                    worldMaxY,
+                    proposedPosition.z,
+                    ref minX,
+                    ref maxX,
+                    ref minY,
+                    ref maxY);
+                includedRenderer = true;
+            }
+        }
+
+        if (!includedRenderer)
+        {
+            var viewport = cam.WorldToViewportPoint(proposedPosition);
+            IncludeViewportPoint(viewport, ref minX, ref maxX, ref minY, ref maxY);
+        }
+    }
+
+    private static void IncludeWorldRectViewportBounds(
+        Camera cam,
+        float worldMinX,
+        float worldMaxX,
+        float worldMinY,
+        float worldMaxY,
+        float worldZ,
+        ref float minX,
+        ref float maxX,
+        ref float minY,
+        ref float maxY)
+    {
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(new Vector3(worldMinX, worldMinY, worldZ)),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(new Vector3(worldMinX, worldMaxY, worldZ)),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(new Vector3(worldMaxX, worldMinY, worldZ)),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(new Vector3(worldMaxX, worldMaxY, worldZ)),
+            ref minX, ref maxX, ref minY, ref maxY);
+    }
+
+    private static void IncludeViewportPoint(
+        Vector3 point,
+        ref float minX,
+        ref float maxX,
+        ref float minY,
+        ref float maxY)
+    {
+        minX = Mathf.Min(minX, point.x);
+        maxX = Mathf.Max(maxX, point.x);
+        minY = Mathf.Min(minY, point.y);
+        maxY = Mathf.Max(maxY, point.y);
+    }
+
+    private static Vector3 ButtonGroupClampDelta(
+        Camera cam,
+        float minX,
+        float maxX,
+        float minY,
+        float maxY)
+    {
+        if (float.IsInfinity(minX) || float.IsInfinity(maxX)
+            || float.IsInfinity(minY) || float.IsInfinity(maxY))
+            return Vector3.zero;
+
+        Rect safe = NormalizedSafeViewportRect();
+        float paddingX = Mathf.Min(ButtonViewportPadding, safe.width * 0.25f);
+        float paddingY = Mathf.Min(ButtonViewportPadding, safe.height * 0.25f);
+        float shiftX = CalculateViewportShift(
+            minX, maxX, safe.xMin + paddingX, safe.xMax - paddingX);
+        float shiftY = CalculateViewportShift(
+            minY, maxY, safe.yMin + paddingY, safe.yMax - paddingY);
+        if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f))
+            return Vector3.zero;
+
+        var origin = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ButtonViewportDepth));
+        var shifted = cam.ViewportToWorldPoint(new Vector3(shiftX, shiftY, ButtonViewportDepth));
+        var delta = shifted - origin;
+        delta.z = 0f;
+        return delta;
+    }
+
+    internal static float CalculateViewportShift(float min, float max, float minAllowed, float maxAllowed)
+    {
         float allowedSize = maxAllowed - minAllowed;
         float currentSize = max - min;
 
@@ -329,6 +580,20 @@ public static class VoiceChatHudState
         if (max > maxAllowed)
             return maxAllowed - max;
         return 0f;
+    }
+
+    private static Rect NormalizedSafeViewportRect()
+    {
+        float screenWidth = Mathf.Max(1f, Screen.width);
+        float screenHeight = Mathf.Max(1f, Screen.height);
+        Rect safe = Screen.safeArea;
+        if (safe.width < 1f || safe.height < 1f)
+            safe = new Rect(0f, 0f, screenWidth, screenHeight);
+        return new Rect(
+            safe.xMin / screenWidth,
+            safe.yMin / screenHeight,
+            safe.width / screenWidth,
+            safe.height / screenHeight);
     }
     // P1.2: pre-warm the one-time HUD init off the game-entry frame. The first UpdateHud() otherwise lands the
     // ~24 MB / ~177 ms first-init (embedded-PNG sprite decode + HUD button Instantiate + tooltip GameObject
@@ -377,6 +642,9 @@ public static class VoiceChatHudState
         var hud = HudManager.Instance;
         if (hud == null)
         {
+#if ANDROID
+            ReleaseAndroidTouchInput();
+#endif
             ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
             _lastUpdateStep = "waiting.hud";
             return;
@@ -386,6 +654,9 @@ public static class VoiceChatHudState
         var localPlayer = PlayerControl.LocalPlayer;
         if (localPlayer == null)
         {
+#if ANDROID
+            ReleaseAndroidTouchInput();
+#endif
             ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
             _lastUpdateStep = "waiting.local-player";
             return;
@@ -397,6 +668,9 @@ public static class VoiceChatHudState
         _lastUpdateStep = "readiness.local-data";
         if (localPlayer.Data == null)
         {
+#if ANDROID
+            ReleaseAndroidTouchInput();
+#endif
             ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
             _lastUpdateStep = "waiting.local-data";
             return;
@@ -405,6 +679,9 @@ public static class VoiceChatHudState
         _lastUpdateStep = "readiness.map-button";
         if (hud.MapButton == null)
         {
+#if ANDROID
+            ReleaseAndroidTouchInput();
+#endif
             ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
             _lastUpdateStep = "waiting.map-button";
             return;
@@ -432,12 +709,18 @@ public static class VoiceChatHudState
         ApplyMicState();
         _lastUpdateStep = "button-visibility";
         UpdateHudButtonsVisibility();
+#if ANDROID
+        _lastUpdateStep = "touch-input";
+        UpdateAndroidTouchInput();
+#endif
         _lastUpdateStep = "button-visuals";
         long vTicks = VoiceFrameProfiler.Begin();
         RefreshButtonVisuals();
         VoiceFrameProfiler.End("hud.visuals", vTicks);
         _lastUpdateStep = "toast";
         UpdateToast(hud);
+        _lastUpdateStep = "compact-status";
+        UpdateCompactStatus(hud);
         _lastUpdateStep = "complete";
     }
 
@@ -473,7 +756,11 @@ public static class VoiceChatHudState
                 "mic",
                 "VC_MicButton",
                 "VoiceChatPlugin.Resources.MicOn.png",
+#if ANDROID
+                AndroidMicButtonClick,
+#else
                 ToggleMutePublic,
+#endif
                 ShowMicTooltip,
                 hideTooltipOnMouseOut: true,
                 out var button,
@@ -524,7 +811,33 @@ public static class VoiceChatHudState
             _jailButtonObj = obj;
             _jailButton = button;
             _jailButtonSrs = renderers;
+#if ANDROID
+            return; // keep the existing one-button-per-frame initialization budget
+#endif
         }
+
+#if ANDROID
+        if (_radioTouchButtonObj == null)
+        {
+            var obj = CreateHudButton(
+                hud,
+                root,
+                "radio-touch",
+                "VC_RadioTouchButton",
+                "VoiceChatPlugin.Resources.MicOn.png",
+                AndroidRadioButtonClickNoOp,
+                ShowRadioTooltip,
+                hideTooltipOnMouseOut: true,
+                out var button,
+                out var icon,
+                out var renderers);
+            _radioTouchButtonObj = obj;
+            _radioTouchButton = button;
+            _radioTouchIconSr = icon;
+            _radioTouchButtonSrs = renderers;
+            CreateRadioTouchLabel(obj);
+        }
+#endif
     }
 
     private static GameObject CreateHudButton(
@@ -610,6 +923,9 @@ public static class VoiceChatHudState
         var root = ResolveHudRoot(hud);
         ReparentToRoot(_micButtonObj, root);
         ReparentToRoot(_spkButtonObj, root);
+#if ANDROID
+        ReparentToRoot(_radioTouchButtonObj, root);
+#endif
         // _jailButtonObj's parent is owned by UpdateHudButtonsVisibility (HUD root vs. the
         // jailee's meeting card), so it is intentionally not reparented here.
         ReparentToRoot(_micTooltip, root);
@@ -641,6 +957,9 @@ public static class VoiceChatHudState
         if (_micButtonObj == null || _spkButtonObj == null) return;
         _micButtonObj.SetActive(true);
         _spkButtonObj.SetActive(true);
+#if ANDROID
+        _radioTouchButtonObj?.SetActive(CanUseTeamRadio());
+#endif
 
         bool jailVisible = VoiceRoleMuteState.CanLocalJailorUnmute(out byte jailedId);
         _jailButtonObj?.SetActive(jailVisible);
@@ -666,6 +985,9 @@ public static class VoiceChatHudState
 
         KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
         KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
+#if ANDROID
+        KeepButtonOnTop(_radioTouchButtonObj, ref _radioTouchButtonSrs);
+#endif
         KeepButtonOnTop(_jailButtonObj, ref _jailButtonSrs);
     }
 
@@ -764,6 +1086,21 @@ public static class VoiceChatHudState
                 if (sr != null) { sr.sprite = Sprites.SpkOn; sr.color = Color.white; }
             }
         }
+#if ANDROID
+        if (_radioTouchButtonObj != null)
+        {
+            var sr = ResolveIconSr(_radioTouchButtonObj, ref _radioTouchIconSr);
+            if (sr != null)
+            {
+                sr.sprite = Sprites.MicOn;
+                sr.color = IsInTeamRadioMode()
+                    ? new Color(1f, 0.55f, 0.1f)
+                    : CanUseTeamRadioInput()
+                        ? new Color(1f, 0.78f, 0.22f)
+                        : new Color(0.55f, 0.45f, 0.3f);
+            }
+        }
+#endif
     }
     internal static void ApplyMicState()
     {
@@ -959,7 +1296,7 @@ public static class VoiceChatHudState
         InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
-        ShowToast(next == VoiceMicMode.PushToTalk ? "Push To Talk" : "Open Mic");
+        ShowCompactStatus(next == VoiceMicMode.PushToTalk ? "Push To Talk" : "Open Mic");
     }
 
     private static bool IsManualMuteActive()
@@ -981,6 +1318,15 @@ public static class VoiceChatHudState
     }
 
     internal static void UpdateTeamRadioHold(bool held, bool justPressed, bool justReleased)
+    {
+        _keyboardTeamRadioHeld = held;
+#if ANDROID
+        held = _keyboardTeamRadioHeld || _touchTeamRadioHeld;
+#endif
+        ApplyTeamRadioHold(held);
+    }
+
+    private static void ApplyTeamRadioHold(bool held)
     {
         var channel = NormalizeTeamRadioChannel();
         if (channel == VoiceTeamRadioChannel.None)
@@ -1050,9 +1396,22 @@ public static class VoiceChatHudState
         InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
-        if (_micTooltip?.activeSelf == true)
+        var tooltipOwner = ResolveSharedMicTooltipRefreshOwner(
+            _micTooltip?.activeSelf == true,
+            _sharedMicTooltipOwner);
+#if ANDROID
+        if (tooltipOwner == SharedMicTooltipOwner.Radio)
+            ShowRadioTooltip();
+        else
+#endif
+        if (tooltipOwner == SharedMicTooltipOwner.Microphone)
             ShowMicTooltip();
     }
+
+    internal static SharedMicTooltipOwner ResolveSharedMicTooltipRefreshOwner(
+        bool tooltipActive,
+        SharedMicTooltipOwner owner)
+        => tooltipActive ? owner : SharedMicTooltipOwner.None;
 
     private static VoiceTeamRadioChannel NormalizeTeamRadioChannel()
     {
@@ -1065,12 +1424,228 @@ public static class VoiceChatHudState
 
     internal static void UpdatePushToTalkHeld(bool held)
     {
+        _keyboardPushToTalkHeld = held;
+#if ANDROID
+        held = _keyboardPushToTalkHeld || _touchPushToTalkHeld;
+#endif
+        ApplyPushToTalkHeld(held);
+    }
+
+    private static void ApplyPushToTalkHeld(bool held)
+    {
         if (_pushToTalkHeld == held) return;
         _pushToTalkHeld = held;
         InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
     }
+
+#if ANDROID
+    private static void AndroidMicButtonClick()
+    {
+        if (ShouldSuppressHandledTouchClick(
+                _micTouchFingerId >= 0,
+                Time.unscaledTime,
+                _suppressMicClickUntilUnscaledTime))
+        {
+            _suppressMicClickUntilUnscaledTime = 0f;
+            return;
+        }
+
+        ToggleMutePublic();
+    }
+
+    internal static bool ShouldSuppressHandledTouchClick(
+        bool touchStillTracked,
+        float unscaledTime,
+        float suppressUntilUnscaledTime)
+        => touchStillTracked
+        || suppressUntilUnscaledTime > 0f && unscaledTime <= suppressUntilUnscaledTime;
+
+    private static void AndroidRadioButtonClickNoOp()
+    {
+        // Touch down/up is handled explicitly below so a short tap can cycle channels while a
+        // sustained press transmits. PassiveButton still owns the visual hit surface.
+    }
+
+    private static void CreateRadioTouchLabel(GameObject button)
+    {
+        var labelObject = new GameObject("RadioLabel");
+        labelObject.transform.SetParent(button.transform, false);
+        labelObject.transform.localPosition = new Vector3(0.28f, -0.28f, -1f);
+        labelObject.layer = button.layer;
+        var label = labelObject.AddComponent<TextMeshPro>();
+        label.text = "R";
+        label.fontSize = 2f;
+        label.fontStyle = FontStyles.Bold;
+        label.color = new Color(1f, 0.88f, 0.28f);
+        label.alignment = TextAlignmentOptions.Center;
+        label.enableWordWrapping = false;
+        label.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+        label.sortingOrder = ButtonSortOrder + 1;
+        label.rectTransform.sizeDelta = new Vector2(0.65f, 0.65f);
+    }
+
+    private static void UpdateAndroidTouchInput()
+    {
+        if (VoiceChatPatches.ShouldSuppressVoiceInput())
+        {
+            ReleaseAndroidTouchInput();
+            return;
+        }
+
+        UpdateAndroidPushToTalkTouch();
+        UpdateAndroidRadioTouch();
+    }
+
+    private static void UpdateAndroidPushToTalkTouch()
+    {
+        if (!IsPushToTalkMode() || _micButtonObj == null || !_micButtonObj.activeInHierarchy)
+        {
+            ReleaseAndroidPushToTalkTouch();
+            return;
+        }
+
+        if (_micTouchFingerId >= 0)
+        {
+            if (!TryFindTouch(_micTouchFingerId, out var tracked)
+                || tracked.phase is TouchPhase.Ended or TouchPhase.Canceled)
+                ReleaseAndroidPushToTalkTouch();
+            return;
+        }
+
+        for (int i = 0; i < Input.touchCount; i++)
+        {
+            var touch = Input.GetTouch(i);
+            if (touch.phase != TouchPhase.Began || touch.fingerId == _radioTouchFingerId) continue;
+            if (!TouchHitsButton(touch.position, _micButtonObj)) continue;
+
+            _micTouchFingerId = touch.fingerId;
+            _touchPushToTalkHeld = true;
+            ApplyPushToTalkHeld(_keyboardPushToTalkHeld || _touchPushToTalkHeld);
+            break;
+        }
+    }
+
+    private static void UpdateAndroidRadioTouch()
+    {
+        if (_radioTouchButtonObj == null
+            || !_radioTouchButtonObj.activeInHierarchy
+            || !CanUseTeamRadioInput())
+        {
+            ReleaseAndroidRadioTouch();
+            return;
+        }
+
+        if (_radioTouchFingerId >= 0)
+        {
+            if (!TryFindTouch(_radioTouchFingerId, out var tracked))
+            {
+                ReleaseAndroidRadioTouch();
+                return;
+            }
+
+            if (tracked.phase is TouchPhase.Ended or TouchPhase.Canceled)
+            {
+                bool cycle = !_radioTouchTransmitStarted && tracked.phase == TouchPhase.Ended;
+                ReleaseAndroidRadioTouch();
+                if (cycle && CanUseTeamRadioInput()) CycleTeamRadioChannel();
+                return;
+            }
+
+            if (!_radioTouchTransmitStarted
+                && Time.unscaledTime - _radioTouchStartTime >= RadioTouchHoldThresholdSeconds)
+            {
+                _radioTouchTransmitStarted = true;
+                _touchTeamRadioHeld = true;
+                ApplyTeamRadioHold(_keyboardTeamRadioHeld || _touchTeamRadioHeld);
+            }
+            return;
+        }
+
+        for (int i = 0; i < Input.touchCount; i++)
+        {
+            var touch = Input.GetTouch(i);
+            if (touch.phase != TouchPhase.Began || touch.fingerId == _micTouchFingerId) continue;
+            if (!TouchHitsButton(touch.position, _radioTouchButtonObj)) continue;
+
+            _radioTouchFingerId = touch.fingerId;
+            _radioTouchStartTime = Time.unscaledTime;
+            _radioTouchTransmitStarted = false;
+            break;
+        }
+    }
+
+    private static bool TryFindTouch(int fingerId, out Touch touch)
+    {
+        for (int i = 0; i < Input.touchCount; i++)
+        {
+            var candidate = Input.GetTouch(i);
+            if (candidate.fingerId != fingerId) continue;
+            touch = candidate;
+            return true;
+        }
+        touch = default;
+        return false;
+    }
+
+    private static bool TouchHitsButton(Vector2 screenPosition, GameObject button)
+    {
+        var cam = MainCamera();
+        if (cam == null) return false;
+        var world = cam.ScreenToWorldPoint(new Vector3(screenPosition.x, screenPosition.y, ButtonViewportDepth));
+        var renderers = button.GetComponentsInChildren<SpriteRenderer>(true);
+        foreach (var renderer in renderers)
+        {
+            if (renderer == null || renderer.sprite == null) continue;
+            var bounds = renderer.bounds;
+            float padding = Mathf.Max(bounds.size.x, bounds.size.y) * 0.30f;
+            if (world.x >= bounds.min.x - padding && world.x <= bounds.max.x + padding
+                && world.y >= bounds.min.y - padding && world.y <= bounds.max.y + padding)
+                return true;
+        }
+        return false;
+    }
+
+    private static void ReleaseAndroidPushToTalkTouch()
+    {
+        bool handledTouch = _micTouchFingerId >= 0;
+        _micTouchFingerId = -1;
+        if (handledTouch)
+            _suppressMicClickUntilUnscaledTime =
+                Time.unscaledTime + HandledTouchClickSuppressionSeconds;
+        if (!_touchPushToTalkHeld) return;
+        _touchPushToTalkHeld = false;
+        ApplyPushToTalkHeld(_keyboardPushToTalkHeld);
+    }
+
+    private static void ReleaseAndroidRadioTouch()
+    {
+        _radioTouchFingerId = -1;
+        _radioTouchStartTime = 0f;
+        _radioTouchTransmitStarted = false;
+        if (!_touchTeamRadioHeld) return;
+        _touchTeamRadioHeld = false;
+        ApplyTeamRadioHold(_keyboardTeamRadioHeld);
+    }
+
+    private static void ReleaseAndroidTouchInput()
+    {
+        ReleaseAndroidPushToTalkTouch();
+        ReleaseAndroidRadioTouch();
+    }
+
+    private static void ResetAndroidTouchState()
+    {
+        _micTouchFingerId = -1;
+        _radioTouchFingerId = -1;
+        _radioTouchStartTime = 0f;
+        _radioTouchTransmitStarted = false;
+        _touchPushToTalkHeld = false;
+        _touchTeamRadioHeld = false;
+        _suppressMicClickUntilUnscaledTime = 0f;
+    }
+#endif
 
     internal static void ToggleSpeakerPublic() => SetSpeakerMuted(!_speakerMuted);
 
@@ -1100,24 +1675,53 @@ public static class VoiceChatHudState
             _spkButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
         if (_jailButtonObj != null)
             _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+#if ANDROID
+        if (_radioTouchButtonObj != null)
+            _radioTouchButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+#endif
         PositionButtons();
     }
     private static void DestroyButtons()
     {
+#if ANDROID
+        // A scene teardown can destroy the touch target without producing TouchPhase.Ended.
+        // Close every transmit source before discarding finger ownership so capture cannot latch.
+        if (_touchPushToTalkHeld || _touchTeamRadioHeld
+            || _micTouchFingerId >= 0 || _radioTouchFingerId >= 0)
+            ReleaseTransmitHoldsFailClosed();
+#endif
         BestEffortDestroy(ref _micButtonObj);
         BestEffortDestroy(ref _spkButtonObj);
         BestEffortDestroy(ref _jailButtonObj);
+#if ANDROID
+        BestEffortDestroy(ref _radioTouchButtonObj);
+#endif
         _micButton   = null; _spkButton   = null; _jailButton  = null;
+#if ANDROID
+        _radioTouchButton = null;
+        _radioTouchIconSr = null;
+        _radioTouchButtonSrs = null;
+        ResetAndroidTouchState();
+#endif
     }
 
     private static void DestroyTooltips()
     {
         BestEffortDestroy(ref _micTooltip);
         BestEffortDestroy(ref _spkTooltip);
+        _sharedMicTooltipOwner = SharedMicTooltipOwner.None;
         _micTooltipTmp = null; _spkTooltipTmp = null;
         // Drop the cached child-component arrays so a re-created tooltip re-caches fresh references.
         _micTooltipRenderers = null; _spkTooltipRenderers = null;
         _micTooltipTmps = null; _spkTooltipTmps = null;
+    }
+
+    private static void DestroyCompactStatus()
+    {
+        BestEffortDestroy(ref _compactStatusObj);
+        _compactStatusTmp = null;
+        _compactStatusRenderers = null;
+        _compactStatusTmps = null;
     }
 
     private static void BestEffortDestroy(ref GameObject? obj)
@@ -1193,6 +1797,213 @@ public static class VoiceChatHudState
         _toastTmps = null;
     }
 
+    private static void UpdateCompactStatus(HudManager hud)
+    {
+        string transient = Time.unscaledTime < _compactStatusExpiry ? _compactStatusMessage : string.Empty;
+        if (transient.Length == 0 && _compactStatusMessage.Length != 0)
+            _compactStatusMessage = "";
+
+        string warning = VoiceHudWarnings.BuildWarning();
+        bool showManualState = VoiceSettings.Instance?.ShowMuteDeafenStatusAlerts.Value ?? true;
+        bool microphoneMuted = IsManualMuteActive();
+        if (!string.Equals(transient, _lastCompactTransient, StringComparison.Ordinal)
+            || !string.Equals(warning, _lastCompactWarning, StringComparison.Ordinal)
+            || microphoneMuted != _lastCompactMicMuted
+            || _speakerMuted != _lastCompactDeafened
+            || showManualState != _lastCompactStateEnabled)
+        {
+            _lastCompactTransient = transient;
+            _lastCompactWarning = warning;
+            _lastCompactMicMuted = microphoneMuted;
+            _lastCompactDeafened = _speakerMuted;
+            _lastCompactStateEnabled = showManualState;
+            _lastCompactRendered = VoiceCompactStatusPolicy.Compose(
+                transient,
+                warning,
+                microphoneMuted,
+                _speakerMuted,
+                showManualState);
+        }
+        string rendered = _lastCompactRendered;
+
+        if (rendered.Length == 0)
+        {
+            if (_compactStatusObj != null && _compactStatusObj.activeSelf)
+                _compactStatusObj.SetActive(false);
+            return;
+        }
+
+        var root = ResolveHudRoot(hud);
+        if (_compactStatusObj == null)
+            _compactStatusObj = CreateCompactStatusObject(root, out _compactStatusTmp);
+        ReparentToRoot(_compactStatusObj, root);
+
+        if (_compactStatusTmp != null && _compactStatusTmp.text != rendered)
+            _compactStatusTmp.text = rendered;
+
+        // TMP does not publish reliable rendered bounds for an inactive object. Activate before
+        // forcing the mesh so PositionCompactStatus can clamp the actual glyph block, including a
+        // multi-line grace-period warning, rather than a guessed fixed rectangle.
+        if (!_compactStatusObj.activeSelf) _compactStatusObj.SetActive(true);
+        PositionCompactStatus();
+        KeepTooltipOnTop(_compactStatusObj, ref _compactStatusRenderers, ref _compactStatusTmps);
+    }
+
+    private static GameObject CreateCompactStatusObject(Transform root, out TextMeshPro tmp)
+    {
+        var go = new GameObject("VC_CompactStatus");
+        go.transform.SetParent(root, false);
+        go.transform.localPosition = new Vector3(0f, 0f, -80f);
+
+        var textGo = new GameObject("Text");
+        textGo.transform.SetParent(go.transform, false);
+        textGo.transform.localPosition = Vector3.zero;
+        tmp = textGo.AddComponent<TextMeshPro>();
+        tmp.fontSize = 1.15f;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.color = Color.white;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.enableWordWrapping = false;
+        tmp.richText = true;
+        tmp.outlineWidth = 0.22f;
+        tmp.outlineColor = new Color32(0, 0, 0, 225);
+        tmp.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+        tmp.sortingOrder = TooltipSortOrder;
+        tmp.rectTransform.sizeDelta = new Vector2(7.5f, 2.2f);
+        go.SetActive(false);
+        return go;
+    }
+
+    private static void PositionCompactStatus()
+    {
+        if (_compactStatusObj == null) return;
+        var cam = MainCamera();
+        if (cam == null) return;
+
+        float minX = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity;
+        float minY = float.PositiveInfinity;
+        float maxY = float.NegativeInfinity;
+        var fallback = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, ButtonViewportDepth));
+        IncludeProposedButtonViewportBounds(
+            cam,
+            _micButtonObj,
+            _micButtonSrs,
+            _micButtonObj != null ? _micButtonObj.transform.position : fallback,
+            ref minX,
+            ref maxX,
+            ref minY,
+            ref maxY);
+        IncludeProposedButtonViewportBounds(
+            cam,
+            _spkButtonObj,
+            _spkButtonSrs,
+            _spkButtonObj != null ? _spkButtonObj.transform.position : fallback,
+            ref minX,
+            ref maxX,
+            ref minY,
+            ref maxY);
+        if (_jailButtonObj != null && _jailButtonObj.activeInHierarchy && !_jailOnCard)
+            IncludeProposedButtonViewportBounds(
+                cam,
+                _jailButtonObj,
+                _jailButtonSrs,
+                _jailButtonObj.transform.position,
+                ref minX,
+                ref maxX,
+                ref minY,
+                ref maxY);
+#if ANDROID
+        if (_radioTouchButtonObj != null && _radioTouchButtonObj.activeInHierarchy)
+            IncludeProposedButtonViewportBounds(
+                cam,
+                _radioTouchButtonObj,
+                _radioTouchButtonSrs,
+                _radioTouchButtonObj.transform.position,
+                ref minX,
+                ref maxX,
+                ref minY,
+                ref maxY);
+#endif
+
+        float statusMinX;
+        float statusMaxX;
+        float statusMinY;
+        float statusMaxY;
+        if (!TryGetCompactStatusViewportBounds(
+                cam, out statusMinX, out statusMaxX, out statusMinY, out statusMaxY))
+        {
+            var center = cam.WorldToViewportPoint(_compactStatusObj.transform.position);
+            statusMinX = center.x - CompactStatusFallbackHalfWidthViewport;
+            statusMaxX = center.x + CompactStatusFallbackHalfWidthViewport;
+            statusMinY = center.y - CompactStatusFallbackHalfHeightViewport;
+            statusMaxY = center.y + CompactStatusFallbackHalfHeightViewport;
+        }
+
+        Rect safe = NormalizedSafeViewportRect();
+        float alignX = (minX + maxX - statusMinX - statusMaxX) * 0.5f;
+        bool placeAbove = (minY + maxY) * 0.5f <= safe.center.y;
+        float alignY = placeAbove
+            ? maxY + CompactStatusViewportGap - statusMinY
+            : minY - CompactStatusViewportGap - statusMaxY;
+
+        float shiftedMinX = statusMinX + alignX;
+        float shiftedMaxX = statusMaxX + alignX;
+        float shiftedMinY = statusMinY + alignY;
+        float shiftedMaxY = statusMaxY + alignY;
+        float paddingX = Mathf.Min(CompactStatusViewportPadding, safe.width * 0.25f);
+        float paddingY = Mathf.Min(CompactStatusViewportPadding, safe.height * 0.25f);
+        float clampX = CalculateViewportShift(
+            shiftedMinX, shiftedMaxX, safe.xMin + paddingX, safe.xMax - paddingX);
+        float clampY = CalculateViewportShift(
+            shiftedMinY, shiftedMaxY, safe.yMin + paddingY, safe.yMax - paddingY);
+
+        var origin = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ButtonViewportDepth));
+        var shifted = cam.ViewportToWorldPoint(
+            new Vector3(alignX + clampX, alignY + clampY, ButtonViewportDepth));
+        var delta = shifted - origin;
+        delta.z = 0f;
+        _compactStatusObj.transform.position += delta;
+    }
+
+    private static bool TryGetCompactStatusViewportBounds(
+        Camera cam,
+        out float minX,
+        out float maxX,
+        out float minY,
+        out float maxY)
+    {
+        minX = float.PositiveInfinity;
+        maxX = float.NegativeInfinity;
+        minY = float.PositiveInfinity;
+        maxY = float.NegativeInfinity;
+        if (_compactStatusTmp == null) return false;
+
+        _compactStatusTmp.ForceMeshUpdate(ignoreActiveState: true, forceTextReparsing: true);
+        var bounds = _compactStatusTmp.textBounds;
+        if (bounds.size.x <= 0f || bounds.size.y <= 0f) return false;
+
+        var transform = _compactStatusTmp.transform;
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(transform.TransformPoint(
+                new Vector3(bounds.min.x, bounds.min.y, bounds.center.z))),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(transform.TransformPoint(
+                new Vector3(bounds.min.x, bounds.max.y, bounds.center.z))),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(transform.TransformPoint(
+                new Vector3(bounds.max.x, bounds.min.y, bounds.center.z))),
+            ref minX, ref maxX, ref minY, ref maxY);
+        IncludeViewportPoint(
+            cam.WorldToViewportPoint(transform.TransformPoint(
+                new Vector3(bounds.max.x, bounds.max.y, bounds.center.z))),
+            ref minX, ref maxX, ref minY, ref maxY);
+        return !float.IsInfinity(minX) && !float.IsInfinity(maxX)
+            && !float.IsInfinity(minY) && !float.IsInfinity(maxY);
+    }
+
     private static GameObject CreateTooltipObject(Transform root, out TextMeshPro tmp)
     {
         var go = new GameObject("VC_Tooltip");
@@ -1218,6 +2029,8 @@ public static class VoiceChatHudState
     private static void ShowMicTooltip()
     {
         if (_micTooltip == null || _micTooltipTmp == null || _micButtonObj == null) return;
+
+        _sharedMicTooltipOwner = SharedMicTooltipOwner.Microphone;
 
         var tab = VoiceSettings.Instance;
         bool pushToTalkMode = tab?.MicMode.Value == VoiceMicMode.PushToTalk;
@@ -1251,7 +2064,7 @@ public static class VoiceChatHudState
     {
         if (_spkTooltip == null || _spkTooltipTmp == null || _spkButtonObj == null) return;
 
-        string status = _speakerMuted ? "Muted" : "Active";
+        string status = _speakerMuted ? "Deafened" : "Active";
         var tab = VoiceSettings.Instance;
         string hotkey = VoiceChatKeybinds.ToggleSpeaker.Label;
 
@@ -1266,10 +2079,37 @@ public static class VoiceChatHudState
         _spkTooltip.SetActive(true);
     }
 
+#if ANDROID
+    private static void ShowRadioTooltip()
+    {
+        if (_micTooltip == null || _micTooltipTmp == null || _radioTouchButtonObj == null) return;
+
+        _sharedMicTooltipOwner = SharedMicTooltipOwner.Radio;
+
+        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
+        string status = TryGetLocalTransmitBlockReason(out string transmitBlockReason)
+            ? transmitBlockReason
+            : TeamRadioBlockedByMeetingPolicy() ? "Unavailable in this phase"
+            : IsInTeamRadioMode() ? "Transmitting"
+            : CanUseTeamRadioInput() ? "Ready"
+            : "Unavailable";
+        _micTooltipTmp.text =
+            "<b>Team Radio</b>\n" +
+            $"Status: {status}\n" +
+            $"Channel: {channel}\n" +
+            "Tap: change channel  |  Hold: transmit";
+
+        PositionNear(_micTooltip, _radioTouchButtonObj);
+        KeepTooltipOnTop(_micTooltip, ref _micTooltipRenderers, ref _micTooltipTmps);
+        _micTooltip.SetActive(true);
+    }
+#endif
+
     private static void HideTooltips()
     {
         _micTooltip?.SetActive(false);
         _spkTooltip?.SetActive(false);
+        _sharedMicTooltipOwner = SharedMicTooltipOwner.None;
     }
 
     private static void PositionNear(GameObject tooltip, GameObject btn)

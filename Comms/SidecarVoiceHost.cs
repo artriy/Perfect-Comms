@@ -33,7 +33,7 @@ internal interface ISidecarVoiceClient : IDisposable
     event Action<SidecarPlaybackState>? OnPlaybackState;
 
     CaptureHealth Health { get; }
-    IReadOnlyList<string> OutputDevices { get; }
+    IReadOnlyList<VoiceDeviceInfo> OutputDevices { get; }
     bool Start(string? micDevice, string? spkDevice);
     bool TryConfigureInitialCapture(
         string micDevice,
@@ -140,7 +140,7 @@ internal sealed class SidecarVoiceLease : IDisposable
     internal long Id { get; }
     internal bool IsActive => Volatile.Read(ref _active) != 0;
     public CaptureHealth Health => _host.GetHealth(this);
-    public IReadOnlyList<string> OutputDevices => _host.GetOutputDevices(this);
+    public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _host.GetOutputDevices(this);
 
     internal void Attach(ISidecarVoiceClient client)
     {
@@ -337,12 +337,12 @@ internal sealed class SidecarVoiceHostCore
             return OwnsLocked(lease) ? _client?.Health ?? CaptureHealth.Dead : CaptureHealth.Dead;
     }
 
-    internal IReadOnlyList<string> GetOutputDevices(SidecarVoiceLease lease)
+    internal IReadOnlyList<VoiceDeviceInfo> GetOutputDevices(SidecarVoiceLease lease)
     {
         lock (_gate)
             return OwnsLocked(lease) && _client != null
                 ? _client.OutputDevices.ToArray()
-                : Array.Empty<string>();
+                : Array.Empty<VoiceDeviceInfo>();
     }
 
     internal void Use(SidecarVoiceLease lease, Action<ISidecarVoiceClient> action)

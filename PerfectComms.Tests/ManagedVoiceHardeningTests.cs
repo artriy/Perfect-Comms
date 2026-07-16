@@ -242,7 +242,7 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(9, SidecarVoiceClient.Proto);
+        Assert.Equal(10, SidecarVoiceClient.Proto);
         Assert.Equal(3, SidecarProtocol.MobileAbi);
     }
 
@@ -284,10 +284,39 @@ public sealed class ManagedVoiceHardeningTests
                             "\"outputDevices\":[{\"id\":\"spk-1\",\"name\":\"Speaker One\",\"default\":true}]}";
 
         Assert.True(SidecarVoiceClient.TryReadDeviceUpdate(json, out var inputs, out var outputs));
-        Assert.Equal(new[] { "Mic One" }, inputs);
-        Assert.Equal(new[] { "Speaker One" }, outputs);
+        Assert.Equal(new VoiceDeviceInfo("mic-1", "Mic One", true), Assert.Single(inputs));
+        Assert.Equal(new VoiceDeviceInfo("spk-1", "Speaker One", true), Assert.Single(outputs));
         Assert.False(SidecarVoiceClient.TryReadDeviceUpdate(
             "{\"op\":\"devices\",\"devices\":[]}", out _, out _));
+    }
+
+    [Fact]
+    public void DeviceUpdatesKeepDuplicateDisplayNamesDistinctByStableId()
+    {
+        const string json = "{\"op\":\"devices\",\"devices\":[" +
+                            "{\"id\":\"mic-a\",\"name\":\"USB Audio\",\"default\":false}," +
+                            "{\"id\":\"mic-b\",\"name\":\"USB Audio\",\"default\":true}]," +
+                            "\"outputDevices\":[]}";
+
+        Assert.True(SidecarVoiceClient.TryReadDeviceUpdate(json, out var inputs, out _));
+        Assert.Equal(2, inputs.Length);
+        Assert.Equal("mic-a", inputs[0].Id);
+        Assert.Equal("mic-b", inputs[1].Id);
+        Assert.Equal(inputs[0].Name, inputs[1].Name);
+        Assert.False(inputs[0].IsDefault);
+        Assert.True(inputs[1].IsDefault);
+    }
+
+    [Fact]
+    public void DeviceUpdatesRejectMissingOrDuplicateStableIds()
+    {
+        Assert.False(SidecarVoiceClient.TryReadDeviceUpdate(
+            "{\"op\":\"devices\",\"devices\":[{\"name\":\"Mic\"}],\"outputDevices\":[]}",
+            out _, out _));
+        Assert.False(SidecarVoiceClient.TryReadDeviceUpdate(
+            "{\"op\":\"devices\",\"devices\":[" +
+            "{\"id\":\"same\",\"name\":\"Mic A\"},{\"id\":\"same\",\"name\":\"Mic B\"}]," +
+            "\"outputDevices\":[]}", out _, out _));
     }
 
     [Fact]

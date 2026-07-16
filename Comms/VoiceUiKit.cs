@@ -89,6 +89,7 @@ internal static class VoiceUiKit
         // These panels live on the persistent overlay canvas, so scene destruction cannot close
         // them for us. Close every settings surface at a scene/session boundary and release any
         // transmit hold captured before the modal appeared.
+        try { VoiceFirstRunSetup.ForceClose(); } catch { }
         try { VoiceSettingsPanel.ForceClose(); } catch { }
         try { HostSettingsPanel.ForceClose(); } catch { }
         try { VoiceVolumeMenu.ForceClose(); } catch { }

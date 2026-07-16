@@ -187,6 +187,17 @@ impl Dsp {
         DspStatus::from_state(self.config_generation, self.config, self.apm.is_some())
     }
 
+    fn disable_apm_after_runtime_error(&mut self, operation: &str, error: String) {
+        // Taking the failed instance makes the capture path fail open and also rate-limits this
+        // diagnostic to once per loaded APM instance. A later explicit DSP reconfiguration may
+        // try loading a fresh instance.
+        if self.apm.take().is_some() {
+            eprintln!(
+                "pc-capture: apm {operation} failed, disabling APM; mic passthrough remains active: {error}"
+            );
+        }
+    }
+
     pub fn begin_capture_generation(&mut self) {
         // A newly opened capture stream has a different hardware/queue path. Preserve the loaded
         // APM instance and its adaptive filter, but do not carry the previous stream's smoothed
@@ -206,7 +217,10 @@ impl Dsp {
         for i in 0..frames {
             self.mono[i] = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5;
         }
-        apm.analyze_reverse(&self.mono);
+        let failure = apm.analyze_reverse(&self.mono).err();
+        if let Some(error) = failure {
+            self.disable_apm_after_runtime_error("reverse analysis", error);
+        }
     }
 
     pub fn capture_with_stream_delay(
@@ -226,11 +240,17 @@ impl Dsp {
         let applied_delay_ms = self
             .aec_stream_delay
             .update(measured_delay_ms, timing_complete);
-        if let Some(apm) = self.apm.as_mut() {
+        let failure = if let Some(apm) = self.apm.as_mut() {
             // WebRTC consumes the stream-delay marker on each 10 ms ProcessStream call. The APM
             // wrapper therefore reapplies the same end-to-end delay to both halves of our 20 ms
-            // frame.
-            apm.process_capture_with_stream_delay(mic, applied_delay_ms);
+            // frame. The wrapper commits output atomically, so a failure leaves `mic` unchanged.
+            apm.process_capture_with_stream_delay(mic, applied_delay_ms)
+                .err()
+        } else {
+            None
+        };
+        if let Some(error) = failure {
+            self.disable_apm_after_runtime_error("capture processing", error);
         }
         applied_delay_ms
     }

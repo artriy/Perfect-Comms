@@ -46,6 +46,9 @@ public static class VoiceVolumeMenu
         if (privacy.HideAllForViewer || privacy.DimAll)
             return;
 
+        VoiceSettingsPanel.ForceClose();
+        HostSettingsPanel.ForceClose();
+
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
 

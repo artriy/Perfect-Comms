@@ -1040,14 +1040,22 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     }
 #endif
 
-    public void SetMicrophone(string deviceName, float volume)
+    internal static bool ShouldRestartMicrophoneSelection(
+        string previousDeviceId,
+        string currentDeviceId,
+        bool forceRestart)
+        => forceRestart ||
+           !string.Equals(previousDeviceId, currentDeviceId, StringComparison.Ordinal);
+
+    public void SetMicrophone(string deviceName, float volume, bool forceRestart = false)
     {
         var normalizedName = deviceName ?? string.Empty;
-        var deviceChanged = !string.Equals(_lastMicDeviceName, normalizedName, StringComparison.Ordinal);
+        var restartSidecar = ShouldRestartMicrophoneSelection(
+            _lastMicDeviceName, normalizedName, forceRestart);
         _lastMicDeviceName = normalizedName;
         _micVolume = NormalizeMicGain(volume);
 #if WINDOWS
-        if (deviceChanged)
+        if (restartSidecar)
         {
             _btProfileConflict = false;
             BeginSidecarCaptureSourceGeneration(
@@ -1060,7 +1068,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             return;
         }
 
-        QueueMicrophoneTransition(true, "settings", restartSidecar: deviceChanged);
+        QueueMicrophoneTransition(true, "settings", restartSidecar);
 #elif ANDROID
         if (Mute)
         {
@@ -1684,7 +1692,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 ArmSidecarCaptureEvidenceLocked(sourceGeneration, micActive);
                 StartVoicePump();
                 if (outputDevices.Length > 0)
-                    VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(outputDevices);
+                    VoiceChatLocalSettings.SetSpkDevicesFromSidecar(outputDevices);
                 _voiceColdStartRetries = 0;
                 Interlocked.Exchange(
                     ref _speakerTopologyFastUntilTicks,
@@ -2524,7 +2532,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _androidMicrophone.ReuseBuffer = true;
                 _androidMicrophone.DataAvailable += OnAndroidMicrophoneData;
                 _androidMicrophone.SetVolume(1f);
-                _microphoneReady = _androidMicrophone.Start(_lastMicDeviceName);
+                // A setup preview can briefly own Unity's process-global Microphone surface while
+                // the room is starting. Production capture remains requested and reacquires that
+                // lease with bounded backoff as soon as the preview is disposed.
+                _microphoneReady = _androidMicrophone.Start(
+                    _lastMicDeviceName,
+                    retryLeaseWhenUnavailable: true);
                 VoiceDiagnostics.Log(
                     "voice.unity.mic",
                     $"requested={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} unityDevices=[{string.Join(",", AndroidMicrophone.GetDeviceNames().Select(VoiceDiagnostics.DescribeDevice))}]");
@@ -2825,7 +2838,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var androidMicrophone = _androidMicrophone;
         androidMicrophone?.Tick();
         if (androidMicrophone != null)
-            _microphoneReady = androidMicrophone.IsCapturing;
+        {
+            bool wasReady = _microphoneReady;
+            bool isReady = androidMicrophone.IsCapturing;
+            _microphoneReady = isReady;
+            if (isReady != wasReady)
+            {
+                // Close the native PCM gate during every Unity restart/lease wait. Re-open it only
+                // after the source has actually recovered so stale encoder history and queued PCM
+                // cannot leak across a capture discontinuity.
+                try { _mobileVoice?.SetMicActive(isReady && !Mute); } catch { }
+                VoiceDiagnostics.Log(
+                    "voice.mic",
+                    $"ready={isReady.ToString().ToLowerInvariant()} reason=unity-capture-transition leaseUnavailable={androidMicrophone.LeaseUnavailable.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)}");
+            }
+        }
 
         var mobileSpeaker = _mobileSpeaker;
         if (mobileSpeaker != null)

@@ -116,7 +116,9 @@ internal sealed class FirstRunSetupDraft
     private const float DefaultMasterVolume = 1f;
 
     internal string MicrophoneDevice = string.Empty;
+    internal string MicrophoneDeviceName = string.Empty;
     internal string SpeakerDevice = string.Empty;
+    internal string SpeakerDeviceName = string.Empty;
     internal string OriginalMicrophoneDevice = string.Empty;
     internal string OriginalSpeakerDevice = string.Empty;
     internal float MicVolume;
@@ -198,8 +200,10 @@ internal sealed class FirstRunSetupDraft
         var draft = new FirstRunSetupDraft
         {
             MicrophoneDevice = settings.MicrophoneDevice,
+            MicrophoneDeviceName = settings.MicrophoneDeviceName,
 #if WINDOWS
             SpeakerDevice = settings.SpeakerDevice,
+            SpeakerDeviceName = settings.SpeakerDeviceName,
 #endif
             MicVolume = settings.MicVolume.Value,
             MicSensitivity = settings.MicSensitivity.Value,
@@ -256,27 +260,41 @@ internal sealed class FirstRunSetupDraft
     }
 
     internal int MicrophoneIndex()
-        => FindDeviceIndex(MicrophoneDevice, VoiceChatLocalSettings.MicDeviceNames);
+        => FindDeviceIndex(MicrophoneDevice, VoiceChatLocalSettings.MicDevices);
+
+    internal string MicrophoneDisplayName()
+        => FindDeviceName(MicrophoneDevice, MicrophoneDeviceName, VoiceChatLocalSettings.MicDevices);
 
     internal bool MicrophoneSelectionChanged
         => !string.Equals(MicrophoneDevice, OriginalMicrophoneDevice,
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.Ordinal);
 
 #if WINDOWS
     internal int SpeakerIndex()
-        => FindDeviceIndex(SpeakerDevice, VoiceChatLocalSettings.SpkDeviceNames);
+        => FindDeviceIndex(SpeakerDevice, VoiceChatLocalSettings.SpkDevices);
+
+    internal string SpeakerDisplayName()
+        => FindDeviceName(SpeakerDevice, SpeakerDeviceName, VoiceChatLocalSettings.SpkDevices);
 
     internal bool SpeakerSelectionChanged
         => !string.Equals(SpeakerDevice, OriginalSpeakerDevice,
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.Ordinal);
 #endif
 
     internal void SetMicrophoneIndex(int index)
-        => MicrophoneDevice = DeviceAt(index, VoiceChatLocalSettings.MicDeviceNames);
+    {
+        var device = DeviceAt(index, VoiceChatLocalSettings.MicDevices);
+        MicrophoneDevice = device.Id ?? string.Empty;
+        MicrophoneDeviceName = device.Name ?? string.Empty;
+    }
 
 #if WINDOWS
     internal void SetSpeakerIndex(int index)
-        => SpeakerDevice = DeviceAt(index, VoiceChatLocalSettings.SpkDeviceNames);
+    {
+        var device = DeviceAt(index, VoiceChatLocalSettings.SpkDevices);
+        SpeakerDevice = device.Id ?? string.Empty;
+        SpeakerDeviceName = device.Name ?? string.Empty;
+    }
 #endif
 
     internal void ApplyTo(VoiceChatLocalSettings settings)
@@ -332,15 +350,27 @@ internal sealed class FirstRunSetupDraft
     }
 #endif
 
-    private static int FindDeviceIndex(string savedName, IReadOnlyList<string> names)
+    private static int FindDeviceIndex(string savedId, IReadOnlyList<VoiceDeviceInfo> devices)
     {
-        if (string.IsNullOrEmpty(savedName)) return names.Count > 0 ? 0 : -1;
-        for (int i = 1; i < names.Count; i++)
-            if (string.Equals(savedName, names[i], StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrEmpty(savedId)) return devices.Count > 0 ? 0 : -1;
+        for (int i = 1; i < devices.Count; i++)
+            if (string.Equals(savedId, devices[i].Id, StringComparison.Ordinal))
                 return i;
         return -1;
     }
 
-    private static string DeviceAt(int index, IReadOnlyList<string> names)
-        => index > 0 && index < names.Count ? names[index] : string.Empty;
+    private static VoiceDeviceInfo DeviceAt(int index, IReadOnlyList<VoiceDeviceInfo> devices)
+        => index > 0 && index < devices.Count ? devices[index] : default;
+
+    private static string FindDeviceName(
+        string savedId,
+        string savedName,
+        IReadOnlyList<VoiceDeviceInfo> devices)
+    {
+        if (string.IsNullOrEmpty(savedId)) return "System Default";
+        for (int i = 1; i < devices.Count; i++)
+            if (string.Equals(savedId, devices[i].Id, StringComparison.Ordinal))
+                return devices[i].Name;
+        return string.IsNullOrWhiteSpace(savedName) ? "Saved device" : savedName;
+    }
 }

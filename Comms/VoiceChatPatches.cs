@@ -183,7 +183,7 @@ public static class VoiceChatPatches
         float deadVolume = VoiceVolumeMath.NormalizeUserVolume(profile.DeadVolume);
         if (showToast)
         {
-            VoiceChatHudState.ShowToast(focus == VoiceAliveDeadMixFocus.Neutral
+            VoiceChatHudState.ShowCompactStatus(focus == VoiceAliveDeadMixFocus.Neutral
                 ? "Voice mix: Normal"
                 : $"Voice mix: Alive {Mathf.RoundToInt(aliveVolume * 100f)}% / Dead {Mathf.RoundToInt(deadVolume * 100f)}%");
         }

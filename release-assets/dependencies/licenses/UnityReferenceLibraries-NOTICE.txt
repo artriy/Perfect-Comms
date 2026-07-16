@@ -1,0 +1,13 @@
+Unity 2022.3.44 reference libraries provenance notice
+
+Perfect Comms dependency bundles include the exact archive downloaded from:
+https://unity.bepinex.dev/libraries/2022.3.44.zip
+
+SHA-256:
+e9e6c943619867f0aafb6888bd57ec49e46f833b92ec0e43223346370d69e0bd
+
+The archive contains 66 generated UnityEngine reference assemblies. BepInEx
+uses these references while generating the game's IL2CPP interop assemblies.
+The upstream archive does not contain a LICENSE, COPYING, NOTICE, or README
+file. This file records exact provenance and contents; it is not a license
+grant and does not replace any terms that apply to Unity software.

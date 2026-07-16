@@ -80,28 +80,43 @@ public class VoiceChatLocalSettings
 {
     internal const bool SpeakingBarLivePreviewDefault = false;
 
+    private static volatile VoiceDeviceInfo[] _micDevices = Array.Empty<VoiceDeviceInfo>();
     private static volatile string[] _micDeviceNames = Array.Empty<string>();
+    private static volatile string _savedMicIdForPublication = string.Empty;
+    private static volatile string _savedMicNameForPublication = string.Empty;
     private static volatile bool _micNamesFromSidecar;
     private static int _micDeviceListVersion;
 #if WINDOWS
     private static Task? _sidecarProbeTask;
+    private static volatile VoiceDeviceInfo[] _spkDevices = Array.Empty<VoiceDeviceInfo>();
     private static volatile string[] _spkDeviceNames = Array.Empty<string>();
+    private static volatile string _savedSpkIdForPublication = string.Empty;
+    private static volatile string _savedSpkNameForPublication = string.Empty;
     private static volatile bool _spkNamesFromSidecar;
     private static int _spkDeviceListVersion;
 #endif
 
+    internal static VoiceDeviceInfo[] MicDevices => _micDevices;
     public static string[] MicDeviceNames => _micDeviceNames;
     public static int MicDeviceListVersion => Volatile.Read(ref _micDeviceListVersion);
 
-    public static void SetMicDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    internal static void SetMicDevicesFromSidecar(IReadOnlyList<VoiceDeviceInfo> devices)
     {
-        var arr = new string[names.Count + 1];
-        arr[0] = "Default";
-        for (int i = 0; i < names.Count; i++)
-            arr[i + 1] = names[i];
+        var arr = new VoiceDeviceInfo[devices.Count + 1];
+        arr[0] = new VoiceDeviceInfo(string.Empty, "Default", true);
+        for (int i = 0; i < devices.Count; i++)
+            arr[i + 1] = devices[i];
+        arr = WithUnavailableSelection(
+            arr, _savedMicIdForPublication, _savedMicNameForPublication,
+            "Saved microphone");
         _micNamesFromSidecar = true;
-        PublishMicDeviceNames(arr);
+        PublishMicDevices(arr);
     }
+
+    // Kept for compatibility with older callers/tests. Desktop helper paths publish structured
+    // entries; Android legitimately uses the Unity microphone name as its selection identifier.
+    public static void SetMicDeviceNamesFromSidecar(IReadOnlyList<string> names)
+        => SetMicDevicesFromSidecar(ToNameBasedDevices(names));
 
     public static int SpkDeviceListVersion =>
 #if WINDOWS
@@ -110,42 +125,102 @@ public class VoiceChatLocalSettings
         0;
 #endif
 #if WINDOWS
+    internal static VoiceDeviceInfo[] SpkDevices => _spkDevices;
     public static string[] SpkDeviceNames => _spkDeviceNames;
     internal static bool SidecarDeviceProbePending =>
         _sidecarProbeTask != null && !_sidecarProbeTask.IsCompleted;
 
-    public static void SetSpkDeviceNamesFromSidecar(IReadOnlyList<string> names)
+    internal static void SetSpkDevicesFromSidecar(IReadOnlyList<VoiceDeviceInfo> devices)
     {
-        var arr = new string[names.Count + 1];
-        arr[0] = "Default";
-        for (int i = 0; i < names.Count; i++)
-            arr[i + 1] = names[i];
+        var arr = new VoiceDeviceInfo[devices.Count + 1];
+        arr[0] = new VoiceDeviceInfo(string.Empty, "Default", true);
+        for (int i = 0; i < devices.Count; i++)
+            arr[i + 1] = devices[i];
+        arr = WithUnavailableSelection(
+            arr, _savedSpkIdForPublication, _savedSpkNameForPublication,
+            "Saved speaker");
         _spkNamesFromSidecar = true;
-        PublishSpkDeviceNames(arr);
+        PublishSpkDevices(arr);
     }
+
+    internal static bool PublishSidecarDeviceEnumeration(
+        SidecarDeviceEnumerationResult enumeration)
+    {
+        if (!enumeration.IsAuthoritative)
+            return false;
+        SetMicDevicesFromSidecar(enumeration.Input);
+        SetSpkDevicesFromSidecar(enumeration.Output);
+        return true;
+    }
+
+    public static void SetSpkDeviceNamesFromSidecar(IReadOnlyList<string> names)
+        => SetSpkDevicesFromSidecar(ToNameBasedDevices(names));
 #endif
 
-    private static bool SameDeviceNames(IReadOnlyList<string> first, IReadOnlyList<string> second)
+    private static VoiceDeviceInfo[] ToNameBasedDevices(IReadOnlyList<string> names)
+    {
+        var devices = new VoiceDeviceInfo[names.Count];
+        for (int i = 0; i < names.Count; i++)
+            devices[i] = VoiceDeviceInfo.FromName(names[i]);
+        return devices;
+    }
+
+    internal static VoiceDeviceInfo[] WithUnavailableSelection(
+        VoiceDeviceInfo[] availableDevices,
+        string savedId,
+        string savedName,
+        string fallbackName)
+    {
+        if (string.IsNullOrEmpty(savedId) && string.IsNullOrEmpty(savedName))
+            return availableDevices;
+
+        for (int i = 1; i < availableDevices.Length; i++)
+        {
+            bool matches = !string.IsNullOrEmpty(savedId)
+                ? string.Equals(availableDevices[i].Id, savedId, StringComparison.Ordinal)
+                : string.Equals(availableDevices[i].Name, savedName, StringComparison.OrdinalIgnoreCase);
+            if (matches)
+                return availableDevices;
+        }
+
+        Array.Resize(ref availableDevices, availableDevices.Length + 1);
+        availableDevices[^1] = VoiceDeviceInfo.Unavailable(savedId, savedName, fallbackName);
+        return availableDevices;
+    }
+
+    private static bool SameDevices(IReadOnlyList<VoiceDeviceInfo> first, IReadOnlyList<VoiceDeviceInfo> second)
     {
         if (first.Count != second.Count) return false;
         for (int i = 0; i < first.Count; i++)
-            if (!string.Equals(first[i], second[i], StringComparison.Ordinal))
+            if (!first[i].Equals(second[i]))
                 return false;
         return true;
     }
 
-    private static void PublishMicDeviceNames(string[] names)
+    private static string[] DeviceNames(IReadOnlyList<VoiceDeviceInfo> devices)
     {
-        if (SameDeviceNames(_micDeviceNames, names)) return;
-        _micDeviceNames = names;
+        var names = new string[devices.Count];
+        for (int i = 0; i < devices.Count; i++)
+            names[i] = devices[i].IsAvailable
+                ? devices[i].Name
+                : devices[i].Name + " (unavailable)";
+        return names;
+    }
+
+    private static void PublishMicDevices(VoiceDeviceInfo[] devices)
+    {
+        if (SameDevices(_micDevices, devices)) return;
+        _micDevices = devices;
+        _micDeviceNames = DeviceNames(devices);
         Interlocked.Increment(ref _micDeviceListVersion);
     }
 
 #if WINDOWS
-    private static void PublishSpkDeviceNames(string[] names)
+    private static void PublishSpkDevices(VoiceDeviceInfo[] devices)
     {
-        if (SameDeviceNames(_spkDeviceNames, names)) return;
-        _spkDeviceNames = names;
+        if (SameDevices(_spkDevices, devices)) return;
+        _spkDevices = devices;
+        _spkDeviceNames = DeviceNames(devices);
         Interlocked.Increment(ref _spkDeviceListVersion);
     }
 #endif
@@ -174,6 +249,7 @@ public class VoiceChatLocalSettings
 #endif
     public ConfigEntry<float> ButtonPositionX { get; }
     public ConfigEntry<float> ButtonPositionY { get; }
+    public ConfigEntry<bool> ShowMuteDeafenStatusAlerts { get; }
     public ConfigEntry<VoiceControlsLayout> VoiceControlsLayout { get; }
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
     public ConfigEntry<SpeakingBarSideLayout> SpeakingBarSideLayout { get; }
@@ -217,12 +293,15 @@ public class VoiceChatLocalSettings
 
     private readonly ConfigFile _config;
     private readonly ConfigEntry<int> _speakingBarSettingsVersion;
+    private readonly ConfigEntry<string> _savedMicDeviceId;
     private readonly ConfigEntry<string> _savedMicDeviceName;
 #if WINDOWS
+    private readonly ConfigEntry<string> _savedSpkDeviceId;
     private readonly ConfigEntry<string> _savedSpkDeviceName;
 #endif
 
     private bool _correcting;
+    private bool _suppressInternalDeviceSelectionDispatch;
 
     private bool _applyingDiagnosticsToggle;
 
@@ -240,23 +319,27 @@ public class VoiceChatLocalSettings
         VoiceChatRoom.Current?.RefreshLocalAudioSettings();
     }
 
-    public string MicrophoneDevice => _savedMicDeviceName?.Value ?? "";
+    /// <summary>The opaque helper/Unity selection identifier. Never use it as UI text.</summary>
+    public string MicrophoneDevice => _savedMicDeviceId?.Value ?? "";
+    internal string MicrophoneDeviceName => _savedMicDeviceName?.Value ?? "";
 
-    private string MicDeviceNameAtCurrentIndex()
+    private VoiceDeviceInfo MicDeviceAtCurrentIndex()
     {
-        var names = _micDeviceNames;
+        var devices = _micDevices;
         int idx = (int)MicrophoneDeviceIndex.Value;
-        return idx > 0 && idx < names.Length ? names[idx] : "";
+        return idx >= 0 && idx < devices.Length ? devices[idx] : default;
     }
 
 #if WINDOWS
-    public string SpeakerDevice => _savedSpkDeviceName?.Value ?? "";
+    /// <summary>The opaque helper selection identifier. Never use it as UI text.</summary>
+    public string SpeakerDevice => _savedSpkDeviceId?.Value ?? "";
+    internal string SpeakerDeviceName => _savedSpkDeviceName?.Value ?? "";
 
-    private string SpkDeviceNameAtCurrentIndex()
+    private VoiceDeviceInfo SpkDeviceAtCurrentIndex()
     {
-        var names = _spkDeviceNames;
+        var devices = _spkDevices;
         int idx = (int)SpeakerDeviceIndex.Value;
-        return idx > 0 && idx < names.Length ? names[idx] : "";
+        return idx >= 0 && idx < devices.Length ? devices[idx] : default;
     }
 #endif
 
@@ -337,26 +420,64 @@ public class VoiceChatLocalSettings
         StartDeafened = config.Bind("Audio", "StartDeafened", false,
             new ConfigDescription("Starts each voice session with incoming voice audio muted."));
 
+        _savedMicDeviceId = config.Bind("Audio", "MicDeviceId", "",
+            "Stable microphone device identifier. Display names are stored separately and are not used for selection.");
         _savedMicDeviceName = config.Bind("Audio", "MicDeviceName", "",
-            "Saved microphone device name (used to restore selection across sessions)");
+            "Last known microphone display name (also used once to migrate pre-v4 settings)");
 
 #if WINDOWS
+        _savedSpkDeviceId = config.Bind("Audio", "SpkDeviceId", "",
+            "Stable speaker device identifier. Display names are stored separately and are not used for selection.");
         _savedSpkDeviceName = config.Bind("Audio", "SpkDeviceName", "",
-            "Saved speaker device name (used to restore selection across sessions)");
+            "Last known speaker display name (also used once to migrate pre-v4 settings)");
 #endif
 
         MicrophoneDeviceIndex = config.Bind("Audio", "Microphone",
             MicDeviceEnum.Default,
             new ConfigDescription("Selects the recording device Perfect Comms uses. Default follows the system's default input device."));
+#if WINDOWS
+        SpeakerDeviceIndex = config.Bind("Audio", "Speaker",
+            SpkDeviceEnum.Default,
+            new ConfigDescription("Selects the playback device Perfect Comms uses for voice audio. Default follows the system's default output device."));
+#endif
+
+        ApplyLegacyDefaultCanonicalization(
+            (int)MicrophoneDeviceIndex.Value, _savedMicDeviceId, _savedMicDeviceName);
+#if WINDOWS
+        ApplyLegacyDefaultCanonicalization(
+            (int)SpeakerDeviceIndex.Value, _savedSpkDeviceId, _savedSpkDeviceName);
+#endif
+
+        _savedMicIdForPublication = _savedMicDeviceId.Value;
+        _savedMicNameForPublication = _savedMicDeviceName.Value;
+#if WINDOWS
+        _savedSpkIdForPublication = _savedSpkDeviceId.Value;
+        _savedSpkNameForPublication = _savedSpkDeviceName.Value;
+#endif
+
+        PublishMicDevices(WithUnavailableSelection(
+            _micDevices, _savedMicDeviceId.Value, _savedMicDeviceName.Value,
+            "Saved microphone"));
+#if WINDOWS
+        PublishSpkDevices(WithUnavailableSelection(
+            _spkDevices, _savedSpkDeviceId.Value, _savedSpkDeviceName.Value,
+            "Saved speaker"));
+#endif
 
         MicrophoneDeviceIndex.Value = ResolveDeviceIndex<MicDeviceEnum>(
-            _savedMicDeviceName.Value, _micDeviceNames, MicrophoneDeviceIndex.Value);
+            _savedMicDeviceId.Value, _savedMicDeviceName.Value, _micDevices,
+            MicrophoneDeviceIndex.Value, out var resolvedMic);
+        MigrateLegacyDeviceSelection(_savedMicDeviceId, _savedMicDeviceName, resolvedMic);
+        _savedMicIdForPublication = _savedMicDeviceId.Value;
+        _savedMicNameForPublication = _savedMicDeviceName.Value;
+        _lastResolvedMicId = resolvedMic?.Id ?? _savedMicDeviceId.Value;
+        _lastResolvedMicAvailable = resolvedMic is { IsAvailable: true };
 
         MicrophoneDeviceIndex.SettingChanged += (_, _) =>
         {
             if (_correcting) return;
             int newIdx = (int)MicrophoneDeviceIndex.Value;
-            int count  = _micDeviceNames.Length;
+            int count  = _micDevices.Length;
             if (newIdx < count) return;
 
             _correcting = true;
@@ -370,18 +491,20 @@ public class VoiceChatLocalSettings
         };
 
 #if WINDOWS
-        SpeakerDeviceIndex = config.Bind("Audio", "Speaker",
-            SpkDeviceEnum.Default,
-            new ConfigDescription("Selects the playback device Perfect Comms uses for voice audio. Default follows the system's default output device."));
-
         SpeakerDeviceIndex.Value = ResolveDeviceIndex<SpkDeviceEnum>(
-            _savedSpkDeviceName.Value, _spkDeviceNames, SpeakerDeviceIndex.Value);
+            _savedSpkDeviceId.Value, _savedSpkDeviceName.Value, _spkDevices,
+            SpeakerDeviceIndex.Value, out var resolvedSpeaker);
+        MigrateLegacyDeviceSelection(_savedSpkDeviceId, _savedSpkDeviceName, resolvedSpeaker);
+        _savedSpkIdForPublication = _savedSpkDeviceId.Value;
+        _savedSpkNameForPublication = _savedSpkDeviceName.Value;
+        _lastResolvedSpkId = resolvedSpeaker?.Id ?? _savedSpkDeviceId.Value;
+        _lastResolvedSpkAvailable = resolvedSpeaker is { IsAvailable: true };
 
         SpeakerDeviceIndex.SettingChanged += (_, _) =>
         {
             if (_correcting) return;
             int newIdx = (int)SpeakerDeviceIndex.Value;
-            int count  = _spkDeviceNames.Length;
+            int count  = _spkDevices.Length;
             if (newIdx < count) return;
 
             _correcting = true;
@@ -402,6 +525,9 @@ public class VoiceChatLocalSettings
         ButtonPositionY = config.Bind("UI", "ButtonPositionY", 0.10f,
             new ConfigDescription("Vertical position of voice buttons (0 = bottom, 1 = top)",
                 new AcceptableValueRange<float>(0f, 1f)));
+
+        ShowMuteDeafenStatusAlerts = config.Bind("UI", "ShowMuteDeafenStatusAlerts", true,
+            new ConfigDescription("Shows a small persistent HUD reminder while the microphone is muted or voice playback is deafened."));
 
         VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,
@@ -733,34 +859,149 @@ public class VoiceChatLocalSettings
         };
     }
 
-    private static T ResolveDeviceIndex<T>(string savedName, string[] names, T fallback)
+    private static T ResolveDeviceIndex<T>(
+        string savedId,
+        string legacyName,
+        IReadOnlyList<VoiceDeviceInfo> devices,
+        T fallback,
+        out VoiceDeviceInfo? resolvedDevice)
         where T : struct, Enum
+        => (T)(object)ResolveDeviceIndex(
+            savedId, legacyName, devices, (int)(object)fallback, out resolvedDevice);
+
+    internal static int ResolveDeviceIndex(
+        string savedId,
+        string legacyName,
+        IReadOnlyList<VoiceDeviceInfo> devices,
+        int fallback,
+        out VoiceDeviceInfo? resolvedDevice)
     {
-        if (!string.IsNullOrEmpty(savedName))
+        resolvedDevice = null;
+        if (!string.IsNullOrEmpty(savedId))
         {
-            for (int i = 1; i < names.Length; i++)
+            for (int i = 1; i < devices.Count; i++)
             {
-                if (DeviceEntryMatches(savedName, names, i))
-                    return (T)(object)i;
+                if (string.Equals(devices[i].Id, savedId, StringComparison.Ordinal))
+                {
+                    resolvedDevice = devices[i];
+                    return i;
+                }
             }
-            return default;
+            // Stable IDs are authoritative. Do not silently retarget a missing endpoint to another
+            // device with the same display name; keep the ID so hot-plug can restore it later.
+            return 0;
         }
-        int idx = (int)(object)fallback;
-        return (idx >= 0 && idx < names.Length) ? fallback : default;
+        if (!string.IsNullOrEmpty(legacyName))
+        {
+            for (int i = 1; i < devices.Count; i++)
+            {
+                if (!string.Equals(devices[i].Name, legacyName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                resolvedDevice = devices[i];
+                return i;
+            }
+            return 0;
+        }
+        return fallback >= 0 && fallback < devices.Count ? fallback : 0;
     }
 
-    private static bool DeviceEntryMatches(string savedName, string[] names, int index)
+    internal static bool ShouldReapplyResolvedDevice(
+        string previousId,
+        bool previousAvailable,
+        VoiceDeviceInfo? resolvedDevice)
+        => resolvedDevice is { IsAvailable: true } device &&
+           (!previousAvailable ||
+            !string.Equals(previousId, device.Id, StringComparison.Ordinal));
+
+    internal static bool ShouldProcessDeviceSelectionDispatch(
+        bool internalIndexCorrection)
+        => !internalIndexCorrection;
+
+    internal static bool IsPersistedDefaultSelection(
+        int selectedIndex,
+        string savedId,
+        string savedName)
+        => selectedIndex == 0 &&
+           string.IsNullOrEmpty(savedId) &&
+           string.IsNullOrEmpty(savedName);
+
+    internal static (string Id, string Name) CanonicalizeLegacyPersistedSelection(
+        int selectedIndex,
+        string savedId,
+        string savedName)
     {
-        if (string.Equals(names[index], savedName, StringComparison.OrdinalIgnoreCase))
-            return true;
-        return false;
+        string id = savedId ?? string.Empty;
+        string name = savedName ?? string.Empty;
+        if (selectedIndex == 0 &&
+            string.IsNullOrEmpty(id) &&
+            string.Equals(name, "Default", StringComparison.OrdinalIgnoreCase))
+            return (string.Empty, string.Empty);
+        return (id, name);
+    }
+
+    internal static (string Id, string Name) PersistedSelectionForDevice(
+        int selectedIndex,
+        VoiceDeviceInfo device)
+    {
+        string id = device.Id ?? string.Empty;
+        if (selectedIndex == 0 && device.IsDefault && string.IsNullOrEmpty(id))
+            return (string.Empty, string.Empty);
+        return (id, device.Name ?? string.Empty);
+    }
+
+    private static void ApplyLegacyDefaultCanonicalization(
+        int selectedIndex,
+        ConfigEntry<string> savedId,
+        ConfigEntry<string> savedName)
+    {
+        var canonical = CanonicalizeLegacyPersistedSelection(
+            selectedIndex, savedId.Value, savedName.Value);
+        if (!string.Equals(savedId.Value, canonical.Id, StringComparison.Ordinal))
+            savedId.Value = canonical.Id;
+        if (!string.Equals(savedName.Value, canonical.Name, StringComparison.Ordinal))
+            savedName.Value = canonical.Name;
+    }
+
+    internal static string DefaultAvailableDeviceId(IReadOnlyList<VoiceDeviceInfo> devices)
+    {
+        for (int i = 0; i < devices.Count; i++)
+        {
+            var device = devices[i];
+            if (device.IsAvailable && device.IsDefault && !string.IsNullOrEmpty(device.Id))
+                return device.Id;
+        }
+        return string.Empty;
+    }
+
+    internal static bool ShouldReapplyDefaultDevice(
+        bool defaultSelected,
+        string previousDefaultId,
+        string currentDefaultId)
+        => defaultSelected &&
+           !string.IsNullOrEmpty(currentDefaultId) &&
+           !string.Equals(previousDefaultId, currentDefaultId, StringComparison.Ordinal);
+
+    private static void MigrateLegacyDeviceSelection(
+        ConfigEntry<string> savedId,
+        ConfigEntry<string> savedName,
+        VoiceDeviceInfo? resolvedDevice)
+    {
+        if (!resolvedDevice.HasValue) return;
+        var device = resolvedDevice.Value;
+        if (!string.Equals(savedId.Value, device.Id, StringComparison.Ordinal))
+            savedId.Value = device.Id;
+        if (!string.Equals(savedName.Value, device.Name, StringComparison.Ordinal))
+            savedName.Value = device.Name;
     }
 
     public static void RefreshDeviceLists()
     {
         if (!_micNamesFromSidecar)
         {
-            var mics = new List<string> { "Default" };
+            var mics = new List<VoiceDeviceInfo>
+            {
+                new(string.Empty, "Default", true),
+            };
             try
             {
 #if ANDROID
@@ -770,22 +1011,36 @@ public class VoiceChatLocalSettings
                     {
                         string n = dev?.Trim() ?? "";
                         if (!string.IsNullOrEmpty(n))
-                            mics.Add(n);
+                            mics.Add(VoiceDeviceInfo.FromName(n));
                     }
                 }
 #endif
             }
             catch { }
-            PublishMicDeviceNames(mics.ToArray());
+            var micDevices = mics.ToArray();
+            micDevices = WithUnavailableSelection(
+                micDevices, _savedMicIdForPublication, _savedMicNameForPublication,
+                "Saved microphone");
+            PublishMicDevices(micDevices);
         }
 
 #if WINDOWS
         if (!_spkNamesFromSidecar)
-            PublishSpkDeviceNames(new[] { "Default" });
+        {
+            var speakerDevices = new[] { new VoiceDeviceInfo(string.Empty, "Default", true) };
+            speakerDevices = WithUnavailableSelection(
+                speakerDevices, _savedSpkIdForPublication, _savedSpkNameForPublication,
+                "Saved speaker");
+            PublishSpkDevices(speakerDevices);
+        }
 #endif
     }
 
+    internal static readonly TimeSpan ActiveDeviceProbeInterval = TimeSpan.FromSeconds(30);
     private static DateTime _nextDeviceRefreshUtc = DateTime.MinValue;
+#if WINDOWS
+    private static DateTime _nextActiveDeviceProbeUtc = DateTime.MinValue;
+#endif
 
     // Re-enumerate devices (throttled to every 2s) so hot-plugged or removed mics/speakers show up in the
     // in-game device pickers without a game restart. Called from the settings panel's device rows.
@@ -805,6 +1060,21 @@ public class VoiceChatLocalSettings
         }
     }
 
+    internal static void MaybeRefreshActiveRoomDeviceLists()
+    {
+        // Resolving an already-published version is just two integer comparisons, so do that on
+        // every room tick. Enumeration is deliberately much slower because the desktop helper's
+        // safe device probe is a short-lived process, not an operation for the frame loop.
+        VoiceSettings.Instance?.ResolveMicIndexIfListChanged();
+        VoiceSettings.Instance?.ResolveSpkIndexIfListChanged();
+#if WINDOWS
+        var now = DateTime.UtcNow;
+        if (now < _nextActiveDeviceProbeUtc) return;
+        _nextActiveDeviceProbeUtc = now.Add(ActiveDeviceProbeInterval);
+        MaybeProbeSidecarDevices();
+#endif
+    }
+
     private static void MaybeProbeSidecarDevices()
     {
 #if WINDOWS
@@ -814,11 +1084,7 @@ public class VoiceChatLocalSettings
         {
             try
             {
-                var (inputs, outputs) = SidecarLauncher.EnumerateDevices();
-                if (inputs.Count > 0)
-                    SetMicDeviceNamesFromSidecar(inputs);
-                if (outputs.Count > 0)
-                    SetSpkDeviceNamesFromSidecar(outputs);
+                PublishSidecarDeviceEnumeration(SidecarLauncher.EnumerateDevices());
             }
             catch { }
         });
@@ -826,32 +1092,104 @@ public class VoiceChatLocalSettings
     }
 
     private int _lastResolvedMicVersion = -1;
+    private string _lastResolvedMicId = string.Empty;
+    private bool _lastResolvedMicAvailable;
+    private string _lastObservedDefaultMicId = DefaultAvailableDeviceId(_micDevices);
 
     internal void ResolveMicIndexIfListChanged()
     {
         int version = MicDeviceListVersion;
         if (version == _lastResolvedMicVersion) return;
         _lastResolvedMicVersion = version;
-        var resolved = ResolveDeviceIndex<MicDeviceEnum>(_savedMicDeviceName.Value, _micDeviceNames, MicrophoneDeviceIndex.Value);
-        if (!string.IsNullOrEmpty(_savedMicDeviceName.Value) && (int)(object)resolved <= 0)
+        string currentDefaultId = DefaultAvailableDeviceId(_micDevices);
+        bool defaultChanged = ShouldReapplyDefaultDevice(
+            IsPersistedDefaultSelection(
+                (int)MicrophoneDeviceIndex.Value,
+                _savedMicDeviceId.Value,
+                _savedMicDeviceName.Value),
+            _lastObservedDefaultMicId,
+            currentDefaultId);
+        _lastObservedDefaultMicId = currentDefaultId;
+        var resolved = ResolveDeviceIndex<MicDeviceEnum>(
+            _savedMicDeviceId.Value, _savedMicDeviceName.Value, _micDevices,
+            MicrophoneDeviceIndex.Value, out var resolvedDevice);
+        bool becameAvailable = ShouldReapplyResolvedDevice(
+            _lastResolvedMicId, _lastResolvedMicAvailable, resolvedDevice);
+        if ((!string.IsNullOrEmpty(_savedMicDeviceId.Value) ||
+             !string.IsNullOrEmpty(_savedMicDeviceName.Value)) &&
+            (int)(object)resolved <= 0)
+        {
+            _lastResolvedMicId = _savedMicDeviceId.Value;
+            _lastResolvedMicAvailable = false;
             return;
-        if (!resolved.Equals(MicrophoneDeviceIndex.Value))
-            MicrophoneDeviceIndex.Value = resolved;
+        }
+        bool indexChanged = !resolved.Equals(MicrophoneDeviceIndex.Value);
+        if (indexChanged)
+        {
+            _suppressInternalDeviceSelectionDispatch = true;
+            try { MicrophoneDeviceIndex.Value = resolved; }
+            finally { _suppressInternalDeviceSelectionDispatch = false; }
+        }
+        MigrateLegacyDeviceSelection(_savedMicDeviceId, _savedMicDeviceName, resolvedDevice);
+        _savedMicIdForPublication = _savedMicDeviceId.Value;
+        _savedMicNameForPublication = _savedMicDeviceName.Value;
+        _lastResolvedMicId = resolvedDevice?.Id ?? _savedMicDeviceId.Value;
+        _lastResolvedMicAvailable = resolvedDevice is { IsAvailable: true };
+        if (becameAvailable && resolvedDevice is { } availableMicrophone)
+            VoiceChatRoom.Current?.SetMicrophone(availableMicrophone.Id);
+        else if (defaultChanged)
+            VoiceChatRoom.Current?.ReapplyDefaultMicrophone();
     }
 
 #if WINDOWS
     private int _lastResolvedSpkVersion = -1;
+    private string _lastResolvedSpkId = string.Empty;
+    private bool _lastResolvedSpkAvailable;
+    private string _lastObservedDefaultSpkId = DefaultAvailableDeviceId(_spkDevices);
 
     internal void ResolveSpkIndexIfListChanged()
     {
         int version = SpkDeviceListVersion;
         if (version == _lastResolvedSpkVersion) return;
         _lastResolvedSpkVersion = version;
-        var resolved = ResolveDeviceIndex<SpkDeviceEnum>(_savedSpkDeviceName.Value, _spkDeviceNames, SpeakerDeviceIndex.Value);
-        if (!string.IsNullOrEmpty(_savedSpkDeviceName.Value) && (int)(object)resolved <= 0)
+        string currentDefaultId = DefaultAvailableDeviceId(_spkDevices);
+        bool defaultChanged = ShouldReapplyDefaultDevice(
+            IsPersistedDefaultSelection(
+                (int)SpeakerDeviceIndex.Value,
+                _savedSpkDeviceId.Value,
+                _savedSpkDeviceName.Value),
+            _lastObservedDefaultSpkId,
+            currentDefaultId);
+        _lastObservedDefaultSpkId = currentDefaultId;
+        var resolved = ResolveDeviceIndex<SpkDeviceEnum>(
+            _savedSpkDeviceId.Value, _savedSpkDeviceName.Value, _spkDevices,
+            SpeakerDeviceIndex.Value, out var resolvedDevice);
+        bool becameAvailable = ShouldReapplyResolvedDevice(
+            _lastResolvedSpkId, _lastResolvedSpkAvailable, resolvedDevice);
+        if ((!string.IsNullOrEmpty(_savedSpkDeviceId.Value) ||
+             !string.IsNullOrEmpty(_savedSpkDeviceName.Value)) &&
+            (int)(object)resolved <= 0)
+        {
+            _lastResolvedSpkId = _savedSpkDeviceId.Value;
+            _lastResolvedSpkAvailable = false;
             return;
-        if (!resolved.Equals(SpeakerDeviceIndex.Value))
-            SpeakerDeviceIndex.Value = resolved;
+        }
+        bool indexChanged = !resolved.Equals(SpeakerDeviceIndex.Value);
+        if (indexChanged)
+        {
+            _suppressInternalDeviceSelectionDispatch = true;
+            try { SpeakerDeviceIndex.Value = resolved; }
+            finally { _suppressInternalDeviceSelectionDispatch = false; }
+        }
+        MigrateLegacyDeviceSelection(_savedSpkDeviceId, _savedSpkDeviceName, resolvedDevice);
+        _savedSpkIdForPublication = _savedSpkDeviceId.Value;
+        _savedSpkNameForPublication = _savedSpkDeviceName.Value;
+        _lastResolvedSpkId = resolvedDevice?.Id ?? _savedSpkDeviceId.Value;
+        _lastResolvedSpkAvailable = resolvedDevice is { IsAvailable: true };
+        if (becameAvailable && resolvedDevice is { } availableSpeaker)
+            VoiceChatRoom.Current?.SetSpeaker(availableSpeaker.Id);
+        else if (defaultChanged)
+            VoiceChatRoom.Current?.ReapplyDefaultSpeaker();
     }
 #else
     internal void ResolveSpkIndexIfListChanged() { }
@@ -899,21 +1237,43 @@ public class VoiceChatLocalSettings
         }
         else if (configEntry == MicrophoneDeviceIndex)
         {
-            var name = MicDeviceNameAtCurrentIndex();
-            bool deviceChanged = !string.Equals(_savedMicDeviceName.Value, name, StringComparison.Ordinal);
+            if (!ShouldProcessDeviceSelectionDispatch(
+                    _suppressInternalDeviceSelectionDispatch))
+                return;
+            var device = MicDeviceAtCurrentIndex();
+            var persisted = PersistedSelectionForDevice(
+                (int)MicrophoneDeviceIndex.Value, device);
+            var id = persisted.Id;
+            var name = persisted.Name;
+            _savedMicDeviceId.Value = id;
             _savedMicDeviceName.Value = name;
-            if (deviceChanged)
-                VoiceChatRoom.Current?.SetMicrophone(name);
+            _savedMicIdForPublication = id;
+            _savedMicNameForPublication = name;
+            _lastResolvedMicId = id;
+            _lastResolvedMicAvailable = device.IsAvailable;
+            if (device.IsAvailable)
+                VoiceChatRoom.Current?.SetMicrophone(id);
             VoiceChatRoom.Current?.SetMicVolume(MicVolume.Value);
         }
 #if WINDOWS
         else if (configEntry == SpeakerDeviceIndex)
         {
-            var name = SpkDeviceNameAtCurrentIndex();
-            bool deviceChanged = !string.Equals(_savedSpkDeviceName.Value, name, StringComparison.Ordinal);
+            if (!ShouldProcessDeviceSelectionDispatch(
+                    _suppressInternalDeviceSelectionDispatch))
+                return;
+            var device = SpkDeviceAtCurrentIndex();
+            var persisted = PersistedSelectionForDevice(
+                (int)SpeakerDeviceIndex.Value, device);
+            var id = persisted.Id;
+            var name = persisted.Name;
+            _savedSpkDeviceId.Value = id;
             _savedSpkDeviceName.Value = name;
-            if (deviceChanged)
-                VoiceChatRoom.Current?.SetSpeaker(name);
+            _savedSpkIdForPublication = id;
+            _savedSpkNameForPublication = name;
+            _lastResolvedSpkId = id;
+            _lastResolvedSpkAvailable = device.IsAvailable;
+            if (device.IsAvailable)
+                VoiceChatRoom.Current?.SetSpeaker(id);
         }
 #endif
         else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY ||

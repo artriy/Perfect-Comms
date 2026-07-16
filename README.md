@@ -101,13 +101,31 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
 | Toggle open mic / push to talk | Unbound | | | |
 
+On Android, hold the mic button to transmit in push-to-talk mode. For Team
+Radio, tap its button to cycle channels or hold it to transmit. To keep a small
+**Muted** / **Deafened** reminder visible, enable **Voice Settings > HUD > Mute /
+Deafen Status Reminder**.
+
 <br>
 
 ## Install
 
-1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or grab **`PerfectComms+dependencies.zip`** from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) which already bundles it.
-2. Drop `PerfectComms.dll` into `BepInEx/plugins`.
-3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
+For the easiest install, download one architecture-specific bundle from the
+[latest release](https://github.com/artriy/Perfect-Comms/releases/latest):
+
+- **`PerfectComms+dependencies-win-x86.zip`** for a 32-bit `Among Us.exe`.
+- **`PerfectComms+dependencies-win-x64.zip`** for a 64-bit `Among Us.exe`.
+
+The architecture must match the game executable; do not mix files from the two
+ZIPs. The documented Steam 2026.3.31 target is 32-bit and uses the x86 bundle.
+The x64 loader bundle is for a compatible 64-bit game build; choosing it does
+not by itself make a different Among Us version compatible.
+
+Extract the selected ZIP into the Among Us folder, so `winhttp.dll` sits beside
+`Among Us.exe`, then launch the game. If BepInEx 6 Unity IL2CPP is already
+installed, download `PerfectComms.dll` instead and place it in
+`BepInEx/plugins`. Open Perfect Comms from the Options menu (`F10`); hosts open
+Voice Settings from the lobby game-settings console (`F11`).
 
 ```text
 BepInEx/

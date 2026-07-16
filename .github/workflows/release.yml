@@ -81,11 +81,15 @@ jobs:
           mkdir -p Libs/pc-mobile
           cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
           # Android intentionally uses the platform audio path without desktop DSP sidecars.
-      - name: Assemble BepInEx dependency bundle source
-        run: bash scripts/fetch-bepinex.sh "${{ runner.temp }}/bepinex-deps"
-      - name: Package (Release + dependencies)
+      - name: Assemble BepInEx dependency bundle sources
+        run: |
+          bash scripts/fetch-bepinex.sh --self-test
+          bash scripts/fetch-bepinex.sh win-x86 "${{ runner.temp }}/bepinex-deps-win-x86"
+          bash scripts/fetch-bepinex.sh win-x64 "${{ runner.temp }}/bepinex-deps-win-x64"
+      - name: Package (Release + x86/x64 dependencies)
         env:
-          PC_DEPENDENCY_SOURCE: ${{ runner.temp }}/bepinex-deps
+          PC_DEPENDENCY_SOURCE_WIN_X86: ${{ runner.temp }}/bepinex-deps-win-x86
+          PC_DEPENDENCY_SOURCE_WIN_X64: ${{ runner.temp }}/bepinex-deps-win-x64
         run: bash scripts/package-release.sh Release
       - name: Package (Android)
         run: bash scripts/package-release.sh Android
@@ -94,7 +98,8 @@ jobs:
         with:
           name: PerfectComms-packages-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            artifacts/PerfectComms+dependencies.zip
+            artifacts/PerfectComms+dependencies-win-x86.zip
+            artifacts/PerfectComms+dependencies-win-x64.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll
           if-no-files-found: error
@@ -105,6 +110,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/PerfectComms+dependencies.zip
+            artifacts/PerfectComms+dependencies-win-x86.zip
+            artifacts/PerfectComms+dependencies-win-x64.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll

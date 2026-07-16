@@ -4,11 +4,17 @@ Perfect Comms is a standalone BepInEx plugin for Among Us. Its only hard depende
 
 ## Quick install (with dependencies)
 
-1. Download `PerfectComms+dependencies.zip` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+1. Download the bundle from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) that matches `Among Us.exe`:
+   - `PerfectComms+dependencies-win-x86.zip` for a 32-bit game executable. The documented Steam 2026.3.31 target uses this bundle.
+   - `PerfectComms+dependencies-win-x64.zip` for a compatible 64-bit game executable.
 2. Extract it into your Among Us install folder (the folder containing `Among Us.exe`).
 3. Launch the game. You should see Perfect Comms load in the BepInEx console.
 
-This bundle includes **BepInEx and `PerfectComms.dll` only**. It does not bundle MiraAPI, Reactor, or TOU-Mira - none of them are needed for Perfect Comms to run.
+Do not combine the x86 and x64 bundles. The architecture label must match the
+game executable, and does not override the supported Among Us version. Both
+bundles include **BepInEx and `PerfectComms.dll` only**. They do not bundle
+MiraAPI, Reactor, or TOU-Mira - none of them are needed for Perfect Comms to
+run.
 
 ## DLL-only install
 
@@ -25,6 +31,11 @@ into the final APK manifest before signing and installing it. That fragment decl
 Android will still ask the player for the runtime microphone permission. A player who denies it can
 continue in receive-only mode.
 
+On Android, hold the mic button to transmit in push-to-talk mode. For Team
+Radio, tap its button to cycle channels or hold it to transmit. To keep a small
+**Muted** / **Deafened** reminder visible, enable **Voice Settings > HUD > Mute /
+Deafen Status Reminder**.
+
 ## Verify it loaded
 
 - A Perfect Comms voice HUD appears in-game.
@@ -33,7 +44,7 @@ continue in receive-only mode.
 
 ## Requirements
 
-| Component | Needed by Perfect Comms | In the zip? |
+| Component | Needed by Perfect Comms | In either dependency bundle? |
 | :--- | :--- | :--- |
 | BepInEx (Unity IL2CPP 6) | Yes | Yes |
 | MiraAPI | No | No |

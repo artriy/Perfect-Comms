@@ -28,7 +28,7 @@ bytes = "1"
 # Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from
 # the Android build keeps the cross-compile free of the oboe/JNI backend.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-cpal = "0.15"
+cpal = "=0.17.3"
 crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]

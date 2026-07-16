@@ -15,12 +15,13 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
+    // Protocol 10 sends stable audio device IDs separately from display names.
     // Protocol 9 adds the speech-safe native noise-gate threshold and complete receive/path
     // telemetry. Protocol 8 requires AUDIO_OUT playback injection plus lifecycle acknowledgement
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 9;
+    public const int Proto = 10;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -35,7 +36,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private int _health = (int)CaptureHealth.Dead;
     private volatile bool _running;
     private readonly float[] _frameScratch = new float[SidecarProtocol.AudioSamples];
-    private volatile string[] _outputDevices = Array.Empty<string>();
+    private volatile VoiceDeviceInfo[] _outputDevices = Array.Empty<VoiceDeviceInfo>();
     private Thread? _reader;
     internal int PingIntervalMs = 1000;
     internal int MissedPongLimit = 3;
@@ -59,7 +60,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public event Action<SidecarPlaybackState>? OnPlaybackState;
     private int _deadRaised;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
-    public IReadOnlyList<string> OutputDevices => _outputDevices;
+    public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _outputDevices;
 
     public SidecarVoiceClient(Func<string, string, SidecarLaunchResult> launch)
     {
@@ -580,9 +581,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         return builder.ToString();
     }
 
-    private bool ReadReady(NetworkStream stream, out string[] outputDevices, out string error)
+    private bool ReadReady(NetworkStream stream, out VoiceDeviceInfo[] outputDevices, out string error)
     {
-        outputDevices = Array.Empty<string>();
+        outputDevices = Array.Empty<VoiceDeviceInfo>();
         error = "";
         var buffer = new byte[8192];
         var have = 0;
@@ -1021,8 +1022,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 #if WINDOWS
             // Device-selection and synthetic-capture changes can alter the live lists. Publish the
             // helper's authoritative response instead of leaving the settings UI on its startup probe.
-            VoiceChatLocalSettings.SetMicDeviceNamesFromSidecar(inputDevices);
-            VoiceChatLocalSettings.SetSpkDeviceNamesFromSidecar(outputDevices);
+            VoiceChatLocalSettings.SetMicDevicesFromSidecar(inputDevices);
+            VoiceChatLocalSettings.SetSpkDevicesFromSidecar(outputDevices);
 #endif
             VoiceDiagnostics.Log(
                 "sidecar.control.rx",
@@ -1042,10 +1043,10 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"op=\"{SafeDiagnosticText(op, 64)}\" reason=unknown-op payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
     }
 
-    internal static bool TryReadDeviceUpdate(string json, out string[] inputDevices, out string[] outputDevices)
+    internal static bool TryReadDeviceUpdate(string json, out VoiceDeviceInfo[] inputDevices, out VoiceDeviceInfo[] outputDevices)
     {
-        inputDevices = Array.Empty<string>();
-        outputDevices = Array.Empty<string>();
+        inputDevices = Array.Empty<VoiceDeviceInfo>();
+        outputDevices = Array.Empty<VoiceDeviceInfo>();
         if (!SidecarProtocol.TryReadDevices(json, out var inputs)
             || !SidecarProtocol.TryReadOutputDevices(json, out var outputs))
             return false;

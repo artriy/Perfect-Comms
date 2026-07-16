@@ -20,6 +20,8 @@ Defaults below. Every key is rebindable in **Voice Settings** (open with `F10`).
 - **Host voice settings (`F11`)** opens only for the lobby host, from the game-settings console. See [Host Settings](Host-Settings).
 - **Push to talk (`C`)** works when open-mic is off. Hold to transmit.
 - **Team radio (`V`)** is held to talk on your team channel (when team radio is enabled by the host and your role qualifies). **Cycle (`G`)** switches between channels you can use.
+- **Android controls:** hold the mic button to transmit in push-to-talk mode. Tap the Team Radio button to cycle channels, or hold it to transmit.
+- **Mute / deafen reminder:** enable **Voice Settings > HUD > Mute / Deafen Status Reminder** for a small persistent status indicator.
 - **Refresh voice (`F7`)** re-establishes your own voice connection if audio drops. **Host refresh (`F8`)** asks all clients to refresh.
 
 See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Host Settings](Host-Settings)

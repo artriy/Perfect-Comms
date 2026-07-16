@@ -51,6 +51,20 @@ public sealed class AndroidMicrophoneHealthLogicTests
     }
 
     [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    public void DestroyedClipCannotRemainStuckInRecordingState(
+        bool recording,
+        bool clipAvailable,
+        bool expected)
+    {
+        Xunit.Assert.Equal(
+            expected,
+            AndroidMicrophone.ShouldRecoverDestroyedClip(recording, clipAvailable));
+    }
+
+    [Theory]
     [InlineData(1, 250)]
     [InlineData(2, 500)]
     [InlineData(3, 1_000)]

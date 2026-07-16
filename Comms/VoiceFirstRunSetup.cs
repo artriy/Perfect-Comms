@@ -125,6 +125,17 @@ internal static class VoiceFirstRunSetup
             _automaticAttemptedThisSession = true;
     }
 
+    /// <summary>
+    /// Session/scene boundaries cannot leave a persistent setup preview holding platform audio.
+    /// This bypasses the interactive close confirmation because voice-room privacy and capture
+    /// ownership take precedence once gameplay is starting or ending.
+    /// </summary>
+    internal static void ForceClose()
+    {
+        if (!_shown && _shell == null && _audioPreview == null && _hudPreview == null) return;
+        CloseInternal(destroy: true);
+    }
+
     private static bool Show(VoiceChatLocalSettings settings, bool manual)
     {
         try
@@ -134,7 +145,12 @@ internal static class VoiceFirstRunSetup
             VoiceUiKit.EnsureDriver();
             VoiceChatLocalSettings.MaybeRefreshDeviceLists(resolveSavedIndices: false);
 
-            _draft = FirstRunSetupDraft.CreateFresh(settings);
+            // Automatic first-run setup starts from the recommended v4 baseline. A manual rerun
+            // is an editor for the user's current configuration and must not silently reset every
+            // page to defaults before they have chosen a change.
+            _draft = manual
+                ? FirstRunSetupDraft.CaptureExisting(settings)
+                : FirstRunSetupDraft.CreateFresh(settings);
             _completed = false;
             _page = WelcomePage;
             _appear = 0f;
@@ -585,9 +601,9 @@ internal static class VoiceFirstRunSetup
         float w = (ContentWidth - gap * 2f) / 3f;
         BuildSummaryCard(0f, w, "Audio", new[]
         {
-            "Input: " + CompactDevice(_draft.MicrophoneDevice),
+            "Input: " + CompactDevice(_draft.MicrophoneDisplayName()),
 #if WINDOWS
-            "Output: " + CompactDevice(_draft.SpeakerDevice),
+            "Output: " + CompactDevice(_draft.SpeakerDisplayName()),
 #else
             "Output: Android audio route",
 #endif
@@ -1289,7 +1305,7 @@ internal static class VoiceFirstRunSetup
     private static string DraftMicrophoneNameForUi(int index)
         => index < VoiceChatLocalSettings.MicDeviceNames.Length
             ? DeviceName(VoiceChatLocalSettings.MicDeviceNames, index)
-            : DisplayDevice(_draft?.MicrophoneDevice ?? string.Empty) + " (saved device)";
+            : (_draft?.MicrophoneDisplayName() ?? "Saved device") + " (saved device)";
 
 #if WINDOWS
     private static int DraftSpeakerIndexForUi()
@@ -1309,15 +1325,12 @@ internal static class VoiceFirstRunSetup
     private static string DraftSpeakerNameForUi(int index)
         => index < VoiceChatLocalSettings.SpkDeviceNames.Length
             ? DeviceName(VoiceChatLocalSettings.SpkDeviceNames, index)
-            : DisplayDevice(_draft?.SpeakerDevice ?? string.Empty) + " (saved device)";
+            : (_draft?.SpeakerDisplayName() ?? "Saved device") + " (saved device)";
 #endif
 
-    private static string DisplayDevice(string saved)
-        => string.IsNullOrWhiteSpace(saved) ? "System Default" : saved;
-
-    private static string CompactDevice(string saved)
+    private static string CompactDevice(string displayName)
     {
-        string value = DisplayDevice(saved);
+        string value = string.IsNullOrWhiteSpace(displayName) ? "System Default" : displayName;
         return value.Length <= 30 ? value : value.Substring(0, 27) + "...";
     }
 

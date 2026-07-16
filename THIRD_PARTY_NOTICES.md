@@ -48,3 +48,15 @@ audio I/O, and platform support crates. A deterministic cargo-about inventory co
 desktop target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` at
 `Libs/native-rust-dependencies.html` and shipped as `licenses/native-rust-dependencies.html`.
 CI regenerates this file from the locked graph and rejects drift.
+
+## Optional Windows dependency bundles
+
+The architecture-specific `PerfectComms+dependencies-win-x86.zip` and
+`PerfectComms+dependencies-win-x64.zip` assets additionally redistribute the
+matching official BepInEx 6 build 735 loader and runtime. Those assets include
+`DEPENDENCY_THIRD_PARTY_NOTICES.md` plus exact license texts under
+`licenses/dependencies/` for BepInEx, UnityDoorstop, CoreCLR, Il2CppInterop,
+HarmonyX/Harmony, MonoMod, and every additional managed/native file copied from
+`BepInEx/core`. The same directory records exact provenance for the pinned
+Unity reference libraries. The plugin-only release does not contain those
+loader/runtime files.

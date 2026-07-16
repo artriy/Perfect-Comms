@@ -23,11 +23,17 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     private const int SampleRate  = 48000;
     private const int ClipSeconds = 1;     // Nebula uses 1 s looping clip
 
+    private static readonly ExclusiveCaptureLease CaptureLease = new();
+    private static long _nextCaptureOwner;
+    private readonly long _captureOwner = Interlocked.Increment(ref _nextCaptureOwner);
+
     private string    _device = "";
     private AudioClip? _clip;
     private int        _lastPos;
     private bool       _recording;
+    private bool       _physicalCaptureNeedsEnd;
     private bool       _captureRequested;
+    private bool       _retryLeaseWhenUnavailable;
     private float      _volume = 1f;
     private long _lastAdvanceTicks;
     private static readonly long DeadAfterTicks = 15L * System.Diagnostics.Stopwatch.Frequency;
@@ -49,6 +55,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
     public bool IsCapturing => _recording && _clip != null;
     public bool CaptureRequested => _captureRequested;
+    public bool LeaseUnavailable { get; private set; }
 
     public void SetVolume(float v) => _volume = Math.Clamp(v, 0f, 4f);
 
@@ -57,26 +64,42 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     /// falls back to first available device if the given name is empty/invalid.
     /// Never passes null to Microphone.Start (IL2CPP does not accept null here).
     /// </summary>
-    public bool Start(string deviceName)
+    public bool Start(string deviceName, bool retryLeaseWhenUnavailable = false)
     {
         Stop();
 
         _device = ResolveDevice(deviceName);
         _captureRequested = true;
+        _retryLeaseWhenUnavailable = retryLeaseWhenUnavailable;
         _recoveryAttempt = 0;
         _nextRecoveryMs = 0;
+        if (!CaptureLease.TryAcquire(_captureOwner))
+        {
+            LeaseUnavailable = true;
+            VoiceDiagnostics.Log("voice.unity.mic.lease",
+                $"acquired=false device=\"{DescribeDevice()}\" reason=already-owned retry={retryLeaseWhenUnavailable.ToString().ToLowerInvariant()}");
+            if (retryLeaseWhenUnavailable)
+                ScheduleRecovery(Environment.TickCount64, "capture lease unavailable");
+            else
+                _captureRequested = false;
+            return false;
+        }
+
+        LeaseUnavailable = false;
         return TryStartCapture(Environment.TickCount64, "initial");
     }
 
     public void Stop()
     {
         _captureRequested = false;
+        EndCurrentCapture(releaseLease: true);
         _recording = false;
-        EndCurrentCapture();
         _clip = null;
         _il2cppPollBuf = null;
         _nextRecoveryMs = 0;
         _recoveryAttempt = 0;
+        _retryLeaseWhenUnavailable = false;
+        LeaseUnavailable = false;
     }
 
     /// <summary>
@@ -95,6 +118,16 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
     public void Tick()
     {
         if (!_captureRequested) return;
+        if (ShouldRecoverDestroyedClip(_recording, _clip != null))
+        {
+            var now = Environment.TickCount64;
+            VoiceDiagnostics.Log("voice.unity.mic.restart",
+                $"clip-destroyed device=\"{DescribeDevice()}\" attempt={_recoveryAttempt + 1}");
+            EndCurrentCapture(releaseLease: false);
+            _clip = null;
+            _recording = false;
+            ScheduleRecovery(now, "microphone clip destroyed");
+        }
         if (!_recording || _clip == null)
         {
             MaybeRetryCapture();
@@ -162,7 +195,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
         var now = Environment.TickCount64;
         VoiceDiagnostics.Log("voice.unity.mic.restart",
             $"read-failed device=\"{DescribeDevice()}\" attempt={_recoveryAttempt + 1} error=\"{SafeDiagnostic(failure)}\"");
-        EndCurrentCapture();
+        EndCurrentCapture(releaseLease: false);
         _clip = null;
         _recording = false;
         ScheduleRecovery(now, "read failed");
@@ -176,7 +209,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
         VoiceDiagnostics.Log("voice.unity.mic.restart",
             $"stalled device=\"{DescribeDevice()}\" attempt={_recoveryAttempt + 1} stallMs={now - _lastProgressMs} lastPos={_lastPos}");
-        EndCurrentCapture();
+        EndCurrentCapture(releaseLease: false);
         _clip = null;
         _recording = false;
         ScheduleRecovery(now, "stalled");
@@ -187,15 +220,50 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
         var now = Environment.TickCount64;
         if (!ShouldAttemptRecovery(_captureRequested, _recording, now, _nextRecoveryMs)) return;
         _device = ResolveDevice(_device);
+
+        if (!CaptureLease.IsOwnedBy(_captureOwner))
+        {
+            if (!CaptureLease.TryAcquire(_captureOwner))
+            {
+                LeaseUnavailable = true;
+                if (_retryLeaseWhenUnavailable)
+                    ScheduleRecovery(now, "capture lease unavailable");
+                else
+                    _captureRequested = false;
+                return;
+            }
+
+            LeaseUnavailable = false;
+            _recoveryAttempt = 0;
+            _nextRecoveryMs = 0;
+            VoiceDiagnostics.Log("voice.unity.mic.lease",
+                $"acquired=true device=\"{DescribeDevice()}\" reason=retry");
+        }
+
         TryStartCapture(now, "retry");
     }
 
     private bool TryStartCapture(long now, string reason)
     {
+        if (!CaptureLease.IsOwnedBy(_captureOwner))
+        {
+            LeaseUnavailable = true;
+            if (_retryLeaseWhenUnavailable)
+                ScheduleRecovery(now, "capture lease lost");
+            else
+                _captureRequested = false;
+            return false;
+        }
+
         AudioClip? clip = null;
         string failure = "Microphone.Start returned null";
         try
         {
+            // Unity may reserve its process-global microphone surface even when the returned
+            // AudioClip is immediately destroyed or the managed call throws. Remember that the
+            // physical Start entry point was entered independently of Unity's overloaded null
+            // comparison so this owner always issues the matching End.
+            _physicalCaptureNeedsEnd = true;
             clip = Microphone.Start(_device, true, ClipSeconds, SampleRate);
         }
         catch (Exception ex)
@@ -217,6 +285,9 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
             return true;
         }
 
+        // Unity can fail after touching its global microphone state. Close this owner's physical
+        // attempt before the scheduled retry, while retaining the process-local logical lease.
+        EndCurrentCapture(releaseLease: false);
         ScheduleRecovery(now, failure);
         return false;
     }
@@ -230,15 +301,35 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
             $"retry-scheduled device=\"{DescribeDevice()}\" attempt={_recoveryAttempt} delayMs={delayMs} error=\"{SafeDiagnostic(failure)}\"");
     }
 
-    private void EndCurrentCapture()
+    private void EndCurrentCapture(bool releaseLease)
     {
+        if (!CaptureLease.IsOwnedBy(_captureOwner)) return;
+
         // Empty string is the IL2CPP-safe representation of Unity's default device and is the
         // same value passed to Start, so it must also be passed to End to release the mic lease.
-        try { Microphone.End(_device); } catch { }
+        try
+        {
+            // Do not call the process-global End API for an instance that never started a clip.
+            // In particular, a blocked setup preview must not stop the active room microphone.
+            if (_physicalCaptureNeedsEnd)
+                Microphone.End(_device);
+        }
+        catch { }
+        finally
+        {
+            _physicalCaptureNeedsEnd = false;
+            // A stalled capture retains logical ownership while it retries. Only an explicit Stop
+            // hands the global Unity microphone surface to another Perfect Comms consumer.
+            if (releaseLease)
+                CaptureLease.Release(_captureOwner);
+        }
     }
 
     internal static bool ShouldAttemptRecovery(bool requested, bool recording, long nowMs, long nextRecoveryMs)
         => requested && !recording && nowMs >= nextRecoveryMs;
+
+    internal static bool ShouldRecoverDestroyedClip(bool recording, bool clipAvailable)
+        => recording && !clipAvailable;
 
     internal static int RecoveryDelayMilliseconds(int attempt, int initialDelayMs, int maximumDelayMs)
     {

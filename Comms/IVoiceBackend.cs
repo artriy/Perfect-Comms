@@ -27,7 +27,7 @@ internal interface IVoiceBackend : IDisposable
     void SetMicVolume(float volume);
     void SetNoiseGate(float noiseGateThreshold, float vadThreshold);
     void SetCaptureRuntimeOptions(VoiceCaptureRuntimeOptions options);
-    void SetMicrophone(string deviceName, float volume);
+    void SetMicrophone(string deviceName, float volume, bool forceRestart = false);
     void SetSpeaker(string deviceName);
     void UpdateProfile(byte playerId, string playerName);
     void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel);

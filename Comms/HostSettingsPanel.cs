@@ -57,6 +57,9 @@ public static class HostSettingsPanel
     {
         if (AmongUsClient.Instance == null || !AmongUsClient.Instance.AmHost) return;
 
+        VoiceSettingsPanel.ForceClose();
+        VoiceVolumeMenu.ForceClose();
+
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
 
@@ -136,7 +139,7 @@ public static class HostSettingsPanel
     {
         if (!IsOpen || (newHostClientId >= 0 && newHostClientId == localClientId)) return;
         Hide();
-        VoiceChatHudState.ShowToast("Host voice settings closed: host changed");
+        VoiceChatHudState.ShowCompactStatus("Host voice settings closed: host changed");
         try
         {
             VoiceDiagnostics.Log(

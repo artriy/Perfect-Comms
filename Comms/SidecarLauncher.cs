@@ -11,6 +11,20 @@ using System.Threading;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+internal readonly record struct SidecarDeviceEnumerationResult(
+    bool IsAuthoritative,
+    IReadOnlyList<VoiceDeviceInfo> Input,
+    IReadOnlyList<VoiceDeviceInfo> Output)
+{
+    internal static SidecarDeviceEnumerationResult Failure =>
+        new(false, Array.Empty<VoiceDeviceInfo>(), Array.Empty<VoiceDeviceInfo>());
+
+    internal static SidecarDeviceEnumerationResult Success(
+        IReadOnlyList<VoiceDeviceInfo> input,
+        IReadOnlyList<VoiceDeviceInfo> output)
+        => new(true, input, output);
+}
+
 internal static class SidecarLauncher
 {
     private static readonly object BundleVersionGate = new();
@@ -354,23 +368,26 @@ internal static class SidecarLauncher
         return Path.Combine(dir, "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
     }
 
-    public static (List<string> Input, List<string> Output) EnumerateDevices()
+    public static SidecarDeviceEnumerationResult EnumerateDevices()
     {
         try
         {
             var assembly = Assembly.GetExecutingAssembly();
             if (!IsHelperAvailable(assembly))
-                return (new List<string>(), new List<string>());
+                return SidecarDeviceEnumerationResult.Failure;
             var helperPath = EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
             return EnumerateDevices(helperPath, WineEnvironment.IsWine, WineEnvironment.ResolveHostPath);
         }
         catch
         {
-            return (new List<string>(), new List<string>());
+            return SidecarDeviceEnumerationResult.Failure;
         }
     }
 
-    public static (List<string> Input, List<string> Output) EnumerateDevices(string helperPath, bool wine, Func<string, string> resolveWineHostPath)
+    public static SidecarDeviceEnumerationResult EnumerateDevices(
+        string helperPath,
+        bool wine,
+        Func<string, string> resolveWineHostPath)
     {
         var outPath = NewHandshakePath();
         Process? process = null;
@@ -402,7 +419,7 @@ internal static class SidecarLauncher
             if (process == null)
             {
                 VoiceDiagnostics.Log("sidecar.launch", "event=enumerate-start-failed reason=process-start-null");
-                return (new List<string>(), new List<string>());
+                return SidecarDeviceEnumerationResult.Failure;
             }
             diagnostics = AttachProcessDiagnostics(process, token: string.Empty, purpose: "enumerate");
             VoiceDiagnostics.Log("sidecar.launch", $"event=enumerate-process-start pid={SafeProcessId(process)}");
@@ -414,21 +431,21 @@ internal static class SidecarLauncher
                     VoiceDiagnostics.Log(
                         "sidecar.launch",
                         $"event=enumerate-complete pid={SafeProcessId(process)} inputs={input.Count} outputs={output.Count} elapsedMs={pollSw.ElapsedMilliseconds}");
-                    return (input, output);
+                    return SidecarDeviceEnumerationResult.Success(input, output);
                 }
                 Thread.Sleep(25);
             }
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-timeout pid={SafeProcessId(process)} elapsedMs={pollSw.ElapsedMilliseconds}");
-            return (new List<string>(), new List<string>());
+            return SidecarDeviceEnumerationResult.Failure;
         }
         catch (Exception ex)
         {
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-failed elapsedMs={sw.ElapsedMilliseconds} error={ExceptionDiagnostic(ex)}");
-            return (new List<string>(), new List<string>());
+            return SidecarDeviceEnumerationResult.Failure;
         }
         finally
         {
@@ -439,10 +456,10 @@ internal static class SidecarLauncher
         }
     }
 
-    private static bool TryReadDevicesFile(string path, out List<string> input, out List<string> output)
+    internal static bool TryReadDevicesFile(string path, out List<VoiceDeviceInfo> input, out List<VoiceDeviceInfo> output)
     {
-        input = new List<string>();
-        output = new List<string>();
+        input = new List<VoiceDeviceInfo>();
+        output = new List<VoiceDeviceInfo>();
         try
         {
             if (!File.Exists(path))
@@ -450,9 +467,8 @@ internal static class SidecarLauncher
             var text = File.ReadAllText(path);
             if (string.IsNullOrWhiteSpace(text))
                 return false;
-            var ok = SidecarProtocol.TryReadDevices(text, out input);
-            SidecarProtocol.TryReadOutputDevices(text, out output);
-            return ok;
+            return SidecarProtocol.TryReadDevices(text, out input) &&
+                   SidecarProtocol.TryReadOutputDevices(text, out output);
         }
         catch
         {

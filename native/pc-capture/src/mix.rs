@@ -281,6 +281,7 @@ pub struct Mixer {
     ghost_lp_z2: f32,
     ghost_tail: usize,
     wall_tail: usize,
+    observed_deafen_epoch: u64,
 }
 
 impl Default for Mixer {
@@ -304,7 +305,22 @@ impl Mixer {
             ghost_lp_z2: 0.0,
             ghost_tail: 0,
             wall_tail: 0,
+            observed_deafen_epoch: 0,
         }
+    }
+
+    fn reset_effect_state(&mut self) {
+        // Treat deafen as an immediate break in the playback signal path. Otherwise reverb and
+        // filter history accumulated before deafen can resume audibly when playback is restored.
+        self.glide.clear();
+        self.ghost_reverb.reset();
+        self.wall_reverb.reset();
+        self.ghost_send.fill(0.0);
+        self.wall_send.fill(0.0);
+        self.ghost_lp_z1 = 0.0;
+        self.ghost_lp_z2 = 0.0;
+        self.ghost_tail = 0;
+        self.wall_tail = 0;
     }
 
     pub fn mix(&mut self, per_peer: &[(String, &[f32])], gs: &GameState, out_stereo: &mut [f32]) {
@@ -312,6 +328,10 @@ impl Mixer {
             *s = 0.0;
         }
         let snap = gs.snapshot();
+        if self.observed_deafen_epoch != snap.deafen_epoch {
+            self.reset_effect_state();
+            self.observed_deafen_epoch = snap.deafen_epoch;
+        }
         if snap.local.deafened {
             return;
         }
@@ -937,6 +957,88 @@ mod tests {
             });
         }
         assert!(peak < 0.2, "reverb tail did not decay: {peak}");
+    }
+
+    #[test]
+    fn deafen_transition_discards_reverb_tails_and_filter_history() {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            1.0,
+            vec![
+                (
+                    "ghost",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 1,
+                    },
+                ),
+                (
+                    "wall",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 3,
+                    },
+                ),
+            ],
+        );
+        let mut mixer = Mixer::new();
+        let ghost = vec![0.2f32; 960];
+        let wall = vec![0.2f32; 960];
+        let per_peer = vec![
+            ("ghost".to_string(), ghost.as_slice()),
+            ("wall".to_string(), wall.as_slice()),
+        ];
+        let mut output = vec![0.0f32; 1920];
+
+        for _ in 0..10 {
+            mixer.mix(&per_peer, &gs, &mut output);
+        }
+        assert!(mixer.ghost_tail > 0);
+        assert!(mixer.wall_tail > 0);
+        assert!(!mixer.glide.is_empty());
+        assert!(mixer
+            .ghost_reverb
+            .comb_l
+            .iter()
+            .flatten()
+            .any(|sample| *sample != 0.0));
+        assert!(mixer
+            .wall_reverb
+            .comb_l
+            .iter()
+            .flatten()
+            .any(|sample| *sample != 0.0));
+
+        // No mixer callback occurs while deafened, which is possible when the decoded jitter
+        // queues are idle. The epoch still lets the next callback observe that deafen happened.
+        gs.set_local(LocalState { deafened: true });
+        gs.set_local(LocalState { deafened: false });
+        let empty: Vec<(String, &[f32])> = Vec::new();
+        output.fill(1.0);
+        mixer.mix(&empty, &gs, &mut output);
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        assert_eq!(mixer.ghost_tail, 0);
+        assert_eq!(mixer.wall_tail, 0);
+        assert_eq!(mixer.ghost_lp_z1, 0.0);
+        assert_eq!(mixer.ghost_lp_z2, 0.0);
+        assert!(mixer.glide.is_empty());
+        for reverb in [&mixer.ghost_reverb, &mixer.wall_reverb] {
+            assert!(reverb.comb_l.iter().flatten().all(|sample| *sample == 0.0));
+            assert!(reverb.comb_r.iter().flatten().all(|sample| *sample == 0.0));
+            assert!(reverb.ap_l.iter().flatten().all(|sample| *sample == 0.0));
+            assert!(reverb.ap_r.iter().flatten().all(|sample| *sample == 0.0));
+            assert!(reverb.filt_l.iter().all(|sample| *sample == 0.0));
+            assert!(reverb.filt_r.iter().all(|sample| *sample == 0.0));
+        }
+
+        output.fill(1.0);
+        mixer.mix(&empty, &gs, &mut output);
+        assert!(
+            output.iter().all(|sample| *sample == 0.0),
+            "pre-deafen effect history must not resume after undeafen"
+        );
     }
 
     #[test]

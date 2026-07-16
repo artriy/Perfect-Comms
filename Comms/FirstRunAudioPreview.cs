@@ -692,6 +692,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
         if (draft != null) _androidDraft = draft;
         var activeDraft = draft ?? _androidDraft;
         if (_disposed || activeDraft == null) return;
+        if (VoiceChatRoom.Current != null)
+        {
+            FailMicrophone("Mic Check is available from the main menu, outside a voice room");
+            StopAndroidCaptureOnly();
+            return;
+        }
         VoiceChatLocalSettings.RefreshDeviceLists();
         var microphoneRoute = ResolveMicrophoneRoute(activeDraft);
         StopAndroidCaptureOnly();
@@ -700,7 +706,9 @@ internal sealed class FirstRunAudioPreview : IDisposable
         _androidMicrophone.DataAvailable += OnAndroidSamples;
         if (!_androidMicrophone.Start(activeDraft.MicrophoneDevice))
         {
-            FailMicrophone("Could not open the Android microphone");
+            FailMicrophone(_androidMicrophone.LeaseUnavailable
+                ? "Mic Check is unavailable while voice chat is using the microphone"
+                : "Could not open the Android microphone");
             StopAndroidCaptureOnly();
             return;
         }

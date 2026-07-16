@@ -19,6 +19,7 @@ pub struct PeerState {
 #[derive(Debug, Clone)]
 pub struct GameSnapshot {
     pub version: u64,
+    pub deafen_epoch: u64,
     pub local: LocalState,
     pub master: f32,
     pub peers: HashMap<String, PeerState>,
@@ -28,6 +29,7 @@ impl Default for GameSnapshot {
     fn default() -> GameSnapshot {
         GameSnapshot {
             version: 0,
+            deafen_epoch: 0,
             local: LocalState::default(),
             master: 1.0,
             peers: HashMap::new(),
@@ -62,6 +64,9 @@ impl GameState {
         let mut snapshot = self.inner.lock().unwrap();
         let next = Arc::make_mut(&mut snapshot);
         next.version = next.version.wrapping_add(1);
+        if local.deafened && !next.local.deafened {
+            next.deafen_epoch = next.deafen_epoch.wrapping_add(1);
+        }
         next.local = local;
     }
 
@@ -91,6 +96,9 @@ impl GameState {
         let mut snapshot = self.inner.lock().unwrap();
         let next = Arc::make_mut(&mut snapshot);
         next.version = next.version.wrapping_add(1);
+        if local.deafened && !next.local.deafened {
+            next.deafen_epoch = next.deafen_epoch.wrapping_add(1);
+        }
         next.local = local;
         next.master = sanitize_master(master);
         next.peers.clear();
@@ -182,6 +190,24 @@ mod tests {
         let s = gs.snapshot();
         assert!(s.local.deafened);
         assert_eq!(s.master, 0.5);
+    }
+
+    #[test]
+    fn deafen_epoch_records_each_transition_into_deafen() {
+        let gs = GameState::new();
+        assert_eq!(gs.snapshot().deafen_epoch, 0);
+
+        gs.set_local(LocalState { deafened: false });
+        assert_eq!(gs.snapshot().deafen_epoch, 0);
+        gs.set_local(LocalState { deafened: true });
+        assert_eq!(gs.snapshot().deafen_epoch, 1);
+        gs.set_local(LocalState { deafened: true });
+        assert_eq!(gs.snapshot().deafen_epoch, 1);
+        gs.set_local(LocalState { deafened: false });
+        assert_eq!(gs.snapshot().deafen_epoch, 1);
+
+        gs.apply(LocalState { deafened: true }, 1.0, Vec::new());
+        assert_eq!(gs.snapshot().deafen_epoch, 2);
     }
 
     #[test]

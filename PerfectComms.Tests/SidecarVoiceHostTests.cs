@@ -193,7 +193,8 @@ public sealed class SidecarVoiceHostTests
         public event Action<SidecarPlaybackState>? OnPlaybackState { add => _onPlaybackState += value; remove => _onPlaybackState -= value; }
 
         public CaptureHealth Health { get; private set; } = CaptureHealth.Dead;
-        public IReadOnlyList<string> OutputDevices { get; } = new[] { "speaker" };
+        public IReadOnlyList<VoiceDeviceInfo> OutputDevices { get; } =
+            new[] { new VoiceDeviceInfo("speaker-id", "speaker", true) };
         public int StartCount => Volatile.Read(ref StartCountBacking);
         public int DisposeCount { get; private set; }
         public ManualResetEventSlim? StartEntered { get; init; }

@@ -25,6 +25,7 @@ jobs:
           python3 -m py_compile scripts/verify-package-layout.py
           python3 scripts/verify-release-assets.py --self-test
           python3 scripts/verify-package-layout.py --self-test
+          bash scripts/fetch-bepinex.sh --self-test
           python3 scripts/verify-release-assets.py --root . --configuration Android --manifest-only
           bash -n scripts/package-release.sh scripts/fetch-bepinex.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/ci-smoke-helper.sh
           bash scripts/package-release.sh --validate-source

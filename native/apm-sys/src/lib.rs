@@ -109,7 +109,7 @@ pub struct Apm {
     a: *mut ApmHandle,
     sc: *mut ApmStreamConfig,
     chunk: usize,
-    out: Vec<f32>,
+    processed: Vec<f32>,
 }
 
 unsafe impl Send for Apm {}
@@ -129,7 +129,7 @@ impl Apm {
                 return Err("apm-create".into());
             }
             let chunk = (api.frame_size)(RATE);
-            if chunk == 0 || FRAME % chunk != 0 {
+            if chunk == 0 || !FRAME.is_multiple_of(chunk) {
                 (api.destroy)(a);
                 return Err(format!("chunk:{chunk}"));
             }
@@ -138,7 +138,7 @@ impl Apm {
                 a,
                 sc: std::ptr::null_mut(),
                 chunk,
-                out: vec![0.0; chunk],
+                processed: Vec::new(),
             };
             me.apply(echo, noise_suppression, agc2, hpf)?;
             me.sc = (me.api.sc_create)(RATE, 1);
@@ -193,48 +193,53 @@ impl Apm {
         self.chunk
     }
 
-    pub fn analyze_reverse(&mut self, frame: &[f32]) {
-        unsafe {
-            let mut off = 0;
-            while off + self.chunk <= frame.len() {
-                let p = frame.as_ptr().add(off);
-                let pp = &p as *const *const f32;
-                (self.api.analyze)(self.a, pp, self.sc);
-                off += self.chunk;
-            }
-        }
+    pub fn analyze_reverse(&mut self, frame: &[f32]) -> Result<(), String> {
+        let analyze = self.api.analyze;
+        let a = self.a;
+        let sc = self.sc;
+        analyze_frame_chunks(frame, self.chunk, |chunk| unsafe {
+            let p = chunk.as_ptr();
+            let pp = &p as *const *const f32;
+            analyze(a, pp, sc)
+        })
+        .map_err(|(offset, code)| format!("analyze-reverse:{code}@{offset}"))
     }
 
-    pub fn process_capture(&mut self, frame: &mut [f32]) {
-        self.process_capture_with_stream_delay(frame, 0);
+    pub fn process_capture(&mut self, frame: &mut [f32]) -> Result<(), String> {
+        self.process_capture_with_stream_delay(frame, 0)
     }
 
     /// Processes capture audio while supplying the render-to-capture delay required by WebRTC
     /// APM. A 20 ms PerfectComms frame contains two 10 ms APM chunks, and APM clears its
     /// `was_stream_delay_set` flag after every ProcessStream call. Set the delay before every
     /// internal chunk rather than once per PerfectComms frame.
-    pub fn process_capture_with_stream_delay(&mut self, frame: &mut [f32], delay_ms: i32) {
+    pub fn process_capture_with_stream_delay(
+        &mut self,
+        frame: &mut [f32],
+        delay_ms: i32,
+    ) -> Result<(), String> {
         let delay_ms = sanitize_stream_delay_ms(delay_ms);
-        unsafe {
-            let mut off = 0;
-            while off + self.chunk <= frame.len() {
-                let ip = frame.as_ptr().add(off);
-                let op = self.out.as_mut_ptr();
+        let set_delay = self.api.set_delay;
+        let process = self.api.process;
+        let a = self.a;
+        let sc = self.sc;
+        process_frame_chunks_fail_open(
+            frame,
+            self.chunk,
+            &mut self.processed,
+            |input, output| unsafe {
+                let ip = input.as_ptr();
+                let op = output.as_mut_ptr();
                 let ipp = &ip as *const *const f32;
                 let opp = &op as *const *mut f32;
                 // The second capture chunk is 10 ms newer, but its corresponding render chunk is
                 // also 10 ms deeper in the same analyzed/output frame. Those offsets cancel, so
                 // WebRTC receives the same end-to-end stream delay for both chunks.
-                (self.api.set_delay)(self.a, delay_ms);
-                (self.api.process)(self.a, ipp, self.sc, self.sc, opp);
-                std::ptr::copy_nonoverlapping(
-                    self.out.as_ptr(),
-                    frame.as_mut_ptr().add(off),
-                    self.chunk,
-                );
-                off += self.chunk;
-            }
-        }
+                set_delay(a, delay_ms);
+                process(a, ipp, sc, sc, opp)
+            },
+        )
+        .map_err(|(offset, code)| format!("process-capture:{code}@{offset}"))
     }
 
     pub fn set_stream_delay_ms(&mut self, ms: i32) {
@@ -242,6 +247,52 @@ impl Apm {
             (self.api.set_delay)(self.a, sanitize_stream_delay_ms(ms));
         }
     }
+}
+
+fn analyze_frame_chunks(
+    frame: &[f32],
+    chunk: usize,
+    mut analyze: impl FnMut(&[f32]) -> c_int,
+) -> Result<(), (usize, c_int)> {
+    assert!(chunk > 0, "APM chunk size must be nonzero");
+    let mut offset = 0;
+    while offset + chunk <= frame.len() {
+        let code = analyze(&frame[offset..offset + chunk]);
+        if code != 0 {
+            return Err((offset, code));
+        }
+        offset += chunk;
+    }
+    Ok(())
+}
+
+fn process_frame_chunks_fail_open(
+    frame: &mut [f32],
+    chunk: usize,
+    processed: &mut Vec<f32>,
+    mut process: impl FnMut(&[f32], &mut [f32]) -> c_int,
+) -> Result<(), (usize, c_int)> {
+    assert!(chunk > 0, "APM chunk size must be nonzero");
+    let processed_len = frame.len() / chunk * chunk;
+    processed.resize(processed_len, 0.0);
+
+    let mut offset = 0;
+    while offset < processed_len {
+        let code = process(
+            &frame[offset..offset + chunk],
+            &mut processed[offset..offset + chunk],
+        );
+        if code != 0 {
+            // Do not copy any processed chunks back unless the whole frame succeeds. In
+            // particular, the C API may leave its destination untouched on failure, so copying
+            // the reusable buffer here could replay output from an older frame.
+            return Err((offset, code));
+        }
+        offset += chunk;
+    }
+
+    frame[..processed_len].copy_from_slice(&processed[..processed_len]);
+    Ok(())
 }
 
 impl Drop for Apm {
@@ -259,7 +310,9 @@ impl Drop for Apm {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_stream_delay_ms, Apm, FRAME};
+    use super::{
+        analyze_frame_chunks, process_frame_chunks_fail_open, sanitize_stream_delay_ms, Apm, FRAME,
+    };
 
     #[test]
     fn stream_delay_is_bounded_to_webrtc_range() {
@@ -269,14 +322,65 @@ mod tests {
     }
 
     #[test]
+    fn reverse_analysis_stops_and_reports_the_failing_chunk() {
+        let frame = [0.0; 8];
+        let mut calls = 0;
+        let result = analyze_frame_chunks(&frame, 4, |_| {
+            calls += 1;
+            if calls == 2 {
+                -7
+            } else {
+                0
+            }
+        });
+        assert_eq!(result, Err((4, -7)));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn failed_processing_keeps_the_entire_capture_frame_unchanged() {
+        let original = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let mut frame = original;
+        let mut processed = vec![99.0; frame.len()];
+        let mut calls = 0;
+        let result = process_frame_chunks_fail_open(&mut frame, 4, &mut processed, |_, output| {
+            calls += 1;
+            if calls == 1 {
+                output.fill(-0.5);
+                0
+            } else {
+                // Model a failed C call which leaves stale output in its destination.
+                -13
+            }
+        });
+        assert_eq!(result, Err((4, -13)));
+        assert_eq!(frame, original);
+    }
+
+    #[test]
+    fn successful_processing_commits_complete_chunks_and_preserves_a_short_tail() {
+        let mut frame = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut processed = Vec::new();
+        process_frame_chunks_fail_open(&mut frame, 2, &mut processed, |input, output| {
+            for (source, destination) in input.iter().zip(output) {
+                *destination = *source * 2.0;
+            }
+            0
+        })
+        .expect("processing succeeds");
+        assert_eq!(frame, [2.0, 4.0, 6.0, 8.0, 5.0]);
+    }
+
+    #[test]
     #[ignore]
     fn loads_and_processes_a_frame() {
         let path =
             std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
         let mut apm = Apm::load(&path, true, true, false, true).expect("load");
         let mut frame = vec![0.0f32; 960];
-        apm.analyze_reverse(&frame);
-        apm.process_capture_with_stream_delay(&mut frame, 73);
+        apm.analyze_reverse(&frame).expect("analyze reverse");
+        apm.process_capture_with_stream_delay(&mut frame, 73)
+            .expect("process capture");
         assert_eq!(frame.len(), 960);
     }
 
@@ -304,8 +408,12 @@ mod tests {
 
             let mut bypass_frame = input.clone();
             let mut suppressed_frame = input;
-            bypass.process_capture(&mut bypass_frame);
-            suppressed.process_capture(&mut suppressed_frame);
+            bypass
+                .process_capture(&mut bypass_frame)
+                .expect("bypass processing");
+            suppressed
+                .process_capture(&mut suppressed_frame)
+                .expect("noise suppression processing");
 
             if frame_index >= 150 {
                 bypass_energy += bypass_frame

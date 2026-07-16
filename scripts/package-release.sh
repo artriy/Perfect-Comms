@@ -91,6 +91,42 @@ copy_third_party_license_texts() {
 		"$destination/licenses/native-rust-dependencies.html"
 }
 
+copy_dependency_license_texts() {
+	local destination="$1"
+	local source_root="$root/release-assets/dependencies"
+	local license_destination="$destination/licenses/dependencies"
+	local files=(
+		"BepInEx-LGPL-2.1.txt"
+		"UnityDoorstop-LGPL-2.1.txt"
+		"CoreCLR-MIT.txt"
+		"CoreCLR-THIRD-PARTY-NOTICES.txt"
+		"Il2CppInterop-LGPL-3.0.txt"
+		"HarmonyX-MIT.txt"
+		"Harmony-upstream-MIT.txt"
+		"MonoMod-MIT.txt"
+		"SemanticVersioning-MIT.txt"
+		"AssetRipper.Primitives-MIT.txt"
+		"AsmResolver-MIT.txt"
+		"Cpp2IL-MIT.txt"
+		"AssetRipper.CIL-MIT.txt"
+		"Capstone.NET-MIT.txt"
+		"Disarm-MIT.txt"
+		"Iced-MIT.txt"
+		"Mono.Cecil-MIT.txt"
+		"Dobby-Apache-2.0.txt"
+		"UnityReferenceLibraries-NOTICE.txt"
+	)
+	require_nonempty "$source_root/THIRD_PARTY_NOTICES.md"
+	mkdir -p "$license_destination"
+	cp "$source_root/THIRD_PARTY_NOTICES.md" \
+		"$destination/DEPENDENCY_THIRD_PARTY_NOTICES.md"
+	local file
+	for file in "${files[@]}"; do
+		require_nonempty "$source_root/licenses/$file"
+		cp "$source_root/licenses/$file" "$license_destination/$file"
+	done
+}
+
 if [[ "$config" == "Android" ]]; then
 	require_nonempty "$root/Libs/pc-mobile/libpc_mobile.so"
 	require_nonempty "$root/release-assets/android/AndroidManifest.xml"
@@ -217,9 +253,15 @@ fi
 	"$root/artifacts/PerfectComms-$config.zip" --kind "$config"
 
 if [[ "$config" != "Android" ]]; then
-	dependency_source="${PC_DEPENDENCY_SOURCE:-$root/TouMira}"
-	dependency_output="$root/artifacts/PerfectComms+dependencies"
-	dependency_zip="$root/artifacts/PerfectComms+dependencies.zip"
+	if [[ -n "${PC_DEPENDENCY_SOURCE:-}" ]]; then
+		echo "PC_DEPENDENCY_SOURCE is ambiguous; use PC_DEPENDENCY_SOURCE_WIN_X86 and PC_DEPENDENCY_SOURCE_WIN_X64." >&2
+		exit 2
+	fi
+	dependency_arches=("win-x86" "win-x64")
+	dependency_sources=(
+		"${PC_DEPENDENCY_SOURCE_WIN_X86:-$root/artifacts/bepinex-win-x86}"
+		"${PC_DEPENDENCY_SOURCE_WIN_X64:-$root/artifacts/bepinex-win-x64}"
+	)
 	required_dependency_files=(
 		".doorstop_version"
 		"doorstop_config.ini"
@@ -227,63 +269,87 @@ if [[ "$config" != "Android" ]]; then
 		"dotnet"
 		"BepInEx/core"
 		"BepInEx/patchers"
-		"BepInEx/unity-libs"
+		"BepInEx/unity-libs/2022.3.44.zip"
 		"BepInEx/config/BepInEx.cfg"
 	)
-	for file in "${required_dependency_files[@]}"; do
-		test -e "$dependency_source/$file" || {
-			echo "missing dependency bundle source: $file" >&2
-			exit 1
-		}
-	done
 
-	rm -rf "$dependency_output"
-	mkdir -p "$dependency_output/BepInEx/plugins" "$dependency_output/BepInEx/config"
-	cp "$dependency_source/.doorstop_version" "$dependency_output/"
-	cp "$dependency_source/doorstop_config.ini" "$dependency_output/"
-	cp "$dependency_source/winhttp.dll" "$dependency_output/"
-	cp -R "$dependency_source/dotnet" "$dependency_output/dotnet"
-	cp -R "$dependency_source/BepInEx/core" "$dependency_output/BepInEx/core"
-	cp -R "$dependency_source/BepInEx/patchers" "$dependency_output/BepInEx/patchers"
-	cp -R "$dependency_source/BepInEx/unity-libs" "$dependency_output/BepInEx/unity-libs"
-	cp "$dependency_source/BepInEx/config/BepInEx.cfg" "$dependency_output/BepInEx/config/BepInEx.cfg"
-	cp "$dll" "$dependency_output/BepInEx/plugins/PerfectComms.dll"
-	cp "$root/README.md" "$dependency_output/README.md"
-	cp "$root/LICENSE" "$dependency_output/LICENSE"
-	cp "$root/THIRD_PARTY_NOTICES.md" "$dependency_output/THIRD_PARTY_NOTICES.md"
-	cp "$root/PRIVACY.md" "$dependency_output/PRIVACY.md"
-	copy_third_party_license_texts "$dependency_output"
-	cat >"$dependency_output/DEPENDENCIES.txt" <<'EOF'
+	for index in "${!dependency_arches[@]}"; do
+		dependency_arch="${dependency_arches[$index]}"
+		dependency_source="${dependency_sources[$index]}"
+		dependency_name="PerfectComms+dependencies-$dependency_arch"
+		dependency_output="$root/artifacts/$dependency_name"
+		dependency_zip="$root/artifacts/$dependency_name.zip"
+		case "$dependency_arch" in
+			win-x86)
+				architecture_label="Windows x86 (32-bit)"
+				bepinex_archive_sha256="9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
+				;;
+			win-x64)
+				architecture_label="Windows x64 (64-bit)"
+				bepinex_archive_sha256="badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
+				;;
+		esac
+
+		for file in "${required_dependency_files[@]}"; do
+			test -e "$dependency_source/$file" || {
+				echo "missing $dependency_arch dependency bundle source: $file (source: $dependency_source)" >&2
+				exit 1
+			}
+		done
+		echo "e9e6c943619867f0aafb6888bd57ec49e46f833b92ec0e43223346370d69e0bd  $dependency_source/BepInEx/unity-libs/2022.3.44.zip" | sha256sum -c -
+
+		rm -rf "$dependency_output"
+		mkdir -p "$dependency_output/BepInEx/plugins" "$dependency_output/BepInEx/config"
+		cp "$dependency_source/.doorstop_version" "$dependency_output/"
+		cp "$dependency_source/doorstop_config.ini" "$dependency_output/"
+		cp "$dependency_source/winhttp.dll" "$dependency_output/"
+		cp -R "$dependency_source/dotnet" "$dependency_output/dotnet"
+		cp -R "$dependency_source/BepInEx/core" "$dependency_output/BepInEx/core"
+		cp -R "$dependency_source/BepInEx/patchers" "$dependency_output/BepInEx/patchers"
+		cp -R "$dependency_source/BepInEx/unity-libs" "$dependency_output/BepInEx/unity-libs"
+		cp "$dependency_source/BepInEx/config/BepInEx.cfg" "$dependency_output/BepInEx/config/BepInEx.cfg"
+		cp "$dll" "$dependency_output/BepInEx/plugins/PerfectComms.dll"
+		cp "$root/README.md" "$dependency_output/README.md"
+		cp "$root/LICENSE" "$dependency_output/LICENSE"
+		cp "$root/THIRD_PARTY_NOTICES.md" "$dependency_output/THIRD_PARTY_NOTICES.md"
+		cp "$root/PRIVACY.md" "$dependency_output/PRIVACY.md"
+		copy_third_party_license_texts "$dependency_output"
+		copy_dependency_license_texts "$dependency_output"
+		cat >"$dependency_output/DEPENDENCIES.txt" <<EOF
 Perfect Comms with dependencies
-Includes: PerfectComms.dll and BepInEx Unity IL2CPP 6.0.0-be.735.
+Architecture: $architecture_label
+Includes: PerfectComms.dll and official BepInEx Unity IL2CPP 6.0.0-be.735 loader/runtime files for $dependency_arch.
+BepInEx source archive SHA-256: $bepinex_archive_sha256
+Includes pinned Unity 2022.3.44 reference libraries for reliable offline first launch.
 Perfect Comms is standalone and does NOT require MiraAPI or Reactor.
 Does not include TOU-Mira. Supported mod behaviours activate only when matching mods are installed.
 Install by extracting into the Among Us install folder so winhttp.dll sits next to Among Us.exe.
+The x86/x64 label must match Among Us.exe; the package verifier rejects mixed or cross-labeled native files.
 EOF
 
-	test ! -e "$dependency_output/BepInEx/plugins/TownOfUsMira.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/Mini.RegionInstall.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/MiraAPI.dll"
-	test ! -e "$dependency_output/BepInEx/plugins/Reactor.dll"
-	test -s "$dependency_output/BepInEx/plugins/PerfectComms.dll"
+		test ! -e "$dependency_output/BepInEx/plugins/TownOfUsMira.dll"
+		test ! -e "$dependency_output/BepInEx/plugins/Mini.RegionInstall.dll"
+		test ! -e "$dependency_output/BepInEx/plugins/MiraAPI.dll"
+		test ! -e "$dependency_output/BepInEx/plugins/Reactor.dll"
+		test -s "$dependency_output/BepInEx/plugins/PerfectComms.dll"
 
-	(
-		cd "$dependency_output"
-		find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.txt
-	)
-
-	if command -v zip >/dev/null 2>&1; then
-		rm -f "$dependency_zip"
 		(
 			cd "$dependency_output"
-			zip -qr "$dependency_zip" .
+			find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.txt
 		)
-	else
-		package_root="$root/artifacts"
-		if command -v cygpath >/dev/null 2>&1; then
-			package_root="$(cygpath -w "$package_root")"
-		fi
-		PACKAGE_ROOT="$package_root" PACKAGE_NAME="PerfectComms+dependencies" "$asset_python" - <<'PY'
+
+		if command -v zip >/dev/null 2>&1; then
+			rm -f "$dependency_zip"
+			(
+				cd "$dependency_output"
+				zip -qr "$dependency_zip" .
+			)
+		else
+			package_root="$root/artifacts"
+			if command -v cygpath >/dev/null 2>&1; then
+				package_root="$(cygpath -w "$package_root")"
+			fi
+			PACKAGE_ROOT="$package_root" PACKAGE_NAME="$dependency_name" "$asset_python" - <<'PY'
 import os
 import pathlib
 import zipfile
@@ -299,10 +365,11 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
         if path.is_file():
             zf.write(path, path.relative_to(src))
 PY
-	fi
-	"$asset_python" "$root/scripts/verify-package-layout.py" \
-		"$dependency_zip" --kind dependencies
-	echo "Dependency package $dependency_zip"
+		fi
+		"$asset_python" "$root/scripts/verify-package-layout.py" \
+			"$dependency_zip" --kind "dependencies-$dependency_arch"
+		echo "Dependency package $dependency_zip"
+	done
 fi
 
 echo "Packaged $output"

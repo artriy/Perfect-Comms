@@ -67,6 +67,9 @@ public static class VoiceSettingsPanel
     {
         if (VoiceSettings.Instance == null) return;
 
+        HostSettingsPanel.ForceClose();
+        VoiceVolumeMenu.ForceClose();
+
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
 
@@ -634,6 +637,7 @@ public static class VoiceSettingsPanel
         Slider(defs, "Button Position X", s.ButtonPositionX, Pct);
         Slider(defs, "Button Position Y", s.ButtonPositionY, Pct);
         Slider(defs, "Button Scale", s.OverlayScale, Num2);
+        Toggle(defs, "Mute / Deafen Status Reminder", s.ShowMuteDeafenStatusAlerts);
 
         Section(defs, "SPEAKING BAR");
         Toggle(defs, "Show All Players", s.SpeakingBarFixedAllPlayers);
