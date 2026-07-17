@@ -140,6 +140,26 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Prepare GitHub release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_heading="## Perfect Comms $GITHUB_REF_NAME"
+          awk -v heading="$release_heading" '
+            $0 == heading { in_release = 1; next }
+            in_release && /^## Perfect Comms v[0-9]+\.[0-9]+\.[0-9]+$/ { exit }
+            in_release { print }
+          ' CHANGELOG.md > release-notes.md
+          sed -i '/./,$!d' release-notes.md
+          test -s release-notes.md || {
+            echo "CHANGELOG.md has no release notes beneath: $release_heading" >&2
+            exit 1
+          }
+          if grep -Fqx "$release_heading" release-notes.md; then
+            echo "Release notes must not repeat the GitHub release title." >&2
+            exit 1
+          fi
       - name: Download Steam/itch.io x86 dependency artifact
         uses: actions/download-artifact@v4
         with:
@@ -166,7 +186,8 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: Perfect Comms ${{ github.ref_name }}
+          body_path: release-notes.md
           files: |
             artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip
             artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip

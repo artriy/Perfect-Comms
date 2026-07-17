@@ -22,6 +22,9 @@ more control over how voice looks and feels.
 - **Voice chat rebuilt for more systems.**
   > <sub>Perfect Comms now ships with its own voice engine for microphone capture, playback, sound processing, proximity effects, and player connections. It supports 32-bit and 64-bit Windows along with the host environments used by Wine, Proton, and CrossOver. Android receives its own dedicated voice engine. Everything is included with the mod. There is no separate voice application to install or keep open.</sub>
 
+- **BetterCrewLink is no longer the voice backend.**
+  > <sub>Perfect Comms v4 no longer sends voice through BetterCrewLink (BCL). Voice is now handled by the new Perfect Comms engine instead.</sub>
+
 - **Connections that repair themselves.**
   > <sub>Voice now recovers automatically from lost connection messages, interrupted handshakes, temporary network failures, player reconnects, voice-engine restarts, and connections that get stuck halfway. Direct connections are still preferred, but Perfect Comms can automatically switch only the affected player to a relay when a direct route cannot be established.</sub>
 
