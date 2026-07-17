@@ -31,9 +31,229 @@ internal readonly record struct SidecarTemporaryPaths(
     string? PrivateDirectory,
     string? PrivateRoot);
 
+internal readonly record struct WineHelperCandidates(
+    string PrimaryPath,
+    string? FallbackPath,
+    string? StagedHelperPath,
+    string? StagedDspPath);
+
+internal readonly record struct WineLaunchControlPaths(
+    string Nonce,
+    string OwnershipPath,
+    string StartedPath,
+    string FailurePath,
+    string ExitPath,
+    string CancellationPath);
+
 internal static class SidecarLauncher
 {
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
+    internal const int WineHelperExitWaitMs = 4_500;
+    internal const string WinePrivateDirectoryScript = """
+        set -eu
+        umask 077
+        private_dir=$1
+        pending_token=$2
+        receipt=$3
+        expected_receipt=$4
+        launch_owned=$5
+        /bin/mkdir -m 700 "$private_dir"
+        /bin/chmod 700 "$private_dir"
+        : > "$pending_token"
+        /bin/chmod 600 "$pending_token"
+        receipt_tmp="${receipt}.tmp.$$"
+        printf '%s' "$expected_receipt" > "$receipt_tmp"
+        /bin/chmod 600 "$receipt_tmp"
+        /bin/mv -f "$receipt_tmp" "$receipt"
+        (
+          bootstrap_seconds=0
+          while [ "$bootstrap_seconds" -lt 120 ]; do
+            if [ ! -d "$private_dir" ]; then exit 0; fi
+            if [ -e "$launch_owned" ]; then exit 0; fi
+            /bin/sleep 1
+            bootstrap_seconds=$((bootstrap_seconds + 1))
+          done
+          /bin/rm -f "$pending_token" "$receipt"
+          /bin/rmdir "$private_dir" 2>/dev/null || true
+        ) >/dev/null 2>&1 &
+        """;
+    internal const string WineHelperLaunchScript = """
+        set -u
+        umask 077
+        private_dir=$1
+        token_file=$2
+        primary_helper=$3
+        fallback_helper=$4
+        staged_helper=$5
+        staged_dsp=$6
+        quarantine_target=$7
+        handshake_file=$8
+        launch_owned=$9
+        launch_started=${10}
+        launch_failed=${11}
+        helper_exited=${12}
+        launch_cancelled=${13}
+        launch_nonce=${14}
+        expected_protocol=${15}
+        shift 15
+
+        write_receipt() {
+          receipt_file=$1
+          receipt_value=$2
+          receipt_tmp="${receipt_file}.tmp.$$"
+          printf '%s' "$receipt_value" > "$receipt_tmp" || return 1
+          /bin/chmod 600 "$receipt_tmp" || { /bin/rm -f "$receipt_tmp"; return 1; }
+          /bin/mv -f "$receipt_tmp" "$receipt_file" || {
+            /bin/rm -f "$receipt_tmp"
+            return 1
+          }
+        }
+
+        cleanup_later() {
+          (
+            /bin/sleep 10
+            if [ -n "$token_file" ]; then /bin/rm -f "$token_file"; fi
+            /bin/rm -f "$private_dir/.token.pending" "$private_dir/.bootstrap-ready"
+            /bin/rm -f "$handshake_file" "$launch_owned" "$launch_started" \
+              "$launch_failed" "$helper_exited" "$launch_cancelled"
+            if [ -n "$staged_helper" ]; then /bin/rm -f "$staged_helper"; fi
+            if [ -n "$staged_dsp" ]; then /bin/rm -f "$staged_dsp"; fi
+            /bin/rmdir "$private_dir" 2>/dev/null || true
+          ) >/dev/null 2>&1 &
+        }
+
+        fail_launch() {
+          failure_reason=$1
+          failure_code=$2
+          write_receipt "$launch_failed" \
+            "perfect-comms-launch-failed-v1:${launch_nonce}:${failure_reason}:${failure_code}" || true
+          cleanup_later
+          exit "$failure_code"
+        }
+
+        is_cancelled() {
+          [ -f "$launch_cancelled" ] || return 1
+          cancellation_value=$(/bin/cat "$launch_cancelled" 2>/dev/null) || return 1
+          [ "$cancellation_value" = "perfect-comms-launch-cancel-v1:${launch_nonce}" ]
+        }
+
+        terminate_bounded_child() {
+          /bin/kill -TERM "$bounded_pid" 2>/dev/null || true
+          /bin/sleep 1
+          /bin/kill -KILL "$bounded_pid" 2>/dev/null || true
+          wait "$bounded_pid" 2>/dev/null || true
+        }
+
+        run_bounded() {
+          bounded_output=$1
+          bounded_limit=$2
+          shift 2
+          : > "$bounded_output" || { bounded_status=125; return 1; }
+          "$@" >"$bounded_output" 2>/dev/null &
+          bounded_pid=$!
+          bounded_elapsed=0
+          while /bin/kill -0 "$bounded_pid" 2>/dev/null; do
+            if is_cancelled; then
+              terminate_bounded_child
+              bounded_status=125
+              return 2
+            fi
+            if [ "$bounded_elapsed" -ge "$bounded_limit" ]; then
+              terminate_bounded_child
+              bounded_status=124
+              return 1
+            fi
+            /bin/sleep 1
+            bounded_elapsed=$((bounded_elapsed + 1))
+          done
+          wait "$bounded_pid"
+          bounded_status=$?
+          return 0
+        }
+
+        probe_status=127
+        probe_helper() {
+          probe_output_file="$private_dir/.probe-output.$$"
+          run_bounded "$probe_output_file" 2 "$1" --protocol-version
+          bounded_result=$?
+          probe_status=$bounded_status
+          probe_output=$(/bin/cat "$probe_output_file" 2>/dev/null) || probe_output=
+          /bin/rm -f "$probe_output_file"
+          if [ "$bounded_result" -eq 2 ]; then fail_launch cancelled 125; fi
+          if [ "$probe_status" -ne 0 ]; then return 1; fi
+          if [ "$probe_output" != "$expected_protocol" ]; then probe_status=65; return 1; fi
+          return 0
+        }
+
+        /bin/chmod 700 "$private_dir" || exit 125
+        write_receipt "$launch_owned" \
+          "perfect-comms-launch-owned-v1:${launch_nonce}" || exit 125
+        if is_cancelled; then fail_launch cancelled 125; fi
+        if [ -n "$token_file" ]; then
+          /bin/chmod 600 "$token_file" || fail_launch token-permission 126
+        fi
+        if [ -n "$quarantine_target" ] && [ -x /usr/bin/xattr ]; then
+          xattr_output_file="$private_dir/.xattr-output.$$"
+          run_bounded "$xattr_output_file" 2 \
+            /usr/bin/xattr -dr com.apple.quarantine "$quarantine_target"
+          bounded_result=$?
+          /bin/rm -f "$xattr_output_file"
+          if [ "$bounded_result" -eq 2 ]; then fail_launch cancelled 125; fi
+        fi
+        /bin/chmod u+x "$primary_helper" >/dev/null 2>&1 || true
+        if [ -n "$fallback_helper" ] && [ "$fallback_helper" != "$primary_helper" ]; then
+          /bin/chmod u+x "$fallback_helper" >/dev/null 2>&1 || true
+        fi
+
+        selected_helper=
+        primary_status=127
+        fallback_status=127
+        if [ -z "$fallback_helper" ] || [ "$fallback_helper" = "$primary_helper" ]; then
+          # The signed universal macOS app has no alternate location and is already validated by
+          # release signing/smoke gates. Linux always supplies a staged+original pair and takes
+          # the portable bounded execution probe path below.
+          selected_helper=$primary_helper
+          primary_status=0
+        else
+          probe_helper "$primary_helper"
+          primary_status=$probe_status
+          if [ "$primary_status" -eq 0 ]; then
+            selected_helper=$primary_helper
+          else
+            if is_cancelled; then fail_launch cancelled 125; fi
+            probe_helper "$fallback_helper"
+            fallback_status=$probe_status
+            if [ "$fallback_status" -eq 0 ]; then selected_helper=$fallback_helper; fi
+          fi
+        fi
+        if [ -z "$selected_helper" ]; then
+          printf '%s\n' \
+            "pc-capture: no executable helper location (primary=${primary_status}, fallback=${fallback_status})" >&2
+          fail_launch no-executable-candidate 126
+        fi
+        if is_cancelled; then fail_launch cancelled 125; fi
+        if [ "$selected_helper" = "$primary_helper" ]; then
+          printf '%s\n' 'pc-capture: helper candidate selected=primary' >&2
+        else
+          printf '%s\n' 'pc-capture: helper candidate selected=fallback' >&2
+        fi
+
+        "$selected_helper" "$@" &
+        helper_pid=$!
+        if ! write_receipt "$launch_started" \
+          "perfect-comms-launch-started-v1:${launch_nonce}:${helper_pid}"; then
+          /bin/kill -TERM "$helper_pid" 2>/dev/null || true
+          wait "$helper_pid" 2>/dev/null || true
+          fail_launch start-receipt 125
+        fi
+        if is_cancelled; then /bin/kill -TERM "$helper_pid" 2>/dev/null || true; fi
+        wait "$helper_pid"
+        helper_status=$?
+        write_receipt "$helper_exited" \
+          "perfect-comms-helper-exited-v1:${launch_nonce}:${helper_pid}:${helper_status}" || true
+        cleanup_later
+        exit "$helper_status"
+        """;
     private static readonly object BundleVersionGate = new();
     private static readonly Dictionary<string, string> BundleVersions = new(StringComparer.Ordinal);
 
@@ -44,7 +264,10 @@ internal static class SidecarLauncher
             RuntimeInformation.IsOSPlatform(OSPlatform.Windows),
             RuntimeInformation.IsOSPlatform(OSPlatform.OSX),
             RuntimeInformation.IsOSPlatform(OSPlatform.Linux),
-            RuntimeInformation.OSArchitecture);
+            // The helper must match the game process, not the physical CPU. This keeps 32-bit
+            // Among Us correct on x64 Windows and lets the x64 build run under Windows-on-ARM
+            // emulation instead of incorrectly requesting a nonexistent ARM64 helper.
+            RuntimeInformation.ProcessArchitecture);
 
     internal static string TargetTripleFor(
         bool wine,
@@ -52,7 +275,7 @@ internal static class SidecarLauncher
         bool windows,
         bool macOs,
         bool linux,
-        Architecture architecture)
+        Architecture processArchitecture)
     {
         if (wine)
         {
@@ -63,26 +286,26 @@ internal static class SidecarLauncher
                 "pc-capture: running under Wine but host OS is undetectable (Z: not mapped to host root); cannot select a native helper");
         }
         if (windows)
-            return architecture switch
+            return processArchitecture switch
             {
                 Architecture.X86 => "i686-pc-windows-msvc",
                 Architecture.X64 => "x86_64-pc-windows-msvc",
                 _ => throw new PlatformNotSupportedException(
-                    $"pc-capture: unsupported Windows architecture {architecture}"),
+                    $"pc-capture: unsupported Windows process architecture {processArchitecture}"),
             };
         if (macOs)
-            return architecture switch
+            return processArchitecture switch
             {
                 Architecture.X64 => "x86_64-apple-darwin",
                 Architecture.Arm64 => "aarch64-apple-darwin",
                 _ => throw new PlatformNotSupportedException(
-                    $"pc-capture: unsupported macOS architecture {architecture}"),
+                    $"pc-capture: unsupported macOS process architecture {processArchitecture}"),
             };
         if (linux)
-            return architecture == Architecture.X64
+            return processArchitecture == Architecture.X64
                 ? "x86_64-unknown-linux-gnu"
                 : throw new PlatformNotSupportedException(
-                    $"pc-capture: unsupported Linux architecture {architecture}");
+                    $"pc-capture: unsupported Linux process architecture {processArchitecture}");
         throw new PlatformNotSupportedException("pc-capture: unsupported operating system");
     }
 
@@ -156,15 +379,18 @@ internal static class SidecarLauncher
                 stage = "extract-mac-app";
                 helperPath = ExtractMacApp(extracted, triple, baseDirectory, bundleVersion);
                 diagnosticPath = helperPath;
-                stage = "make-executable";
-                MakeExecutable(helperPath);
-                stage = "strip-quarantine";
-                StripQuarantine(helperPath);
+                if (!WineEnvironment.IsWine)
+                {
+                    stage = "make-executable";
+                    MakeExecutable(helperPath);
+                    stage = "strip-quarantine";
+                    StripQuarantine(helperPath);
+                }
             }
             else
             {
                 helperPath = extracted;
-                if (WineEnvironment.IsWine || !RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                if (!WineEnvironment.IsWine && !RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
                     stage = "make-executable";
                     MakeExecutable(helperPath);
@@ -215,8 +441,6 @@ internal static class SidecarLauncher
             "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll") },
             "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll") },
             "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so") },
-            "x86_64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib") },
-            "aarch64-apple-darwin" => new[] { ("Lib.dsp.libwebrtc-apm.dylib", "libwebrtc-apm.dylib") },
             _ => Array.Empty<(string, string)>(),
         };
 
@@ -229,6 +453,22 @@ internal static class SidecarLauncher
     {
         var helperDir = Path.GetDirectoryName(helperPath);
         if (string.IsNullOrEmpty(helperDir)) return;
+        if (triple.EndsWith("-apple-darwin", StringComparison.Ordinal))
+        {
+            // The universal macOS app is deep-signed after its APM dylib is inserted. Replacing
+            // that sealed file with the separately staged pre-sign artifact invalidates the app's
+            // code signature, especially on Apple Silicon. The archive integrity check above
+            // already validates every in-app file, so preserve and require the signed copy.
+            var signedDsp = Path.Combine(helperDir, "libwebrtc-apm.dylib");
+            if (!File.Exists(signedDsp))
+                throw new FileNotFoundException(
+                    "The signed macOS helper app is missing its bundled WebRTC APM library",
+                    signedDsp);
+            VoiceDiagnostics.Log(
+                "sidecar.dsp",
+                $"event=preserve-signed-app-library path={NativeLibraryCache.DiagnosticValue(signedDsp)}");
+            return;
+        }
         foreach (var (resource, file) in DspLibsFor(triple))
         {
             try
@@ -443,44 +683,79 @@ internal static class SidecarLauncher
     {
         if (WineEnvironment.IsWine)
         {
-            WineEnvironment.HostExec("/bin/chmod", $"+x \"{WineEnvironment.ResolveHostPath(path)}\"");
+            WineEnvironment.HostExec("/bin/chmod", "u+x", WineEnvironment.ResolveHostPath(path));
             return;
         }
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
         try
         {
-            using var p = Process.Start(new ProcessStartInfo("chmod", $"+x \"{path}\"")
+            var psi = new ProcessStartInfo("chmod")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
-            p?.WaitForExit(2000);
+            };
+            psi.ArgumentList.Add("u+x");
+            psi.ArgumentList.Add(path);
+            using var p = Process.Start(psi);
+            if (p == null)
+                throw new InvalidOperationException("chmod process did not start");
+            if (!p.WaitForExit(2000))
+            {
+                KillQuietly(p);
+                throw new TimeoutException("chmod timed out");
+            }
+            if (p.ExitCode != 0)
+                throw new UnauthorizedAccessException($"chmod exited with code {p.ExitCode}");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Could not mark the native audio helper executable", ex);
+        }
     }
 
     public static void StripQuarantine(string innerPath)
     {
-        var appDir = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(innerPath)));
+        var appDir = MacAppDirectory(innerPath);
         var target = appDir ?? innerPath;
         if (WineEnvironment.IsWine)
         {
-            WineEnvironment.HostExec("/usr/bin/xattr", $"-dr com.apple.quarantine \"{WineEnvironment.ResolveHostPath(target)}\"");
+            WineEnvironment.HostExec(
+                "/usr/bin/xattr",
+                "-dr",
+                "com.apple.quarantine",
+                WineEnvironment.ResolveHostPath(target));
             return;
         }
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
         try
         {
-            using var p = Process.Start(new ProcessStartInfo("xattr", $"-dr com.apple.quarantine \"{target}\"")
+            var psi = new ProcessStartInfo("xattr")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
-            p?.WaitForExit(2000);
+            };
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add("-r");
+            psi.ArgumentList.Add("com.apple.quarantine");
+            psi.ArgumentList.Add(target);
+            using var p = Process.Start(psi);
+            if (p != null && !p.WaitForExit(2000))
+                KillQuietly(p);
         }
         catch { }
+    }
+
+    private static string? MacAppDirectory(string helperPath)
+    {
+        var appDirectory = Path.GetDirectoryName(
+            Path.GetDirectoryName(
+                Path.GetDirectoryName(helperPath)));
+        return !string.IsNullOrEmpty(appDirectory) &&
+               appDirectory.EndsWith(".app", StringComparison.OrdinalIgnoreCase)
+            ? appDirectory
+            : null;
     }
 
     public static string BuildArguments(string handshakePath, int ownerPid, bool wine)
@@ -491,6 +766,65 @@ internal static class SidecarLauncher
         if (ownerPid <= 0)
             throw new ArgumentOutOfRangeException(nameof(ownerPid), "A native helper owner PID must be positive");
         return $"{arguments} --owner-pid {ownerPid}";
+    }
+
+    internal static ProcessStartInfo BuildWineHelperStartInfo(
+        string hostPrivateDirectory,
+        WineHelperCandidates hostCandidates,
+        string hostHandshake,
+        string? hostToken,
+        bool enumerate,
+        WineLaunchControlPaths hostControl,
+        int expectedProtocol,
+        string? hostQuarantineTarget = null)
+    {
+        ThrowIfNullOrWhiteSpace(hostPrivateDirectory, nameof(hostPrivateDirectory));
+        ThrowIfNullOrWhiteSpace(hostCandidates.PrimaryPath, nameof(hostCandidates));
+        ThrowIfNullOrWhiteSpace(hostHandshake, nameof(hostHandshake));
+        ThrowIfNullOrWhiteSpace(hostControl.Nonce, nameof(hostControl));
+        ThrowIfNullOrWhiteSpace(hostControl.OwnershipPath, nameof(hostControl));
+        ThrowIfNullOrWhiteSpace(hostControl.StartedPath, nameof(hostControl));
+        ThrowIfNullOrWhiteSpace(hostControl.FailurePath, nameof(hostControl));
+        ThrowIfNullOrWhiteSpace(hostControl.ExitPath, nameof(hostControl));
+        ThrowIfNullOrWhiteSpace(hostControl.CancellationPath, nameof(hostControl));
+        if (expectedProtocol <= 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedProtocol));
+
+        var arguments = new List<string>
+        {
+            hostPrivateDirectory,
+            hostToken ?? string.Empty,
+            hostCandidates.PrimaryPath,
+            hostCandidates.FallbackPath ?? string.Empty,
+            hostCandidates.StagedHelperPath ?? string.Empty,
+            hostCandidates.StagedDspPath ?? string.Empty,
+            hostQuarantineTarget ?? string.Empty,
+            hostHandshake,
+            hostControl.OwnershipPath,
+            hostControl.StartedPath,
+            hostControl.FailurePath,
+            hostControl.ExitPath,
+            hostControl.CancellationPath,
+            hostControl.Nonce,
+            expectedProtocol.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        if (enumerate)
+            arguments.Add("--enumerate");
+        arguments.Add("--handshake");
+        arguments.Add(hostHandshake);
+        // A nonce-bound native guard makes managed cancellation identity-safe even before the
+        // TCP authentication handshake. It replaces best-effort /bin/kill against a PID that
+        // could have exited and been reused.
+        arguments.Add("--cancel-file");
+        arguments.Add(hostControl.CancellationPath);
+        arguments.Add("--cancel-nonce");
+        arguments.Add(hostControl.Nonce);
+        if (!string.IsNullOrEmpty(hostToken))
+        {
+            arguments.Add("--token-file");
+            arguments.Add(hostToken);
+        }
+        return WineEnvironment.BuildWineShellStartInfo(WineHelperLaunchScript, arguments);
     }
 
     public static bool TryReadHandshake(string handshakePath, out int port, out int pid)
@@ -534,23 +868,113 @@ internal static class SidecarLauncher
         return false;
     }
 
+    internal static bool PollWineHandshake(
+        string handshakePath,
+        WineLaunchControlPaths control,
+        int timeoutMs,
+        out int port,
+        out int helperPid,
+        out bool supervisorOwned,
+        out string failureReason)
+    {
+        if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+        port = 0;
+        helperPid = 0;
+        supervisorOwned = false;
+        failureReason = string.Empty;
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            supervisorOwned |= IsWineLaunchOwned(control);
+            if (TryReadWineLaunchFailure(control, out var launchFailure, out var launchExitCode))
+            {
+                failureReason =
+                    $"Wine host launch failed before handshake ({launchFailure}, exit={launchExitCode})";
+                return false;
+            }
+            if (helperPid == 0)
+                TryReadWineLaunchStarted(control, out helperPid);
+            if (helperPid > 0 && TryReadWineHelperExit(control, helperPid, out var helperExitCode))
+            {
+                failureReason = $"native helper exited before handshake (exit={helperExitCode})";
+                return false;
+            }
+            if (TryReadHandshake(handshakePath, out var candidatePort, out var handshakePid))
+            {
+                if (helperPid == 0)
+                {
+                    Thread.Sleep(25);
+                    continue;
+                }
+                if (handshakePid != helperPid)
+                {
+                    failureReason =
+                        $"Wine helper PID receipt mismatch (launch={helperPid}, handshake={handshakePid})";
+                    return false;
+                }
+                port = candidatePort;
+                return true;
+            }
+            Thread.Sleep(25);
+        }
+
+        supervisorOwned |= IsWineLaunchOwned(control);
+        if (helperPid == 0)
+            TryReadWineLaunchStarted(control, out helperPid);
+        failureReason = !supervisorOwned
+            ? "Wine host shell was not dispatched before the launch deadline"
+            : helperPid <= 0
+                ? "Wine host launch preflight did not start an executable helper"
+                : "native helper started but did not publish a handshake before the deadline";
+        return false;
+    }
+
     public static string NewHandshakePath()
         => Path.Combine(Path.GetTempPath(), "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+
+    internal static WineHelperCandidates StageWineHelper(
+        string helperPath,
+        SidecarTemporaryPaths paths,
+        WineHostOs hostOs)
+    {
+        if (hostOs != WineHostOs.Linux)
+            return new WineHelperCandidates(helperPath, null, null, null);
+        if (string.IsNullOrEmpty(paths.PrivateDirectory))
+            throw new InvalidOperationException("A staged Linux helper requires a private Wine directory");
+
+        var helperDirectory = Path.GetDirectoryName(helperPath)
+            ?? throw new InvalidOperationException("The Linux helper has no containing directory");
+        var sourceDsp = Path.Combine(helperDirectory, "libwebrtc-apm.so");
+        if (!File.Exists(sourceDsp))
+            throw new FileNotFoundException("The Linux helper is missing its WebRTC APM library", sourceDsp);
+
+        var stagedHelper = Path.Combine(paths.PrivateDirectory, "PerfectCommsAudio");
+        var stagedDsp = Path.Combine(paths.PrivateDirectory, "libwebrtc-apm.so");
+        PublishFileAtomically(helperPath, stagedHelper);
+        PublishFileAtomically(sourceDsp, stagedDsp);
+        // Hardened Linux hosts commonly mark either the Steam library or /tmp noexec. The host
+        // script performs a real --protocol-version execution probe and falls back between both
+        // locations; chmod's executable bit alone cannot detect a noexec mount.
+        return new WineHelperCandidates(stagedHelper, helperPath, stagedHelper, stagedDsp);
+    }
 
     internal static SidecarTemporaryPaths CreateTemporaryPaths(
         bool wine,
         Func<string, string> resolveWineHostPath,
-        Func<string, string, bool> hostExec,
+        WineHostActionExecutor hostAction,
         string? wineTemporaryRoot = null)
     {
-        ArgumentNullException.ThrowIfNull(resolveWineHostPath);
-        ArgumentNullException.ThrowIfNull(hostExec);
         if (!wine)
             return new SidecarTemporaryPaths(NewHandshakePath(), null, null);
+        ArgumentNullException.ThrowIfNull(resolveWineHostPath);
+        ArgumentNullException.ThrowIfNull(hostAction);
 
         var root = Path.GetFullPath(wineTemporaryRoot ?? @"Z:\tmp");
         if (!Directory.Exists(root))
             throw new DirectoryNotFoundException($"Wine host temporary directory is unavailable: {root}");
+        var hostRoot = resolveWineHostPath(root);
+        if (string.IsNullOrWhiteSpace(hostRoot))
+            throw new DirectoryNotFoundException("Could not resolve the Wine host temporary root");
 
         string? privateDirectory = null;
         try
@@ -562,20 +986,36 @@ internal static class SidecarLauncher
                     WineTemporaryDirectoryPrefix + Guid.NewGuid().ToString("N"));
                 if (Directory.Exists(candidate))
                     continue;
-                Directory.CreateDirectory(candidate);
                 privateDirectory = candidate;
                 break;
             }
             if (privateDirectory == null)
                 throw new IOException("Could not allocate a private Wine helper directory");
 
-            var hostDirectory = resolveWineHostPath(privateDirectory);
-            if (string.IsNullOrWhiteSpace(hostDirectory) ||
-                !hostExec("/bin/chmod", $"700 \"{hostDirectory}\""))
-            {
+            var leaf = Path.GetFileName(privateDirectory);
+            var hostDirectory = AppendHostPath(hostRoot, leaf);
+            var pendingToken = Path.Combine(privateDirectory, ".token.pending");
+            var receiptPath = Path.Combine(privateDirectory, ".bootstrap-ready");
+            var launchOwnershipPath = Path.Combine(privateDirectory, ".launch-owned");
+            var expectedReceipt = "perfect-comms-host-action-v1:" + NewSecureNonce();
+            var result = hostAction(
+                "prepare-private-directory",
+                WinePrivateDirectoryScript,
+                new[]
+                {
+                    hostDirectory,
+                    AppendHostPath(hostDirectory, Path.GetFileName(pendingToken)),
+                    AppendHostPath(hostDirectory, Path.GetFileName(receiptPath)),
+                    expectedReceipt,
+                    AppendHostPath(hostDirectory, Path.GetFileName(launchOwnershipPath)),
+                },
+                receiptPath,
+                expectedReceipt);
+            TryDeleteFile(receiptPath);
+            if (!result.Succeeded || !Directory.Exists(privateDirectory) || !File.Exists(pendingToken))
                 throw new UnauthorizedAccessException(
-                    "Could not restrict the private Wine helper directory to mode 0700");
-            }
+                    "Could not securely prepare the Wine helper directory and token slot " +
+                    $"({result.DiagnosticSummary})");
 
             return new SidecarTemporaryPaths(
                 Path.Combine(privateDirectory, "handshake.json"),
@@ -592,30 +1032,37 @@ internal static class SidecarLauncher
 
     internal static string CreateWineTokenFile(
         SidecarTemporaryPaths paths,
-        string token,
-        Func<string, string> resolveWineHostPath,
-        Func<string, string, bool> hostExec)
+        string token)
     {
         ArgumentNullException.ThrowIfNull(token);
         if (string.IsNullOrEmpty(paths.PrivateDirectory))
             throw new InvalidOperationException("A Wine token requires a private temporary directory");
 
+        var pendingToken = Path.Combine(paths.PrivateDirectory, ".token.pending");
         var tokenFile = Path.Combine(paths.PrivateDirectory, "token");
         var tokenBytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(token);
-        using (var stream = new FileStream(tokenFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        if (File.Exists(tokenFile))
+            throw new IOException("The Wine helper token has already been published");
+        using (var stream = new FileStream(pendingToken, FileMode.Open, FileAccess.Write, FileShare.None))
         {
+            stream.SetLength(0);
             stream.Write(tokenBytes, 0, tokenBytes.Length);
             stream.Flush(true);
         }
-
-        var hostToken = resolveWineHostPath(tokenFile);
-        if (string.IsNullOrWhiteSpace(hostToken) ||
-            !hostExec("/bin/chmod", $"600 \"{hostToken}\""))
+        try
         {
-            try { File.Delete(tokenFile); } catch { }
-            throw new UnauthorizedAccessException("Could not restrict the Wine helper token to mode 0600");
+            // The host bootstrap created .token.pending as mode 0600 before any secret bytes were
+            // written. A same-directory atomic rename preserves that mode and prevents a second
+            // publication from silently replacing the live token.
+            File.Move(pendingToken, tokenFile);
+            return tokenFile;
         }
-        return tokenFile;
+        catch
+        {
+            TryDeleteFile(pendingToken);
+            TryDeleteFile(tokenFile);
+            throw;
+        }
     }
 
     internal static void CleanupTemporaryPaths(
@@ -659,6 +1106,186 @@ internal static class SidecarLauncher
             Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
+    internal static WineLaunchControlPaths CreateWineLaunchControl(SidecarTemporaryPaths paths)
+    {
+        if (string.IsNullOrEmpty(paths.PrivateDirectory))
+            throw new InvalidOperationException("Wine launch control requires a private directory");
+        return new WineLaunchControlPaths(
+            NewSecureNonce(),
+            Path.Combine(paths.PrivateDirectory, ".launch-owned"),
+            Path.Combine(paths.PrivateDirectory, ".launch-started"),
+            Path.Combine(paths.PrivateDirectory, ".launch-failed"),
+            Path.Combine(paths.PrivateDirectory, ".helper-exited"),
+            Path.Combine(paths.PrivateDirectory, ".launch-cancelled"));
+    }
+
+    internal static WineLaunchControlPaths ResolveHostLaunchControl(
+        WineLaunchControlPaths local,
+        string hostPrivateDirectory)
+        => new(
+            local.Nonce,
+            AppendHostPath(hostPrivateDirectory, Path.GetFileName(local.OwnershipPath)),
+            AppendHostPath(hostPrivateDirectory, Path.GetFileName(local.StartedPath)),
+            AppendHostPath(hostPrivateDirectory, Path.GetFileName(local.FailurePath)),
+            AppendHostPath(hostPrivateDirectory, Path.GetFileName(local.ExitPath)),
+            AppendHostPath(hostPrivateDirectory, Path.GetFileName(local.CancellationPath)));
+
+    internal static bool IsWineLaunchOwned(WineLaunchControlPaths control)
+        => TryReadExactFile(
+            control.OwnershipPath,
+            "perfect-comms-launch-owned-v1:" + control.Nonce);
+
+    internal static bool TryReadWineLaunchStarted(
+        WineLaunchControlPaths control,
+        out int helperPid)
+    {
+        helperPid = 0;
+        if (!TryReadFile(control.StartedPath, out var value)) return false;
+        var prefix = "perfect-comms-launch-started-v1:" + control.Nonce + ":";
+        return value.StartsWith(prefix, StringComparison.Ordinal) &&
+               int.TryParse(
+                   value.Substring(prefix.Length),
+                   System.Globalization.NumberStyles.None,
+                   System.Globalization.CultureInfo.InvariantCulture,
+                   out helperPid) &&
+               helperPid > 0;
+    }
+
+    internal static bool TryReadWineLaunchFailure(
+        WineLaunchControlPaths control,
+        out string reason,
+        out int exitCode)
+    {
+        reason = string.Empty;
+        exitCode = 0;
+        if (!TryReadFile(control.FailurePath, out var value)) return false;
+        var prefix = "perfect-comms-launch-failed-v1:" + control.Nonce + ":";
+        if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var payload = value.Substring(prefix.Length);
+        var separator = payload.LastIndexOf(':');
+        if (separator <= 0 || separator == payload.Length - 1) return false;
+        reason = payload.Substring(0, separator);
+        return reason.Length <= 80 &&
+               !ContainsControlCharacters(reason) &&
+               int.TryParse(
+                   payload.Substring(separator + 1),
+                   System.Globalization.NumberStyles.Integer,
+                   System.Globalization.CultureInfo.InvariantCulture,
+                   out exitCode);
+    }
+
+    internal static bool TryReadWineHelperExit(
+        WineLaunchControlPaths control,
+        int expectedPid,
+        out int exitCode)
+    {
+        exitCode = 0;
+        if (expectedPid <= 0 || !TryReadFile(control.ExitPath, out var value)) return false;
+        var prefix = "perfect-comms-helper-exited-v1:" + control.Nonce + ":" +
+                     expectedPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":";
+        return value.StartsWith(prefix, StringComparison.Ordinal) &&
+               int.TryParse(
+                   value.Substring(prefix.Length),
+                   System.Globalization.NumberStyles.Integer,
+                   System.Globalization.CultureInfo.InvariantCulture,
+                   out exitCode);
+    }
+
+    internal static bool WaitForWineHelperExit(
+        WineLaunchControlPaths control,
+        int expectedPid,
+        int timeoutMs,
+        out int exitCode)
+    {
+        if (timeoutMs < 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+        var stopwatch = Stopwatch.StartNew();
+        do
+        {
+            if (TryReadWineHelperExit(control, expectedPid, out exitCode)) return true;
+            if (stopwatch.ElapsedMilliseconds >= timeoutMs) break;
+            Thread.Sleep(25);
+        }
+        while (true);
+        exitCode = 0;
+        return false;
+    }
+
+    internal static bool RequestWineLaunchCancellation(WineLaunchControlPaths control)
+    {
+        var value = "perfect-comms-launch-cancel-v1:" + control.Nonce;
+        var temporary = control.CancellationPath + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllText(
+                temporary,
+                value,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(temporary, control.CancellationPath);
+            return true;
+        }
+        catch
+        {
+            TryDeleteFile(temporary);
+            return TryReadExactFile(control.CancellationPath, value);
+        }
+    }
+
+    private static bool TryReadExactFile(string path, string expected)
+        => TryReadFile(path, out var value) && string.Equals(value, expected, StringComparison.Ordinal);
+
+    private static bool TryReadFile(string path, out string value)
+    {
+        value = string.Empty;
+        try
+        {
+            if (!File.Exists(path)) return false;
+            value = File.ReadAllText(path);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string AppendHostPath(string hostDirectory, string leaf)
+    {
+        ThrowIfNullOrWhiteSpace(hostDirectory, nameof(hostDirectory));
+        ThrowIfNullOrWhiteSpace(leaf, nameof(leaf));
+        if (leaf.IndexOfAny(new[] { '/', '\\' }) >= 0 || leaf == "." || leaf == "..")
+            throw new InvalidDataException("A Wine host path leaf must be a single filename");
+        if (ContainsControlCharacters(hostDirectory) || ContainsControlCharacters(leaf))
+            throw new InvalidDataException("Wine host paths cannot contain control characters");
+
+        var normalized = hostDirectory.Replace('\\', '/').TrimEnd('/');
+        return (normalized.Length == 0 ? string.Empty : normalized) + "/" + leaf;
+    }
+
+    private static bool ContainsControlCharacters(string value)
+    {
+        foreach (var c in value)
+            if (char.IsControl(c)) return true;
+        return false;
+    }
+
+    private static string NewSecureNonce()
+    {
+        var bytes = new byte[32];
+        RandomNumberGenerator.Fill(bytes);
+        return Convert.ToHexString(bytes);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    private static void ThrowIfNullOrWhiteSpace(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException("Value cannot be null or whitespace.", parameterName);
+    }
+
     public static SidecarDeviceEnumerationResult EnumerateDevices()
     {
         try
@@ -679,17 +1306,25 @@ internal static class SidecarLauncher
         string helperPath,
         bool wine,
         Func<string, string> resolveWineHostPath,
-        Func<string, string, bool>? hostExec = null)
+        WineHostActionExecutor? hostAction = null,
+        WineHostOs? wineHostOs = null)
     {
         var paths = default(SidecarTemporaryPaths);
         var outPath = string.Empty;
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
+        WineLaunchControlPaths? wineControl = null;
+        var wineSupervisorOwned = false;
+        var wineHelperPid = 0;
+        var enumerationSucceeded = false;
         var sw = Stopwatch.StartNew();
         try
         {
-            hostExec ??= WineEnvironment.TryHostExec;
-            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostExec);
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=enumerate-prepare wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
+            hostAction ??= WineEnvironment.RunVerifiedHostAction;
+            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
             outPath = paths.HandshakePath;
             VoiceDiagnostics.Log(
                 "sidecar.launch",
@@ -697,10 +1332,36 @@ internal static class SidecarLauncher
             ProcessStartInfo psi;
             if (wine)
             {
-                var hostHelper = resolveWineHostPath(helperPath);
-                var hostOut = resolveWineHostPath(outPath);
-                var args = BuildArguments(hostOut, Environment.ProcessId, wine: true);
-                psi = new ProcessStartInfo("start.exe", $"/unix \"{hostHelper}\" --enumerate {args}");
+                var hostOs = wineHostOs ?? WineEnvironment.HostOs;
+                var launchCandidates = StageWineHelper(helperPath, paths, hostOs);
+                wineControl = CreateWineLaunchControl(paths);
+                var hostPrivate = resolveWineHostPath(paths.PrivateDirectory!);
+                var hostCandidates = new WineHelperCandidates(
+                    resolveWineHostPath(launchCandidates.PrimaryPath),
+                    launchCandidates.FallbackPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.FallbackPath),
+                    launchCandidates.StagedHelperPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.StagedHelperPath),
+                    launchCandidates.StagedDspPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.StagedDspPath));
+                var hostOut = AppendHostPath(hostPrivate, Path.GetFileName(outPath));
+                var hostControl = ResolveHostLaunchControl(wineControl.Value, hostPrivate);
+                var quarantineTarget = MacAppDirectory(helperPath);
+                var hostQuarantineTarget = quarantineTarget == null
+                    ? null
+                    : resolveWineHostPath(quarantineTarget);
+                psi = BuildWineHelperStartInfo(
+                    hostPrivate,
+                    hostCandidates,
+                    hostOut,
+                    hostToken: null,
+                    enumerate: true,
+                    hostControl,
+                    SidecarVoiceClient.Proto,
+                    hostQuarantineTarget: hostQuarantineTarget);
             }
             else
             {
@@ -724,10 +1385,32 @@ internal static class SidecarLauncher
             {
                 if (TryReadDevicesFile(outPath, out var input, out var output))
                 {
+                    enumerationSucceeded = true;
                     VoiceDiagnostics.Log(
                         "sidecar.launch",
                         $"event=enumerate-complete pid={SafeProcessId(process)} inputs={input.Count} outputs={output.Count} elapsedMs={pollSw.ElapsedMilliseconds}");
                     return SidecarDeviceEnumerationResult.Success(input, output);
+                }
+                if (wineControl is { } control)
+                {
+                    wineSupervisorOwned |= IsWineLaunchOwned(control);
+                    if (wineHelperPid == 0)
+                        TryReadWineLaunchStarted(control, out wineHelperPid);
+                    if (TryReadWineLaunchFailure(control, out var reason, out var launchExitCode))
+                    {
+                        VoiceDiagnostics.Log(
+                            "sidecar.launch",
+                            $"event=enumerate-host-failed reason={reason} exitCode={launchExitCode} elapsedMs={pollSw.ElapsedMilliseconds}");
+                        return SidecarDeviceEnumerationResult.Failure;
+                    }
+                    if (wineHelperPid > 0 &&
+                        TryReadWineHelperExit(control, wineHelperPid, out var helperExitCode))
+                    {
+                        VoiceDiagnostics.Log(
+                            "sidecar.launch",
+                            $"event=enumerate-helper-exited-before-result helperPid={wineHelperPid} exitCode={helperExitCode} elapsedMs={pollSw.ElapsedMilliseconds}");
+                        return SidecarDeviceEnumerationResult.Failure;
+                    }
                 }
                 Thread.Sleep(25);
             }
@@ -748,7 +1431,31 @@ internal static class SidecarLauncher
             if (process != null && !wine)
                 KillQuietly(process);
             diagnostics?.Complete("enumerate-finished");
-            try { CleanupTemporaryPaths(outPath, paths.PrivateDirectory, paths.PrivateRoot); } catch { }
+            var wineHelperExited = false;
+            if (wineControl is { } control)
+            {
+                wineSupervisorOwned |= IsWineLaunchOwned(control);
+                if (wineHelperPid == 0)
+                    TryReadWineLaunchStarted(control, out wineHelperPid);
+                if (!enumerationSucceeded)
+                    RequestWineLaunchCancellation(control);
+                if (wineHelperPid > 0)
+                    wineHelperExited = WaitForWineHelperExit(
+                        control,
+                        wineHelperPid,
+                        timeoutMs: 1_000,
+                        out _);
+            }
+            if (!wineSupervisorOwned || wineHelperExited)
+            {
+                try { CleanupTemporaryPaths(outPath, paths.PrivateDirectory, paths.PrivateRoot); } catch { }
+            }
+            if (process != null)
+            {
+                if (wine && !ProcessExited(process))
+                    KillQuietly(process);
+                try { process.Dispose(); } catch { }
+            }
         }
     }
 
@@ -778,9 +1485,10 @@ internal static class SidecarLauncher
         int handshakeTimeoutMs,
         bool wine,
         Func<string, string> resolveWineHostPath,
-        Func<string, string, bool>? hostExec = null)
+        WineHostActionExecutor? hostAction = null,
+        WineHostOs? wineHostOs = null)
     {
-        var result = new SidecarLaunchResult();
+        var result = new SidecarLaunchResult { Wine = wine };
         var paths = default(SidecarTemporaryPaths);
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
@@ -788,8 +1496,11 @@ internal static class SidecarLauncher
         var sw = Stopwatch.StartNew();
         try
         {
-            hostExec ??= WineEnvironment.TryHostExec;
-            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostExec);
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=prepare wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
+            hostAction ??= WineEnvironment.RunVerifiedHostAction;
+            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
             result.HandshakePath = paths.HandshakePath;
             result.TemporaryDirectory = paths.PrivateDirectory;
             result.TemporaryRoot = paths.PrivateRoot;
@@ -798,20 +1509,39 @@ internal static class SidecarLauncher
                 $"event=begin wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(result.HandshakePath, 320)}\"");
             if (wine)
             {
-                tokenFile = CreateWineTokenFile(paths, token, resolveWineHostPath, hostExec);
-                var hostToken = resolveWineHostPath(tokenFile);
-                var hostHelper = resolveWineHostPath(helperPath);
-                var hostHandshake = resolveWineHostPath(result.HandshakePath);
-                var wineArguments = BuildArguments(hostHandshake, Environment.ProcessId, wine: true);
-                var wpsi = new ProcessStartInfo("start.exe",
-                    $"/unix \"{hostHelper}\" {wineArguments} --token-file \"{hostToken}\"")
-                {
-                    UseShellExecute = false,
-                    RedirectStandardInput = false,
-                    RedirectStandardOutput = false,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                };
+                tokenFile = CreateWineTokenFile(paths, token);
+                var hostOs = wineHostOs ?? WineEnvironment.HostOs;
+                var launchCandidates = StageWineHelper(helperPath, paths, hostOs);
+                var control = CreateWineLaunchControl(paths);
+                result.WineControl = control;
+                var hostPrivate = resolveWineHostPath(paths.PrivateDirectory!);
+                var hostToken = AppendHostPath(hostPrivate, Path.GetFileName(tokenFile));
+                var hostCandidates = new WineHelperCandidates(
+                    resolveWineHostPath(launchCandidates.PrimaryPath),
+                    launchCandidates.FallbackPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.FallbackPath),
+                    launchCandidates.StagedHelperPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.StagedHelperPath),
+                    launchCandidates.StagedDspPath == null
+                        ? null
+                        : resolveWineHostPath(launchCandidates.StagedDspPath));
+                var hostHandshake = AppendHostPath(hostPrivate, Path.GetFileName(result.HandshakePath));
+                var hostControl = ResolveHostLaunchControl(control, hostPrivate);
+                var quarantineTarget = MacAppDirectory(helperPath);
+                var hostQuarantineTarget = quarantineTarget == null
+                    ? null
+                    : resolveWineHostPath(quarantineTarget);
+                var wpsi = BuildWineHelperStartInfo(
+                    hostPrivate,
+                    hostCandidates,
+                    hostHandshake,
+                    hostToken,
+                    enumerate: false,
+                    hostControl,
+                    SidecarVoiceClient.Proto,
+                    hostQuarantineTarget: hostQuarantineTarget);
 
                 process = Process.Start(wpsi);
                 if (process == null)
@@ -824,12 +1554,23 @@ internal static class SidecarLauncher
                 result.Diagnostics = diagnostics;
                 VoiceDiagnostics.Log("sidecar.launch", $"event=process-start pid={SafeProcessId(process)} wine=true");
 
-                if (!PollHandshake(result.HandshakePath, handshakeTimeoutMs, () => true, out var wport, out var wpid))
+                if (!PollWineHandshake(
+                        result.HandshakePath,
+                        control,
+                        handshakeTimeoutMs,
+                        out var wport,
+                        out var wpid,
+                        out var supervisorOwned,
+                        out var wineFailure))
                 {
-                    result.FailureReason = "handshake timeout (wine host-exec: verify Z: maps to host root, winepath, and host mic permission)";
+                    result.WineSupervisorOwned = supervisorOwned;
+                    result.Pid = wpid;
+                    RequestWineLaunchCancellation(control);
+                    result.FailureReason = wineFailure;
                     return result;
                 }
 
+                result.WineSupervisorOwned = true;
                 result.Port = wport;
                 result.Pid = wpid;
                 result.Success = true;
@@ -912,7 +1653,27 @@ internal static class SidecarLauncher
             }
             if (!result.Success)
             {
-                try { CleanupTemporaryPaths(result.HandshakePath, result.TemporaryDirectory, result.TemporaryRoot); } catch { }
+                if (result.WineControl is { } control)
+                {
+                    RequestWineLaunchCancellation(control);
+                    result.WineSupervisorOwned |= IsWineLaunchOwned(control);
+                    if (result.Pid <= 0 && TryReadWineLaunchStarted(control, out var startedPid))
+                        result.Pid = startedPid;
+                }
+                // Once the host supervisor has claimed the directory, it owns the helper child
+                // and fixed-file cleanup. Removing the directory here races a detached host
+                // process and was the source of orphaned retries on Wine/CrossOver.
+                if (!result.WineSupervisorOwned)
+                {
+                    try { CleanupTemporaryPaths(result.HandshakePath, result.TemporaryDirectory, result.TemporaryRoot); } catch { }
+                }
+                if (process != null)
+                {
+                    if (!ProcessExited(process))
+                        KillQuietly(process);
+                    try { process.Dispose(); } catch { }
+                    result.Process = null;
+                }
             }
         }
     }
@@ -1006,12 +1767,15 @@ internal static class SidecarLauncher
     private static void KillQuietly(Process process)
     {
         try { if (!process.HasExited) process.Kill(); } catch { }
+        try { process.WaitForExit(500); } catch { }
     }
 }
 
 internal sealed class SidecarLaunchResult
 {
     public bool Success;
+    public bool Wine;
+    public bool WineSupervisorOwned;
     public int Port;
     public int Pid;
     public Process? Process;
@@ -1019,6 +1783,7 @@ internal sealed class SidecarLaunchResult
     public string HandshakePath = "";
     public string? TemporaryDirectory;
     public string? TemporaryRoot;
+    public WineLaunchControlPaths? WineControl;
     public string FailureReason = "";
 }
 
@@ -1049,17 +1814,28 @@ internal sealed class SidecarProcessDiagnostics
 
     public void Attach()
     {
+        var captureStdout = false;
+        var captureStderr = false;
         try
         {
-            _process.ErrorDataReceived += (_, args) =>
+            captureStdout = _process.StartInfo.RedirectStandardOutput;
+            captureStderr = _process.StartInfo.RedirectStandardError;
+            if (captureStdout)
             {
-                if (args.Data == null)
+                _process.OutputDataReceived += (_, args) =>
                 {
-                    Complete("stderr-eof");
-                    return;
-                }
-                LogLine(args.Data);
-            };
+                    if (args.Data != null)
+                        LogLine("stdout", args.Data);
+                };
+            }
+            if (captureStderr)
+            {
+                _process.ErrorDataReceived += (_, args) =>
+                {
+                    if (args.Data != null)
+                        LogLine("stderr", args.Data);
+                };
+            }
             _process.EnableRaisingEvents = true;
             _process.Exited += (_, _) =>
             {
@@ -1069,20 +1845,41 @@ internal sealed class SidecarProcessDiagnostics
                     "sidecar.launch",
                     $"event=process-exit purpose={_purpose} pid={SafePid()} exitCode={exitCode}");
             };
-            _process.BeginErrorReadLine();
-            VoiceDiagnostics.Log(
-                "sidecar.stderr",
-                $"event=capture-start purpose={_purpose} pid={SafePid()} perSecondLimit={MaxLinesPerWindow} totalLimit={MaxLoggedLines} maxLineChars={MaxLineChars}");
         }
         catch (Exception ex)
         {
             VoiceDiagnostics.Log(
                 "sidecar.stderr",
                 $"event=capture-failed purpose={_purpose} pid={SafePid()} error={ex.GetType().Name}:\"{SidecarLauncher.SanitizeStderrForDiagnostics(ex.Message, _token)}\"");
+            return;
+        }
+
+        // Wine start.exe writes some fatal /unix dispatch errors to stdout. Both redirected
+        // streams must be drained for helper launches: otherwise a verbose wrapper can fill the
+        // stdout pipe and turn a useful launch error into a generic handshake timeout. Start the
+        // streams independently so one late/closed pipe cannot prevent the other from draining.
+        if (captureStdout) BeginRead("stdout", _process.BeginOutputReadLine);
+        if (captureStderr) BeginRead("stderr", _process.BeginErrorReadLine);
+        VoiceDiagnostics.Log(
+            "sidecar.stderr",
+            $"event=capture-start purpose={_purpose} pid={SafePid()} stdout={captureStdout.ToString().ToLowerInvariant()} stderr={captureStderr.ToString().ToLowerInvariant()} perSecondLimit={MaxLinesPerWindow} totalLimit={MaxLoggedLines} maxLineChars={MaxLineChars}");
+    }
+
+    private void BeginRead(string source, Action begin)
+    {
+        try
+        {
+            begin();
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "sidecar.stderr",
+                $"event=stream-capture-failed purpose={_purpose} pid={SafePid()} source={source} error={ex.GetType().Name}:\"{SidecarLauncher.SanitizeStderrForDiagnostics(ex.Message, _token)}\"");
         }
     }
 
-    private void LogLine(string line)
+    private void LogLine(string source, string line)
     {
         string? safe = null;
         var sequence = 0;
@@ -1106,7 +1903,7 @@ internal sealed class SidecarProcessDiagnostics
 
         VoiceDiagnostics.Log(
             "sidecar.stderr",
-            $"purpose={_purpose} pid={SafePid()} seq={sequence} text=\"{safe}\"");
+            $"purpose={_purpose} pid={SafePid()} source={source} seq={sequence} text=\"{safe}\"");
     }
 
     public void Complete(string reason)

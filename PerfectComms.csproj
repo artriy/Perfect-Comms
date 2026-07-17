@@ -93,9 +93,9 @@
 		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.so" Condition="Exists('Libs\dsp\libwebrtc-apm.so')">
 			<LogicalName>Lib.dsp.libwebrtc-apm.so</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.dylib" Condition="Exists('Libs\dsp\libwebrtc-apm.dylib')">
-			<LogicalName>Lib.dsp.libwebrtc-apm.dylib</LogicalName>
-		</EmbeddedResource>
+		<!-- The macOS APM library is already sealed inside the deep-signed helper app. Embedding the
+		     pre-sign copy separately allowed runtime staging to replace the signed file and invalidate
+		     the app bundle, so macOS deliberately has no standalone DSP resource. -->
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' == 'Android'">
@@ -116,7 +116,6 @@
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x64.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x64.dll" />
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
 		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
-		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.dylib')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.dylib" />
 	</Target>
 
 	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="PrepareResources"

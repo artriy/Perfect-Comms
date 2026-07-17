@@ -140,4 +140,27 @@ internal static class SpeakingBarRosterPolicy
 
         return rebuilt;
     }
+
+    /// <summary>
+    /// Adds deaths exposed by an already-public surface such as MeetingHud player cards. Unlike a
+    /// boundary rebuild, this deliberately never removes an earlier publication: a transient live
+    /// data read or an in-meeting revive must not make an already-revealed death private again.
+    /// </summary>
+    internal static HashSet<byte> AddPubliclyObservedDeaths(
+        IReadOnlySet<byte> previousSnapshot,
+        IEnumerable<SpeakingBarRosterMember> publicRoster)
+    {
+        if (previousSnapshot == null)
+            throw new ArgumentNullException(nameof(previousSnapshot));
+        if (publicRoster == null)
+            throw new ArgumentNullException(nameof(publicRoster));
+
+        var merged = new HashSet<byte>(previousSnapshot);
+        foreach (var player in publicRoster)
+        {
+            if (player.IsDead)
+                merged.Add(player.PlayerId);
+        }
+        return merged;
+    }
 }

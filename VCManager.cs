@@ -102,6 +102,8 @@ internal class VCManager : MonoBehaviour
                 VoiceJoinGuard.Tick();
                 VoiceFrameProfiler.Tick();
                 long vcTicks = VoiceFrameProfiler.Begin();
+                if (_activeSceneName == "EndGame")
+                    VoiceChatPatches.UpdatePushToTalkFromFrameDriver();
                 long hudTicks = VoiceFrameProfiler.Begin();
                 SafeUpdateHud();
                 VoiceFrameProfiler.End("hud", hudTicks);

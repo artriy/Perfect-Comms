@@ -467,7 +467,11 @@ internal static class CrewmateAvatarRenderer
 
     // Copies hat (back + front) / skin / visor from the player's live cosmetics onto the icon at FIXED offsets,
     // preserving each cosmetic's real sprite + material + color so Adaptive (color-matched) cosmetics stay correct.
-    internal static void TryAddOutfitCosmetics(Transform root, PlayerControl pc, List<CachedCosmeticLayer>? capture = null)
+    internal static void TryAddOutfitCosmetics(
+        Transform root,
+        PlayerControl pc,
+        List<CachedCosmeticLayer>? capture = null,
+        bool useLiveSpriteFrames = false)
     {
         try
         {
@@ -481,13 +485,17 @@ internal static class CrewmateAvatarRenderer
             // Only copy a cosmetic once its CURRENT sprite has finished loading, so a stale one is never baked in.
             bool hatReady = !IsEmptyCosmeticId(outfit.HatId) && HatLoaded(c);
             if (hatReady)
-                AddCosmeticLayer(root, "VC_HatBack", HatBackRenderer(c), HatVisorAnchor, BackCosmeticOrder, HatBackIdleSprite(c), capture);
+                AddCosmeticLayer(root, "VC_HatBack", HatBackRenderer(c), HatVisorAnchor, BackCosmeticOrder,
+                    useLiveSpriteFrames ? null : HatBackIdleSprite(c), capture);
             if (!IsEmptyCosmeticId(outfit.SkinId) && SkinLoaded(c))
-                AddCosmeticLayer(root, "VC_Skin", SkinRenderer(c), SkinAnchor, CosmeticOrder, SkinIdleSprite(c), capture);
+                AddCosmeticLayer(root, "VC_Skin", SkinRenderer(c), SkinAnchor, CosmeticOrder,
+                    useLiveSpriteFrames ? null : SkinIdleSprite(c), capture);
             if (hatReady)
-                AddCosmeticLayer(root, "VC_HatFront", HatFrontRenderer(c), HatVisorAnchor, FrontCosmeticOrder, HatFrontIdleSprite(c), capture);
+                AddCosmeticLayer(root, "VC_HatFront", HatFrontRenderer(c), HatVisorAnchor, FrontCosmeticOrder,
+                    useLiveSpriteFrames ? null : HatFrontIdleSprite(c), capture);
             if (!IsEmptyCosmeticId(outfit.VisorId) && VisorLoaded(c))
-                AddCosmeticLayer(root, "VC_Visor", VisorRenderer(c), HatVisorAnchor, VisorOrder(outfit.VisorId), VisorIdleSprite(c), capture);
+                AddCosmeticLayer(root, "VC_Visor", VisorRenderer(c), HatVisorAnchor, VisorOrder(outfit.VisorId),
+                    useLiveSpriteFrames ? null : VisorIdleSprite(c), capture);
         }
         catch
         {
@@ -570,6 +578,66 @@ internal static class CrewmateAvatarRenderer
         CacheOutfit(playerId, pc, ghostSprite, capturedLayers);
         ApplySorting(iconRoot);
         VCOverlayCamera.EnsureOnTop(iconRoot);
+    }
+
+    /// <summary>
+    /// Rebuilds a publicly dead avatar from the live ghost cosmetic renderers. Some animated and
+    /// modded hats/visors switch sprite when CosmeticsLayer.SetGhost runs; reusing the pre-death
+    /// idle frame leaves the speaking avatar wearing a different cosmetic than the in-world ghost.
+    /// This refresh intentionally does not overwrite the stable living/end-game outfit cache.
+    /// </summary>
+    internal static void TryRefreshPublicGhostCosmetics(GameObject? iconRoot, PlayerControl? pc)
+    {
+        if (iconRoot == null || pc?.Data == null) return;
+
+        RemoveCosmeticLayers(iconRoot);
+        var ghostSprite = TryGetVanillaGhostSprite(pc);
+        bool concealed = RenderAsConcealed(pc);
+        int colorId = GetPlayerColorId(pc);
+        TryAddVanillaGhostBody(
+            iconRoot.transform,
+            ghostSprite,
+            colorId,
+            !concealed && IsRainbowColorId(colorId),
+            concealed);
+        if (!concealed)
+            TryAddOutfitCosmetics(
+                iconRoot.transform,
+                pc,
+                capture: null,
+                useLiveSpriteFrames: true);
+        ApplySorting(iconRoot);
+        VCOverlayCamera.EnsureOnTop(iconRoot);
+    }
+
+    internal static bool IsLiveGhostBodyApplied(PlayerControl? pc)
+    {
+        try
+        {
+            var cosmetics = pc?.cosmetics;
+            var body = cosmetics?.currentBodySprite;
+            var currentSprite = body?.BodySprite?.sprite;
+            if (body == null || currentSprite == null) return false;
+            if (body.GhostSprite != null && currentSprite == body.GhostSprite)
+                return true;
+
+            var extraGhostSprites = body.ExtraGhostSprites;
+            if (extraGhostSprites != null)
+            {
+                foreach (var sprite in extraGhostSprites)
+                    if (sprite != null && currentSprite == sprite)
+                        return true;
+            }
+
+            // The standard body asset is the authoritative fallback for mods that swap
+            // currentBodySprite while retaining the normal ghost renderer.
+            var normalGhost = cosmetics?.normalBodySprite?.GhostSprite;
+            return normalGhost != null && currentSprite == normalGhost;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // Stores the just-built outfit (body color + resolved cosmetic layers) so the end-game screen can rebuild
@@ -721,9 +789,26 @@ internal static class CrewmateAvatarRenderer
         bool concealed)
     {
         if (root == null || ghostSprite == null) return false;
+        var normalBodyPosition = Vector3.zero;
+        var normalBodyRotation = Quaternion.identity;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var child = root.GetChild(i);
+            if (child.name != AliveBodyName) continue;
+            normalBodyPosition = child.localPosition;
+            normalBodyRotation = child.localRotation;
+            break;
+        }
+
         for (int i = 0; i < root.childCount; i++)
             if (root.GetChild(i).name == GhostBodyName)
+            {
+                // The ghost is the normal body with alternate artwork. Keep it at the normal
+                // body's exact transform instead of maintaining an independently tuned offset.
+                root.GetChild(i).localPosition = normalBodyPosition;
+                root.GetChild(i).localRotation = normalBodyRotation;
                 return true;
+            }
 
         GameObject? ghostObject = null;
         Material? ownedMaterial = null;
@@ -736,14 +821,14 @@ internal static class CrewmateAvatarRenderer
             {
                 hideFlags = HideFlags.HideAndDontSave
             };
-            // Vanilla SetBodyAsGhost only swaps this canonical renderer's sprite. Its transform is
-            // unchanged, so native scale 1 aligns with the game-owned hat/visor sprites and anchors.
+            // Put the vanilla ghost artwork at the normal body's exact position and rotation.
+            // Native scale remains 1 because the two sprite assets use different pixels-per-unit.
             var ghostRenderer = AddSprite(
                 root,
                 GhostBodyName,
                 ghostSprite,
-                Vector3.zero,
-                Quaternion.identity,
+                normalBodyPosition,
+                normalBodyRotation,
                 Vector3.one,
                 Color.white,
                 BodyOrder);

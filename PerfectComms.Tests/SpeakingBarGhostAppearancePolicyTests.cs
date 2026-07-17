@@ -87,4 +87,27 @@ public sealed class SpeakingBarGhostAppearancePolicyTests
                 appliedPubliclyDead,
                 requestedPubliclyDead));
     }
+
+    [Theory]
+    [InlineData(false, false, false, false, (int)SpeakingBarGhostCosmeticRefresh.None)]
+    [InlineData(false, false, false, true, (int)SpeakingBarGhostCosmeticRefresh.Ghost)]
+    [InlineData(false, true, false, true, (int)SpeakingBarGhostCosmeticRefresh.Ghost)]
+    [InlineData(true, true, true, true, (int)SpeakingBarGhostCosmeticRefresh.Ghost)]
+    [InlineData(false, true, true, true, (int)SpeakingBarGhostCosmeticRefresh.None)]
+    [InlineData(false, true, true, false, (int)SpeakingBarGhostCosmeticRefresh.Living)]
+    public void CosmeticRefreshTracksPublicGhostTransitionsAndRecreatedIcons(
+        bool iconChanged,
+        bool hasAppliedRequest,
+        bool appliedPubliclyDead,
+        bool requestedPubliclyDead,
+        int expectedValue)
+    {
+        Assert.Equal(
+            (SpeakingBarGhostCosmeticRefresh)expectedValue,
+            SpeakingBarGhostAppearancePolicy.ResolveCosmeticRefresh(
+                iconChanged,
+                hasAppliedRequest,
+                appliedPubliclyDead,
+                requestedPubliclyDead));
+    }
 }

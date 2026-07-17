@@ -140,7 +140,6 @@ else
 		"Libs/dsp/webrtc-apm.x64.dll"
 		"Libs/dsp/webrtc-apm.x86.dll"
 		"Libs/dsp/libwebrtc-apm.so"
-		"Libs/dsp/libwebrtc-apm.dylib"
 	)
 	for asset in "${required_desktop_assets[@]}"; do
 		require_nonempty "$root/$asset"

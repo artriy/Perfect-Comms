@@ -15,6 +15,7 @@ public static class VoiceChatPatches
     private static int _lastLocalRefreshFrame = -1;
     private static int _lastRadioChannelCycleFrame = -1;
     private static int _lastMicModeToggleFrame = -1;
+    private static int _lastPushToTalkPollFrame = -1;
     private static System.DateTime _lastKbErrorLogUtc;
     private static VoiceAliveDeadMixFocus _aliveDeadMixFocus;
 
@@ -41,18 +42,7 @@ public static class VoiceChatPatches
                 return;
             }
 
-            // A hold that crossed a privacy boundary (chat/modal/focus/rebind/session) must be
-            // physically released before it can arm again. Otherwise closing chat while the key
-            // is still down immediately resumes capture without a new user action.
-            if (_transmitReleaseRequired)
-            {
-                if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld())
-                {
-                    ReleaseHeldTransmitInputs();
-                    return;
-                }
-                _transmitReleaseRequired = false;
-            }
+            if (!CanResumeHeldTransmitInput()) return;
 
             VoiceChatKeybinds.ToggleMute.FireIfPressed();
             VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
@@ -80,30 +70,83 @@ public static class VoiceChatPatches
 
             VoiceChatHudState.UpdateTeamRadioHold(held, down, up);
 
-            if (!VoiceChatHudState.IsPushToTalkMode())
-            {
-                _pushToTalkInputHeld = false;
-                VoiceChatHudState.UpdatePushToTalkHeld(false);
-                return;
-            }
-
-            bool pttHeld = ReadHold(VoiceChatKeybinds.PushToTalk.IsHeld(), ref _pushToTalkInputHeld).Held;
-            VoiceChatHudState.UpdatePushToTalkHeld(pttHeld);
+            UpdatePushToTalkHold();
         }
         catch (System.Exception ex)
         {
-            // Never leave a capture-open hold latched because an IL2CPP object disappeared while
-            // the keyboard patch was running. The release path is deliberately independent from
-            // the failing read and is also used by chat/modal/focus and session boundaries.
-            try { ReleaseHeldTransmitInputs(); }
-            catch { SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false); }
-            var now = System.DateTime.UtcNow;
-            if ((now - _lastKbErrorLogUtc).TotalSeconds >= 5)
-            {
-                _lastKbErrorLogUtc = now;
-                VoiceDiagnostics.DebugError($"[VC] keyboard radio/PTT update failed: {ex.Message}");
-            }
+            HandleTransmitInputFailure("keyboard", ex);
         }
+    }
+
+    /// <summary>
+    /// EndGame has no gameplay joystick to guarantee KeyboardJoystick.Update ticks, but capture and
+    /// the voice room deliberately remain alive. Poll the PTT hold from the persistent VC manager so
+    /// the results screen has the same fail-closed input semantics as OnlineGame. The frame guard in
+    /// UpdatePushToTalkHold makes this harmless if a platform still happens to tick the joystick.
+    /// </summary>
+    internal static void UpdatePushToTalkFromFrameDriver()
+    {
+        try
+        {
+            if (ShouldSuppressVoiceInput())
+            {
+                ReleaseHeldTransmitInputs();
+                return;
+            }
+            if (!CanResumeHeldTransmitInput()) return;
+            UpdatePushToTalkHold();
+        }
+        catch (System.Exception ex)
+        {
+            HandleTransmitInputFailure("frame-driver", ex);
+        }
+    }
+
+    private static bool CanResumeHeldTransmitInput()
+    {
+        if (!_transmitReleaseRequired) return true;
+
+        // A hold that crossed a privacy boundary (chat/modal/focus/rebind/session) must be
+        // physically released before it can arm again. Otherwise closing chat while the key
+        // is still down immediately resumes capture without a new user action.
+        if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld())
+        {
+            ReleaseHeldTransmitInputs();
+            return false;
+        }
+
+        _transmitReleaseRequired = false;
+        return true;
+    }
+
+    private static void UpdatePushToTalkHold()
+    {
+        int frame = Time.frameCount;
+        if (_lastPushToTalkPollFrame == frame) return;
+        _lastPushToTalkPollFrame = frame;
+
+        if (!VoiceChatHudState.IsPushToTalkMode())
+        {
+            _pushToTalkInputHeld = false;
+            VoiceChatHudState.UpdatePushToTalkHeld(false);
+            return;
+        }
+
+        bool held = ReadHold(VoiceChatKeybinds.PushToTalk.IsHeld(), ref _pushToTalkInputHeld).Held;
+        VoiceChatHudState.UpdatePushToTalkHeld(held);
+    }
+
+    private static void HandleTransmitInputFailure(string source, System.Exception ex)
+    {
+        // Never leave a capture-open hold latched because an IL2CPP object disappeared while
+        // reading input. The release path is independent from the failing Unity wrapper.
+        try { ReleaseHeldTransmitInputs(); }
+        catch { SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false); }
+        var now = System.DateTime.UtcNow;
+        if ((now - _lastKbErrorLogUtc).TotalSeconds < 5) return;
+
+        _lastKbErrorLogUtc = now;
+        VoiceDiagnostics.DebugError($"[VC] {source} radio/PTT update failed: {ex.Message}");
     }
 
     internal static void ReleaseHeldTransmitInputs()

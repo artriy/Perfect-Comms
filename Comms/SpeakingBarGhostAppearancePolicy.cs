@@ -15,6 +15,13 @@ internal readonly record struct SpeakingBarGhostAppearance(
     SpeakingBarGhostBodyArt BodyArt,
     float Alpha);
 
+internal enum SpeakingBarGhostCosmeticRefresh
+{
+    None,
+    Living,
+    Ghost
+}
+
 internal static class SpeakingBarGhostAppearancePolicy
 {
     internal const float GhostAlpha = 0.45f;
@@ -38,4 +45,20 @@ internal static class SpeakingBarGhostAppearancePolicy
         bool appliedPubliclyDead,
         bool requestedPubliclyDead)
         => !hasAppliedRequest || appliedPubliclyDead != requestedPubliclyDead;
+
+    internal static SpeakingBarGhostCosmeticRefresh ResolveCosmeticRefresh(
+        bool iconChanged,
+        bool hasAppliedRequest,
+        bool appliedPubliclyDead,
+        bool requestedPubliclyDead)
+    {
+        if (requestedPubliclyDead
+            && (iconChanged || !hasAppliedRequest || !appliedPubliclyDead))
+            return SpeakingBarGhostCosmeticRefresh.Ghost;
+
+        if (!requestedPubliclyDead && hasAppliedRequest && appliedPubliclyDead)
+            return SpeakingBarGhostCosmeticRefresh.Living;
+
+        return SpeakingBarGhostCosmeticRefresh.None;
+    }
 }

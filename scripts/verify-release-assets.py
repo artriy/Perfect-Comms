@@ -52,6 +52,110 @@ def assert_pe(path: Path, expected_machine: int) -> None:
         fail(f"{path}: PE machine 0x{machine:04x}, expected 0x{expected_machine:04x}")
 
 
+def pe_imports(path: Path) -> set[str]:
+    return pe_imports_bytes(path.read_bytes(), str(path))
+
+
+def pe_imports_bytes(data: bytes, label: str) -> set[str]:
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        fail(f"{label}: expected a PE file (MZ header)")
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if pe_offset + 24 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
+        fail(f"{label}: invalid PE signature")
+    coff = pe_offset + 4
+    section_count = struct.unpack_from("<H", data, coff + 2)[0]
+    optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+    optional = coff + 20
+    if optional_size < 2 or optional + optional_size > len(data):
+        fail(f"{label}: truncated PE optional header")
+    magic = struct.unpack_from("<H", data, optional)[0]
+    directory_offset = optional + (112 if magic == 0x20B else 96 if magic == 0x10B else 0)
+    if directory_offset == optional:
+        fail(f"{label}: unsupported PE optional-header magic 0x{magic:04x}")
+    if directory_offset + 16 > optional + optional_size:
+        fail(f"{label}: PE optional header has no complete import directory")
+    import_rva, _ = struct.unpack_from("<II", data, directory_offset + 8)
+    if import_rva == 0:
+        return set()
+
+    sections: list[tuple[int, int, int]] = []
+    section_table = optional + optional_size
+    if section_table + section_count * 40 > len(data):
+        fail(f"{label}: truncated PE section table")
+    for index in range(section_count):
+        entry = section_table + index * 40
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+            "<IIII", data, entry + 8
+        )
+        sections.append((virtual_address, max(virtual_size, raw_size), raw_offset))
+
+    def rva_offset(rva: int) -> int:
+        for virtual_address, size, raw_offset in sections:
+            if virtual_address <= rva < virtual_address + size:
+                offset = raw_offset + rva - virtual_address
+                if offset >= len(data):
+                    fail(f"{label}: PE RVA 0x{rva:x} resolves past end of file")
+                return offset
+        fail(f"{label}: PE RVA 0x{rva:x} is outside all sections")
+        return 0
+
+    imports: set[str] = set()
+    descriptor = rva_offset(import_rva)
+    while True:
+        if descriptor + 20 > len(data):
+            fail(f"{label}: unterminated PE import descriptor table")
+        values = struct.unpack_from("<IIIII", data, descriptor)
+        if not any(values):
+            break
+        name_offset = rva_offset(values[3])
+        name_end = data.find(b"\0", name_offset)
+        if name_end < 0:
+            fail(f"{label}: unterminated PE import name")
+        try:
+            name = data[name_offset:name_end].decode("ascii", "strict").upper()
+        except UnicodeDecodeError:
+            fail(f"{label}: PE import name is not ASCII")
+        imports.add(name)
+        descriptor += 20
+    return imports
+
+
+def assert_no_private_windows_runtime_imports(imports: set[str], label: str) -> None:
+    forbidden = sorted(
+        name
+        for name in imports
+        if (
+            name.startswith(
+                (
+                    "VCRUNTIME",
+                    "MSVCP",
+                    "CONCRT",
+                    "VCOMP",
+                    "MFC",
+                    "LIBWINPTHREAD",
+                    "LIBGCC",
+                    "LIBSTDC++",
+                    "LIBSSP",
+                    "LIBATOMIC",
+                    "LIBGOMP",
+                    "LIBQUADMATH",
+                    "LIBGFORTRAN",
+                )
+            )
+            or (name.startswith("MSVCR") and name != "MSVCRT.DLL")
+        )
+    )
+    if forbidden:
+        fail(
+            f"{label}: native binary requires an unbundled compiler runtime: "
+            f"{', '.join(forbidden)}; build Windows release assets with static runtimes"
+        )
+
+
+def assert_no_private_windows_runtime(path: Path) -> None:
+    assert_no_private_windows_runtime_imports(pe_imports(path), str(path))
+
+
 def assert_elf(path: Path, expected_machine: int, expected_type: int | None = None) -> None:
     assert_elf_bytes(path.read_bytes(), str(path), expected_machine, expected_type)
 
@@ -161,6 +265,64 @@ def assert_pc_mobile_abi_bytes(data: bytes, label: str, expected_abi: int) -> No
 
 def align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
+
+
+def self_test_pe(imports: tuple[str, ...], machine: int) -> bytes:
+    pe_offset = 0x80
+    optional_size = 0xF0 if machine == PE_AMD64 else 0xE0
+    optional_magic = 0x20B if machine == PE_AMD64 else 0x10B
+    directory_offset = 112 if machine == PE_AMD64 else 96
+    section_virtual_address = 0x1000
+    section_raw_offset = 0x200
+    section_raw_size = 0x400
+    data = bytearray(section_raw_offset + section_raw_size)
+
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, pe_offset)
+    data[pe_offset : pe_offset + 4] = b"PE\0\0"
+    coff = pe_offset + 4
+    struct.pack_into("<HHIIIHH", data, coff, machine, 1, 0, 0, 0, optional_size, 0x0022)
+    optional = coff + 20
+    struct.pack_into("<H", data, optional, optional_magic)
+    struct.pack_into("<I", data, optional + directory_offset - 4, 16)
+    descriptor_size = (len(imports) + 1) * 20
+    struct.pack_into(
+        "<II",
+        data,
+        optional + directory_offset + 8,
+        section_virtual_address,
+        descriptor_size,
+    )
+
+    section_table = optional + optional_size
+    struct.pack_into(
+        "<8sIIIIIIHHI",
+        data,
+        section_table,
+        b".rdata\0\0",
+        section_raw_size,
+        section_virtual_address,
+        section_raw_size,
+        section_raw_offset,
+        0,
+        0,
+        0,
+        0,
+        0x40000040,
+    )
+
+    name_offset = section_raw_offset + align_up(descriptor_size, 16)
+    for index, import_name in enumerate(imports):
+        encoded = import_name.encode("ascii") + b"\0"
+        if name_offset + len(encoded) > len(data):
+            fail("PE self-test fixture import names exceed the test section")
+        name_rva = section_virtual_address + name_offset - section_raw_offset
+        struct.pack_into(
+            "<IIIII", data, section_raw_offset + index * 20, 0, 0, 0, name_rva, 0
+        )
+        data[name_offset : name_offset + len(encoded)] = encoded
+        name_offset += len(encoded)
+    return bytes(data)
 
 
 def self_test_pc_mobile_elf(
@@ -327,7 +489,60 @@ def run_self_tests() -> None:
                 )
         else:
             fail(f"ABI verifier self-test {index} unexpectedly passed")
+    clean_imports = pe_imports_bytes(
+        self_test_pe(("KERNEL32.DLL", "WS2_32.DLL", "MSVCRT.DLL"), PE_AMD64),
+        "pe-self-test",
+    )
+    if clean_imports != {"KERNEL32.DLL", "WS2_32.DLL", "MSVCRT.DLL"}:
+        fail(f"PE import parser self-test returned {sorted(clean_imports)!r}")
+    assert_no_private_windows_runtime_imports(clean_imports, "pe-self-test")
+    try:
+        assert_no_private_windows_runtime_imports(
+            pe_imports_bytes(
+                self_test_pe(("KERNEL32.DLL", "VCRUNTIME140.DLL"), PE_AMD64),
+                "pe-self-test-invalid",
+            ),
+            "pe-self-test-invalid",
+        )
+    except ValueError as error:
+        if "unbundled compiler runtime" not in str(error):
+            fail(f"PE import policy self-test returned unexpected error: {error}")
+    else:
+        fail("PE import policy self-test unexpectedly passed")
+    try:
+        assert_no_private_windows_runtime_imports(
+            pe_imports_bytes(
+                self_test_pe(("KERNEL32.DLL", "LIBWINPTHREAD-1.DLL"), PE_I386),
+                "pe-self-test-mingw-invalid",
+            ),
+            "pe-self-test-mingw-invalid",
+        )
+    except ValueError as error:
+        if "unbundled compiler runtime" not in str(error):
+            fail(f"MinGW import policy self-test returned unexpected error: {error}")
+    else:
+        fail("MinGW import policy self-test unexpectedly passed")
+    for runtime_name in (
+        "MSVCR120.DLL",
+        "CONCRT140.DLL",
+        "VCOMP140.DLL",
+        "LIBATOMIC-1.DLL",
+        "LIBGOMP-1.DLL",
+        "LIBQUADMATH-0.DLL",
+        "LIBGFORTRAN-5.DLL",
+    ):
+        try:
+            assert_no_private_windows_runtime_imports(
+                {"KERNEL32.DLL", runtime_name},
+                "pe-self-test-extra-runtime",
+            )
+        except ValueError as error:
+            if "unbundled compiler runtime" not in str(error):
+                fail(f"Additional PE runtime policy self-test returned unexpected error: {error}")
+        else:
+            fail(f"Additional PE runtime policy self-test accepted {runtime_name}")
     print("release.asset.selftest.ok check=pc-mobile-abi-marker")
+    print("release.asset.selftest.ok check=windows-pe-import-parser-and-self-contained-runtime")
 
 
 def macho_architectures(data: bytes, label: str) -> set[int]:
@@ -419,18 +634,14 @@ def verify_desktop(root: Path) -> None:
         "Libs/pc-capture/pc-capture-linux-x64",
         "Libs/dsp/libwebrtc-apm.so",
     )
-    macho_assets = (
-        "Libs/dsp/libwebrtc-apm.dylib",
-    )
     for relative, machine in pe_assets:
-        assert_pe(require_file(root, relative), machine)
+        path = require_file(root, relative)
+        assert_pe(path, machine)
+        assert_no_private_windows_runtime(path)
         print(f"release.asset.ok format=pe machine=0x{machine:04x} path={relative}")
     for relative in elf_assets:
         assert_elf(require_file(root, relative), ELF_X86_64)
         print(f"release.asset.ok format=elf64 machine=x86_64 path={relative}")
-    for relative in macho_assets:
-        assert_universal_macho(require_file(root, relative))
-        print(f"release.asset.ok format=macho-universal architectures=x86_64,arm64 path={relative}")
     mac_zip = require_file(root, "Libs/pc-capture/pc-capture-mac.zip")
     assert_mac_bundle(mac_zip)
     print("release.asset.ok target=macos format=app-zip architectures=x86_64,arm64 path=Libs/pc-capture/pc-capture-mac.zip")
@@ -450,13 +661,26 @@ def main() -> int:
         action="store_true",
         help="run deterministic verifier checks without reading release assets",
     )
+    parser.add_argument(
+        "--pe-no-private-runtime",
+        type=Path,
+        help="verify one Windows PE asset has no unbundled MSVC or MinGW runtime dependency",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     try:
         if args.self_test:
-            if args.configuration is not None or args.manifest_only:
-                fail("--self-test cannot be combined with --configuration or --manifest-only")
+            if args.configuration is not None or args.manifest_only or args.pe_no_private_runtime:
+                fail("--self-test cannot be combined with other verification modes")
             run_self_tests()
+        elif args.pe_no_private_runtime is not None:
+            if args.configuration is not None or args.manifest_only:
+                fail("--pe-no-private-runtime cannot be combined with other verification modes")
+            helper = args.pe_no_private_runtime.resolve()
+            if not helper.is_file() or helper.stat().st_size == 0:
+                fail(f"missing or empty Windows PE asset: {helper}")
+            assert_no_private_windows_runtime(helper)
+            print(f"release.asset.ok target=windows compiler_runtime=self-contained path={helper}")
         elif args.configuration is None:
             fail("--configuration is required unless --self-test is used")
         elif args.manifest_only:

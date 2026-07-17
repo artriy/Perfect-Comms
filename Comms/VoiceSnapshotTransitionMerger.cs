@@ -5,7 +5,8 @@ namespace VoiceChatPlugin.VoiceChat;
 /// <summary>
 /// Reconciles the frame-local PlayerControl roster with the server-maintained InnerNet roster.
 /// PlayerControls legitimately disappear while scenes change, but an InnerNet client leaving is
-/// authoritative and must remove its route immediately.
+/// normally authoritative. The bounded EndGame-to-lobby replacement window is the sole exception
+/// because InnerNet publishes partial allClients collections while that scene is rebuilding.
 /// </summary>
 internal static class VoiceSnapshotTransitionMerger
 {
@@ -126,13 +127,29 @@ internal static class VoiceSnapshotTransitionMerger
             : currentStart;
     }
 
+    internal static bool AuthenticatedRosterContainsAllRemoteClients(
+        VoiceGameStateSnapshot previous,
+        ISet<int> authenticatedClientIds)
+    {
+        for (int i = 0; i < previous.Players.Count; i++)
+        {
+            var player = previous.Players[i];
+            if (player.IsLocal || player.ClientId < 0 || player.Disconnected || player.IsDummy)
+                continue;
+            if (!authenticatedClientIds.Contains(player.ClientId))
+                return false;
+        }
+        return true;
+    }
+
     internal static VoiceGameStateSnapshot Merge(
         VoiceGameStateSnapshot refreshed,
         VoiceGameStateSnapshot? previous,
         ISet<int> authenticatedClientIds,
         IDictionary<int, float> missingSinceByClientId,
         float now,
-        float graceSeconds)
+        float graceSeconds,
+        bool retainPreviousClientsMissingFromAuthenticatedRoster = false)
     {
         if (previous == null)
         {
@@ -146,13 +163,26 @@ internal static class VoiceSnapshotTransitionMerger
         var players = new List<VoicePlayerSnapshot>(
             refreshed.Players.Count + previous.Players.Count);
         var representedClientIds = new HashSet<int>();
+        HashSet<int>? transitionExpectedClientIds = null;
+        if (retainPreviousClientsMissingFromAuthenticatedRoster)
+        {
+            transitionExpectedClientIds = new HashSet<int>();
+            for (int i = 0; i < previous.Players.Count; i++)
+            {
+                var player = previous.Players[i];
+                if (player.ClientId >= 0 && !player.Disconnected && !player.IsDummy)
+                    transitionExpectedClientIds.Add(player.ClientId);
+            }
+        }
 
         // A transition-frame LocalPlayer can exist while Data/client ownership is not resolved yet.
         // Do not let that half-built object replace the last authenticated local role/identity.
         for (int i = 0; i < refreshed.Players.Count; i++)
         {
             var player = refreshed.Players[i];
-            if (player.ClientId >= 0 && !authenticatedClientIds.Contains(player.ClientId))
+            if (player.ClientId >= 0
+                && !authenticatedClientIds.Contains(player.ClientId)
+                && transitionExpectedClientIds?.Contains(player.ClientId) != true)
             {
                 missingSinceByClientId.Remove(player.ClientId);
                 continue;
@@ -181,9 +211,12 @@ internal static class VoiceSnapshotTransitionMerger
             if (clientId < 0 || player.Disconnected || player.IsDummy)
                 continue;
 
-            // InnerNet membership wins over stale scene state. This makes a real leave immediate,
-            // including on the results screen where PlayerControls no longer exist.
-            if (!authenticatedClientIds.Contains(clientId))
+            bool authenticated = authenticatedClientIds.Contains(clientId);
+            bool transitionExpected = transitionExpectedClientIds?.Contains(clientId) == true;
+            // InnerNet membership normally wins over stale scene state. EndGame -> lobby is the one
+            // bounded exception: allClients is known to publish partial rosters while the lobby is
+            // rebuilding, so previously authenticated routes remain expected until completion/expiry.
+            if (!authenticated && !transitionExpected)
             {
                 missingSinceByClientId.Remove(clientId);
                 continue;
@@ -196,12 +229,22 @@ internal static class VoiceSnapshotTransitionMerger
             }
 
             trackedMissingClientIds.Add(clientId);
-            var retain = refreshed.Phase == VoiceGamePhase.EndGame;
-            if (retain)
+            bool retain;
+            if (!authenticated)
+            {
+                if (!missingSinceByClientId.TryGetValue(clientId, out var missingSince))
+                {
+                    missingSince = now;
+                    missingSinceByClientId[clientId] = missingSince;
+                }
+                retain = now - missingSince < graceSeconds;
+            }
+            else if (refreshed.Phase == VoiceGamePhase.EndGame)
             {
                 // EndGame has no world roster for its entire lifetime. Keep only clients still in
                 // authenticated allClients, and start a fresh bounded grace if the lobby reforms.
                 missingSinceByClientId.Remove(clientId);
+                retain = true;
             }
             else
             {

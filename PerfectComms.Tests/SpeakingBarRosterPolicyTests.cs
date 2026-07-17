@@ -88,6 +88,20 @@ public sealed class SpeakingBarRosterPolicyTests
         AssertSet(next, 2);
     }
 
+    [Fact]
+    public void PublicMeetingCardDeathIsAddedWithoutClearingEarlierPublication()
+    {
+        var previous = new HashSet<byte> { 2 };
+
+        var next = SpeakingBarRosterPolicy.AddPubliclyObservedDeaths(
+            previous,
+            Roster((1, false), (2, false), (3, true)));
+
+        AssertSet(next, 2, 3);
+        AssertSet(previous, 2);
+        Assert.NotSame(previous, next);
+    }
+
     [Theory]
     [InlineData(true, false, true)]
     [InlineData(false, false, false)]

@@ -5,7 +5,11 @@ on:
     branches: [main]
   pull_request:
     paths:
+      - "Comms/SidecarLauncher.cs"
       - "Comms/SidecarVoiceClient.cs"
+      - "Comms/WineEnvironment.cs"
+      - "PerfectComms.csproj"
+      - "native/cmake/**"
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
       - "native/apm-sys/**"
@@ -14,7 +18,11 @@ on:
       - "scripts/build-helpers.sh"
       - "scripts/build-mac.sh"
       - "scripts/ci-smoke-helper.sh"
+      - "scripts/package-release.ps1"
+      - "scripts/package-release.sh"
+      - "scripts/verify-release-assets.py"
       - ".github/workflows/native-helpers.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
   workflow_call:
 
@@ -51,6 +59,8 @@ jobs:
       - name: Build helper
         shell: bash
         run: bash scripts/build-helpers.sh ${{ matrix.target }}
+      - name: Verify helper has no private MSVC runtime dependency
+        run: python scripts/verify-release-assets.py --pe-no-private-runtime Libs/pc-capture/${{ matrix.dest }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -165,8 +175,12 @@ jobs:
             bin: pc-capture-linux-x64
             apm_artifact: apm-linux-x64
           - artifact: helper-mac
-            # Smoke the universal app's x86_64 slice on a native Intel runner.
+            # Smoke both slices of the final signed universal app on native runners.
             os: macos-15-intel
+            bin: pc-capture-mac.zip
+            apm_artifact: ""
+          - artifact: helper-mac
+            os: macos-latest
             bin: pc-capture-mac.zip
             apm_artifact: ""
     runs-on: ${{ matrix.os }}
@@ -187,6 +201,7 @@ jobs:
           if [[ "${{ matrix.bin }}" == *.zip ]]; then
             cd dl && unzip -o "${{ matrix.bin }}" && cd ..
             chmod +x dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
+            codesign --verify --deep --strict --verbose=2 dl/PerfectCommsAudio.app
             bash scripts/ci-smoke-helper.sh \
               dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio --require-dsp
           else
@@ -257,6 +272,8 @@ jobs:
         with:
           name: apm-win-x64
           path: dl
+      - name: Verify no unbundled compiler runtime
+        run: python scripts/verify-release-assets.py --pe-no-private-runtime dl/webrtc-apm.x64.dll
       - name: Smoke win-x64 (apm-sys load + process a frame)
         shell: bash
         run: |
@@ -276,6 +293,8 @@ jobs:
         with:
           name: apm-win-x86
           path: dl
+      - name: Verify no unbundled compiler runtime
+        run: python scripts/verify-release-assets.py --pe-no-private-runtime dl/webrtc-apm.x86.dll
       - name: Smoke win-x86 (32-bit process loads 32-bit DLL) [GATE]
         shell: bash
         run: |

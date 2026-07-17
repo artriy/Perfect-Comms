@@ -186,8 +186,7 @@ if ($Configuration -eq "Android") {
         "Libs\pc-capture\pc-capture-mac.zip",
         "Libs\dsp\webrtc-apm.x64.dll",
         "Libs\dsp\webrtc-apm.x86.dll",
-        "Libs\dsp\libwebrtc-apm.so",
-        "Libs\dsp\libwebrtc-apm.dylib"
+        "Libs\dsp\libwebrtc-apm.so"
     ) | ForEach-Object { Assert-ReleaseAsset $_ }
     Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
     Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol

@@ -1,6 +1,6 @@
 use pc_capture::ipc::ServerConfig;
 use pc_capture::{audio, ipc, proto};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use std::time::Duration;
 // this below the managed launcher's three-second enumeration deadline so even an unkillable
 // start.exe proxy cannot leave the host-native helper behind.
 const ENUMERATION_HARD_TIMEOUT: Duration = Duration::from_millis(2_500);
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Eq, PartialEq)]
 enum EnumerationError {
@@ -36,6 +37,39 @@ where
     }
 }
 
+fn read_and_unlink_token(path: &Path) -> std::io::Result<String> {
+    let value = std::fs::read_to_string(path)?;
+    // Once the secret is in process memory, unlink it immediately so a managed crash cannot
+    // leave a token behind for the remainder of the helper lifetime.
+    if let Err(error) = std::fs::remove_file(path) {
+        eprintln!("pc-capture: warning: cannot remove consumed token file: {error}");
+    }
+    Ok(value.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn cancellation_value(nonce: &str) -> String {
+    format!("perfect-comms-launch-cancel-v1:{nonce}")
+}
+
+fn cancellation_requested(path: &Path, nonce: &str) -> bool {
+    std::fs::read_to_string(path)
+        .map(|value| value == cancellation_value(nonce))
+        .unwrap_or(false)
+}
+
+fn spawn_cancellation_guard(path: PathBuf, nonce: String) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("pc-capture-cancellation".to_string())
+        .spawn(move || loop {
+            if cancellation_requested(&path, &nonce) {
+                eprintln!("pc-capture: authenticated launch cancellation requested");
+                std::process::exit(0);
+            }
+            std::thread::sleep(CANCELLATION_POLL_INTERVAL);
+        })?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Args {
     pub handshake_path: Option<PathBuf>,
@@ -44,6 +78,8 @@ pub struct Args {
     pub enumerate: bool,
     pub protocol_version: bool,
     pub owner_pid: Option<u32>,
+    pub cancel_file: Option<PathBuf>,
+    pub cancel_nonce: Option<String>,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -53,6 +89,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut enumerate = false;
     let mut protocol_version = false;
     let mut owner_pid = None;
+    let mut cancel_file = None;
+    let mut cancel_nonce = None;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -80,12 +118,33 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
                 }
                 owner_pid = Some(pid);
             }
+            "--cancel-file" => {
+                i += 1;
+                let path = argv.get(i).ok_or("--cancel-file requires a path")?;
+                if path.is_empty() {
+                    return Err("--cancel-file requires a non-empty path".to_string());
+                }
+                cancel_file = Some(PathBuf::from(path));
+            }
+            "--cancel-nonce" => {
+                i += 1;
+                let nonce = argv.get(i).ok_or("--cancel-nonce requires a nonce")?;
+                if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(
+                        "--cancel-nonce requires a 64-character hexadecimal nonce".to_string()
+                    );
+                }
+                cancel_nonce = Some(nonce.to_string());
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
     }
     if handshake_path.is_none() && !protocol_version {
         return Err("--handshake <path> is required".to_string());
+    }
+    if cancel_file.is_some() != cancel_nonce.is_some() {
+        return Err("--cancel-file and --cancel-nonce must be supplied together".to_string());
     }
     Ok(Args {
         handshake_path,
@@ -94,6 +153,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         enumerate,
         protocol_version,
         owner_pid,
+        cancel_file,
+        cancel_nonce,
     })
 }
 
@@ -110,6 +171,13 @@ fn main() {
     if args.protocol_version {
         println!("{}", proto::PROTO_VERSION);
         return;
+    }
+
+    if let (Some(path), Some(nonce)) = (&args.cancel_file, &args.cancel_nonce) {
+        if let Err(error) = spawn_cancellation_guard(path.clone(), nonce.clone()) {
+            eprintln!("pc-capture: cannot start launch cancellation guard: {error}");
+            std::process::exit(1);
+        }
     }
 
     if args.enumerate {
@@ -142,8 +210,8 @@ fn main() {
     }
 
     let token = match &args.token_file {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(s) => s.trim_end_matches(['\r', '\n']).to_string(),
+        Some(path) => match read_and_unlink_token(path) {
+            Ok(s) => s,
             Err(e) => {
                 eprintln!("pc-capture: cannot read token file: {e}");
                 std::process::exit(2);
@@ -182,6 +250,81 @@ mod tests {
     fn parse_args_requires_handshake() {
         let err = parse_args(&["pc-capture".to_string()]).unwrap_err();
         assert!(err.contains("--handshake"), "got: {err}");
+    }
+
+    #[test]
+    fn token_file_is_unlinked_immediately_after_read() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "perfect-comms-token-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "test-secret\r\n").unwrap();
+
+        let token = read_and_unlink_token(&path).unwrap();
+
+        assert_eq!(token, "test-secret");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cancellation_receipt_requires_exact_nonce() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "perfect-comms-cancel-test-{}-{unique}",
+            std::process::id()
+        ));
+        let nonce = "A".repeat(64);
+        std::fs::write(&path, cancellation_value(&"B".repeat(64))).unwrap();
+        assert!(!cancellation_requested(&path, &nonce));
+        std::fs::write(&path, cancellation_value(&nonce)).unwrap();
+        assert!(cancellation_requested(&path, &nonce));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn parse_args_requires_paired_valid_cancellation_control() {
+        let nonce = "A".repeat(64);
+        let args = parse_args(&[
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/hs.json".to_string(),
+            "--cancel-file".to_string(),
+            "/tmp/cancel".to_string(),
+            "--cancel-nonce".to_string(),
+            nonce.clone(),
+        ])
+        .unwrap();
+        assert_eq!(args.cancel_file.unwrap(), PathBuf::from("/tmp/cancel"));
+        assert_eq!(args.cancel_nonce.unwrap(), nonce);
+
+        let missing_nonce = parse_args(&[
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/hs.json".to_string(),
+            "--cancel-file".to_string(),
+            "/tmp/cancel".to_string(),
+        ])
+        .unwrap_err();
+        assert!(missing_nonce.contains("supplied together"));
+
+        let invalid_nonce = parse_args(&[
+            "pc-capture".to_string(),
+            "--handshake".to_string(),
+            "/tmp/hs.json".to_string(),
+            "--cancel-file".to_string(),
+            "/tmp/cancel".to_string(),
+            "--cancel-nonce".to_string(),
+            "not-hex".to_string(),
+        ])
+        .unwrap_err();
+        assert!(invalid_nonce.contains("64-character hexadecimal"));
     }
 
     #[test]

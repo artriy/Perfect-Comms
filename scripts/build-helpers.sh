@@ -37,7 +37,25 @@ for entry in "${targets[@]}"; do
   echo "map $triple -> $dest"
   [[ "$dry" -eq 1 ]] && continue
   rustup target add "$triple" >/dev/null 2>&1 || true
-  CARGO_TARGET_DIR="$cargo_target_root" cargo build --release --manifest-path "$crate/Cargo.toml" --target "$triple"
+  if [[ "$triple" == *-pc-windows-msvc ]]; then
+    # Ship a self-contained MSVC runtime so a clean Windows/Steam install does not depend on a
+    # separately installed Visual C++ redistributable. Rust flags do not automatically control
+    # bundled CMake dependencies, so the toolchain file keeps their /MT choice in sync too.
+    # UCRT API-set imports remain OS components.
+    static_crt_flags="${RUSTFLAGS:-}"
+    [[ "$static_crt_flags" == *"target-feature=+crt-static"* ]] || \
+      static_crt_flags="${static_crt_flags:+$static_crt_flags }-C target-feature=+crt-static"
+    static_crt_toolchain="$root/native/cmake/windows-static-crt.cmake"
+    if command -v cygpath >/dev/null 2>&1; then
+      static_crt_toolchain="$(cygpath -w "$static_crt_toolchain")"
+    fi
+    CARGO_TARGET_DIR="$cargo_target_root" RUSTFLAGS="$static_crt_flags" \
+      CMAKE_TOOLCHAIN_FILE="$static_crt_toolchain" \
+      cargo build --release --manifest-path "$crate/Cargo.toml" --target "$triple"
+  else
+    CARGO_TARGET_DIR="$cargo_target_root" \
+      cargo build --release --manifest-path "$crate/Cargo.toml" --target "$triple"
+  fi
   cp "$src" "$dest"
   [[ "$destname" == *.exe ]] || chmod +x "$dest"
   echo "built $dest"

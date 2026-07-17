@@ -118,6 +118,7 @@ public class VoiceChatRoom
     private readonly Dictionary<int, float> _missingSnapshotClientSince = new();
     private readonly HashSet<int> _authenticatedSnapshotClientIds = new();
     private float _authRosterUnavailableSince = -1f;
+    private float _completeRemoteRosterWaitStart = -1f;
     private float  _bootstrapUntilTime = -999f;
     private float  _bootstrapRefreshTimer;
     private float _missingPeerRecoveryReadyTime = -999f;
@@ -485,21 +486,51 @@ public class VoiceChatRoom
             // are bounded; EndGame keeps its resolved roster because it has no world roster.
             if (previousRetainable && CurrentSnapshot != null)
             {
+                var now = Time.realtimeSinceStartup;
+                if (VoiceRoomLifetimeGate.RequiresCompleteRemoteRoster(
+                        CurrentSnapshot.Phase,
+                        refreshedSnapshot.Phase)
+                    && _completeRemoteRosterWaitStart < 0f)
+                {
+                    _completeRemoteRosterWaitStart = now;
+                }
+                else if (_completeRemoteRosterWaitStart >= 0f
+                         && !VoiceSnapshotTransitionMerger.IsBoundedAuthGapPhase(refreshedSnapshot.Phase))
+                {
+                    _completeRemoteRosterWaitStart = -1f;
+                }
+
                 var authRosterState = CollectAuthenticatedSnapshotClientIds();
                 if (authRosterState == AuthenticatedRosterCollectionState.Populated)
                 {
                     _authRosterUnavailableSince = -1f;
+                    bool completeRemoteRoster =
+                        VoiceSnapshotTransitionMerger.AuthenticatedRosterContainsAllRemoteClients(
+                            CurrentSnapshot,
+                            _authenticatedSnapshotClientIds);
+                    bool retainIncompleteRemoteRoster = _completeRemoteRosterWaitStart >= 0f
+                                                        && !completeRemoteRoster
+                                                        && now - _completeRemoteRosterWaitStart
+                                                        < TransitionRosterRetentionMaxSeconds;
+                    if (_completeRemoteRosterWaitStart >= 0f && !retainIncompleteRemoteRoster)
+                    {
+                        VoiceDiagnostics.Log(
+                            "voice.snapshot.complete_roster_wait",
+                            $"phase={refreshedSnapshot.Phase} action={(completeRemoteRoster ? "complete" : "expired")} " +
+                            $"waitSeconds={Math.Max(0f, now - _completeRemoteRosterWaitStart):0.000} gameId={currentGameId}");
+                        _completeRemoteRosterWaitStart = -1f;
+                    }
                     refreshedSnapshot = VoiceSnapshotTransitionMerger.Merge(
                         refreshedSnapshot,
                         CurrentSnapshot,
                         _authenticatedSnapshotClientIds,
                         _missingSnapshotClientSince,
-                        Time.realtimeSinceStartup,
-                        TransitionRosterRetentionMaxSeconds);
+                        now,
+                        TransitionRosterRetentionMaxSeconds,
+                        retainPreviousClientsMissingFromAuthenticatedRoster: retainIncompleteRemoteRoster);
                 }
                 else if (authRosterState == AuthenticatedRosterCollectionState.Empty)
                 {
-                    var now = Time.realtimeSinceStartup;
                     _authRosterUnavailableSince = VoiceSnapshotTransitionMerger.NextEmptyAuthenticatedRosterGapStart(
                         refreshedSnapshot.Phase,
                         CurrentSnapshot.Phase,
@@ -524,7 +555,6 @@ public class VoiceChatRoom
                 else if (refreshedSnapshot.Phase == VoiceGamePhase.EndGame
                          || VoiceSnapshotTransitionMerger.IsBoundedAuthGapPhase(refreshedSnapshot.Phase))
                 {
-                    var now = Time.realtimeSinceStartup;
                     // Start the bounded clock only after EndGame. Its own missing world roster is
                     // expected and the explicit-disconnect lifetime gate still stops voice at once.
                     _authRosterUnavailableSince = VoiceSnapshotTransitionMerger.NextAuthGapStart(
@@ -558,6 +588,7 @@ public class VoiceChatRoom
             else
             {
                 _authRosterUnavailableSince = -1f;
+                _completeRemoteRosterWaitStart = -1f;
                 _missingSnapshotClientSince.Clear();
             }
 
@@ -588,6 +619,7 @@ public class VoiceChatRoom
             {
                 _retainingTransitionSnapshot = false;
                 _authRosterUnavailableSince = -1f;
+                _completeRemoteRosterWaitStart = -1f;
                 _missingSnapshotClientSince.Clear();
                 CurrentSnapshot = null;
                 _snapshotGameId = 0;
@@ -1772,6 +1804,7 @@ public class VoiceChatRoom
         CurrentSnapshot = null;
         _snapshotGameId = 0;
         _retainingTransitionSnapshot = false;
+        _completeRemoteRosterWaitStart = -1f;
         _missingSnapshotClientSince.Clear();
         _authenticatedSnapshotClientIds.Clear();
         _snapshotRefreshTimer = 0f;
@@ -1840,6 +1873,7 @@ public class VoiceChatRoom
         CurrentSnapshot = null;
         _snapshotGameId = 0;
         _retainingTransitionSnapshot = false;
+        _completeRemoteRosterWaitStart = -1f;
         _missingSnapshotClientSince.Clear();
         _authenticatedSnapshotClientIds.Clear();
         _snapshotRefreshTimer = 0f;

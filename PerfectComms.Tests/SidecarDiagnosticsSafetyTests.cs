@@ -1,8 +1,53 @@
+using System.Diagnostics;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
 public sealed class SidecarDiagnosticsSafetyTests
 {
+    [Fact]
+    public void ProcessDiagnosticsDrainBothRedirectedStreams()
+    {
+        var payload = new string('x', 160);
+        ProcessStartInfo psi;
+        if (OperatingSystem.IsWindows())
+        {
+            psi = new ProcessStartInfo("cmd.exe");
+            psi.ArgumentList.Add("/d");
+            psi.ArgumentList.Add("/q");
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(
+                $"(for /L %i in (1,1,5000) do @echo stdout-{payload}) " +
+                $"& (for /L %i in (1,1,5000) do @echo stderr-{payload} 1>&2)");
+        }
+        else
+        {
+            psi = new ProcessStartInfo("/bin/sh");
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add(
+                $"i=0; while [ $i -lt 5000 ]; do printf '%s\\n' 'stdout-{payload}'; i=$((i+1)); done; " +
+                $"i=0; while [ $i -lt 5000 ]; do printf '%s\\n' 'stderr-{payload}' >&2; i=$((i+1)); done");
+        }
+        psi.UseShellExecute = false;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.CreateNoWindow = true;
+
+        using var process = Process.Start(psi);
+        Assert.NotNull(process);
+        var diagnostics = new SidecarProcessDiagnostics(process!, string.Empty, "test-drain");
+        try
+        {
+            diagnostics.Attach();
+            Assert.True(process!.WaitForExit(10_000), "redirected helper output was not fully drained");
+            Assert.Equal(0, process.ExitCode);
+        }
+        finally
+        {
+            try { if (!process!.HasExited) process.Kill(); } catch { }
+            diagnostics.Complete("test-finished");
+        }
+    }
+
     [Fact]
     public void StderrSanitizerRedactsTokensAndSignalingBodies()
     {

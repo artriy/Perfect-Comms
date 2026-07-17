@@ -128,6 +128,95 @@ public sealed class VoiceSnapshotTransitionMergerTests
     }
 
     [Fact]
+    public void EndGameToLobbyPartialAuthenticatedRosterRetainsRoutesUntilReplacementCompletes()
+    {
+        var endGame = Snapshot(
+            VoiceGamePhase.EndGame,
+            liveLocal: false,
+            Player(1, 7, isLocal: true),
+            Player(2, 8),
+            Player(3, 9));
+        var earlyLobby = Snapshot(
+            VoiceGamePhase.Lobby,
+            liveLocal: true,
+            Player(1, 7, isLocal: true));
+        var missing = new Dictionary<int, float>();
+
+        var retained = VoiceSnapshotTransitionMerger.Merge(
+            earlyLobby,
+            endGame,
+            new HashSet<int> { 7 },
+            missing,
+            now: 10f,
+            graceSeconds: 3f,
+            retainPreviousClientsMissingFromAuthenticatedRoster: true);
+
+        Assert.Equal(3, retained.Players.Count);
+        Assert.True(retained.TryGetClient(8, out _));
+        Assert.True(retained.TryGetClient(9, out _));
+        Assert.True(retained.RoutingRosterRetained);
+        Assert.False(VoiceSnapshotTransitionMerger.AuthenticatedRosterContainsAllRemoteClients(
+            retained,
+            new HashSet<int> { 7, 8 }));
+        Assert.True(VoiceSnapshotTransitionMerger.AuthenticatedRosterContainsAllRemoteClients(
+            retained,
+            new HashSet<int> { 7, 8, 9 }));
+
+        var completeLobby = VoiceSnapshotTransitionMerger.Merge(
+            Snapshot(
+                VoiceGamePhase.Lobby,
+                liveLocal: true,
+                Player(1, 7, isLocal: true),
+                Player(2, 8),
+                Player(3, 9)),
+            retained,
+            new HashSet<int> { 7, 8, 9 },
+            missing,
+            now: 10.5f,
+            graceSeconds: 3f);
+
+        Assert.Equal(3, completeLobby.Players.Count);
+        Assert.False(completeLobby.RoutingRosterRetained);
+    }
+
+    [Fact]
+    public void EndGameToLobbyIncompleteAuthenticatedRosterStillExpiresAtTransitionBound()
+    {
+        var endGame = Snapshot(
+            VoiceGamePhase.EndGame,
+            liveLocal: false,
+            Player(1, 7, isLocal: true),
+            Player(2, 8));
+        var earlyLobby = Snapshot(
+            VoiceGamePhase.Lobby,
+            liveLocal: true,
+            Player(1, 7, isLocal: true));
+        var missing = new Dictionary<int, float>();
+        var partialAuthentication = new HashSet<int> { 7 };
+
+        var retained = VoiceSnapshotTransitionMerger.Merge(
+            earlyLobby,
+            endGame,
+            partialAuthentication,
+            missing,
+            now: 10f,
+            graceSeconds: 3f,
+            retainPreviousClientsMissingFromAuthenticatedRoster: true);
+        var expired = VoiceSnapshotTransitionMerger.Merge(
+            earlyLobby,
+            retained,
+            partialAuthentication,
+            missing,
+            now: 13f,
+            graceSeconds: 3f,
+            retainPreviousClientsMissingFromAuthenticatedRoster: true);
+
+        Assert.True(retained.TryGetClient(8, out _));
+        Assert.False(expired.TryGetClient(8, out _));
+        Assert.False(expired.RoutingRosterRetained);
+    }
+
+    [Fact]
     public void FirstEndGameAuthenticationCollectionFailureRetainsPriorRoutes()
     {
         var previous = Snapshot(

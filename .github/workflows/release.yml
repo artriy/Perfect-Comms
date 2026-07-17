@@ -90,7 +90,7 @@ jobs:
           cp dl/apm-win-x64/webrtc-apm.x64.dll Libs/dsp/
           cp dl/apm-win-x86/webrtc-apm.x86.dll Libs/dsp/
           cp dl/apm-linux-x64/libwebrtc-apm.so Libs/dsp/
-          cp dl/apm-mac/libwebrtc-apm.dylib Libs/dsp/
+          # macOS APM is sealed inside the signed app; never stage a second pre-sign copy.
       - name: Stage Android voice engine into Libs
         run: |
           mkdir -p Libs/pc-mobile

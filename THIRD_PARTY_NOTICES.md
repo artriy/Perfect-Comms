@@ -18,10 +18,11 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
 ## webrtc-audio-processing (AEC3 + noise suppression + high-pass filter)
 
 - Release files: `Libs/dsp/webrtc-apm.x64.dll`, `Libs/dsp/webrtc-apm.x86.dll`,
-  `Libs/dsp/libwebrtc-apm.so`, `Libs/dsp/libwebrtc-apm.dylib`
+  `Libs/dsp/libwebrtc-apm.so`, and the signed
+  `PerfectCommsAudio.app/Contents/MacOS/libwebrtc-apm.dylib` inside `pc-capture-mac.zip`
 - Upstream: WebRTC AudioProcessingModule (Google), via the PulseAudio standalone fork
-  https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing (v2.1, WebRTC M131). Prebuilt Windows
-  binaries from the `LSXPrime/webrtc-audio-processing` mirror.
+  https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing (v2.1, WebRTC M131). Windows
+  binaries are built by release CI from the vendored `LSXPrime/webrtc-audio-processing` source.
 - License: BSD 3-Clause. Copyright The WebRTC project authors. Full text is in source at
   `Libs/webrtc-apm.COPYING` and in release bundles at
   `licenses/webrtc-audio-processing-BSD-3-Clause.txt`.

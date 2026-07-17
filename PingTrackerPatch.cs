@@ -101,6 +101,7 @@ public static class PingTrackerPatch
     private static Sprite?           _backdropSprite;
     private static float             _nextColorPrewarmTime;
     private const float              ColorPrewarmInterval = 0.25f; // warm one uncached avatar colour per quarter-second
+    private const int                PublicGhostCosmeticReadyWaitFrames = 120;
     private static AspectPosition?   _barAspect;
     private static bool              _layoutVertical;
     private static SpeakingBarPosition _barPosition = SpeakingBarPosition.TopRight;
@@ -122,6 +123,7 @@ public static class PingTrackerPatch
     private static VoiceGamePhase _previousPublicDeathPhase = VoiceGamePhase.Menu;
     private static bool _previousPublicDeathMeetingActive;
     private static bool _publicDeathPublicationPending;
+    private static readonly List<SpeakingBarRosterMember> _publicMeetingCardRoster = new(16);
     private static readonly List<byte> _fixedRoster = new();
     private static readonly HashSet<byte> _fixedRosterSet = new();
     private static readonly Dictionary<byte, SpeakerSlot> _slots = new();
@@ -234,40 +236,77 @@ public static class PingTrackerPatch
 
     private static void UpdatePubliclyDead(VoiceGameStateSnapshot? snapshot)
     {
-        if (snapshot == null) return;
-
-        bool reset = SpeakingBarRosterPolicy.IsPublicDeathResetPhase(snapshot.Phase);
-        bool publish = SpeakingBarRosterPolicy.IsPublicDeathPublicationBoundary(
-            _previousPublicDeathPhase,
-            _previousPublicDeathMeetingActive,
-            snapshot.Phase,
-            snapshot.MeetingActive);
-
-        _previousPublicDeathPhase = snapshot.Phase;
-        _previousPublicDeathMeetingActive = snapshot.MeetingActive;
-        if (reset)
+        if (snapshot != null)
         {
-            _publicDeathPublicationPending = false;
-            if (_publiclyDead.Count == 0) return;
-            ApplyPublishedDeaths(new HashSet<byte>());
+            bool reset = SpeakingBarRosterPolicy.IsPublicDeathResetPhase(snapshot.Phase);
+            bool publish = SpeakingBarRosterPolicy.IsPublicDeathPublicationBoundary(
+                _previousPublicDeathPhase,
+                _previousPublicDeathMeetingActive,
+                snapshot.Phase,
+                snapshot.MeetingActive);
+
+            _previousPublicDeathPhase = snapshot.Phase;
+            _previousPublicDeathMeetingActive = snapshot.MeetingActive;
+            if (reset)
+            {
+                _publicDeathPublicationPending = false;
+                if (_publiclyDead.Count > 0)
+                    ApplyPublishedDeaths(new HashSet<byte>());
+                return;
+            }
+            if (publish)
+                _publicDeathPublicationPending = true;
+            if (_publicDeathPublicationPending
+                && SpeakingBarRosterPolicy.CanPublishFromSnapshot(
+                    snapshot.PlayerEnumerationCompleted,
+                    snapshot.RoutingRosterRetained))
+            {
+                _publicDeathPublicationPending = false;
+
+                // Boundary publication rebuilds from authenticated game state so publicly revived
+                // players can return to the alive group at the next meeting/exile edge.
+                var next = new HashSet<byte>();
+                foreach (var player in snapshot.Players)
+                    if (player.IsDead)
+                        next.Add(player.PlayerId);
+                ApplyPublishedDeaths(next);
+            }
+        }
+
+        PublishMeetingCardDeaths();
+    }
+
+    private static void PublishMeetingCardDeaths()
+    {
+        var meeting = MeetingHud.Instance;
+        if (meeting?.playerStates == null) return;
+
+        _publicMeetingCardRoster.Clear();
+        bool hasNewPublicDeath = false;
+        try
+        {
+            foreach (var card in meeting.playerStates)
+            {
+                if (card == null) continue;
+                if (card.AmDead && !_publiclyDead.Contains(card.TargetPlayerId))
+                    hasNewPublicDeath = true;
+                _publicMeetingCardRoster.Add(new SpeakingBarRosterMember(
+                    card.TargetPlayerId,
+                    card.AmDead));
+            }
+        }
+        catch
+        {
+            // MeetingHud can be destroyed while IL2CPP is enumerating its cards. Keep the last
+            // public snapshot and retry next frame instead of publishing a partial card roster.
+            _publicMeetingCardRoster.Clear();
             return;
         }
-        if (publish)
-            _publicDeathPublicationPending = true;
-        if (!_publicDeathPublicationPending) return;
-        if (!SpeakingBarRosterPolicy.CanPublishFromSnapshot(
-                snapshot.PlayerEnumerationCompleted,
-                snapshot.RoutingRosterRetained))
-            return;
 
-        _publicDeathPublicationPending = false;
-
-        // Roster work happens only on a public boundary, never on every task frame.
-        var next = new HashSet<byte>();
-        foreach (var player in snapshot.Players)
-            if (player.IsDead)
-                next.Add(player.PlayerId);
-        ApplyPublishedDeaths(next);
+        if (!hasNewPublicDeath) return;
+        ApplyPublishedDeaths(SpeakingBarRosterPolicy.AddPubliclyObservedDeaths(
+            _publiclyDead,
+            _publicMeetingCardRoster));
     }
 
     private static void ApplyPublishedDeaths(HashSet<byte> next)
@@ -291,6 +330,7 @@ public static class PingTrackerPatch
         _previousPublicDeathPhase = VoiceGamePhase.Menu;
         _previousPublicDeathMeetingActive = false;
         _publicDeathPublicationPending = false;
+        _publicMeetingCardRoster.Clear();
     }
 
     private static SpeakingBarNamePosition ResolveNamePosition()
@@ -374,9 +414,11 @@ public static class PingTrackerPatch
                 }
                 continue;
             }
-            if (player == null)
-                continue;
-            AddSlot(id, 0f);
+            // EndGame destroys the live PlayerControls together with the gameplay scene. The
+            // snapshot still owns the authenticated roster and the avatar renderer keeps the last
+            // resolved outfit, so fixed mode can rebuild a stable slot without a live player.
+            snapshot.TryGetPlayer(id, out var snapshotPlayer);
+            AddSlot(id, 0f, snapshotPlayer.PlayerName);
             if (_slots.TryGetValue(id, out var slot) && !_activeSpeakerIds.Contains(id))
             {
                 slot.IsSpeaking = false;
@@ -426,6 +468,7 @@ public static class PingTrackerPatch
                 slot.GhostAppearanceIcon = null;
                 slot.HasAppliedPublicGhost = false;
                 slot.AppliedPublicGhost = false;
+                slot.PublicGhostCosmeticRefreshFrames = 0;
                 continue;
             }
 
@@ -434,7 +477,64 @@ public static class PingTrackerPatch
                 slot.HasAppliedPublicGhost,
                 slot.AppliedPublicGhost,
                 publiclyDead);
-            if (!iconChanged && !stateChanged)
+            var cosmeticRefresh = SpeakingBarGhostAppearancePolicy.ResolveCosmeticRefresh(
+                iconChanged,
+                slot.HasAppliedPublicGhost,
+                slot.AppliedPublicGhost,
+                publiclyDead);
+            if (cosmeticRefresh == SpeakingBarGhostCosmeticRefresh.Ghost)
+                slot.PublicGhostCosmeticRefreshFrames = PublicGhostCosmeticReadyWaitFrames;
+            else if (cosmeticRefresh == SpeakingBarGhostCosmeticRefresh.Living)
+                slot.PublicGhostCosmeticRefreshFrames = 0;
+
+            bool retryGhostCosmetics = publiclyDead
+                                       && slot.PublicGhostCosmeticRefreshFrames > 0;
+            if (!iconChanged && !stateChanged && !retryGhostCosmetics)
+                continue;
+
+            bool cosmeticsRefreshed = false;
+            if (!_showFake15Players)
+            {
+                var player = FindPlayer(kv.Key);
+                if (player != null)
+                {
+                    if (cosmeticRefresh == SpeakingBarGhostCosmeticRefresh.Living)
+                    {
+                        CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(slot.IconGO, player, kv.Key);
+                        slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
+                        cosmeticsRefreshed = true;
+                    }
+                    else if (retryGhostCosmetics)
+                    {
+                        slot.PublicGhostCosmeticRefreshFrames--;
+                        bool ghostCosmeticsReady =
+                            CrewmateAvatarRenderer.IsLiveGhostBodyApplied(player);
+                        if (ghostCosmeticsReady || slot.PublicGhostCosmeticRefreshFrames <= 0)
+                        {
+                            CrewmateAvatarRenderer.TryRefreshPublicGhostCosmetics(slot.IconGO, player);
+                            slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
+                            slot.PublicGhostCosmeticRefreshFrames = 0;
+                            cosmeticsRefreshed = true;
+                        }
+                    }
+                    if (cosmeticsRefreshed)
+                    {
+                        _layoutDirty = true;
+                        _sortingDirty = true;
+                    }
+                }
+                else if (retryGhostCosmetics)
+                {
+                    // EndGame can only use the last cached outfit because PlayerControls no longer exist.
+                    slot.PublicGhostCosmeticRefreshFrames = 0;
+                }
+            }
+            else if (retryGhostCosmetics)
+            {
+                slot.PublicGhostCosmeticRefreshFrames = 0;
+            }
+
+            if (!iconChanged && !stateChanged && !cosmeticsRefreshed)
                 continue;
 
             // Real slots are requested only from the privacy-gated _publiclyDead snapshot, never
@@ -1199,7 +1299,7 @@ public static class PingTrackerPatch
         }
     }
 
-    private static void AddSlot(byte playerId, float voiceLevel)
+    private static void AddSlot(byte playerId, float voiceLevel, string? fallbackName = null)
     {
         if (_barRoot == null) return;
 
@@ -1240,9 +1340,15 @@ public static class PingTrackerPatch
             SpeakingBarVisualMetrics.MaximumLabelHeight);
         slot.LabelTMP = tmp;
         UpdateSlotLabel(slot, player);
-        // End-game (no live PlayerControl): label from the cached voice profile name so it isn't blank.
-        if (player == null && _activeSpeakerNames.TryGetValue(playerId, out var fallbackName) && !string.IsNullOrWhiteSpace(fallbackName))
-            slot.LabelTMP.text = fallbackName;
+        // End-game (no live PlayerControl): fixed mode supplies the retained snapshot name, while
+        // dynamic mode can use the authenticated voice profile of the active speaker.
+        if (player == null)
+        {
+            if (string.IsNullOrWhiteSpace(fallbackName))
+                _activeSpeakerNames.TryGetValue(playerId, out fallbackName);
+            if (!string.IsNullOrWhiteSpace(fallbackName))
+                slot.LabelTMP.text = fallbackName;
+        }
         VCOverlayCamera.EnsureOnTop(labelGO);
         VoiceFrameProfiler.End("overlay.labelcreate", labelTicks);
         _slots[playerId] = slot;
@@ -2141,6 +2247,7 @@ public static class PingTrackerPatch
         public GameObject?       GhostAppearanceIcon;
         public bool              HasAppliedPublicGhost;
         public bool              AppliedPublicGhost;
+        public int               PublicGhostCosmeticRefreshFrames;
         public bool              PreviewGhostArtReady;
     }
 }

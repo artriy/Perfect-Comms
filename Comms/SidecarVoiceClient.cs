@@ -719,6 +719,28 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private void KillLaunch()
     {
         var launch = Interlocked.Exchange(ref _launchResult, null);
+        if (launch?.Wine == true)
+        {
+            if (launch.WineControl is { } control)
+                SidecarLauncher.RequestWineLaunchCancellation(control);
+            try
+            {
+                new Thread(() => KillLaunch(launch))
+                {
+                    IsBackground = true,
+                    Name = "SidecarFailedLaunchCleanup",
+                }.Start();
+                VoiceDiagnostics.Log(
+                    "sidecar.lifecycle",
+                    $"event=failed-launch-cleanup-detached pid={launch.Pid}");
+                return;
+            }
+            catch
+            {
+                // Thread creation failure is exceptional; complete cleanup synchronously rather
+                // than leaking the host supervisor. Cancellation was already published above.
+            }
+        }
         KillLaunch(launch);
     }
 
@@ -740,10 +762,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         if (launch == null) return;
         var killed = false;
         var exited = false;
-        var hostTerminationRequested = false;
+        var helperExitVerified = false;
+        var helperExitCode = 0;
+        var cancellationRequested = false;
         try
         {
-            if (launch.Process != null && !launch.Process.HasExited)
+            if (!launch.Wine && launch.Process != null && !launch.Process.HasExited)
             {
                 launch.Process.Kill();
                 killed = true;
@@ -752,14 +776,31 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             else
                 exited = launch.Process?.HasExited ?? true;
 
-            // Under Wine/CrossOver, launch.Process is start.exe rather than the native Unix
-            // helper. The authenticated stop frame above is graceful; SIGTERM is the final
-            // process-level backstop so a broken IPC connection cannot leave pc-capture behind
-            // after the room lease ends. launch.Pid comes from the helper-owned handshake file.
-            if (WineEnvironment.IsWine && launch.Pid > 0)
+            if (launch.Wine && launch.WineControl is { } control)
             {
-                WineEnvironment.HostExec("/bin/kill", $"-TERM {launch.Pid}");
-                hostTerminationRequested = true;
+                // The authenticated StopFrame and TCP EOF are the primary lifetime boundary.
+                // The host shell owns and waits for this exact child, then publishes a
+                // nonce-bound exit receipt. Waiting slightly beyond the native three-second EOF
+                // fail-safe avoids sending SIGTERM to a PID that may already have been reused.
+                helperExitVerified = SidecarLauncher.WaitForWineHelperExit(
+                    control,
+                    launch.Pid,
+                    SidecarLauncher.WineHelperExitWaitMs,
+                    out helperExitCode);
+                if (!helperExitVerified)
+                    cancellationRequested = SidecarLauncher.RequestWineLaunchCancellation(control);
+            }
+            if (launch.Wine && launch.Process != null)
+            {
+                // launch.Process is only the Wine start.exe proxy. Host ownership/cancellation is
+                // nonce-bound above, so keeping a wedged proxy alive serves no purpose and leaks a
+                // process on every reconnect attempt.
+                if (!launch.Process.HasExited)
+                {
+                    launch.Process.Kill();
+                    killed = true;
+                }
+                exited = launch.Process.WaitForExit(500) || launch.Process.HasExited;
             }
         }
         catch (Exception ex)
@@ -769,21 +810,26 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         finally
         {
             launch.Diagnostics?.Complete("client-stop");
+            try { launch.Process?.Dispose(); } catch { }
         }
-        try
+        var cleanupAllowed = !launch.Wine || helperExitVerified || !launch.WineSupervisorOwned;
+        if (cleanupAllowed)
         {
-            SidecarLauncher.CleanupTemporaryPaths(
-                launch.HandshakePath,
-                launch.TemporaryDirectory,
-                launch.TemporaryRoot);
-        }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log("sidecar.lifecycle", $"event=handshake-cleanup-failed pid={launch.Pid} error={ExceptionDiagnostic(ex)}");
+            try
+            {
+                SidecarLauncher.CleanupTemporaryPaths(
+                    launch.HandshakePath,
+                    launch.TemporaryDirectory,
+                    launch.TemporaryRoot);
+            }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("sidecar.lifecycle", $"event=handshake-cleanup-failed pid={launch.Pid} error={ExceptionDiagnostic(ex)}");
+            }
         }
         VoiceDiagnostics.Log(
             "sidecar.lifecycle",
-            $"event=process-release pid={launch.Pid} launcherKilled={killed} launcherExited={exited} hostTerminationRequested={hostTerminationRequested}");
+            $"event=process-release pid={launch.Pid} wine={launch.Wine.ToString().ToLowerInvariant()} launcherKilled={killed} launcherExited={exited} helperExitVerified={helperExitVerified.ToString().ToLowerInvariant()} helperExitCode={(helperExitVerified ? helperExitCode : -1)} cancellationRequested={cancellationRequested.ToString().ToLowerInvariant()} cleanupDeferred={(!cleanupAllowed).ToString().ToLowerInvariant()}");
     }
 
     private void ReadLoop(object? state)
