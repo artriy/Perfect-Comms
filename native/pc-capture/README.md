@@ -11,7 +11,7 @@ Also runs DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus
 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the WebRTC
 (webrtc-rs) peer transport with proximity mixing, so mic, peer audio, and
 playback all live in this helper. Android uses the same DRED-capable codec while
-intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 9.
+intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 10.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -24,8 +24,9 @@ added peer cannot recover speech from before it joined.
 pc-capture --handshake <path> [--synthetic-tone]
 ```
 
-- The launcher writes the session auth token as a single line to the helper's
-  STDIN.
+- Native launch writes the session auth token as a single line to the helper's
+  STDIN. Wine/CrossOver launch uses a create-new token file inside a per-launch
+  mode-`0700` directory and verifies mode `0600` before starting the helper.
 - The helper binds 127.0.0.1:0, writes `{"port":<int>,"pid":<int>}` atomically
   to `<path>`, then accepts a single client (a second connection is rejected).
 - `--synthetic-tone` replaces real capture with a 220 Hz, 0.012-peak sine (CI / field

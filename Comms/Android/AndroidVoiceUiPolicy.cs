@@ -41,6 +41,6 @@ internal static class AndroidVoiceUiPolicy
     }
 
     internal const string SpeakerTooltipAction =
-        "Tap the speaker button to mute or unmute incoming voice.";
+        "Tap to deafen or undeafen. Deafening mutes playback and pauses microphone transmission.";
 }
 #endif

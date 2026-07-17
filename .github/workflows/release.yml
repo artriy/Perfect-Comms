@@ -10,7 +10,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   quality:
@@ -29,7 +33,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify release tag matches source version
+      - name: Verify release changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
+          grep -Fqx "## Perfect Comms v$project_version" CHANGELOG.md || {
+            echo "CHANGELOG.md is missing the exact heading: ## Perfect Comms v$project_version" >&2
+            exit 1
+          }
+      - name: Verify release tag matches source version and current main tip
         if: github.ref_type == 'tag'
         shell: bash
         run: |
@@ -51,10 +64,12 @@ jobs:
             exit 1
           fi
           git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
-            echo "release tag $GITHUB_REF_NAME does not point to a commit on main" >&2
+          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          main_commit="$(git rev-parse "refs/remotes/origin/main^{commit}")"
+          if [[ "$tag_commit" != "$main_commit" ]]; then
+            echo "release tag $GITHUB_REF_NAME must point to the current main tip: tag=$tag_commit main=$main_commit" >&2
             exit 1
-          }
+          fi
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "9.0.x"
@@ -96,16 +111,16 @@ jobs:
       - name: Upload Steam/itch.io x86 dependency artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PerfectComms+dependencies-win-x86-steam-itch.zip
-          path: artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip
+          name: "PerfectComms+dependencies x86.zip"
+          path: "artifacts/PerfectComms+dependencies x86.zip"
           if-no-files-found: error
           retention-days: 14
           overwrite: true
       - name: Upload Epic Games Store/Microsoft Store x64 dependency artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PerfectComms+dependencies-win-x64-epic-msstore.zip
-          path: artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip
+          name: "PerfectComms+dependencies x64.zip"
+          path: "artifacts/PerfectComms+dependencies x64.zip"
           if-no-files-found: error
           retention-days: 14
           overwrite: true
@@ -118,13 +133,42 @@ jobs:
             artifacts/PerfectCommsAndroid.dll
           if-no-files-found: error
           retention-days: 14
-      - name: Upload release assets
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: package
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Steam/itch.io x86 dependency artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: "PerfectComms+dependencies x86.zip"
+          path: artifacts
+      - name: Download Epic Games Store/Microsoft Store x64 dependency artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: "PerfectComms+dependencies x64.zip"
+          path: artifacts
+      - name: Download standalone DLL artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: PerfectComms-standalone-dlls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Verify downloaded release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "artifacts/PerfectComms+dependencies x86.zip"
+          test -s "artifacts/PerfectComms+dependencies x64.zip"
+          test -s artifacts/PerfectComms.dll
+          test -s artifacts/PerfectCommsAndroid.dll
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
-        if: github.event_name == 'push' && github.ref_type == 'tag'
         with:
           generate_release_notes: true
           files: |
-            artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip
-            artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip
+            artifacts/PerfectComms+dependencies x86.zip
+            artifacts/PerfectComms+dependencies x64.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll

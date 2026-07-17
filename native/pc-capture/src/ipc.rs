@@ -1456,31 +1456,47 @@ fn capture_frame_authorized(frame_epoch: u64, active_epoch: u64, requested_epoch
     frame_epoch == active_epoch && requested_epoch == active_epoch
 }
 
-#[allow(clippy::while_let_loop)]
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
-    // Establish the process-local monotonic epoch before either audio stream can callback.
-    let _ = monotonic_ns();
+    let Some(reader) = authenticate_session(&stream, cfg)? else {
+        return Ok(());
+    };
+    run_authenticated_session(stream, cfg, reader)
+}
+
+fn authenticate_session(
+    stream: &TcpStream,
+    cfg: &ServerConfig,
+) -> std::io::Result<Option<BufReader<TcpStream>>> {
     stream.set_nodelay(true).ok();
     stream
         .set_write_timeout(Some(Duration::from_millis(250)))
         .ok();
-
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let mut reader = BufReader::new(stream.try_clone()?);
-    let conn = Arc::new(Mutex::new(stream.try_clone()?));
-
     let first = match read_frame_checked(&mut reader) {
         Ok(Frame::Control(s)) => s,
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
     let op = match parse_inbound(&first) {
         Ok(op) => op,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
     if validate_hello(&op, &cfg.token) != HelloResult::Accept {
-        return Ok(());
+        return Ok(None);
     }
     stream.set_read_timeout(None).ok();
+    Ok(Some(reader))
+}
+
+#[allow(clippy::while_let_loop)]
+fn run_authenticated_session(
+    stream: TcpStream,
+    cfg: &ServerConfig,
+    mut reader: BufReader<TcpStream>,
+) -> std::io::Result<()> {
+    // Establish the process-local monotonic epoch before either audio stream can callback.
+    let _ = monotonic_ns();
+    let conn = Arc::new(Mutex::new(stream.try_clone()?));
 
     // Codec initialization is a session prerequisite even when microphone capture is absent:
     // receive-only users still need decoding, and a helper that can report levels but never
@@ -2397,7 +2413,12 @@ pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
         }
     });
 
-    let first = accept_single(&listener)?;
+    let (first, reader) = loop {
+        let candidate = accept_single(&listener)?;
+        if let Some(reader) = authenticate_session(&candidate, &cfg)? {
+            break (candidate, reader);
+        }
+    };
     connected.store(true, Ordering::Relaxed);
 
     let reject_listener = listener.try_clone()?;
@@ -2407,7 +2428,7 @@ pub fn serve(cfg: ServerConfig) -> std::io::Result<()> {
         }
     });
 
-    let result = run_session(first, &cfg);
+    let result = run_authenticated_session(first, &cfg, reader);
 
     drop(listener);
     let _ = std::fs::remove_file(&cfg.handshake_path);
@@ -3105,7 +3126,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_writes_handshake_and_rejects_second_connection() {
+    fn serve_ignores_unauthorized_first_connector_and_rejects_extra_session() {
         let hs = std::env::temp_dir().join(format!("pc-serve-hs-{}.json", std::process::id()));
         let hs_for_thread = hs.clone();
         let cfg = ServerConfig {
@@ -3133,6 +3154,25 @@ mod tests {
         }
         assert_ne!(port, 0, "handshake file never produced a port");
 
+        let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        unauthorized
+            .write_all(&encode_control(
+                r#"{"op":"hello","proto":10,"token":"wrong"}"#,
+            ))
+            .unwrap();
+        let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
+        let mut unauthorized_probe = [0u8; 1];
+        use std::io::Read;
+        assert_eq!(
+            unauthorized_reader
+                .read(&mut unauthorized_probe)
+                .unwrap_or(0),
+            0,
+            "unauthorized connector should close without claiming the helper"
+        );
+        drop(unauthorized_reader);
+        drop(unauthorized);
+
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
@@ -3159,7 +3199,6 @@ mod tests {
             other => panic!("expected busy error, got {other:?}"),
         }
         let mut probe = [0u8; 1];
-        use std::io::Read;
         let n = r2.read(&mut probe).unwrap_or(0);
         assert_eq!(
             n, 0,

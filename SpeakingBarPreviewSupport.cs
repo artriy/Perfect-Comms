@@ -164,6 +164,12 @@ internal static class SpeakingBarLivePreviewTransitionPolicy
     }
 }
 
+internal static class SpeakingBarLivePreviewLifecyclePolicy
+{
+    internal static bool ShouldDisableForCategory(VoiceSettingsCategory category)
+        => category != VoiceSettingsCategory.Hud;
+}
+
 /// <summary>
 /// Pure sizing policy for placing the unchanged settings card and preview card side-by-side.
 /// </summary>

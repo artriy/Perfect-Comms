@@ -25,6 +25,134 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
+    public void UnsupportedNativePlatformsAndArchitecturesFailClosed()
+    {
+        Assert.Throws<PlatformNotSupportedException>(() => SidecarLauncher.TargetTripleFor(
+            wine: false,
+            WineHostOs.Unknown,
+            windows: true,
+            macOs: false,
+            linux: false,
+            System.Runtime.InteropServices.Architecture.Arm64));
+        Assert.Throws<PlatformNotSupportedException>(() => SidecarLauncher.TargetTripleFor(
+            wine: false,
+            WineHostOs.Unknown,
+            windows: false,
+            macOs: false,
+            linux: false,
+            System.Runtime.InteropServices.Architecture.X64));
+        Assert.Equal("x86_64-unknown-linux-gnu", SidecarLauncher.TargetTripleFor(
+            wine: false,
+            WineHostOs.Unknown,
+            windows: false,
+            macOs: false,
+            linux: true,
+            System.Runtime.InteropServices.Architecture.X64));
+    }
+
+    [Fact]
+    public void WineBootstrapLocksPrivateDirectoryBeforeCreatingToken()
+    {
+        var root = NewTemporaryDirectory();
+        var permissionCalls = 0;
+        try
+        {
+            bool SetPermissions(string program, string arguments)
+            {
+                Assert.Equal("/bin/chmod", program);
+                permissionCalls++;
+                var directory = Assert.Single(Directory.EnumerateDirectories(root));
+                if (permissionCalls == 1)
+                {
+                    Assert.StartsWith("700 ", arguments, StringComparison.Ordinal);
+                    Assert.Empty(Directory.EnumerateFiles(directory));
+                }
+                else
+                {
+                    Assert.StartsWith("600 ", arguments, StringComparison.Ordinal);
+                    Assert.True(File.Exists(Path.Combine(directory, "token")));
+                }
+                return true;
+            }
+
+            var paths = SidecarLauncher.CreateTemporaryPaths(
+                wine: true,
+                static path => path,
+                SetPermissions,
+                root);
+            Assert.NotNull(paths.PrivateDirectory);
+            Assert.Equal(Path.Combine(paths.PrivateDirectory!, "handshake.json"), paths.HandshakePath);
+
+            var tokenFile = SidecarLauncher.CreateWineTokenFile(
+                paths,
+                "test-secret",
+                static path => path,
+                SetPermissions);
+            Assert.Equal("test-secret", File.ReadAllText(tokenFile));
+            Assert.Throws<IOException>(() => SidecarLauncher.CreateWineTokenFile(
+                paths,
+                "replacement",
+                static path => path,
+                SetPermissions));
+            Assert.Equal(2, permissionCalls);
+
+            SidecarLauncher.CleanupTemporaryPaths(
+                paths.HandshakePath,
+                paths.PrivateDirectory,
+                paths.PrivateRoot);
+            Assert.Empty(Directory.EnumerateDirectories(root));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void WineCleanupRejectsPrefixNamedDirectoryOutsideOwningRoot()
+    {
+        var parent = NewTemporaryDirectory();
+        var owningRoot = Path.Combine(parent, "owning-root");
+        var outside = Path.Combine(parent, "perfect-comms-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(owningRoot);
+        Directory.CreateDirectory(outside);
+        var sentinel = Path.Combine(outside, "handshake.json");
+        File.WriteAllText(sentinel, "keep");
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => SidecarLauncher.CleanupTemporaryPaths(
+                sentinel,
+                outside,
+                owningRoot));
+            Assert.True(File.Exists(sentinel));
+        }
+        finally
+        {
+            Directory.Delete(parent, true);
+        }
+    }
+
+    [Fact]
+    public void WineBootstrapRemovesDirectoryWhenPermissionSetupFails()
+    {
+        var root = NewTemporaryDirectory();
+        try
+        {
+            Assert.Throws<UnauthorizedAccessException>(() => SidecarLauncher.CreateTemporaryPaths(
+                wine: true,
+                static path => path,
+                static (_, _) => false,
+                root));
+            Assert.Empty(Directory.EnumerateDirectories(root));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public void DeviceEnumerationFileRequiresStructuredInputAndOutputLists()
     {
         var directory = NewTemporaryDirectory();
@@ -277,7 +405,7 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
-    public void MacContentAddressedBundleIgnoresArchiveEntryTimestamps()
+    public void MacContentAddressedBundleRepairsCorruptionWithoutTimestampHeuristics()
     {
         var baseDirectory = NewTemporaryDirectory();
         const string triple = "aarch64-apple-darwin";
@@ -294,7 +422,7 @@ public sealed class SidecarLauncherCacheTests
             var reused = SidecarLauncher.ExtractMacApp(zip, triple, baseDirectory, version);
 
             Assert.Equal(inner, reused);
-            Assert.Equal("cached-sentinel", File.ReadAllText(reused));
+            Assert.Equal("helper-bytes", File.ReadAllText(reused));
         }
         finally
         {

@@ -94,4 +94,28 @@ public sealed class VoiceDiagnosticsProductionTests
         Assert.DoesNotContain('\r', safe);
         Assert.DoesNotContain('\n', safe);
     }
+
+    [Fact]
+    public void ShareableDiagnosticsKeyHashLobbyIdentifiers()
+    {
+        const string room = "ABCDEF";
+        const string region = "Custom Server 10.0.0.25:22023";
+
+        string roomDescription = VoiceDiagnostics.DescribeRoom(room);
+        string regionDescription = VoiceDiagnostics.DescribeRegion(region);
+
+        Assert.Equal(roomDescription, VoiceDiagnostics.DescribeRoom(room));
+        Assert.Contains("roomHash=", roomDescription);
+        Assert.Contains("regionHash=", regionDescription);
+        Assert.False(roomDescription.Contains(room, StringComparison.Ordinal));
+        Assert.False(regionDescription.Contains(region, StringComparison.Ordinal));
+        Assert.NotEqual(roomDescription, VoiceDiagnostics.DescribeRoom("FEDCBA"));
+    }
+
+    [Fact]
+    public void MissingSensitiveDiagnosticValuesDoNotInventIdentifiers()
+    {
+        Assert.Equal("roomPresent=false", VoiceDiagnostics.DescribeRoom(null));
+        Assert.Equal("regionPresent=false", VoiceDiagnostics.DescribeRegion(""));
+    }
 }

@@ -1,6 +1,6 @@
 # Host Options & Tabs
 
-Give the host configurable voice settings for your mod, and your own tab in the Perfect Comms host settings panel. Option values are **synced from the host to every client** automatically over the authenticated settings RPC - you never touch networking.
+Give the host configurable voice settings for your mod, and your own tab in the Perfect Comms host settings panel. Option values are **synced from the host to every client** automatically over the host-settings custom RPC - you never touch networking. Its host-object checks are for lobby compatibility, not hostile-client authentication; see [Privacy](../PRIVACY.md) for the trust boundary.
 
 ← Back to **[Mod Integration](Mod-Integration)**
 

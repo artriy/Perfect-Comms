@@ -58,7 +58,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public event Action<float, bool>? OnLevel;
     public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
     public event Action<SidecarPlaybackState>? OnPlaybackState;
-    private int _deadRaised;
+    private long _deadNotificationState;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _outputDevices;
 
@@ -166,12 +166,13 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             _stream = stream;
             _reader = reader;
             _heartbeat = heartbeat;
+            ResetDeadNotification(ref _deadNotificationState, generation);
+            _running = true;
+            SetHealth(CaptureHealth.Healthy);
         }
-        _running = true;
-        SetHealth(CaptureHealth.Healthy);
         reader.Start(new ReaderLoopState(stream, generation));
         Volatile.Write(ref _lastPongTick, Environment.TickCount64);
-        heartbeat.Start(stream);
+        heartbeat.Start(new ReaderLoopState(stream, generation));
         VoiceDiagnostics.Log("sidecar.lifecycle", $"event=running proto={Proto} pid={launch.Pid}");
         return true;
     }
@@ -587,8 +588,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         error = "";
         var buffer = new byte[8192];
         var have = 0;
-        var deadline = Environment.TickCount + HandshakeTimeoutMs;
-        while (Environment.TickCount < deadline)
+        var startedAt = Environment.TickCount64;
+        while (IsHandshakePending(startedAt, Environment.TickCount64))
         {
             if (have == buffer.Length)
             {
@@ -630,15 +631,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     public void Stop()
     {
-        Interlocked.Increment(ref _startGeneration);
-        var wasRunning = _running;
-        _running = false;
         TcpClient? client;
         NetworkStream? stream;
         Thread? reader;
         Thread? heartbeat;
+        bool wasRunning;
         lock (_gate)
         {
+            Interlocked.Increment(ref _startGeneration);
+            wasRunning = _running;
+            _running = false;
             client = _client;
             stream = _stream;
             reader = _reader;
@@ -647,9 +649,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             _stream = null;
             _reader = null;
             _heartbeat = null;
+            SetHealth(CaptureHealth.Dead);
         }
         var launch = Interlocked.Exchange(ref _launchResult, null);
-        SetHealth(CaptureHealth.Dead);
         if (wasRunning || stream != null)
             VoiceDiagnostics.Log("sidecar.lifecycle", "event=stop-detached health=Dead cleanup=background");
 
@@ -770,8 +772,10 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
         try
         {
-            if (!string.IsNullOrEmpty(launch.HandshakePath) && System.IO.File.Exists(launch.HandshakePath))
-                System.IO.File.Delete(launch.HandshakePath);
+            SidecarLauncher.CleanupTemporaryPaths(
+                launch.HandshakePath,
+                launch.TemporaryDirectory,
+                launch.TemporaryRoot);
         }
         catch (Exception ex)
         {
@@ -791,22 +795,32 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         var buffer = new byte[1 << 16];
         var have = 0;
         var exitReason = "stopped";
-        while (_running)
+        while (IsWorkerGenerationCurrent(
+                   _running,
+                   Volatile.Read(ref _startGeneration),
+                   managedGeneration))
         {
             int read;
             try { read = stream.Read(buffer, have, buffer.Length - have); }
             catch (Exception ex)
             {
                 exitReason = "read-exception";
-                if (_running)
+                if (IsWorkerGenerationCurrent(
+                        _running,
+                        Volatile.Read(ref _startGeneration),
+                        managedGeneration))
                     VoiceDiagnostics.Log("sidecar.reader", $"event=read-failed bufferedBytes={have} error={ExceptionDiagnostic(ex)}");
                 break;
             }
+            if (!IsWorkerGenerationCurrent(
+                    _running,
+                    Volatile.Read(ref _startGeneration),
+                    managedGeneration))
+                break;
             if (read <= 0)
             {
                 exitReason = "end-of-stream";
-                if (_running)
-                    VoiceDiagnostics.Log("sidecar.reader", $"event=stream-closed bufferedBytes={have}");
+                VoiceDiagnostics.Log("sidecar.reader", $"event=stream-closed bufferedBytes={have}");
                 break;
             }
             have += read;
@@ -867,7 +881,10 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 Array.Resize(ref buffer, Math.Min(buffer.Length * 2, cap));
             }
         }
-        if (_running)
+        if (IsWorkerGenerationCurrent(
+                _running,
+                Volatile.Read(ref _startGeneration),
+                managedGeneration))
         {
             VoiceDiagnostics.Log("sidecar.lifecycle", $"event=reader-ended reason={exitReason} health=Dead bufferedBytes={have}");
             SetHealth(CaptureHealth.Dead);
@@ -876,6 +893,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     private void HandleStreamingControl(string json, int payloadBytes, int managedGeneration)
     {
+        if (!IsWorkerGenerationCurrent(
+                _running,
+                Volatile.Read(ref _startGeneration),
+                managedGeneration))
+            return;
+
         var op = SidecarProtocol.ReadOp(json);
         if (string.IsNullOrEmpty(op))
         {
@@ -916,7 +939,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             // Unknown streaming errors are fatal unless the protocol explicitly classifies them as
             // recoverable. RaiseDead (rather than merely changing Health) gives the host/backend one
             // coherent restart path and preserves the exactly-once dead notification contract.
-            RaiseDead($"helper error code={SafeDiagnosticText(code, 64)}");
+            RaiseDead($"helper error code={SafeDiagnosticText(code, 64)}", managedGeneration);
         }
         else if (op == "pong")
         {
@@ -1609,26 +1632,40 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     private void HeartbeatLoop(object? state)
     {
+        var heartbeatState = (ReaderLoopState)state!;
+        var stream = heartbeatState.Stream;
+        var managedGeneration = heartbeatState.ManagedGeneration;
         var ping = SidecarProtocol.PingFrame();
-        while (_running)
+        while (IsWorkerGenerationCurrent(
+                   _running,
+                   Volatile.Read(ref _startGeneration),
+                   managedGeneration))
         {
             Thread.Sleep(PingIntervalMs);
-            if (!_running) break;
+            if (!IsWorkerGenerationCurrent(
+                    _running,
+                    Volatile.Read(ref _startGeneration),
+                    managedGeneration))
+                break;
             try
             {
-                Write(ping);
+                lock (_writeLock)
+                {
+                    stream.Write(ping, 0, ping.Length);
+                    stream.Flush();
+                }
             }
             catch (Exception ex)
             {
                 VoiceDiagnostics.Log("sidecar.heartbeat", $"event=write-failed error={ExceptionDiagnostic(ex)}");
-                RaiseDead("heartbeat write failed");
+                RaiseDead("heartbeat write failed", managedGeneration);
                 break;
             }
             var sincePong = Environment.TickCount64 - Volatile.Read(ref _lastPongTick);
             if (sincePong > (long)PingIntervalMs * MissedPongLimit)
             {
                 VoiceDiagnostics.Log("sidecar", $"heartbeat: {sincePong}ms since last pong -> Dead");
-                RaiseDead("heartbeat pong timeout");
+                RaiseDead("heartbeat pong timeout", managedGeneration);
                 break;
             }
         }
@@ -1639,17 +1676,45 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     internal static bool IsRecoverableHelperError(string? code)
         => string.Equals(code, "mic-error", StringComparison.OrdinalIgnoreCase);
 
-    private void RaiseDead(string reason)
+    internal static bool IsHandshakePending(long startedAt, long now)
+        => now >= startedAt && now - startedAt < HandshakeTimeoutMs;
+
+    internal static bool IsWorkerGenerationCurrent(bool running, int currentGeneration, int workerGeneration)
+        => running && currentGeneration == workerGeneration;
+
+    private static long DeadNotificationState(int generation, bool raised)
+        => unchecked(((long)generation << 1) | (raised ? 1L : 0L));
+
+    internal static void ResetDeadNotification(ref long state, int generation)
+        => Volatile.Write(ref state, DeadNotificationState(generation, raised: false));
+
+    internal static bool TryBeginDeadNotification(ref long state, int generation)
     {
-        SetHealth(CaptureHealth.Dead);
-        VoiceDiagnostics.Log("sidecar.lifecycle", $"event=dead reason=\"{SafeDiagnosticText(reason, 160)}\"");
-        if (Interlocked.Exchange(ref _deadRaised, 1) == 0)
+        var expected = DeadNotificationState(generation, raised: false);
+        return Interlocked.CompareExchange(
+            ref state,
+            DeadNotificationState(generation, raised: true),
+            expected) == expected;
+    }
+
+    private void RaiseDead(string reason, int managedGeneration)
+    {
+        lock (_gate)
         {
-            try { OnDead?.Invoke(reason); }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("sidecar.event", $"op=dead event=handler-failed error={ExceptionDiagnostic(ex)}");
-            }
+            if (!IsWorkerGenerationCurrent(
+                    _running,
+                    Volatile.Read(ref _startGeneration),
+                    managedGeneration)
+                || !TryBeginDeadNotification(ref _deadNotificationState, managedGeneration))
+                return;
+
+            SetHealth(CaptureHealth.Dead);
+        }
+        VoiceDiagnostics.Log("sidecar.lifecycle", $"event=dead reason=\"{SafeDiagnosticText(reason, 160)}\"");
+        try { OnDead?.Invoke(reason); }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("sidecar.event", $"op=dead event=handler-failed error={ExceptionDiagnostic(ex)}");
         }
     }
 

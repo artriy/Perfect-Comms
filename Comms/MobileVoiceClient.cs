@@ -17,6 +17,7 @@ internal sealed class MobileVoiceClient : IDisposable
     private const int MicFrame = SidecarProtocol.AudioSamples;         // 960 mono @ 48k (20ms)
     private const int PlaybackFrame = SidecarProtocol.AudioOutSamples; // 1920 interleaved stereo
     private const int SignalBufBytes = 64 * 1024;
+    private const int MaximumSignalBufBytes = SidecarProtocol.MaxPayloadBytes + 1;
     private const int ShutdownTimeoutMs = 2_000;
     private const int InitialStartRetryMs = 500;
     private const int MaximumStartRetryMs = 30_000;
@@ -327,6 +328,17 @@ internal sealed class MobileVoiceClient : IDisposable
                     Dispatch(Encoding.UTF8.GetString(buf, 0, got));
                     continue;
                 }
+                if (got == -1)
+                {
+                    var nextSize = NextSignalBufferSize(buf.Length);
+                    if (nextSize <= buf.Length)
+                        throw new InvalidOperationException(
+                            $"native signal exceeds the {SidecarProtocol.MaxPayloadBytes}-byte protocol cap");
+                    Array.Resize(ref buf, nextSize);
+                    continue;
+                }
+                if (got < 0)
+                    throw new InvalidOperationException($"native signal poll failed with status {got}");
                 Thread.Sleep(5);
             }
         }
@@ -353,6 +365,13 @@ internal sealed class MobileVoiceClient : IDisposable
            && pumpHeartbeatMs > 0
            && nowMs - pollHeartbeatMs <= timeoutMs
            && nowMs - pumpHeartbeatMs <= timeoutMs;
+
+    internal static int NextSignalBufferSize(int currentSize)
+    {
+        if (currentSize < 2 || currentSize >= MaximumSignalBufBytes)
+            return currentSize;
+        return (int)Math.Min((long)currentSize * 2, MaximumSignalBufBytes);
+    }
 
     private void Dispatch(string json)
     {

@@ -14,8 +14,9 @@ public readonly record struct VoiceRoomControlMessage(
     VoiceRoomSettingsSnapshot Settings);
 
 // NOTE: This codec is NOT the live wire path. Host voice settings + requests flow over the
-// authenticated InnerNet RPC (VoiceRoomSettingsRpc); the voice-transport side-channel that previously
+// host-object-routed custom RPC (VoiceRoomSettingsRpc); the voice-transport side-channel that previously
 // used this codec was de-authorized for security (a self-asserted sender could forge host settings).
+// Object-owner checks on the live path are compatibility validation, not packet-source authentication.
 // It is retained only for legacy side-channel fixtures and their versioned decode tests. It is not the
 // schema for the live RPC: current host snapshots use the exact kind-3/schema-1 payload implemented by
 // VoiceRoomSettingsRpc.EncodeSnapshotPayload/TryDecodeSnapshotPayload. Do not add new runtime callers.

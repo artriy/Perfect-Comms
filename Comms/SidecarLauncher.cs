@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -25,29 +26,64 @@ internal readonly record struct SidecarDeviceEnumerationResult(
         => new(true, input, output);
 }
 
+internal readonly record struct SidecarTemporaryPaths(
+    string HandshakePath,
+    string? PrivateDirectory,
+    string? PrivateRoot);
+
 internal static class SidecarLauncher
 {
+    private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
     private static readonly object BundleVersionGate = new();
     private static readonly Dictionary<string, string> BundleVersions = new(StringComparer.Ordinal);
 
     public static string TargetTriple()
+        => TargetTripleFor(
+            WineEnvironment.IsWine,
+            WineEnvironment.HostOs,
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows),
+            RuntimeInformation.IsOSPlatform(OSPlatform.OSX),
+            RuntimeInformation.IsOSPlatform(OSPlatform.Linux),
+            RuntimeInformation.OSArchitecture);
+
+    internal static string TargetTripleFor(
+        bool wine,
+        WineHostOs wineHostOs,
+        bool windows,
+        bool macOs,
+        bool linux,
+        Architecture architecture)
     {
-        if (WineEnvironment.IsWine)
+        if (wine)
         {
-            if (WineEnvironment.HostOs == WineHostOs.MacOS) return "x86_64-apple-darwin";
-            if (WineEnvironment.HostOs == WineHostOs.Linux) return "x86_64-unknown-linux-gnu";
+            // The macOS resource is a universal app even though its resource key uses x86_64.
+            if (wineHostOs == WineHostOs.MacOS) return "x86_64-apple-darwin";
+            if (wineHostOs == WineHostOs.Linux) return "x86_64-unknown-linux-gnu";
             throw new PlatformNotSupportedException(
                 "pc-capture: running under Wine but host OS is undetectable (Z: not mapped to host root); cannot select a native helper");
         }
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return RuntimeInformation.OSArchitecture == Architecture.X86
-                ? "i686-pc-windows-msvc"
-                : "x86_64-pc-windows-msvc";
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            return RuntimeInformation.OSArchitecture == Architecture.Arm64
-                ? "aarch64-apple-darwin"
-                : "x86_64-apple-darwin";
-        return "x86_64-unknown-linux-gnu";
+        if (windows)
+            return architecture switch
+            {
+                Architecture.X86 => "i686-pc-windows-msvc",
+                Architecture.X64 => "x86_64-pc-windows-msvc",
+                _ => throw new PlatformNotSupportedException(
+                    $"pc-capture: unsupported Windows architecture {architecture}"),
+            };
+        if (macOs)
+            return architecture switch
+            {
+                Architecture.X64 => "x86_64-apple-darwin",
+                Architecture.Arm64 => "aarch64-apple-darwin",
+                _ => throw new PlatformNotSupportedException(
+                    $"pc-capture: unsupported macOS architecture {architecture}"),
+            };
+        if (linux)
+            return architecture == Architecture.X64
+                ? "x86_64-unknown-linux-gnu"
+                : throw new PlatformNotSupportedException(
+                    $"pc-capture: unsupported Linux architecture {architecture}");
+        throw new PlatformNotSupportedException("pc-capture: unsupported operating system");
     }
 
     public static string HelperFileName(string triple)
@@ -208,10 +244,7 @@ internal static class SidecarLauncher
                     bundleVersion);
                 var beside = Path.Combine(helperDir, file);
                 if (!string.Equals(Path.GetFullPath(extracted), Path.GetFullPath(beside), StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!File.Exists(beside))
-                        File.Copy(extracted, beside, false);
-                }
+                    PublishFileAtomically(extracted, beside);
             }
             catch (Exception ex)
             {
@@ -220,6 +253,7 @@ internal static class SidecarLauncher
                     "sidecar.dsp",
                     $"event=extract-failed stage=extract-or-place path={NativeLibraryCache.DiagnosticValue(target)} " +
                     $"resource={NativeLibraryCache.DiagnosticValue(resource)} error={ExceptionDiagnostic(ex)}");
+                throw;
             }
         }
     }
@@ -229,26 +263,164 @@ internal static class SidecarLauncher
         var bundleDirectory = NativeLibraryCache.BundleDirectory(baseDirectory, triple, bundleVersion);
         var appDir = Path.Combine(bundleDirectory, "PerfectCommsAudio.app");
         var inner = Path.Combine(appDir, "Contents", "MacOS", "PerfectCommsAudio");
-        // The parent bundle is content-addressed from the zip bytes. Archive entry timestamps are
-        // normally older than the freshly extracted zip file, so comparing mtimes would delete and
-        // recreate this app on every call. Existence is sufficient for an immutable bundle.
-        if (File.Exists(inner))
-            return inner;
-
         Directory.CreateDirectory(bundleDirectory);
         var lockPath = Path.Combine(bundleDirectory, ".mac-extract.lock");
         using var extractionLock = AcquireExclusiveFileLock(lockPath, TimeSpan.FromSeconds(15));
-        if (File.Exists(inner))
+        if (MacAppMatchesArchive(zipPath, appDir))
             return inner;
 
-        // Only the lock owner can observe/repair a partial extraction left by a crashed process.
-        if (Directory.Exists(appDir))
-            Directory.Delete(appDir, true);
-        ZipFile.ExtractToDirectory(zipPath, bundleDirectory, true);
-        if (!File.Exists(inner))
-            throw new InvalidDataException(
-                $"Mac helper archive is missing PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio: {zipPath}");
-        return inner;
+        var stagingRoot = Path.Combine(
+            bundleDirectory,
+            $".mac-stage-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        var stagedApp = Path.Combine(stagingRoot, "PerfectCommsAudio.app");
+        var backupApp = Path.Combine(
+            bundleDirectory,
+            $".mac-old-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        var previousMoved = false;
+        var published = false;
+        try
+        {
+            Directory.CreateDirectory(stagingRoot);
+            ZipFile.ExtractToDirectory(zipPath, stagingRoot, false);
+            if (!MacAppMatchesArchive(zipPath, stagedApp))
+                throw new InvalidDataException(
+                    $"Mac helper archive is missing or failed integrity validation: {zipPath}");
+
+            if (Directory.Exists(appDir))
+            {
+                Directory.Move(appDir, backupApp);
+                previousMoved = true;
+            }
+
+            Directory.Move(stagedApp, appDir);
+            published = true;
+            TryDeleteDirectory(backupApp);
+            return inner;
+        }
+        catch
+        {
+            if (!published && previousMoved && !Directory.Exists(appDir) && Directory.Exists(backupApp))
+            {
+                try { Directory.Move(backupApp, appDir); } catch { }
+            }
+            throw;
+        }
+        finally
+        {
+            TryDeleteDirectory(stagingRoot);
+            if (published)
+                TryDeleteDirectory(backupApp);
+        }
+    }
+
+    private static bool MacAppMatchesArchive(string zipPath, string appDirectory)
+    {
+        if (!Directory.Exists(appDirectory))
+            return false;
+
+        const string appPrefix = "PerfectCommsAudio.app/";
+        const string helperEntry = "PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio";
+        var appRoot = Path.GetFullPath(appDirectory);
+        var appRootPrefix = Path.TrimEndingDirectorySeparator(appRoot) + Path.DirectorySeparatorChar;
+        var foundHelper = false;
+        try
+        {
+            using var archive = ZipFile.OpenRead(zipPath);
+            foreach (var entry in archive.Entries)
+            {
+                if (!entry.FullName.StartsWith(appPrefix, StringComparison.Ordinal) ||
+                    entry.FullName.EndsWith("/", StringComparison.Ordinal))
+                    continue;
+
+                var relative = entry.FullName.Substring(appPrefix.Length)
+                    .Replace('/', Path.DirectorySeparatorChar);
+                var target = Path.GetFullPath(Path.Combine(appRoot, relative));
+                if (!target.StartsWith(appRootPrefix, StringComparison.Ordinal) ||
+                    !File.Exists(target) ||
+                    new FileInfo(target).Length != entry.Length)
+                    return false;
+
+                using var expectedStream = entry.Open();
+                using var actualStream = new FileStream(
+                    target,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                if (!StreamHashesEqual(expectedStream, actualStream))
+                    return false;
+                if (string.Equals(entry.FullName, helperEntry, StringComparison.Ordinal))
+                    foundHelper = true;
+            }
+            return foundHelper;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void PublishFileAtomically(string source, string target)
+    {
+        using (var sourceProbe = new FileStream(
+                   source,
+                   FileMode.Open,
+                   FileAccess.Read,
+                   FileShare.ReadWrite | FileShare.Delete))
+        {
+            if (File.Exists(target))
+            {
+                using var targetProbe = new FileStream(
+                    target,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                if (sourceProbe.Length == targetProbe.Length && StreamHashesEqual(sourceProbe, targetProbe))
+                    return;
+            }
+        }
+
+        var temp = $"{target}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            using (var input = new FileStream(
+                       source,
+                       FileMode.Open,
+                       FileAccess.Read,
+                       FileShare.ReadWrite | FileShare.Delete))
+            using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                input.CopyTo(output);
+                output.Flush(true);
+            }
+            File.Move(temp, target, true);
+            temp = string.Empty;
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(temp))
+            {
+                try { File.Delete(temp); } catch { }
+            }
+        }
+    }
+
+    private static bool StreamHashesEqual(Stream left, Stream right)
+    {
+        using var leftSha = SHA256.Create();
+        using var rightSha = SHA256.Create();
+        return CryptographicOperations.FixedTimeEquals(
+            leftSha.ComputeHash(left),
+            rightSha.ComputeHash(right));
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, true);
+        }
+        catch { }
     }
 
     private static FileStream AcquireExclusiveFileLock(string path, TimeSpan timeout)
@@ -363,10 +535,129 @@ internal static class SidecarLauncher
     }
 
     public static string NewHandshakePath()
+        => Path.Combine(Path.GetTempPath(), "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+
+    internal static SidecarTemporaryPaths CreateTemporaryPaths(
+        bool wine,
+        Func<string, string> resolveWineHostPath,
+        Func<string, string, bool> hostExec,
+        string? wineTemporaryRoot = null)
     {
-        var dir = WineEnvironment.IsWine ? @"Z:\tmp" : Path.GetTempPath();
-        return Path.Combine(dir, "pc-capture-" + Guid.NewGuid().ToString("N") + ".json");
+        ArgumentNullException.ThrowIfNull(resolveWineHostPath);
+        ArgumentNullException.ThrowIfNull(hostExec);
+        if (!wine)
+            return new SidecarTemporaryPaths(NewHandshakePath(), null, null);
+
+        var root = Path.GetFullPath(wineTemporaryRoot ?? @"Z:\tmp");
+        if (!Directory.Exists(root))
+            throw new DirectoryNotFoundException($"Wine host temporary directory is unavailable: {root}");
+
+        string? privateDirectory = null;
+        try
+        {
+            for (var attempt = 0; attempt < 16; attempt++)
+            {
+                var candidate = Path.Combine(
+                    root,
+                    WineTemporaryDirectoryPrefix + Guid.NewGuid().ToString("N"));
+                if (Directory.Exists(candidate))
+                    continue;
+                Directory.CreateDirectory(candidate);
+                privateDirectory = candidate;
+                break;
+            }
+            if (privateDirectory == null)
+                throw new IOException("Could not allocate a private Wine helper directory");
+
+            var hostDirectory = resolveWineHostPath(privateDirectory);
+            if (string.IsNullOrWhiteSpace(hostDirectory) ||
+                !hostExec("/bin/chmod", $"700 \"{hostDirectory}\""))
+            {
+                throw new UnauthorizedAccessException(
+                    "Could not restrict the private Wine helper directory to mode 0700");
+            }
+
+            return new SidecarTemporaryPaths(
+                Path.Combine(privateDirectory, "handshake.json"),
+                privateDirectory,
+                root);
+        }
+        catch
+        {
+            if (privateDirectory != null)
+                TryDeleteDirectory(privateDirectory);
+            throw;
+        }
     }
+
+    internal static string CreateWineTokenFile(
+        SidecarTemporaryPaths paths,
+        string token,
+        Func<string, string> resolveWineHostPath,
+        Func<string, string, bool> hostExec)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+        if (string.IsNullOrEmpty(paths.PrivateDirectory))
+            throw new InvalidOperationException("A Wine token requires a private temporary directory");
+
+        var tokenFile = Path.Combine(paths.PrivateDirectory, "token");
+        var tokenBytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(token);
+        using (var stream = new FileStream(tokenFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(tokenBytes, 0, tokenBytes.Length);
+            stream.Flush(true);
+        }
+
+        var hostToken = resolveWineHostPath(tokenFile);
+        if (string.IsNullOrWhiteSpace(hostToken) ||
+            !hostExec("/bin/chmod", $"600 \"{hostToken}\""))
+        {
+            try { File.Delete(tokenFile); } catch { }
+            throw new UnauthorizedAccessException("Could not restrict the Wine helper token to mode 0600");
+        }
+        return tokenFile;
+    }
+
+    internal static void CleanupTemporaryPaths(
+        string? handshakePath,
+        string? privateDirectory,
+        string? privateRoot)
+    {
+        if (string.IsNullOrEmpty(privateDirectory))
+        {
+            if (!string.IsNullOrEmpty(handshakePath) && File.Exists(handshakePath))
+                File.Delete(handshakePath);
+            return;
+        }
+        if (string.IsNullOrEmpty(privateRoot))
+            throw new InvalidOperationException("Refusing to remove a Wine helper directory without its owning root");
+
+        var fullDirectory = Path.GetFullPath(privateDirectory);
+        var fullRoot = Path.GetFullPath(privateRoot);
+        var parent = Path.GetDirectoryName(fullDirectory);
+        var directoryName = Path.GetFileName(fullDirectory);
+        var directorySuffix = directoryName.StartsWith(WineTemporaryDirectoryPrefix, StringComparison.Ordinal)
+            ? directoryName.Substring(WineTemporaryDirectoryPrefix.Length)
+            : string.Empty;
+        if (!Guid.TryParseExact(directorySuffix, "N", out _))
+            throw new InvalidOperationException("Refusing to remove an unrecognized Wine helper directory");
+        if (string.IsNullOrEmpty(parent) || !PathsEqual(parent, fullRoot))
+            throw new InvalidOperationException("Refusing to remove a Wine helper directory outside its owning root");
+        if (!string.IsNullOrEmpty(handshakePath))
+        {
+            var handshakeParent = Path.GetDirectoryName(Path.GetFullPath(handshakePath));
+            if (string.IsNullOrEmpty(handshakeParent) || !PathsEqual(handshakeParent, fullDirectory))
+                throw new InvalidOperationException("Refusing to clean a handshake outside its Wine helper directory");
+        }
+        if (Directory.Exists(fullDirectory))
+            Directory.Delete(fullDirectory, true);
+    }
+
+    private static bool PathsEqual(string left, string right)
+        => string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     public static SidecarDeviceEnumerationResult EnumerateDevices()
     {
@@ -387,17 +678,22 @@ internal static class SidecarLauncher
     public static SidecarDeviceEnumerationResult EnumerateDevices(
         string helperPath,
         bool wine,
-        Func<string, string> resolveWineHostPath)
+        Func<string, string> resolveWineHostPath,
+        Func<string, string, bool>? hostExec = null)
     {
-        var outPath = NewHandshakePath();
+        var paths = default(SidecarTemporaryPaths);
+        var outPath = string.Empty;
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
         var sw = Stopwatch.StartNew();
-        VoiceDiagnostics.Log(
-            "sidecar.launch",
-            $"event=enumerate-begin wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(outPath, 320)}\"");
         try
         {
+            hostExec ??= WineEnvironment.TryHostExec;
+            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostExec);
+            outPath = paths.HandshakePath;
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=enumerate-begin wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(outPath, 320)}\"");
             ProcessStartInfo psi;
             if (wine)
             {
@@ -452,7 +748,7 @@ internal static class SidecarLauncher
             if (process != null && !wine)
                 KillQuietly(process);
             diagnostics?.Complete("enumerate-finished");
-            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+            try { CleanupTemporaryPaths(outPath, paths.PrivateDirectory, paths.PrivateRoot); } catch { }
         }
     }
 
@@ -476,24 +772,34 @@ internal static class SidecarLauncher
         }
     }
 
-    public static SidecarLaunchResult Launch(string helperPath, string token, int handshakeTimeoutMs, bool wine, Func<string, string> resolveWineHostPath)
+    public static SidecarLaunchResult Launch(
+        string helperPath,
+        string token,
+        int handshakeTimeoutMs,
+        bool wine,
+        Func<string, string> resolveWineHostPath,
+        Func<string, string, bool>? hostExec = null)
     {
-        var result = new SidecarLaunchResult { HandshakePath = NewHandshakePath() };
+        var result = new SidecarLaunchResult();
+        var paths = default(SidecarTemporaryPaths);
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
         string? tokenFile = null;
         var sw = Stopwatch.StartNew();
-        VoiceDiagnostics.Log(
-            "sidecar.launch",
-            $"event=begin wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(result.HandshakePath, 320)}\"");
         try
         {
+            hostExec ??= WineEnvironment.TryHostExec;
+            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostExec);
+            result.HandshakePath = paths.HandshakePath;
+            result.TemporaryDirectory = paths.PrivateDirectory;
+            result.TemporaryRoot = paths.PrivateRoot;
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=begin wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(result.HandshakePath, 320)}\"");
             if (wine)
             {
-                tokenFile = result.HandshakePath + ".token";
-                File.WriteAllText(tokenFile, token);
+                tokenFile = CreateWineTokenFile(paths, token, resolveWineHostPath, hostExec);
                 var hostToken = resolveWineHostPath(tokenFile);
-                WineEnvironment.HostExec("/bin/chmod", $"600 \"{hostToken}\"");
                 var hostHelper = resolveWineHostPath(helperPath);
                 var hostHandshake = resolveWineHostPath(result.HandshakePath);
                 var wineArguments = BuildArguments(hostHandshake, Environment.ProcessId, wine: true);
@@ -604,6 +910,10 @@ internal static class SidecarLauncher
             {
                 try { File.Delete(tokenFile); } catch { }
             }
+            if (!result.Success)
+            {
+                try { CleanupTemporaryPaths(result.HandshakePath, result.TemporaryDirectory, result.TemporaryRoot); } catch { }
+            }
         }
     }
 
@@ -707,6 +1017,8 @@ internal sealed class SidecarLaunchResult
     public Process? Process;
     public SidecarProcessDiagnostics? Diagnostics;
     public string HandshakePath = "";
+    public string? TemporaryDirectory;
+    public string? TemporaryRoot;
     public string FailureReason = "";
 }
 

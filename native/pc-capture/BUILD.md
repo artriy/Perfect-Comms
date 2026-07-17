@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Capture, playback, DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 9.
+Capture, playback, DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 10.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -50,7 +50,7 @@ The managed build embeds each helper as `Lib.pc-capture.<file>` (mirrors `Lib.ba
 `SidecarLauncher` generates a random token and a host-visible handshake-file path, then:
 
 - **Native Windows:** `Process.Start(helper.exe, --handshake <path>)`, token written to the helper's stdin.
-- **Wine (CrossOver / Proton):** host-exec via `start.exe /unix "<hostpath>" --handshake <path> --token-file <path>`. The Windows-side paths are translated to host paths with `winepath -u` (`WineEnvironment.ResolveHostPath`). The token is stored in a temporary mode-`0600` host-visible file and deleted after launch; it is never placed in the process command line or diagnostics. This is what runs the native mac/linux helper outside the Wine boundary.
+- **Wine (CrossOver / Proton):** host-exec via `start.exe /unix "<hostpath>" --handshake <path> --token-file <path>`. The Windows-side paths are translated to host paths with `winepath -u` (`WineEnvironment.ResolveHostPath`). Each launch first creates a private mode-`0700` host-visible directory, then create-news and verifies a mode-`0600` token file inside it. Permission setup fails closed; the token is deleted after launch and the directory is removed when the helper is released. The token is never placed in the process command line or diagnostics. This is what runs the native mac/linux helper outside the Wine boundary.
 - **Host-exec blocked:** the handshake times out; the `CaptureSupervisor` retries within its restart budget and, if the helper never starts, enters the all-failed "voice unavailable" state (logged). There is no in-proc desktop fallback since BASS was removed in 4.0.
 
 The helper binds `127.0.0.1:0`, writes `{port, pid}` to the handshake file, and the mod connects over loopback (Wine Winsock bridges to host loopback).
@@ -62,11 +62,11 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 ## CI
 
 - `.github/workflows/native-helpers.yml`: builds the five desktop targets on GitHub-hosted runners (`windows-latest` x64/x86, `ubuntu-latest` x64, `macos-latest` universal x64+arm64), uploads `helper-*` artifacts, and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP loading.
-- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies-win-x86-steam-itch.zip`, `PerfectComms+dependencies-win-x64-epic-msstore.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
+- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies x86.zip`, `PerfectComms+dependencies x64.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 9` (the `Proto` constant in `SidecarVoiceClient`). Protocol 9 adds the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of protocol 6's per-peer relay-only ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 10` (the `Proto` constant in `SidecarVoiceClient`). Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of protocol 6's per-peer relay-only ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
 
 ## Media diagnostics
 

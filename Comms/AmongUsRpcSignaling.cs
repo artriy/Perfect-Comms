@@ -445,6 +445,8 @@ internal static class AmongUsRpcSignaling
                 var targetClientId = clientInstance?.ClientId ?? -1;
                 if (clientInstance != null)
                 {
+                    // This resolves the owner of the routed PlayerControl object. HandleRpc does not
+                    // prove which network peer supplied that object id, so it is not hostile-peer auth.
                     var client = clientInstance.GetClientFromCharacter(__instance);
                     if (client != null) senderClientId = client.Id;
                 }

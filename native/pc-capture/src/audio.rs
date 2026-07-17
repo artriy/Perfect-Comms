@@ -1318,33 +1318,38 @@ struct SelectedDevice {
     fell_back_to_default: bool,
 }
 
+fn selected_or_default<T>(
+    requested_id: Option<&str>,
+    selected: Option<T>,
+    default_device: impl FnOnce() -> Option<T>,
+    direction: &str,
+) -> Result<T, String> {
+    if requested_id.is_some_and(|id| !id.is_empty()) {
+        return selected.ok_or_else(|| format!("selected {direction} device is unavailable"));
+    }
+    default_device().ok_or_else(|| format!("no {direction} device"))
+}
+
 fn pick_device(device_id: &Option<String>) -> Result<SelectedDevice, String> {
     let host = cpal::default_host();
-    if let Some(id) = device_id.as_ref().filter(|id| !id.is_empty()) {
-        if let Ok(parsed) = id.parse::<cpal::DeviceId>() {
-            if let Some(device) = host.device_by_id(&parsed) {
-                return Ok(SelectedDevice {
-                    device,
-                    requested_device: id.clone(),
-                    resolved_device: parsed.to_string(),
-                    requested_default: false,
-                    requested_matched: true,
-                    fell_back_to_default: false,
-                });
-            }
-        }
-    }
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "no input device".to_string())?;
+    let requested_id = device_id.as_deref().filter(|id| !id.is_empty());
+    let selected = requested_id
+        .and_then(|id| id.parse::<cpal::DeviceId>().ok())
+        .and_then(|id| host.device_by_id(&id));
+    let device = selected_or_default(
+        device_id.as_deref(),
+        selected,
+        || host.default_input_device(),
+        "input",
+    )?;
     let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
     Ok(SelectedDevice {
         device,
         requested_device: device_id.clone().unwrap_or_default(),
         resolved_device,
-        requested_default: device_id.as_ref().is_none_or(String::is_empty),
-        requested_matched: device_id.as_ref().is_none_or(String::is_empty),
-        fell_back_to_default: device_id.as_ref().is_some_and(|id| !id.is_empty()),
+        requested_default: requested_id.is_none(),
+        requested_matched: true,
+        fell_back_to_default: false,
     })
 }
 
@@ -1730,31 +1735,24 @@ fn pick_output_device(
     host: &cpal::Host,
     device_id: &Option<String>,
 ) -> Result<SelectedDevice, String> {
-    if let Some(id) = device_id.as_ref().filter(|id| !id.is_empty()) {
-        if let Ok(parsed) = id.parse::<cpal::DeviceId>() {
-            if let Some(device) = host.device_by_id(&parsed) {
-                return Ok(SelectedDevice {
-                    device,
-                    requested_device: id.clone(),
-                    resolved_device: parsed.to_string(),
-                    requested_default: false,
-                    requested_matched: true,
-                    fell_back_to_default: false,
-                });
-            }
-        }
-    }
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| "no output device".to_string())?;
+    let requested_id = device_id.as_deref().filter(|id| !id.is_empty());
+    let selected = requested_id
+        .and_then(|id| id.parse::<cpal::DeviceId>().ok())
+        .and_then(|id| host.device_by_id(&id));
+    let device = selected_or_default(
+        device_id.as_deref(),
+        selected,
+        || host.default_output_device(),
+        "output",
+    )?;
     let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
     Ok(SelectedDevice {
         device,
         requested_device: device_id.clone().unwrap_or_default(),
         resolved_device,
-        requested_default: device_id.as_ref().is_none_or(String::is_empty),
-        requested_matched: device_id.as_ref().is_none_or(String::is_empty),
-        fell_back_to_default: device_id.as_ref().is_some_and(|id| !id.is_empty()),
+        requested_default: requested_id.is_none(),
+        requested_matched: true,
+        fell_back_to_default: false,
     })
 }
 
@@ -2143,6 +2141,47 @@ pub fn spawn_cpal_playback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_device_selection_never_falls_back_to_default() {
+        let mut default_called = false;
+        let result = selected_or_default(
+            Some("missing-stable-id"),
+            None::<u8>,
+            || {
+                default_called = true;
+                Some(7)
+            },
+            "input",
+        );
+
+        assert_eq!(result.unwrap_err(), "selected input device is unavailable");
+        assert!(!default_called);
+    }
+
+    #[test]
+    fn empty_device_selection_explicitly_uses_default() {
+        assert_eq!(
+            selected_or_default(Some(""), None, || Some(7u8), "output").unwrap(),
+            7
+        );
+        assert_eq!(
+            selected_or_default(None, None, || Some(9u8), "input").unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn matching_explicit_device_does_not_probe_default() {
+        let selected = selected_or_default(
+            Some("stable-id"),
+            Some(11u8),
+            || panic!("default device must not be used for an explicit selection"),
+            "output",
+        )
+        .unwrap();
+        assert_eq!(selected, 11);
+    }
 
     #[test]
     fn windows_device_label_prefers_endpoint_friendly_name() {

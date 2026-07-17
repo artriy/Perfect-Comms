@@ -5,8 +5,8 @@ Perfect Comms is a standalone BepInEx plugin for Among Us. Its only hard depende
 ## Quick install (with dependencies)
 
 1. Download the bundle from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) that matches your platform:
-   - `PerfectComms+dependencies-win-x86-steam-itch.zip` for Steam and itch.io (`x86` / 32-bit).
-   - `PerfectComms+dependencies-win-x64-epic-msstore.zip` for Epic Games Store and Microsoft Store (`x64` / 64-bit).
+   - `PerfectComms+dependencies x86.zip` for Steam and itch.io (`x86` / 32-bit).
+   - `PerfectComms+dependencies x64.zip` for Epic Games Store and Microsoft Store (`x64` / 64-bit).
 2. Extract it into your Among Us install folder (the folder containing `Among Us.exe`).
 3. Launch the game. You should see Perfect Comms load in the BepInEx console.
 

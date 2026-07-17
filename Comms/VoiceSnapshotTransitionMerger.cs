@@ -3,14 +3,14 @@ using System.Collections.Generic;
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
-/// Reconciles the frame-local PlayerControl roster with the authenticated InnerNet roster.
+/// Reconciles the frame-local PlayerControl roster with the server-maintained InnerNet roster.
 /// PlayerControls legitimately disappear while scenes change, but an InnerNet client leaving is
 /// authoritative and must remove its route immediately.
 /// </summary>
 internal static class VoiceSnapshotTransitionMerger
 {
     /// <summary>
-    /// Carries the last same-session routing roster while both PlayerControls and the authenticated
+    /// Carries the last same-session routing roster while both PlayerControls and the resolved
     /// allClients collection are transiently unavailable. EndGame has no world roster and can keep
     /// the routes until the room lifetime gate observes a real leave. Lobby/Intro/Unknown gaps are
     /// bounded so an unavailable auth API cannot preserve stale membership indefinitely.

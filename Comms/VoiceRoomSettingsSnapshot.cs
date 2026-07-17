@@ -206,7 +206,7 @@ internal static class VoiceRoomSettingsState
     {
         if (gameId == 0) return;
 
-        // An authenticated settings snapshot can beat OnGameJoined while the room is still being
+        // A host-object-matched settings snapshot can beat OnGameJoined while the room is still being
         // constructed. In that case ApplyRemote(gameId) establishes a provisional scope; the first
         // matching authoritative join confirms it without throwing away the useful early snapshot.
         if (!_sessionConfirmed && (_sessionGameId == 0 || _sessionGameId == gameId))

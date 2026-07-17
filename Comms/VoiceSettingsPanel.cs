@@ -140,8 +140,14 @@ public static class VoiceSettingsPanel
         _shell = new VoiceUiKit.PanelShell("VC_SettingsPanel", "PERFECT COMMS", PanelW, PanelH, HeaderClose);
         _rail = new VoiceUiKit.CategoryRail();
         _rail.Build(_shell.RailRoot, _shell.RailWidth, Categories);
-        _rail.OnSelect = _ =>
+        _rail.OnSelect = selectedIndex =>
         {
+            if (SpeakingBarLivePreviewLifecyclePolicy.ShouldDisableForCategory(
+                    CategoryOrder[selectedIndex]))
+            {
+                DisableLivePreview();
+                ApplyPanelPresentation();
+            }
             _expandedMixSettings = MixSettingsExpansion.None;
             _rebuildRequested = false;
             _revealExpandedMix = false;
@@ -208,7 +214,7 @@ public static class VoiceSettingsPanel
         _shown = false;
         _animT = 0f;
         _activeRow = null;
-        _livePreview?.Suspend();
+        DisableLivePreview();
         if (_shell != null && _shell.Root != null)
         {
             _shell.Group.alpha = 0f;
@@ -233,6 +239,8 @@ public static class VoiceSettingsPanel
     {
         VoiceUiKit.RebindRow.CancelCapture();
         CancelScrollbarDrag();
+        _shown = false;
+        DisableLivePreview();
         if (_livePreview != null)
         {
             _livePreview.Dispose();
@@ -249,7 +257,6 @@ public static class VoiceSettingsPanel
         _scroll = 0f;
         _scrollTarget = 0f;
         _contentHeight = 0f;
-        _shown = false;
         _visSignature = int.MinValue;
         _expandedMixSettings = MixSettingsExpansion.None;
         _rebuildRequested = false;
@@ -261,6 +268,17 @@ public static class VoiceSettingsPanel
         _livePreviewUnavailable = false;
         _livePreviewProgress = 0f;
         _lastLivePreviewEnabled = false;
+    }
+
+    private static void DisableLivePreview()
+    {
+        var settings = VoiceSettings.Instance;
+        if (settings?.SpeakingBarLivePreview.Value == true)
+            settings.SpeakingBarLivePreview.Value = false;
+
+        _lastLivePreviewEnabled = false;
+        _livePreviewProgress = 0f;
+        _livePreview?.Suspend();
     }
 
     private static void RebuildRows(bool resetScroll)

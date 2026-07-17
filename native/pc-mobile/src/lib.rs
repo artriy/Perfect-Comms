@@ -170,16 +170,12 @@ pub unsafe extern "C" fn pc_poll_signal(
     }
     match catch_unwind(AssertUnwindSafe(|| match mobile.engine.poll_signal() {
         Some(json) => {
-            let bytes = json.as_bytes();
-            if bytes.len() + 1 > cap as usize {
-                return -1;
+            let written = copy_signal_to_buffer(&json, out, cap);
+            if written < 0 {
+                return written;
             }
-
-            ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-            *out.add(bytes.len()) = 0;
-
             mobile.engine.ack_signal();
-            bytes.len() as c_int
+            written
         }
         None => 0,
     })) {
@@ -191,18 +187,43 @@ pub unsafe extern "C" fn pc_poll_signal(
     }
 }
 
+unsafe fn copy_signal_to_buffer(json: &str, out: *mut c_char, cap: c_int) -> c_int {
+    let bytes = json.as_bytes();
+    if bytes.len() + 1 > cap as usize {
+        // ABI 3 contract: -1 means the caller must grow its buffer and poll again. The signal
+        // remains pending because pc_poll_signal acknowledges only after a successful copy.
+        return -1;
+    }
+    ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+    *out.add(bytes.len()) = 0;
+    bytes.len() as c_int
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn abi_version_matches_protocol_7_contract() {
+    fn abi_version_matches_contract() {
         assert_eq!(PC_ABI_VERSION, 3);
         assert_eq!(pc_abi_version(), 3);
         assert_eq!(
             PC_MOBILE_ABI_MARKER.as_slice(),
             format!("PERFECTCOMMS_PC_MOBILE_ABI={PC_ABI_VERSION}\0").as_bytes()
         );
+    }
+
+    #[test]
+    fn oversized_signal_requests_a_larger_buffer_without_partial_copy() {
+        let mut small = [b'x' as c_char; 4];
+        let written = unsafe { copy_signal_to_buffer("oversized", small.as_mut_ptr(), 4) };
+        assert_eq!(written, -1);
+        assert_eq!(small, [b'x' as c_char; 4]);
+
+        let mut exact = [0 as c_char; 10];
+        let written = unsafe { copy_signal_to_buffer("oversized", exact.as_mut_ptr(), 10) };
+        assert_eq!(written, 9);
+        assert_eq!(exact[9], 0);
     }
 
     #[test]

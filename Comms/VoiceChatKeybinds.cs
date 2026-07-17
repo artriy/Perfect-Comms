@@ -6,6 +6,13 @@ namespace VoiceChatPlugin.VoiceChat;
 
 public static class VoiceChatKeybinds
 {
+    internal const string ToggleDeafenDisplayName = "Toggle Deafen";
+    internal const string ToggleDeafenHelpText =
+        "Deafens or undeafens Perfect Comms. Deafening mutes voice playback and pauses microphone transmission.";
+    internal const string HostLocalRefreshDisplayName = "Refresh Host Voice Connection";
+    internal const string HostLocalRefreshHelpText =
+        "Host only. Rebuilds your local voice session. It has a 10-second cooldown.";
+
     private static VoiceKeybind[] _allBindings = Array.Empty<VoiceKeybind>();
 
     public static VoiceKeybind ToggleMute { get; private set; } = null!;
@@ -36,8 +43,10 @@ public static class VoiceChatKeybinds
             helpText: "While held, transmits your microphone when Mic Mode is set to Push To Talk.");
         ToggleMicMode = new VoiceKeybind(config, s, "Toggle Open Mic / Push To Talk", KeyCode.None,
             helpText: "Switches your microphone between Open Mic and Push To Talk mode.");
-        ToggleSpeaker = new VoiceKeybind(config, s, "Toggle Speaker", KeyCode.N,
-            helpText: "Toggles all incoming Perfect Comms voice audio.");
+        // Keep the pre-v4 persisted key so the clearer deafen label does not reset existing binds.
+        ToggleSpeaker = new VoiceKeybind(
+            config, s, ToggleDeafenDisplayName, "Toggle Speaker", KeyCode.N,
+            helpText: ToggleDeafenHelpText);
         VolumeMenu = new VoiceKeybind(
             config, s, "Player Volumes", KeyCode.B, KeyCode.LeftShift, VoiceModifierMatch.EitherSide,
             helpText: "Opens the local per-player volume mixer. Its adjustments affect only what you hear.");
@@ -49,8 +58,11 @@ public static class VoiceChatKeybinds
             helpText: "While held, applies this binding's separately configured Alive and Dead volume levels. Releasing restores both groups to 100%. If both mix bindings are held, neither profile is applied.");
         LocalVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connection", KeyCode.F7,
             helpText: "Rejoins only your local voice session to repair stuck audio. It has a 10-second cooldown.");
-        HostVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connections (Host)", KeyCode.F8,
-            helpText: "Host only. Tells every client to rebuild its voice session. It has a 10-second host cooldown.");
+        // The old plural config key is retained for binding compatibility. The action is local-only
+        // because PlayerControl.HandleRpc does not expose authenticated packet sender provenance.
+        HostVoiceRefresh = new VoiceKeybind(
+            config, s, HostLocalRefreshDisplayName, "Refresh Voice Connections (Host)", KeyCode.F8,
+            helpText: HostLocalRefreshHelpText);
         OpenVoiceMenu = new VoiceKeybind(config, s, "Open Voice Menu", KeyCode.F10,
             helpText: "Opens or closes this local Perfect Comms settings menu.");
         OpenHostVoiceSettings = new VoiceKeybind(config, s, "Open Host Voice Settings", KeyCode.F11,
@@ -73,7 +85,7 @@ public static class VoiceChatKeybinds
         };
 
         var shiftDefaultsMigrated = config.Bind(s, "ShiftDefaultsMigrated", false,
-            new ConfigDescription("Internal one-time flag: added Shift to the default Mute (M) and Toggle Speaker (N) keys. Do not edit."));
+            new ConfigDescription("Internal one-time flag: added Shift to the default Mute (M) and deafen (N) keys. Do not edit."));
         if (!shiftDefaultsMigrated.Value)
         {
             if (ToggleMute.Value == KeyCode.M && ToggleMute.Modifier == KeyCode.None)

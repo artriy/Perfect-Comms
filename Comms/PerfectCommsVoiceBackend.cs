@@ -265,9 +265,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         // immediately instead of waiting for a credential round trip after the timeout.
         if (UsesManagedTurn())
             EnsureManagedTurnCredentials(forceRelay: ShouldForceRelay(), refreshRelayPeers: false);
-        VoiceDiagnostics.Log("voice.engine.created", $"room={RoomCode} region={Region} signaling=among-us-rpc");
+        VoiceDiagnostics.Log("voice.engine.created",
+            $"{VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} signaling=among-us-rpc");
         if (WineEnvironment.IsWine)
-            VoiceDiagnostics.Log("env.wine", $"detected=true localIp={WineEnvironment.GetLocalIPv4()?.ToString() ?? "none"}");
+            VoiceDiagnostics.Log("env.wine", "detected=true");
     }
 
     private void ApplyIceServers(List<IceServer> servers)
@@ -2209,13 +2210,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (AdvancePumpDeadline(nowMs, ref _rpcRosterPollNextMs, RpcRosterPollIntervalMs))
         {
             _rpcPresentScratch.Clear();
-            var authenticatedRosterEntries = 0;
+            var resolvedRosterEntries = 0;
             foreach (var remote in client.allClients)
             {
                 if (remote == null) continue;
                 var id = remote.Id;
                 if (id < 0) continue;
-                authenticatedRosterEntries++;
+                resolvedRosterEntries++;
                 if (id == localId) continue;
                 _rpcPresentScratch.Add(id);
                 if (_rpcKnownClients.Add(id))
@@ -2225,7 +2226,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             // A joined InnerNet roster must contain at least the local client. Among Us briefly
             // publishes an empty collection between the final meeting frame and EndGame; treating
             // that impossible snapshot as authoritative used to tear down the healthy mesh.
-            if (authenticatedRosterEntries == 0)
+            if (resolvedRosterEntries == 0)
             {
                 if (!_rpcRosterGapActive)
                 {
@@ -2242,7 +2243,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     _rpcRosterGapActive = false;
                     VoiceDiagnostics.Log(
                         "signaling.session.roster-gap",
-                        $"action=recovered authenticatedEntries={authenticatedRosterEntries} knownPeers={_rpcKnownClients.Count} localClient={localId}");
+                        $"action=recovered rosterEntries={resolvedRosterEntries} knownPeers={_rpcKnownClients.Count} localClient={localId}");
                 }
 
                 if (_rpcKnownClients.Count != _rpcPresentScratch.Count)
@@ -2784,7 +2785,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     public void UpdateProfile(byte playerId, string playerName)
     {
-        // Native peers are keyed by authenticated Among Us client id. Player profile data is
+        // Native peers are keyed by the Among Us client id resolved from the live roster. Player profile data is
         // refreshed from VoiceGameStateSnapshot in EnsureSnapshotRoutePeers.
     }
 
@@ -3789,7 +3790,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             : $" mobilePlaybackDepthSamples={mobileVoice.PlaybackDepthSamples} mobilePlaybackHighWaterSamples={mobileVoice.PlaybackHighWaterSamples} mobilePlaybackDroppedSamples={mobileVoice.PlaybackDroppedSamples} mobilePlaybackSkippedSamples={mobileVoice.PlaybackSkippedSamples} mobilePlaybackZeroFilledSamples={mobileVoice.PlaybackZeroFilledSamples} mobilePlaybackPrimingZeroFilledSamples={mobileVoice.PlaybackPrimingZeroFilledSamples} mobilePlaybackClockCorrectionSamples={mobileVoice.PlaybackClockCorrectionSamples} mobilePlaybackClockCorrectionCallbacks={mobileVoice.PlaybackClockCorrectionCallbacks} mobilePlaybackLateCycles={mobileVoice.PlaybackPumpLateCycles} mobilePlaybackEmptyPulls={mobileVoice.PlaybackNativeEmptyPulls}";
 #endif
         VoiceDiagnostics.Log("voice.stats",
-            $"reason={reason} room={RoomCode} region={Region} media=native-engine signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +
+            $"reason={reason} {VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} media=native-engine signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +
             $"routeRecords={routeRecords} engineRouteTargets={engineRouteTargets} audibleRoutes={peers.Count(peer => peer.CurrentRoute.Audible)} speakingRoutes={peers.Count(peer => peer.IsSpeaking)} {rpcDiagnosticsText} " +
             $"localLevel={LocalLevel:0.000} localSpeaking={LocalSpeaking} mute={Mute} remoteLevelMax={remoteMax:0.000} " +
             $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} " +

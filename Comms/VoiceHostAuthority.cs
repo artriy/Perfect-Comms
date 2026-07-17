@@ -29,6 +29,9 @@ internal readonly record struct VoiceHostSenderIdentity(
 
 internal static class VoiceHostAuthority
 {
+    // This matches the routed PlayerControl's resolved owner to the live host id. HandleRpc does not
+    // expose authenticated packet-sender provenance, so this is a compatibility/consistency check and
+    // must not be treated as a security boundary for remotely destructive operations.
     public static VoiceHostSenderIdentity FromPlayer(PlayerControl? player, string transport)
         => new(ResolveSenderClientId(player), ResolveSenderPlayerId(player), ResolveSenderPeerId(player), transport);
 

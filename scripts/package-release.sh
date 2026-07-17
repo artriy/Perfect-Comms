@@ -280,17 +280,17 @@ if [[ "$config" != "Android" ]]; then
 			win-x86)
 				architecture_label="Windows x86 (32-bit)"
 				platform_label="Steam and itch.io"
-				platform_slug="steam-itch"
+				archive_arch="x86"
 				bepinex_archive_sha256="9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
 				;;
 			win-x64)
 				architecture_label="Windows x64 (64-bit)"
 				platform_label="Epic Games Store and Microsoft Store"
-				platform_slug="epic-msstore"
+				archive_arch="x64"
 				bepinex_archive_sha256="badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
 				;;
 		esac
-		dependency_name="PerfectComms+dependencies-$dependency_arch-$platform_slug"
+		dependency_name="PerfectComms+dependencies $archive_arch"
 		dependency_output="$root/artifacts/$dependency_name"
 		dependency_zip="$root/artifacts/$dependency_name.zip"
 

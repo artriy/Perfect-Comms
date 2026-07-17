@@ -1788,17 +1788,18 @@ public static partial class VoiceChatHudState
         var tab = VoiceSettings.Instance;
 #if ANDROID
         _spkTooltipTmp.text =
-            "<b>Speaker</b>\n" +
+            "<b>Deafen</b>\n" +
             $"Status: {status}\n" +
             $"Volume: {(int)((tab?.MasterVolume.Value ?? 0f) * 100f)}%\n" +
             AndroidVoiceUiPolicy.SpeakerTooltipAction;
 #else
         string hotkey = VoiceChatKeybinds.ToggleSpeaker.Label;
         _spkTooltipTmp.text =
-            "<b>Speaker</b>\n" +
+            "<b>Deafen</b>\n" +
             $"Status: {status}\n" +
             $"Volume: {(int)((tab?.MasterVolume.Value ?? 0f) * 100f)}%\n" +
-            $"Hotkey: {hotkey}";
+            $"Hotkey: {hotkey}\n" +
+            "Mutes playback and pauses microphone transmission.";
 #endif
 
         PositionNear(_spkTooltip, _spkButtonObj);

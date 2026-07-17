@@ -513,9 +513,11 @@ internal static class VoiceRoomSettingsRpc
                     }
 
                     // The unversioned kind-1 payload was extended in-place across many releases.
-                    // It is impossible to distinguish all of those layouts safely, so a trusted
-                    // legacy host is asked for a compatible snapshot instead of applying shifted
-                    // settings. Current payloads are bounded before allocating their byte buffer.
+                    // It is impossible to distinguish all of those layouts safely, so a legacy
+                    // sender matched to the host object is asked for a compatible snapshot instead
+                    // of applying shifted settings. A host-object match is compatibility validation
+                    // rather than hostile-client authentication. Current payloads are bounded before
+                    // allocating their byte buffer.
                     if (kind == LegacySnapshotKind || reader.BytesRemaining > MaxSnapshotPayloadBytes)
                     {
                         string wireReason = kind == LegacySnapshotKind ? "legacy-unversioned" : "payload-oversized";
@@ -535,7 +537,7 @@ internal static class VoiceRoomSettingsRpc
                     }
 
                     // Everything is still inert here. Mutate host-synced state only after both
-                    // sender authorization and complete, exact schema validation have succeeded.
+                    // the host-object compatibility check and complete, exact schema validation succeed.
                     VoiceRoomSettingsState.ApplyRemote(settings, AmongUsClient.Instance?.GameId ?? 0);
                     VoiceModRegistry.BeginRemoteSync();
                     ApplyDecodedModOptions(trusted: true, modOptions, VoiceModRegistry.ApplySyncedValue);

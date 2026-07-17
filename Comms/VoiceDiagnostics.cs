@@ -27,6 +27,10 @@ internal static class VoiceDiagnostics
     private static DateTime _enabledAtUtc;
     private static DiagnosticSession? _session;
     private static MainThreadContext _mainContext = MainThreadContext.Unknown;
+    // A process-local HMAC key keeps low-entropy lobby codes from being recoverable with an
+    // offline dictionary while still allowing entries in one diagnostic session to be correlated.
+    private static readonly byte[] SensitiveValueHashKey =
+        System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
 
     static VoiceDiagnostics()
     {
@@ -160,6 +164,20 @@ internal static class VoiceDiagnostics
         var bytes = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(deviceId));
         return $"default=false idHash={Convert.ToHexString(bytes, 0, 6)} idChars={deviceId.Length}";
+    }
+
+    internal static string DescribeRoom(string? roomCode)
+        => DescribeSensitiveValue("room", roomCode);
+
+    internal static string DescribeRegion(string? region)
+        => DescribeSensitiveValue("region", region);
+
+    private static string DescribeSensitiveValue(string field, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return $"{field}Present=false";
+        using var hmac = new System.Security.Cryptography.HMACSHA256(SensitiveValueHashKey);
+        var bytes = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(value));
+        return $"{field}Present=true {field}Hash={Convert.ToHexString(bytes, 0, 6)} {field}Chars={value.Length}";
     }
 
     private static void MirrorPluginLog(string severity, string message)

@@ -19,6 +19,14 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(48_000, AndroidEnginePcmSpeaker.MaximumCallbackSamples);
         Assert.Equal(expected, AndroidEnginePcmSpeaker.IsSupportedCallbackSize(samples));
     }
+
+    [Theory]
+    [InlineData(64 * 1024, 128 * 1024)]
+    [InlineData(512 * 1024, 1024 * 1024)]
+    [InlineData(1024 * 1024, (1024 * 1024) + 1)]
+    [InlineData((1024 * 1024) + 1, (1024 * 1024) + 1)]
+    public void AndroidSignalPollingGrowsWithoutExceedingProtocolCap(int current, int expected)
+        => Assert.Equal(expected, MobileVoiceClient.NextSignalBufferSize(current));
 #endif
 
     [Theory]
@@ -156,6 +164,47 @@ public sealed class ManagedVoiceHardeningTests
     {
         Assert.True(VoiceChatHudState.CombineTransmitMute(
             speakerMuted, manualMuted, pushToTalkMuted, roleMuted, policyMuted));
+    }
+
+    [Fact]
+    public void DeafenCopyMatchesTheFailClosedPlaybackAndTransmitBehavior()
+    {
+        Assert.Equal("Toggle Deafen", VoiceChatKeybinds.ToggleDeafenDisplayName);
+        Assert.Contains("mutes voice playback", VoiceChatKeybinds.ToggleDeafenHelpText);
+        Assert.Contains("pauses microphone transmission", VoiceChatKeybinds.ToggleDeafenHelpText);
+        Assert.True(VoiceChatHudState.CombineTransmitMute(
+            speakerMuted: true,
+            manualMuted: false,
+            pushToTalkMuted: false,
+            roleMuted: false,
+            policyMuted: false));
+    }
+
+    [Fact]
+    public void HostRefreshIsLocalOnlyAndLegacyRemotePacketsFailClosed()
+    {
+        Assert.Equal("Refresh Host Voice Connection", VoiceChatKeybinds.HostLocalRefreshDisplayName);
+        Assert.Contains("local voice session", VoiceChatKeybinds.HostLocalRefreshHelpText);
+        Assert.DoesNotContain("RPC", VoiceChatKeybinds.HostLocalRefreshHelpText);
+        Assert.False(VoiceHostRefreshRpc.RemoteRefreshEnabled);
+        Assert.Equal(
+            "remote-refresh-disabled-untrusted-rpc-source",
+            VoiceHostRefreshRpc.RemoteRefreshRejectionReason);
+    }
+
+    [Fact]
+    public void LocalAndHostRefreshBindingsShareOneTenSecondCooldown()
+    {
+        float sharedLastRequestTime = -999f;
+
+        Assert.True(VoiceChatRoom.TryConsumeLocalVoiceRefreshCooldown(
+            now: 100f, ref sharedLastRequestTime));
+        Assert.False(VoiceChatRoom.TryConsumeLocalVoiceRefreshCooldown(
+            now: 109.999f, ref sharedLastRequestTime));
+        Assert.Equal(100f, sharedLastRequestTime);
+        Assert.True(VoiceChatRoom.TryConsumeLocalVoiceRefreshCooldown(
+            now: 110f, ref sharedLastRequestTime));
+        Assert.Equal(110f, sharedLastRequestTime);
     }
 
     [Theory]
@@ -374,6 +423,42 @@ public sealed class ManagedVoiceHardeningTests
         Assert.False(SidecarVoiceClient.IsRecoverableHelperError("busy"));
         Assert.False(SidecarVoiceClient.IsRecoverableHelperError("rtc-error"));
         Assert.False(SidecarVoiceClient.IsRecoverableHelperError(null));
+    }
+
+    [Fact]
+    public void SidecarDeadNotificationGateResetsForEachStartGeneration()
+    {
+        long state = 0;
+        SidecarVoiceClient.ResetDeadNotification(ref state, generation: 7);
+        Assert.True(SidecarVoiceClient.TryBeginDeadNotification(ref state, generation: 7));
+        Assert.False(SidecarVoiceClient.TryBeginDeadNotification(ref state, generation: 7));
+
+        SidecarVoiceClient.ResetDeadNotification(ref state, generation: 8);
+
+        Assert.False(SidecarVoiceClient.TryBeginDeadNotification(ref state, generation: 7));
+        Assert.True(SidecarVoiceClient.TryBeginDeadNotification(ref state, generation: 8));
+    }
+
+    [Fact]
+    public void RetiredSidecarWorkersCannotActOnAReplacementGeneration()
+    {
+        Assert.True(SidecarVoiceClient.IsWorkerGenerationCurrent(
+            running: true, currentGeneration: 8, workerGeneration: 8));
+        Assert.False(SidecarVoiceClient.IsWorkerGenerationCurrent(
+            running: true, currentGeneration: 8, workerGeneration: 7));
+        Assert.False(SidecarVoiceClient.IsWorkerGenerationCurrent(
+            running: false, currentGeneration: 8, workerGeneration: 8));
+    }
+
+    [Fact]
+    public void SidecarHandshakeWindowCrossesTheLegacyIntTickRollover()
+    {
+        long startedAt = int.MaxValue - 10L;
+
+        Assert.True(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 20));
+        Assert.True(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 3_999));
+        Assert.False(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 4_000));
+        Assert.False(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt - 1));
     }
 
     [Fact]

@@ -1,5 +1,60 @@
 # Changelog
 
+## Perfect Comms v4.0.0
+
+Perfect Comms v4.0.0 is the largest voice-system rebuild in the project's
+history. Desktop capture, playback, processing, mixing, and WebRTC transport now
+run in the cross-platform PerfectCommsAudio helper, Android uses its own native
+voice engine, and peer negotiation travels through Among Us itself. The result
+is broader platform support, much stronger recovery when a device or connection
+stalls, a polished first-run setup, and a substantially more configurable HUD.
+
+**Compatibility:** v4 uses voice protocol 4. It is intentionally incompatible
+with the v3 transport, so everyone in a voice lobby must update to v4.0.0
+together.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.0.0/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### What's Changed
+
+- **A cross-platform native voice engine.**
+  > <sub>The new PerfectCommsAudio helper owns microphone capture, speaker playback, Opus, audio processing, proximity mixing, and WebRTC on desktop. It ships for Windows x86/x64 plus the Linux and universal macOS host routes used by Wine, Proton, and CrossOver, and is extracted and refreshed automatically with the mod.</sub>
+
+- **Voice signaling now travels through Among Us.**
+  > <sub>Players negotiate voice peers over Among Us custom RPC messages instead of relying on a separate Socket.IO signaling path. Direct WebRTC remains the first choice, with fresh STUN/TURN credentials and automatic relay fallback when the network cannot form a direct route.</sub>
+
+- **Connections recover instead of silently staying broken.**
+  > <sub>The peer manager now retransmits lost hellos, uses deterministic offerer roles, times out incomplete handshakes, reacts to real WebRTC peer state, and rebuilds peers after helper restarts, ICE disconnects, or signaling gaps. Capture also retries a cold helper start and recovers stalled microphones without requiring a manual mute/unmute cycle.</sub>
+
+- **More resilient desktop audio.**
+  > <sub>Native device enumeration drives the in-game mic and speaker selectors across supported desktop routes. Capture and output teardown, rapid device switching, clock drift, bounded audio queues, jitter buffering, echo-reference timing, and audio-thread safety were all hardened to prevent deadlocks, orphan helpers, runaway latency, and choppy playback.</sub>
+
+- **Native audio processing moved beside the devices.**
+  > <sub>Echo cancellation, noise suppression, automatic mic gain, and proximity effects now run in the helper, with automatic echo-delay tracking and graceful passthrough if an optional processing component is unavailable. Radio, wall occlusion, ghost reverb, volume, and stereo positioning keep parity across the supported voice routes.</sub>
+
+- **A dedicated Android voice engine and touch controls.**
+  > <sub>Android now uses the embedded `pc-mobile` engine for WebRTC voice instead of the retired managed transport. Its HUD has touch-first mute, deafen, push-to-talk, Team Radio, and connection controls: hold the mic to transmit in push-to-talk mode, and tap or hold Team Radio to cycle or transmit.</sub>
+
+- **Guided first-time setup.**
+  > <sub>New installs walk through Welcome, Audio, Controls, HUD, and Review. You can choose and test devices, watch a live mic meter, play an output test, pick talk controls, preview HUD presets with a live lobby mockup, and save the complete draft only when you finish. The guide can be reopened later without overwriting existing settings unless you complete it.</sub>
+
+- **A rebuilt speaking bar and HUD editor.**
+  > <sub>The speaking bar now supports screen presets, side lanes, automatic wrapping, manual placement, avatar facing, name placement, 50%-225% scaling, a backdrop, and stable all-player slots. An isolated 15-player live preview updates while you edit and turns itself off when you leave the HUD editor, close settings, or restart the game.</sub>
+
+- **Privacy-safe meeting and role visuals.**
+  > <sub>Meeting speaking glows and voice overlays now respect concealment, blindness, and identity rules instead of leaking hidden information. Fixed-roster transitions were hardened, and dead players in the speaking bar use the game's ghost artwork rather than a misleading living avatar.</sub>
+
+- **Expanded local audio controls.**
+  > <sub>Keyboard and mouse chords are supported throughout the rebindable controls, with `Shift+M` for mic mute, `Shift+N` for deafen, and `Shift+B` for the player-volume mixer by default. Deafening mutes playback and pauses microphone transmission. Per-player levels persist locally from 0%-200%, optional hold bindings can independently focus living or dead voices, and both refresh keys rebuild only the local voice session through one shared cooldown.</sub>
+
+- **Safer, clearer release packages.**
+  > <sub>Steam and itch.io users get `PerfectComms+dependencies x86.zip`; Epic Games Store and Microsoft Store users get `PerfectComms+dependencies x64.zip`. Both include the matching pinned BepInEx loader, Perfect Comms, hashes, and audited notices. `PerfectComms.dll` and `PerfectCommsAndroid.dll` remain available for existing BepInEx or Android installations.</sub>
+
+- **Much deeper automated validation.**
+  > <sub>CI now builds and smoke-tests every helper and audio-processing target, checks Windows architecture labels, validates the Android ABI and microphone manifest, exercises helper-to-helper WebRTC plus live TURN relay, audits Rust dependencies and licenses, and refuses to publish unless the managed, native, RTC, packaging, version, and exact-main-tip gates all pass.</sub>
+
 ## Perfect Comms v3.2.3
 
 Perfect Comms v3.2.3 fixes a crash where players on CrossOver or Wine could take the whole lobby down when they joined, stops hitchy or weak-machine players from sounding choppy to everyone, and gives push-to-talk its own mic color.

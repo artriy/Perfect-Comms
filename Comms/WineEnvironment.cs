@@ -1,8 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -14,12 +12,11 @@ internal enum WineHostOs
     Linux = 2,
 }
 
-// Detects whether we're running under Wine/Proton (Linux) and provides a Wine-safe way to
-// learn our real local IPv4. Both matter for WebRTC: under Wine, ICE host-candidate gathering that
-// leans on the Windows network-interface APIs is unreliable and often yields no candidates, so peers
-// never connect. See docs/wine-nat-fix-plan.md.
+// Detects Wine/Proton/CrossOver and provides the host-OS/path/process helpers used to launch and
+// clean up the native macOS or Linux audio helper outside the Windows compatibility layer.
 internal static class WineEnvironment
 {
+    internal const int HostExecTimeoutMs = 15_000;
     private static bool _probed;
     private static bool _isWine;
 
@@ -76,37 +73,36 @@ internal static class WineEnvironment
     }
 
     public static void HostExec(string unixProgram, string unixArgs)
-    {
-        try
-        {
-            using var p = Process.Start(new ProcessStartInfo("start.exe", $"/unix {unixProgram} {unixArgs}")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
-            p?.WaitForExit(2000);
-        }
-        catch { }
-    }
+        => _ = TryHostExec(unixProgram, unixArgs);
 
-    // Get our real outbound local IPv4 WITHOUT NetworkInterface.GetAllNetworkInterfaces() (which Wine
-    // mis-reports). Opening a UDP socket toward a public address and reading LocalEndPoint resolves the
-    // routable local address even on Wine; no packets are actually sent (UDP connect just sets the route).
-    public static IPAddress? GetLocalIPv4()
+    public static bool TryHostExec(string unixProgram, string unixArgs)
     {
         try
         {
-            using var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            s.Connect("8.8.8.8", 53);
-            if (s.LocalEndPoint is IPEndPoint ep && !IPAddress.IsLoopback(ep.Address))
-                return ep.Address;
+            using var p = Process.Start(BuildHostExecStartInfo(unixProgram, unixArgs));
+            if (p == null)
+                return false;
+            if (!p.WaitForExit(HostExecTimeoutMs))
+            {
+                try { p.Kill(); } catch { }
+                return false;
+            }
+            return p.ExitCode == 0;
         }
         catch
         {
-            // fall through
+            return false;
         }
-        return null;
     }
+
+    internal static ProcessStartInfo BuildHostExecStartInfo(string unixProgram, string unixArgs)
+        // Wine start.exe treats the argument immediately after /unix as the program, so every
+        // other start option must precede /unix.
+        => new("start.exe", $"/wait /unix \"{unixProgram}\" {unixArgs}")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
 
     public static ProcessStartInfo BuildWinePathStartInfo(string windowsPath)
     {

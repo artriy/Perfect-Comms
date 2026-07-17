@@ -4,7 +4,7 @@ This is the player guide for installing Perfect Comms, completing the guided set
 
 ## Get started
 
-1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and use the dependency bundle for your store: x86 for Steam/itch.io or x64 for Epic Games Store/Microsoft Store.
+1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and use the dependency bundle for your store: `PerfectComms+dependencies x86.zip` for Steam/itch.io or `PerfectComms+dependencies x64.zip` for Epic Games Store/Microsoft Store.
 2. Launch Among Us and complete the guided Welcome, Audio, Controls, HUD, and Review steps.
 3. Open **Voice Settings** from Options or press `F10` whenever you want to change your local setup.
 4. If you host, open **Host Voice Settings** from the lobby game-settings console or press `F11`.
@@ -37,10 +37,10 @@ Compatible mods can add more host tabs. See [Host Settings](Host-Settings) for e
 
 - `Shift+M`: mute or unmute your microphone.
 - `C`: hold to talk when Push To Talk is selected.
-- `Shift+N`: mute or unmute incoming voice.
+- `Shift+N`: deafen or undeafen; deafening mutes playback and pauses microphone transmission.
 - `Shift+B`: open persistent per-player volume sliders and speaking meters.
 - `V`: hold Team Radio; `G`: cycle eligible channels.
-- `F7`: refresh your voice session; `F8`: host-only refresh for everyone.
+- `F7`: refresh your voice session; `F8`: host-only refresh of the host's local voice session.
 
 On Android, hold the microphone button for push to talk. Tap Team Radio to cycle channels or hold it to transmit.
 

@@ -7,27 +7,13 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class VoiceHostRefreshRpc
 {
     private const byte RpcId = 206;
+    internal const string RemoteRefreshRejectionReason =
+        "remote-refresh-disabled-untrusted-rpc-source";
 
-    public static void Send(int nonce)
-    {
-        var writer = StartWriter();
-        if (writer == null) return;
-        writer.Write(nonce);
-        FinishWriter(writer);
-    }
-
-    private static MessageWriter? StartWriter()
-    {
-        if (AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return null;
-        return AmongUsClient.Instance.StartRpcImmediately(
-            PlayerControl.LocalPlayer.NetId,
-            RpcId,
-            SendOption.Reliable,
-            -1);
-    }
-
-    private static void FinishWriter(MessageWriter writer)
-        => AmongUsClient.Instance.FinishRpcImmediately(writer);
+    // Handle the legacy packet shape so mixed-version lobbies fail closed instead of
+    // treating the id as an unknown RPC. New clients never send this command because
+    // PlayerControl.HandleRpc does not expose authenticated packet sender provenance.
+    internal static bool RemoteRefreshEnabled => false;
 
     [HarmonyPatch(typeof(PlayerControl), nameof(PlayerControl.HandleRpc))]
     private static class PlayerControlHandleRpcPatch

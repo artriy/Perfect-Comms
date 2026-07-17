@@ -34,6 +34,23 @@ public sealed class SpeakingBarSettingsContractTests
     }
 
     [Fact]
+    public void TransientPreviewAndTroubleshootingTogglesResetForEveryLaunch()
+    {
+        var reset = TransientVoiceTogglePolicy.ResetForLaunch(new TransientVoiceToggleState(
+            SpeakingBarLivePreview: true,
+            ShowFake15Players: true,
+            DebugVoiceStats: true,
+            MicCalibrationDiagnostics: true,
+            SyntheticMicTone: true));
+
+        Assert.False(reset.SpeakingBarLivePreview);
+        Assert.False(reset.ShowFake15Players);
+        Assert.False(reset.DebugVoiceStats);
+        Assert.False(reset.MicCalibrationDiagnostics);
+        Assert.False(reset.SyntheticMicTone);
+    }
+
+    [Fact]
     public void V4OneHundredPercentUsesLegacyNinetyPercentRenderedSize()
     {
         Assert.Equal(0.90f, SpeakingBarScalePolicy.ToRenderedScale(1.00f), 4);

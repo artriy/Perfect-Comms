@@ -54,6 +54,11 @@ DEPENDENCY_PE_MACHINES = {
     "dependencies-win-x64": (0x8664, "x64"),
 }
 
+DEPENDENCY_PUBLIC_ARCHIVE_NAMES = {
+    "dependencies-win-x86": "PerfectComms+dependencies x86.zip",
+    "dependencies-win-x64": "PerfectComms+dependencies x64.zip",
+}
+
 DEPENDENCY_CORE_FILES = {
     "0Harmony.dll",
     "AsmResolver.dll",
@@ -141,6 +146,15 @@ def required_entries(kind: str) -> set[str]:
             "BepInEx/unity-libs/2022.3.44.zip",
         }
     raise ValueError(f"unsupported package kind: {kind}")
+
+
+def validate_archive_filename(archive_path: Path, kind: str) -> None:
+    expected_name = DEPENDENCY_PUBLIC_ARCHIVE_NAMES.get(kind)
+    if expected_name is not None and archive_path.name != expected_name:
+        raise ValueError(
+            f"dependency archive name mismatch for {kind}: "
+            f"expected {expected_name!r}, got {archive_path.name!r}"
+        )
 
 
 def pe_machine(payload: bytes, name: str) -> int:
@@ -250,6 +264,15 @@ def self_test() -> int:
         root / ".package-layout-self-test-unsafe.zip",
     ]
     try:
+        for kind, expected_name in DEPENDENCY_PUBLIC_ARCHIVE_NAMES.items():
+            validate_archive_filename(Path(expected_name), kind)
+            try:
+                validate_archive_filename(Path(f"wrong-{kind}.zip"), kind)
+            except ValueError as error:
+                assert "dependency archive name mismatch" in str(error)
+            else:
+                raise AssertionError("incorrect dependency archive name was accepted")
+
         for kind in (
             "Release",
             "Android",
@@ -331,6 +354,7 @@ def main() -> int:
         parser.error("archive and --kind are required unless --self-test is used")
 
     try:
+        validate_archive_filename(args.archive, args.kind)
         entry_count = validate_archive(args.archive, args.kind)
 
         print(

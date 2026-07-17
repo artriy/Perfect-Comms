@@ -13,8 +13,10 @@ namespace VoiceChatPlugin.VoiceChat;
 /// <summary>
 /// Manages the in-game voice chat session.
 ///
-/// C# owns game-state routing and authenticated Among Us RPC signaling. Native pc-capture/pc-mobile
-/// engines own capture, WebRTC RTP media, jitter buffering, mixing, and playback.
+/// C# owns game-state routing and Among Us custom-RPC signaling. Those callbacks identify the
+/// dispatched PlayerControl object but do not expose authenticated packet sender provenance.
+/// Native pc-capture/pc-mobile engines own capture, WebRTC RTP media, jitter buffering, mixing,
+/// and playback.
 /// </summary>
 public class VoiceChatRoom
 {
@@ -34,7 +36,6 @@ public class VoiceChatRoom
     private const double StalePlaybackBufferTimeoutSeconds = VoiceProtocol.MaxQueuedFrameAgeSeconds;
     private const double SlowUpdateLogThresholdMs = 20.0;
     private const double SlowOperationLogThresholdMs = 2.0;
-    private const float HostVoiceRefreshCooldownSeconds = 10f;
     private const float LocalVoiceRefreshCooldownSeconds = 10f;
     private const float HostPolicySyncFallbackSeconds = 10f;
 
@@ -70,15 +71,7 @@ public class VoiceChatRoom
     private bool _hostSettingsResyncPending;
     private float _hostPolicyWaitStartTime = -1f;
     private bool _hostPolicyFallbackLogged;
-    private int _lastAppliedHostVoiceRefreshNonce;
-    private float _lastAppliedHostVoiceRefreshTime = -999f;
-    private const float HostVoiceRefreshApplyCooldownSeconds = 8f;
-    private float _lastHostVoiceRefreshRequestTime = -999f;
     private float _lastLocalVoiceRefreshRequestTime = -999f;
-    // Seeded randomly per process so two different hosts don't both start at nonce 1. After host migration,
-    // the new host's first refresh would otherwise collide with the old host's nonce 1 and be ignored by
-    // every client as a duplicate — exactly when voice is most likely broken.
-    private static int _nextHostVoiceRefreshNonce = new System.Random().Next(1, int.MaxValue / 2);
     private readonly RadioStateSyncTracker _radioStateSync = new(
         TimeSpan.FromMilliseconds(250),
         TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
@@ -435,8 +428,9 @@ public class VoiceChatRoom
         var local = PlayerControl.LocalPlayer;
         if (local == null) return;
 
-        // Authority only via authenticated Among Us RPC (binds InnerNet sender); the voice
-        // side-channel's self-asserted identity would let any peer forge a jailor's mute.
+        // Keep this on the Among Us custom-RPC path instead of the voice side-channel. The receiver
+        // re-derives the live Jailor relationship and accepts only the permissive direction, but the
+        // routed PlayerControl is still not authenticated packet-sender provenance.
         VoiceJailVoiceRpc.Send(local.PlayerId, jailedPlayerId, allowed);
     }
 
@@ -485,10 +479,10 @@ public class VoiceChatRoom
                 currentGameId,
                 explicitDisconnect);
 
-            // Scene transitions often remove PlayerControls before the authenticated InnerNet
+            // Scene transitions often remove PlayerControls before the server-maintained InnerNet
             // roster changes. Promote the freshly observed phase immediately, but merge a missing
-            // established identity only while allClients still authenticates it. Non-EndGame gaps
-            // are bounded; EndGame keeps its authenticated roster because it has no world roster.
+            // established identity only while allClients still contains it. Non-EndGame gaps
+            // are bounded; EndGame keeps its resolved roster because it has no world roster.
             if (previousRetainable && CurrentSnapshot != null)
             {
                 var authRosterState = CollectAuthenticatedSnapshotClientIds();
@@ -699,16 +693,16 @@ public class VoiceChatRoom
 
             if (client.ClientId >= 0)
                 _authenticatedSnapshotClientIds.Add(client.ClientId);
-            var authenticatedRosterEntries = 0;
+            var resolvedRosterEntries = 0;
             foreach (var member in client.allClients)
             {
                 if (member != null && member.Id >= 0)
                 {
-                    authenticatedRosterEntries++;
+                    resolvedRosterEntries++;
                     _authenticatedSnapshotClientIds.Add(member.Id);
                 }
             }
-            return authenticatedRosterEntries == 0
+            return resolvedRosterEntries == 0
                 ? AuthenticatedRosterCollectionState.Empty
                 : AuthenticatedRosterCollectionState.Populated;
         }
@@ -757,16 +751,10 @@ public class VoiceChatRoom
 
     private void RequestLocalVoiceRefresh()
     {
-        if (Time.time - _lastLocalVoiceRefreshRequestTime < LocalVoiceRefreshCooldownSeconds)
-        {
-            VoiceDiagnostics.Log("voice.refresh.local.rate_limited",
-                $"trigger=keybind cooldown={LocalVoiceRefreshCooldownSeconds:0.0}s");
+        if (!TryBeginLocalVoiceRefreshCooldown("voice.refresh.local.rate_limited", "keybind"))
             return;
-        }
-
-        _lastLocalVoiceRefreshRequestTime = Time.time;
         VoiceDiagnostics.Log("voice.refresh.local.requested",
-            $"backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
+            $"backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)} peers={_voiceBackend?.PeerCount ?? 0}");
         ApplyLocalVoiceRefresh("keybind");
     }
 
@@ -778,21 +766,39 @@ public class VoiceChatRoom
             return;
         }
 
-        if (Time.time - _lastHostVoiceRefreshRequestTime < HostVoiceRefreshCooldownSeconds)
-        {
-            VoiceDiagnostics.Log("voice.refresh.rate_limited",
-                $"trigger=keybind cooldown={HostVoiceRefreshCooldownSeconds:0.0}s");
+        if (!TryBeginLocalVoiceRefreshCooldown("voice.refresh.rate_limited", "host-keybind"))
             return;
+
+        var localClientId = ResolveLocalClientId(CurrentSnapshot);
+        VoiceDiagnostics.Log("voice.refresh.host-local.requested",
+            $"hostClient={localClientId} remoteRefresh=false backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)}");
+
+        ApplyLocalVoiceRefresh("host-keybind");
+    }
+
+    private bool TryBeginLocalVoiceRefreshCooldown(string rateLimitedEvent, string trigger)
+    {
+        var now = Time.time;
+        if (!TryConsumeLocalVoiceRefreshCooldown(now, ref _lastLocalVoiceRefreshRequestTime))
+        {
+            VoiceDiagnostics.Log(rateLimitedEvent,
+                $"trigger={trigger} cooldown={LocalVoiceRefreshCooldownSeconds:0.0}s");
+            return false;
         }
 
-        _lastHostVoiceRefreshRequestTime = Time.time;
-        var nonce = CreateHostVoiceRefreshNonce();
-        var localClientId = ResolveLocalClientId(CurrentSnapshot);
-        VoiceDiagnostics.Log("voice.refresh.requested",
-            $"nonce={nonce} hostClient={localClientId} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")}");
+        return true;
+    }
 
-        VoiceHostRefreshRpc.Send(nonce);
-        ApplyHostVoiceRefresh(VoiceHostAuthority.FromPlayer(PlayerControl.LocalPlayer, "local"), nonce, "keybind");
+    internal static bool IsLocalVoiceRefreshCooldownElapsed(float now, float lastRequestTime)
+        => now - lastRequestTime >= LocalVoiceRefreshCooldownSeconds;
+
+    internal static bool TryConsumeLocalVoiceRefreshCooldown(float now, ref float lastRequestTime)
+    {
+        if (!IsLocalVoiceRefreshCooldownElapsed(now, lastRequestTime))
+            return false;
+
+        lastRequestTime = now;
+        return true;
     }
 
     internal static void ApplyHostVoiceRefreshFromRpc(PlayerControl sender, int nonce)
@@ -804,75 +810,16 @@ public class VoiceChatRoom
             return;
         }
 
-        var senderIdentity = VoiceHostAuthority.FromPlayer(sender, "rpc");
-        if (!VoiceHostAuthority.IsTrustedHostSender(
-                sender,
-                current.CurrentSnapshot,
-                "rpc",
-                out senderIdentity,
-                out var reason,
-                out var hostClientId,
-                out var hostPlayerId))
-        {
-            VoiceDiagnostics.Log("voice.refresh.rejected",
-                $"{senderIdentity.ToDiagnosticFields()} reason={reason} hostClient={hostClientId} hostPlayer={hostPlayerId} nonce={nonce}");
-            return;
-        }
-
-        current.ApplyHostVoiceRefresh(senderIdentity, nonce, "rpc");
-    }
-
-    private static int CreateHostVoiceRefreshNonce()
-    {
-        unchecked
-        {
-            var nonce = ++_nextHostVoiceRefreshNonce;
-            return nonce != 0 ? nonce : ++_nextHostVoiceRefreshNonce;
-        }
-    }
-
-    private void ApplyHostVoiceRefresh(VoiceHostSenderIdentity sender, int nonce, string trigger)
-    {
-        if (nonce != 0 && nonce == _lastAppliedHostVoiceRefreshNonce)
-        {
-            VoiceDiagnostics.Log("voice.refresh.ignored",
-                $"{sender.ToDiagnosticFields()} reason=duplicate nonce={nonce} trigger={trigger}");
-            return;
-        }
-
-        // Only rate-limit RPC-driven refreshes whose nonce is NOT newer than the
-        // last applied one (i.e. duplicate/stale resends). A genuinely new nonce
-        // (host re-tap, host migration) is always honored even inside the window.
-        var nonceIsNewer = nonce != 0 && nonce != _lastAppliedHostVoiceRefreshNonce;
-        if (trigger == "rpc"
-            && !nonceIsNewer
-            && Time.time - _lastAppliedHostVoiceRefreshTime < HostVoiceRefreshApplyCooldownSeconds)
-        {
-            VoiceDiagnostics.Log("voice.refresh.rate_limited",
-                $"{sender.ToDiagnosticFields()} reason=rate-limited nonce={nonce} trigger={trigger}");
-            return;
-        }
-
-        _lastAppliedHostVoiceRefreshTime = Time.time;
-        _lastAppliedHostVoiceRefreshNonce = nonce;
-        var snapshot = CurrentSnapshot;
-        VoiceDiagnostics.Log("voice.refresh.applied",
-            $"{sender.ToDiagnosticFields()} nonce={nonce} trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
-
-        VoiceChatHudState.ShowCompactStatus(trigger == "rpc"
-            ? "Host refreshed voice connections"
-            : "You refreshed voice for everyone");
-
-        // Rejoin() begins with ClearVoiceUiForLifecycleReset, so the UI teardown runs exactly once.
-        StartTransitionTrace($"host voice refresh: {trigger}", snapshot);
-        Rejoin("host voice refresh");
+        var senderIdentity = VoiceHostAuthority.FromPlayer(sender, "rpc-object");
+        VoiceDiagnostics.Log("voice.refresh.rejected",
+            $"{senderIdentity.ToDiagnosticFields()} reason={VoiceHostRefreshRpc.RemoteRefreshRejectionReason} nonce={nonce}");
     }
 
     private void ApplyLocalVoiceRefresh(string trigger)
     {
         var snapshot = CurrentSnapshot;
         VoiceDiagnostics.Log("voice.refresh.local.applied",
-            $"trigger={trigger} backend=native-engine room={LogSafe(_activeRoomCode ?? "unknown")} region={LogSafe(_activeRegion ?? "unknown")} peers={_voiceBackend?.PeerCount ?? 0}");
+            $"trigger={trigger} backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)} peers={_voiceBackend?.PeerCount ?? 0}");
 
         VoiceChatHudState.ShowCompactStatus("Voice connection refreshed");
 
@@ -906,8 +853,8 @@ public class VoiceChatRoom
                 return false;
         }
 
-        // Authority only via authenticated Among Us RPC; the side-channel's self-asserted
-        // sender id would let any peer forge host voice settings.
+        // Keep settings on the host-object-routed custom RPC instead of the voice side-channel.
+        // Receiver-side host matching is a compatibility check, not hostile-client authentication.
         var sent = VoiceRoomSettingsRpc.TrySendSnapshot(settings, targetClientId);
         if (isBroadcast)
             _hostSettingsBroadcastGate.RecordAttempt(now, sent);
@@ -1023,7 +970,7 @@ public class VoiceChatRoom
         }
 
         // This is a policy-only compatibility fallback for vanilla/older hosts. The native media
-        // session and authenticated RPC signaling were already allowed to bootstrap immediately.
+        // session and Among Us custom-RPC signaling were already allowed to bootstrap immediately.
         return true;
     }
 
@@ -1071,7 +1018,7 @@ public class VoiceChatRoom
         TrackHostSettingsAuthority(snapshot);
         var settings = VoiceSettings.Instance;
 
-        // Bootstrap native media and authenticated signaling immediately. Host settings are policy,
+        // Bootstrap native media and Among Us custom-RPC signaling immediately. Host settings are policy,
         // not transport identity, and synchronize independently below.
         EnsureVoiceBackend(snapshot, settings);
         SendHostSettingsSnapshot(force: false, reason: "periodic-or-roster-change");
@@ -1212,7 +1159,8 @@ public class VoiceChatRoom
             return;
         }
 
-        VoiceDiagnostics.Log("transport.switch", $"backend=native-engine signaling=among-us-rpc room={roomCode} region={region}");
+        VoiceDiagnostics.Log("transport.switch",
+            $"backend=native-engine signaling=among-us-rpc {VoiceDiagnostics.DescribeRoom(roomCode)} {VoiceDiagnostics.DescribeRegion(region)}");
         ClearVoiceUiForLifecycleReset("transport switch");
         DisposeVoiceBackend();
         if (Volatile.Read(ref _closed) != 0)
@@ -1283,12 +1231,13 @@ public class VoiceChatRoom
         {
             VoiceDiagnostics.Log(
                 "transport.peer-recovery.state-preserved",
-                $"room={roomCode} globalAttempts={_globalRebuildAttempts} targetedAttempts={_missingPeerRecoveryAttempts} relayOnly={_relayOnlyForSession}");
+                $"{VoiceDiagnostics.DescribeRoom(roomCode)} globalAttempts={_globalRebuildAttempts} targetedAttempts={_missingPeerRecoveryAttempts} relayOnly={_relayOnlyForSession}");
         }
         StartBootstrapWindow("native media session started");
         ForceUpdateLocalProfile();
         SendHostSettingsSnapshot(force: true, reason: "media-session-started");
-        VoiceDiagnostics.Log("transport.selected", $"backend=native-engine signaling=among-us-rpc room={roomCode} region={region} mic={UsingMicrophone} speaker={UsingSpeaker} localLevel={LocalMicLevel:0.000}");
+        VoiceDiagnostics.Log("transport.selected",
+            $"backend=native-engine signaling=among-us-rpc {VoiceDiagnostics.DescribeRoom(roomCode)} {VoiceDiagnostics.DescribeRegion(region)} mic={UsingMicrophone} speaker={UsingSpeaker} localLevel={LocalMicLevel:0.000}");
     }
 
     private void TryRecoverMissingBackendPeers(VoiceGameStateSnapshot? snapshot)
@@ -1396,7 +1345,7 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("transport.peer-recovery",
             $"backend=native-engine reason=missing-peer remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} rawPeers={_voiceBackend.PeerCount} " +
             $"mode={(finalCollapseAttempt ? "global" : collapsed ? "collapse-targeted" : "targeted")} attempt={(collapsed ? _globalRebuildAttempts + 1 : _missingPeerRecoveryAttempts + 1)}/{MissingPeerRecoveryMaxAttempts} healthyPeak={_lastHealthyMappedPeers} backoffSec={backoff:0.0} " +
-            $"room={_activeRoomCode ?? "unknown"} region={_activeRegion ?? "unknown"} " +
+            $"{VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)} " +
             $"liveClients=[{remoteSignatureText}] rpcPeers=[{rpcPeerDiagnostics}]");
 
         bool didGlobal = false;
@@ -1698,7 +1647,7 @@ public class VoiceChatRoom
         var now = DateTime.UtcNow;
         if (!_hostSettingsRequestGate.CanAttempt(now, force)) return;
 
-        // Request the host snapshot over the authenticated RPC only (see SendHostSettingsSnapshot).
+        // Request the host snapshot over the host-targeted custom RPC (see SendHostSettingsSnapshot).
         var hostClientId = VoiceHostAuthority.ResolveHostClientId(CurrentSnapshot);
         var targetClientId = hostClientId >= 0 ? hostClientId : -1;
         var sent = VoiceRoomSettingsRpc.TrySendRequest(targetClientId);

@@ -18,7 +18,7 @@ The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top L
 | **Echo Cancellation** | On | Reduces speaker audio feeding back into your microphone on Windows desktop builds. |
 | **Voice Falloff Softness** | 30% | Keeps voices clearer through more of the host's allowed range, then fades near the edge. It never extends that range. |
 | **Start Muted** | Off | Starts each voice session with your microphone muted. |
-| **Start Deafened** | Off | Starts each voice session with incoming voice muted. |
+| **Start Deafened** | Off | Starts each voice session with playback muted and microphone transmission paused until you undeafen. |
 
 Mic and speaker volume range from 10% to 200%. Mic Sensitivity ranges from 0.25 to 2.00, and Voice Falloff Softness ranges from 0% to 100%.
 
@@ -44,12 +44,12 @@ Every binding can use a keyboard key, mouse button, exact modifier, or modifier 
 | Team radio (hold) | `V` |
 | Cycle team radio channel | `G` |
 | Toggle open mic / push to talk | Unbound |
-| Toggle speaker | `Shift+N` |
+| Toggle deafen | `Shift+N` |
 | Player volumes | `Shift+B` |
 | Alive louder / dead quieter (hold) | Unbound |
 | Alive quieter / dead louder (hold) | Unbound |
 | Refresh voice connection | `F7` |
-| Refresh voice connections (host) | `F8` |
+| Refresh host voice connection | `F8` |
 
 The settings icon beside either alive/dead focus binding expands that binding's independent **Alive Players** and **Dead Players** levels:
 
@@ -77,7 +77,7 @@ Exact left/right modifiers are supported. Press and release a modifier to bind i
 | Setting | Default | What it controls |
 | :--- | :---: | :--- |
 | **Show All Players** | Off | Keeps a stable slot for every connected player instead of showing only current speakers. |
-| **Live Preview** | Off | Moves the settings panel aside and shows an isolated 15-player preview while you edit. |
+| **Live Preview** | Off | Moves the settings panel aside and shows an isolated 15-player preview while you edit. It turns itself off when you close settings, leave the HUD tab, or restart the game. |
 | **Speaking Bar Position** | Top Middle | Chooses a top, middle-side, or bottom screen preset. |
 | **Side Layout** | Single Lane | Uses one lane or wrapped columns for left/right presets. Center presets wrap automatically. |
 | **Speaking Bar Name Position** | Auto | Places names inside the screen automatically, or forces Bottom, Top, Left, or Right. |
@@ -97,7 +97,7 @@ Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at th
 ## Advanced tab
 
 - **First-Time Setup > Run Setup Again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes.
-- **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It is off by default.
+- **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It resets off on every game launch.
 - **Diagnostics** writes detailed voice and microphone-calibration logs. It resets off on launch; leave it off unless you are investigating a problem.
 
 During guided setup, **Use existing settings** keeps every current value and marks onboarding complete without applying the draft choices.
@@ -111,7 +111,8 @@ Press `Shift+B` to open **Player Volumes**. Each other player has a persistent l
 - **Push to talk (`C`)** transmits only while held when Mic Mode is Push To Talk.
 - **Team radio (`V`)** transmits on the selected eligible team channel; **Cycle (`G`)** changes channel.
 - **Refresh voice (`F7`)** rebuilds only your voice session and has a 10-second cooldown.
-- **Host refresh (`F8`)** asks every client to rebuild voice and is available only to the host, with a 10-second cooldown.
+- **Host refresh (`F8`)** rebuilds only the host's local voice session and has a 10-second cooldown.
+- **Deafen (`Shift+N`)** mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.
 - On Android, hold the microphone button to transmit in push-to-talk mode. Tap Team Radio to cycle channels or hold it to transmit.
 
 See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Host Settings](Host-Settings)

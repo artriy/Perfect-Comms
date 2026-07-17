@@ -87,26 +87,27 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 
 | Action | Key | | Action | Key |
 | :--- | :---: | :--- | :--- | :---: |
-| Open voice menu | `F10` | | Toggle speaker | `Shift+N` |
+| Open voice menu | `F10` | | Toggle deafen | `Shift+N` |
 | Open host voice settings | `F11` | | Player volumes | `Shift+B` |
 | Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
-| Team radio (hold) | `V` | | Refresh voice (host) | `F8` |
+| Team radio (hold) | `V` | | Refresh host voice locally | `F8` |
 | Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
 | Toggle open mic / push to talk | Unbound | | | |
 
 On Android, hold the mic button to transmit in push-to-talk mode. For Team
 Radio, tap its button to cycle channels or hold it to transmit. To keep a small
 **Muted** / **Deafened** reminder visible, enable **Voice Settings > HUD > Mute /
-Deafen Status Reminder**.
+Deafen Status Reminder**. Deafening mutes Perfect Comms playback and pauses your
+microphone transmission until you undeafen.
 
 <br>
 
 ## Install
 
 1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or download the bundle for your platform from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest), which already includes BepInEx and Perfect Comms:
-   - **`PerfectComms+dependencies-win-x86-steam-itch.zip`** for **Steam and itch.io** (x86).
-   - **`PerfectComms+dependencies-win-x64-epic-msstore.zip`** for **Epic Games Store and Microsoft Store** (x64).
+   - **`PerfectComms+dependencies x86.zip`** for **Steam and itch.io** (x86).
+   - **`PerfectComms+dependencies x64.zip`** for **Epic Games Store and Microsoft Store** (x64).
 
    Extract the selected bundle into the Among Us folder so `winhttp.dll` sits beside `Among Us.exe`.
 2. If you installed BepInEx separately, drop `PerfectComms.dll` into `BepInEx/plugins`.

@@ -44,6 +44,23 @@ public sealed class VoiceKeybind
     {
     }
 
+    /// <summary>
+    /// Creates a binding whose user-facing label differs from its persisted config key. This is
+    /// used when copy is clarified without discarding an existing user's binding.
+    /// </summary>
+    public VoiceKeybind(
+        ConfigFile config,
+        string section,
+        string displayName,
+        string configKey,
+        KeyCode defaultKey,
+        string helpText)
+        : this(config, section, displayName, defaultKey, KeyCode.None,
+            LegacyModifierMatch(KeyCode.None), hasExplicitModifierMatch: false, helpText: helpText,
+            configKey: configKey)
+    {
+    }
+
     public VoiceKeybind(
         ConfigFile config,
         string section,
@@ -100,18 +117,20 @@ public sealed class VoiceKeybind
         KeyCode defaultModifier,
         VoiceModifierMatch defaultModifierMatch,
         bool hasExplicitModifierMatch,
-        string helpText)
+        string helpText,
+        string? configKey = null)
     {
         DisplayName = displayName;
         HelpText = helpText;
-        _entry = config.Bind(section, displayName, defaultKey);
-        _modifier = config.Bind(section, displayName + " Modifier", defaultModifier);
+        var persistedKey = string.IsNullOrWhiteSpace(configKey) ? displayName : configKey;
+        _entry = config.Bind(section, persistedKey, defaultKey);
+        _modifier = config.Bind(section, persistedKey + " Modifier", defaultModifier);
         // Existing config files have no match-mode entry. Preserve the old behavior for their
         // loaded modifier: Shift/Ctrl/Alt matched either side, while every other key was exact.
         var matchDefault = hasExplicitModifierMatch && _modifier.Value == defaultModifier
             ? defaultModifierMatch
             : LegacyModifierMatch(_modifier.Value);
-        _modifierMatch = config.Bind(section, displayName + " Modifier Match", matchDefault);
+        _modifierMatch = config.Bind(section, persistedKey + " Modifier Match", matchDefault);
     }
 
     public void Set(KeyCode key) => _entry.Value = key;

@@ -173,6 +173,20 @@ public sealed class SpeakingBarLivePreviewTransitionPolicyTests
     }
 }
 
+public sealed class SpeakingBarLivePreviewLifecyclePolicyTests
+{
+    [Fact]
+    public void LivePreviewDisablesOutsideTheHudTab()
+    {
+        foreach (VoiceSettingsCategory category in Enum.GetValues<VoiceSettingsCategory>())
+        {
+            Assert.Equal(
+                category != VoiceSettingsCategory.Hud,
+                SpeakingBarLivePreviewLifecyclePolicy.ShouldDisableForCategory(category));
+        }
+    }
+}
+
 public sealed class SpeakingBarPreviewRosterTests
 {
     [Fact]

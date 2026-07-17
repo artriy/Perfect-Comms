@@ -10,7 +10,7 @@ Your mod references `PerfectComms.dll` as a **soft dependency**, registers its r
 
 Before this API, adding a new role behaviour meant copying the Perfect Comms source, editing the role engine, the snapshot, the settings RPC, and the host panel, then maintaining that fork forever. Now it is a handful of lines in your own plugin.
 
-Everything you register runs **locally on every client** (the same model role mods already use), so most behaviours need no networking at all. The one exception - host-authored toggles - rides the existing authenticated settings RPC for you.
+Everything you register runs **locally on every client** (the same model role mods already use), so most behaviours need no networking at all. The one exception - host-authored toggles - rides the existing host-settings custom RPC for you. Its host-object checks are for lobby compatibility, not hostile-client authentication; see [Privacy](../PRIVACY.md) for the trust boundary.
 
 ---
 

@@ -510,8 +510,8 @@ internal static class VoiceFirstRunSetup
         AddRow(new VoiceUiKit.ToggleRow(
                 () => _draft.StartDeafened,
                 v => _draft.StartDeafened = v)
-            .Build(talk, "Start with playback muted", leftW, -207f, 54f,
-                "Join each voice room without hearing incoming voice."));
+            .Build(talk, "Start deafened", leftW, -207f, 54f,
+                "Join each voice room with playback muted and microphone transmission paused until you undeafen."));
 
         var modeNotice = BuildInlineNotice(talk, 20f, -270f, leftW - 40f, 59f,
             "", VoiceUiKit.Accent);
@@ -531,7 +531,7 @@ internal static class VoiceFirstRunSetup
             () => _draft.PushToTalk, v => _draft.PushToTalk = v,
             "Required only when Push to Talk mode is selected.");
         _pushToTalkGroup = _pushToTalkRow.Root.gameObject.AddComponent<CanvasGroup>();
-        AddBindingRow(binds, rightW, -193f, "Mute / unmute playback",
+        AddBindingRow(binds, rightW, -193f, "Deafen / undeafen",
             () => _draft.ToggleSpeaker, v => _draft.ToggleSpeaker = v,
             null);
         AddBindingRow(binds, rightW, -258f, "Open voice menu",
@@ -541,7 +541,7 @@ internal static class VoiceFirstRunSetup
         AddCardTitle(binds, "In-game touch controls", "Open Voice Settings later from the Among Us Options menu.");
         BuildJourneyRow(binds, -74f, "M", "Microphone", AndroidVoiceUiPolicy.MicrophoneControlHelp);
         BuildJourneyRow(binds, -160f, "R", "Team Radio", AndroidVoiceUiPolicy.TeamRadioControlHelp);
-        BuildJourneyRow(binds, -246f, "S", "Voice playback", "Tap the speaker button to mute incoming voice.");
+        BuildJourneyRow(binds, -246f, "S", "Deafen", "Tap the speaker button to mute playback and pause microphone transmission.");
 #endif
     }
 
@@ -640,7 +640,7 @@ internal static class VoiceFirstRunSetup
                 : "Mute mic: " + _draft.ToggleMute.Label,
             "Voice menu: " + _draft.OpenVoiceSettings.Label,
 #endif
-            $"Start muted: {YesNo(_draft.StartMuted)} / Playback muted: {YesNo(_draft.StartDeafened)}",
+            $"Start muted: {YesNo(_draft.StartMuted)} / Start deafened: {YesNo(_draft.StartDeafened)}",
         }, () => GoTo(ControlsPage));
 
         string hudName = _draft.SelectedHudPreset >= 0

@@ -1,6 +1,13 @@
 fn main() {
     #[cfg(windows)]
     {
+        // Build scripts are compiled for the host. A Windows maintainer can still be
+        // cross-compiling pc-capture for Android, macOS, or Linux, where an .rc resource
+        // is invalid. Only invoke winresource when Cargo's actual target is Windows.
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+            return;
+        }
+
         let mut res = winresource::WindowsResource::new();
         res.set_icon("icon.ico");
         res.set("FileDescription", "PerfectComms Audio Helper");
@@ -9,8 +16,7 @@ fn main() {
         res.set("OriginalFilename", "PerfectCommsAudio.exe");
         res.set("InternalName", "PerfectCommsAudio");
         res.set("LegalCopyright", "PerfectComms");
-        if let Err(e) = res.compile() {
-            eprintln!("cargo:warning=resource embed failed: {e}");
-        }
+        res.compile()
+            .expect("failed to embed PerfectComms Windows executable resources");
     }
 }

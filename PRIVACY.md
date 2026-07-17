@@ -5,7 +5,12 @@ carry. It is informational, not legal advice.
 
 ## Voice and signaling
 
-When you are in a voice room, connection setup (signaling) travels through authenticated Among Us RPCs.
+When you are in a voice room, connection setup (signaling) travels through Among Us custom RPCs. The
+receive callback identifies the routed `PlayerControl`, but does not provide cryptographically authenticated
+packet-sender provenance. Perfect Comms therefore treats a modded lobby as a cooperative trust boundary: a
+hostile modified client may spoof or disrupt signaling and control messages. Especially disruptive remote
+commands, such as forcing every client to rebuild its voice session, are disabled; the remaining object and
+roster checks are compatibility safeguards, not a security boundary against a hostile lobby participant.
 Microphone audio flows peer-to-peer over WebRTC to the other players in the room, or through a TURN relay
 when a direct connection cannot be established. This carries the network metadata (IP addresses and ICE
 candidates) inherent to a real-time voice connection. Audio is not stored by the mod. BetterCrewLink and

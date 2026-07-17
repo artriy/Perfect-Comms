@@ -319,6 +319,26 @@ public class VoiceChatLocalSettings
         VoiceChatRoom.Current?.RefreshLocalAudioSettings();
     }
 
+    internal static void ResetTransientTogglesForLaunch(
+        ConfigEntry<bool> speakingBarLivePreview,
+        ConfigEntry<bool> showFake15Players,
+        ConfigEntry<bool> debugVoiceStats,
+        ConfigEntry<bool> micCalibrationDiagnostics,
+        ConfigEntry<bool> syntheticMicTone)
+    {
+        var reset = TransientVoiceTogglePolicy.ResetForLaunch(new TransientVoiceToggleState(
+            speakingBarLivePreview.Value,
+            showFake15Players.Value,
+            debugVoiceStats.Value,
+            micCalibrationDiagnostics.Value,
+            syntheticMicTone.Value));
+        speakingBarLivePreview.Value = reset.SpeakingBarLivePreview;
+        showFake15Players.Value = reset.ShowFake15Players;
+        debugVoiceStats.Value = reset.DebugVoiceStats;
+        micCalibrationDiagnostics.Value = reset.MicCalibrationDiagnostics;
+        syntheticMicTone.Value = reset.SyntheticMicTone;
+    }
+
     /// <summary>The opaque helper/Unity selection identifier. Never use it as UI text.</summary>
     public string MicrophoneDevice => _savedMicDeviceId?.Value ?? "";
     internal string MicrophoneDeviceName => _savedMicDeviceName?.Value ?? "";
@@ -418,7 +438,7 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Starts each voice session with your microphone muted."));
 
         StartDeafened = config.Bind("Audio", "StartDeafened", false,
-            new ConfigDescription("Starts each voice session with incoming voice audio muted."));
+            new ConfigDescription("Starts each voice session deafened: voice playback is muted and microphone transmission is paused until you undeafen."));
 
         _savedMicDeviceId = config.Bind("Audio", "MicDeviceId", "",
             "Stable microphone device identifier. Display names are stored separately and are not used for selection.");
@@ -580,7 +600,7 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Keeps a stable speaking-bar slot for every connected player, including across meeting transitions, instead of showing only current speakers."));
 
         SpeakingBarLivePreview = config.Bind("UI", "SpeakingBarLivePreview", SpeakingBarLivePreviewDefault,
-            new ConfigDescription("Moves the local settings panel aside and shows an isolated, realistic 15-player live preview of the speaking bar."));
+            new ConfigDescription("Temporarily moves the local settings panel aside and shows an isolated, realistic 15-player live preview of the speaking bar. It turns off when the panel closes, when you leave the HUD tab, and on every game launch."));
 
         JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
             VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
@@ -607,16 +627,19 @@ public class VoiceChatLocalSettings
         SyntheticMicTone = config.Bind("Debug.Advanced", "SyntheticMicTone", false,
             new ConfigDescription("Transmit a quiet generated 48 kHz mono test tone through the native voice engine instead of relying on physical microphone audio."));
         ShowFake15Players = config.Bind("Debug.Advanced", "ShowFake15Players", false,
-            new ConfigDescription("Show a 15-player fake roster in the speaking bar for layout testing."));
+            new ConfigDescription("Temporarily show a 15-player fake roster in the speaking bar for layout testing. It resets off on every game launch."));
         MicCalibrationDiagnostics = config.Bind("Debug", "MicCalibrationDiagnostics", false,
             new ConfigDescription("Log live microphone peak/RMS/gate calibration diagnostics for the native voice engine."));
 
-        // Debug toggles always start OFF on every game launch, even if a previous session left one on. They
-        // still work when turned on mid-session; they just never persist across a restart, so diagnostic
-        // logging, the frame profiler, and the synthetic test tone can't be accidentally left running.
-        DebugVoiceStats.Value = false;
-        MicCalibrationDiagnostics.Value = false;
-        SyntheticMicTone.Value = false;
+        // Temporary editor and troubleshooting toggles always start OFF on every game launch, even if a
+        // previous session left one on. They still work when turned on mid-session; they just never carry
+        // into the next run, so previews, fake roster data, diagnostics, and test audio cannot linger.
+        ResetTransientTogglesForLaunch(
+            SpeakingBarLivePreview,
+            ShowFake15Players,
+            DebugVoiceStats,
+            MicCalibrationDiagnostics,
+            SyntheticMicTone);
 
         LobbyBrowserTitle = config.Bind("Lobby Browser", "Title", "Perfect Comms",
             new ConfigDescription("Title shown in the voice lobby browser"));
