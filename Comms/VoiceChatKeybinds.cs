@@ -9,9 +9,6 @@ public static class VoiceChatKeybinds
     internal const string ToggleDeafenDisplayName = "Toggle Deafen";
     internal const string ToggleDeafenHelpText =
         "Deafens or undeafens Perfect Comms. Deafening mutes voice playback and pauses microphone transmission.";
-    internal const string HostLocalRefreshDisplayName = "Refresh Host Voice Connection";
-    internal const string HostLocalRefreshHelpText =
-        "Host only. Rebuilds your local voice session. It has a 10-second cooldown.";
 
     private static VoiceKeybind[] _allBindings = Array.Empty<VoiceKeybind>();
 
@@ -26,7 +23,6 @@ public static class VoiceChatKeybinds
     public static VoiceKeybind AliveLouderDeadQuieter { get; private set; } = null!;
     public static VoiceKeybind AliveQuieterDeadLouder { get; private set; } = null!;
     public static VoiceKeybind LocalVoiceRefresh { get; private set; } = null!;
-    public static VoiceKeybind HostVoiceRefresh { get; private set; } = null!;
     public static VoiceKeybind OpenVoiceMenu { get; private set; } = null!;
     public static VoiceKeybind OpenHostVoiceSettings { get; private set; } = null!;
 
@@ -58,11 +54,7 @@ public static class VoiceChatKeybinds
             helpText: "While held, applies this binding's separately configured Alive and Dead volume levels. Releasing restores both groups to 100%. If both mix bindings are held, neither profile is applied.");
         LocalVoiceRefresh = new VoiceKeybind(config, s, "Refresh Voice Connection", KeyCode.F7,
             helpText: "Rejoins only your local voice session to repair stuck audio. It has a 10-second cooldown.");
-        // The old plural config key is retained for binding compatibility. The action is local-only
-        // because PlayerControl.HandleRpc does not expose authenticated packet sender provenance.
-        HostVoiceRefresh = new VoiceKeybind(
-            config, s, HostLocalRefreshDisplayName, "Refresh Voice Connections (Host)", KeyCode.F8,
-            helpText: HostLocalRefreshHelpText);
+        RemoveRetiredHostRefreshBindings(config, s);
         OpenVoiceMenu = new VoiceKeybind(config, s, "Open Voice Menu", KeyCode.F10,
             helpText: "Opens or closes this local Perfect Comms settings menu.");
         OpenHostVoiceSettings = new VoiceKeybind(config, s, "Open Host Voice Settings", KeyCode.F11,
@@ -79,7 +71,6 @@ public static class VoiceChatKeybinds
             AliveLouderDeadQuieter,
             AliveQuieterDeadLouder,
             LocalVoiceRefresh,
-            HostVoiceRefresh,
             OpenVoiceMenu,
             OpenHostVoiceSettings,
         };
@@ -107,6 +98,24 @@ public static class VoiceChatKeybinds
 
     internal static bool ShouldMigratePlayerVolumeDefault(KeyCode key, KeyCode modifier)
         => key == KeyCode.B && modifier == KeyCode.None;
+
+    private static void RemoveRetiredHostRefreshBindings(ConfigFile config, string section)
+    {
+        foreach (var key in new[] { "Refresh Voice Connections (Host)", "Refresh Host Voice Connection" })
+        {
+            var primary = config.Bind(section, key, KeyCode.None,
+                new ConfigDescription("Retired host-wide voice refresh binding."));
+            config.Remove(primary.Definition);
+
+            var modifier = config.Bind(section, key + " Modifier", KeyCode.None,
+                new ConfigDescription("Retired host-wide voice refresh modifier."));
+            config.Remove(modifier.Definition);
+
+            var modifierMatch = config.Bind(section, key + " Modifier Match", VoiceModifierMatch.Exact,
+                new ConfigDescription("Retired host-wide voice refresh modifier matching mode."));
+            config.Remove(modifierMatch.Definition);
+        }
+    }
 
     internal static bool HasConfiguredChordUsingModifier(
         KeyCode modifier,

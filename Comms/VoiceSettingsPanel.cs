@@ -669,7 +669,6 @@ public static class VoiceSettingsPanel
                 key: "DeadFocus.DeadPlayers");
         }
         Rebind(defs, VoiceChatKeybinds.LocalVoiceRefresh);
-        Rebind(defs, VoiceChatKeybinds.HostVoiceRefresh);
     }
 
     private static void BuildHud(List<Entry> defs, VoiceChatLocalSettings s)

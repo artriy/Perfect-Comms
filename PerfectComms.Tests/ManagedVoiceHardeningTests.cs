@@ -181,19 +181,7 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
-    public void HostRefreshIsLocalOnlyAndLegacyRemotePacketsFailClosed()
-    {
-        Assert.Equal("Refresh Host Voice Connection", VoiceChatKeybinds.HostLocalRefreshDisplayName);
-        Assert.Contains("local voice session", VoiceChatKeybinds.HostLocalRefreshHelpText);
-        Assert.DoesNotContain("RPC", VoiceChatKeybinds.HostLocalRefreshHelpText);
-        Assert.False(VoiceHostRefreshRpc.RemoteRefreshEnabled);
-        Assert.Equal(
-            "remote-refresh-disabled-untrusted-rpc-source",
-            VoiceHostRefreshRpc.RemoteRefreshRejectionReason);
-    }
-
-    [Fact]
-    public void LocalAndHostRefreshBindingsShareOneTenSecondCooldown()
+    public void LocalRefreshUsesTenSecondCooldown()
     {
         float sharedLastRequestTime = -999f;
 

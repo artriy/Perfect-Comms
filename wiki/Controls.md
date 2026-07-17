@@ -49,7 +49,6 @@ Every binding can use a keyboard key, mouse button, exact modifier, or modifier 
 | Alive louder / dead quieter (hold) | Unbound |
 | Alive quieter / dead louder (hold) | Unbound |
 | Refresh voice connection | `F7` |
-| Refresh host voice connection | `F8` |
 
 The settings icon beside either alive/dead focus binding expands that binding's independent **Alive Players** and **Dead Players** levels:
 
@@ -111,7 +110,6 @@ Press `Shift+B` to open **Player Volumes**. Each other player has a persistent l
 - **Push to talk (`C`)** transmits only while held when Mic Mode is Push To Talk.
 - **Team radio (`V`)** transmits on the selected eligible team channel; **Cycle (`G`)** changes channel.
 - **Refresh voice (`F7`)** rebuilds only your voice session and has a 10-second cooldown.
-- **Host refresh (`F8`)** rebuilds only the host's local voice session and has a 10-second cooldown.
 - **Deafen (`Shift+N`)** mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.
 - On Android, hold the microphone button to transmit in push-to-talk mode. Tap Team Radio to cycle channels or hold it to transmit.
 

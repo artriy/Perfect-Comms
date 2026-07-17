@@ -91,9 +91,8 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Open host voice settings | `F11` | | Player volumes | `Shift+B` |
 | Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
-| Team radio (hold) | `V` | | Refresh host voice locally | `F8` |
+| Team radio (hold) | `V` | | Toggle open mic / push to talk | Unbound |
 | Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
-| Toggle open mic / push to talk | Unbound | | | |
 
 On Android, hold the mic button to transmit in push-to-talk mode. For Team
 Radio, tap its button to cycle channels or hold it to transmit. To keep a small

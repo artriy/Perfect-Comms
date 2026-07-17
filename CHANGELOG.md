@@ -2,58 +2,82 @@
 
 ## Perfect Comms v4.0.0
 
-Perfect Comms v4.0.0 is the largest voice-system rebuild in the project's
-history. Desktop capture, playback, processing, mixing, and WebRTC transport now
-run in the cross-platform PerfectCommsAudio helper, Android uses its own native
-voice engine, and peer negotiation travels through Among Us itself. The result
-is broader platform support, much stronger recovery when a device or connection
-stalls, a polished first-run setup, and a substantially more configurable HUD.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/main/assets/brand/major-divider.gif" alt="Perfect Comms" width="900">
+</p>
 
-**Compatibility:** v4 uses voice protocol 4. It is intentionally incompatible
-with the v3 transport, so everyone in a voice lobby must update to v4.0.0
-together.
+> **Experimental voice engine:** v4.0.0 introduces a new voice engine that is still experimental. If you experience issues, return to v3.2.3 while they are investigated.
+
+Perfect Comms v4.0.0 is the biggest update in the mod’s history. Voice chat has
+been rebuilt from the inside out. The difference for players is simple: easier
+setup, smoother sound, stronger connections, better platform support, and far
+more control over how voice looks and feels.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.0.0/assets/brand/divider.svg" alt="divider" width="900">
 </p>
 
-### What's Changed
+### The New Voice Experience
 
-- **A cross-platform native voice engine.**
-  > <sub>The new PerfectCommsAudio helper owns microphone capture, speaker playback, Opus, audio processing, proximity mixing, and WebRTC on desktop. It ships for Windows x86/x64 plus the Linux and universal macOS host routes used by Wine, Proton, and CrossOver, and is extracted and refreshed automatically with the mod.</sub>
+- **Voice chat rebuilt for more systems.**
+  > <sub>Perfect Comms now ships with its own voice engine for microphone capture, playback, sound processing, proximity effects, and player connections. It supports 32-bit and 64-bit Windows along with the host environments used by Wine, Proton, and CrossOver. Android receives its own dedicated voice engine. Everything is included with the mod. There is no separate voice application to install or keep open.</sub>
 
-- **Voice signaling now travels through Among Us.**
-  > <sub>Players negotiate voice peers over Among Us custom RPC messages instead of relying on a separate Socket.IO signaling path. Direct WebRTC remains the first choice, with fresh STUN/TURN credentials and automatic relay fallback when the network cannot form a direct route.</sub>
+- **Connections that repair themselves.**
+  > <sub>Voice now recovers automatically from lost connection messages, interrupted handshakes, temporary network failures, player reconnects, voice-engine restarts, and connections that get stuck halfway. Direct connections are still preferred, but Perfect Comms can automatically switch only the affected player to a relay when a direct route cannot be established.</sub>
 
-- **Connections recover instead of silently staying broken.**
-  > <sub>The peer manager now retransmits lost hellos, uses deterministic offerer roles, times out incomplete handshakes, reacts to real WebRTC peer state, and rebuilds peers after helper restarts, ICE disconnects, or signaling gaps. Capture also retries a cold helper start and recovers stalled microphones without requiring a manual mute/unmute cycle.</sub>
+- **No more manual NAT or Wine switches.**
+  > <sub>The old Nat Fix and WineForceRelay options have been removed. Perfect Comms now tries the best direct connection first and falls back automatically when necessary, including on Wine, Proton, and CrossOver. Players no longer need to guess which network setting might make voice work.</sub>
 
-- **More resilient desktop audio.**
-  > <sub>Native device enumeration drives the in-game mic and speaker selectors across supported desktop routes. Capture and output teardown, rapid device switching, clock drift, bounded audio queues, jitter buffering, echo-reference timing, and audio-thread safety were all hardened to prevent deadlocks, orphan helpers, runaway latency, and choppy playback.</sub>
+- **Smoother sound on unstable connections.**
+  > <sub>Voice buffering now adapts separately for every player, adding protection when someone’s connection becomes unstable and relaxing again when it improves. Playback timing, audio queues, and device clocks were also hardened to prevent choppy speech, growing delay, repeated frames, and audio that slowly falls out of sync.</sub>
 
-- **Native audio processing moved beside the devices.**
-  > <sub>Echo cancellation, noise suppression, automatic mic gain, and proximity effects now run in the helper, with automatic echo-delay tracking and graceful passthrough if an optional processing component is unavailable. Radio, wall occlusion, ghost reverb, volume, and stereo positioning keep parity across the supported voice routes.</sub>
+- **All the immersive effects are still here.**
+  > <sub>Distance, stereo positioning, walls, vision, radio voices, muffling, and ghost reverb have all been carried into the new engine. Echo cancellation and noise suppression now run closer to the actual audio devices where supported, with automatic timing adjustments and graceful fallback if an optional component is unavailable.</sub>
 
-- **A dedicated Android voice engine and touch controls.**
-  > <sub>Android now uses the embedded `pc-mobile` engine for WebRTC voice instead of the retired managed transport. Its HUD has touch-first mute, deafen, push-to-talk, Team Radio, and connection controls: hold the mic to transmit in push-to-talk mode, and tap or hold Team Radio to cycle or transmit.</sub>
+- **A proper Android experience.**
+  > <sub>Android voice now uses its own native engine and touch-first HUD. Hold the microphone button to speak in Push To Talk mode. Tap Team Radio to cycle between eligible channels, or hold it to transmit. Desktop-only keybind and speaker-device settings stay hidden where they do not apply.</sub>
 
-- **Guided first-time setup.**
-  > <sub>New installs walk through Welcome, Audio, Controls, HUD, and Review. You can choose and test devices, watch a live mic meter, play an output test, pick talk controls, preview HUD presets with a live lobby mockup, and save the complete draft only when you finish. The guide can be reopened later without overwriting existing settings unless you complete it.</sub>
+### Easier From the First Launch
 
-- **A rebuilt speaking bar and HUD editor.**
-  > <sub>The speaking bar now supports screen presets, side lanes, automatic wrapping, manual placement, avatar facing, name placement, 50%-225% scaling, a backdrop, and stable all-player slots. An isolated 15-player live preview updates while you edit and turns itself off when you leave the HUD editor, close settings, or restart the game.</sub>
+- **A guided five-step setup.**
+  > <sub>New players are welcomed with a guided Welcome, Audio, Controls, HUD, and Review flow. Choose and test your microphone and speaker, watch a live microphone meter, play an output test, select Open Mic or Push To Talk, configure important controls, and preview a complete HUD before saving everything together.</sub>
 
-- **Privacy-safe meeting and role visuals.**
-  > <sub>Meeting speaking glows and voice overlays now respect concealment, blindness, and identity rules instead of leaking hidden information. Fixed-roster transitions were hardened, and dead players in the speaking bar use the game's ghost artwork rather than a misleading living avatar.</sub>
+- **Every setting now explains itself.**
+  > <sub>Settings, keybinds, host rules, and options added by compatible mods now have a small help button beside them. Hover it to see a clear explanation of what the option changes and whether it affects only you or the whole lobby. Device and selector rows can also reveal their complete current value, so long names are no longer left unexplained or cut off.</sub>
 
-- **Expanded local audio controls.**
-  > <sub>Keyboard and mouse chords are supported throughout the rebindable controls, with `Shift+M` for mic mute, `Shift+N` for deafen, and `Shift+B` for the player-volume mixer by default. Deafening mutes playback and pauses microphone transmission. Per-player levels persist locally from 0%-200%, optional hold bindings can independently focus living or dead voices, and both refresh keys rebuild only the local voice session through one shared cooldown.</sub>
+- **Audio devices that behave predictably.**
+  > <sub>Microphones and speakers now use stable device identities instead of relying only on their position in a list. Perfect Comms can distinguish devices with identical names, follow changes to the system default, remember a temporarily disconnected device, and recover after unplugging a microphone, reconnecting Bluetooth audio, or switching devices quickly.</sub>
 
-- **Safer, clearer release packages.**
-  > <sub>Steam and itch.io users get `PerfectComms+dependencies-win-x86-steam-itch.zip`; Epic Games Store and Microsoft Store users get `PerfectComms+dependencies-win-x64-epic-msstore.zip`. Both include the matching pinned BepInEx loader, Perfect Comms, hashes, and audited notices. `PerfectComms.dll` and `PerfectCommsAndroid.dll` remain available for existing BepInEx or Android installations.</sub>
+- **Settings designed for real screens.**
+  > <sub>The settings menu has clearer sections, improved scrolling, friendlier slider targets, full-width device selection, and better behavior on smaller resolutions. Temporary previews and troubleshooting options turn themselves off when appropriate instead of becoming permanent accidental settings.</sub>
 
-- **Much deeper automated validation.**
-  > <sub>CI now builds and smoke-tests every helper and audio-processing target, checks Windows architecture labels, validates the Android ABI and microphone manifest, exercises helper-to-helper WebRTC plus live TURN relay, audits Rust dependencies and licenses, and refuses to publish unless the managed, native, RTC, packaging, version, and exact-main-tip gates all pass.</sub>
+### Make Voice Look and Sound Like Yours
+
+- **A completely customizable speaking bar.**
+  > <sub>Choose from ten ready-made HUD presets or create a manual layout. Position the bar anywhere, arrange players horizontally or vertically, choose avatar direction and name placement, use single or wrapped side lanes, scale everything from 50% to 225%, and add or remove the backdrop. Show All Players can keep a stable slot for everyone instead of displaying only active speakers.</sub>
+
+- **A simulated 15-player live preview.**
+  > <sub>The HUD editor can move aside and reveal a simulated 15-player lobby preview while you make changes. It includes sample living players, ghosts, names, colors, and animated speaking activity, and responds immediately to layout changes. The simulation automatically closes when you leave the HUD editor, close settings, or restart the game.</sub>
+
+- **Separate living and dead voice mixes.**
+  > <sub>Two optional hold controls let you emphasize living players or dead players whenever you need to. Each control has independent living and dead volume levels from None to 200%. Release the control to return to the normal mix; holding both at once remains neutral.</sub>
+
+- **More flexible controls.**
+  > <sub>Every voice action can use keyboard keys, mouse buttons, exact left/right modifiers, or key combinations. The main defaults are `Shift+M` for mute, `Shift+N` for deafen, `Shift+B` for player volumes, `C` for Push To Talk, `V` for Team Radio, and `F7` to rebuild your local voice connection if audio becomes stuck.</sub>
+
+- **A persistent mute and deafen reminder.**
+  > <sub>An optional small HUD reminder stays visible whenever your microphone is muted or voice is deafened, making your current voice state obvious at a glance.</sub>
+
+### Safer, Smarter, and Easier to Install
+
+- **Hidden identities stay hidden.**
+  > <sub>The speaking bar, meeting speaking glow, player-volume menu, and compatible mod overlays now respect disguises, concealment, blindness, and identity-changing roles. Appearance changes during speech are handled safely, and uncertain identity states hide information instead of briefly exposing the wrong player.</sub>
+
+- **Better meeting and ghost visuals.**
+  > <sub>Meeting speaking indicators follow the same privacy rules as the rest of the voice HUD. Fixed player slots remain stable through meeting transitions, and dead players now use the game’s proper ghost artwork instead of appearing as living crewmates.</sub>
+
+- **The correct installer for every Windows store.**
+  > <sub>Steam and itch.io players use `PerfectComms+dependencies-win-x86-steam-itch.zip`. Epic Games Store and Microsoft Store players use `PerfectComms+dependencies-win-x64-epic-msstore.zip`. Both include the matching BepInEx installation and Perfect Comms. `PerfectComms.dll` and `PerfectCommsAndroid.dll` remain available for existing installations.</sub>
 
 ## Perfect Comms v3.2.3
 
@@ -252,10 +276,10 @@ This Perfect Comms release reworks the per-player volume menu into a live mixer,
 
 ### What's Changed
 
-- **A live per-player volume mixer.** The volume menu now shows each player's avatar and a live voice meter that moves as they talk, you can scroll the list with the mouse wheel, and the roster refreshes as players join or leave — so it's much easier to find and set the right person's level.
+- **A live per-player volume mixer.** The volume menu now shows each player's avatar and a live voice meter that moves as they talk, you can scroll the list with the mouse wheel, and the roster refreshes as players join or leave. This makes it much easier to find and set the right person's level.
 - **The volume menu no longer hides in the dark.** During blackouts and low-vision moments the menu's rows could vanish; they now stay fully visible regardless of in-game vision.
 - **Optional speaking-bar backdrop, steadier bar.** You can switch on a subtle backdrop behind the speaking bar for readability over busy scenes, the talking icons now hold a stable order instead of jumping around, and their level animation is smoothed.
-- **Switch Open Mic ↔ Push-to-Talk on the fly.** A new keybind flips your microphone between Open Mic and Push-to-Talk and shows a quick confirmation. It's unbound by default — assign a key to it in the keybind settings to use it.
+- **Switch Open Mic ↔ Push-to-Talk on the fly.** A new keybind flips your microphone between Open Mic and Push-to-Talk and shows a quick confirmation. It's unbound by default. Assign a key to it in the keybind settings to use it.
 - **Spectators are handled as ghosts for voice.** Players the game marks dead through a role (e.g. Town of Us Spectator) are now routed like ghosts, so they hear and are heard the same as other dead players.
 - **No more stray hover highlight on the voice buttons.** The mic/speaker buttons (cloned from the in-game map button) no longer show a leftover hover sprite.
 ## Perfect Comms v2.1.5
@@ -264,7 +288,7 @@ This Perfect Comms release fixes the speaking bar showing the wrong player and v
 
 ### What's Changed
 
-- **The speaking bar shows the right person again.** Fixed a bug where the talking indicator — in meetings and on the in-game bar — could light up the wrong player, or two players' voices could collapse onto a single name, especially after rounds where player slots got reshuffled. Each voice now reliably follows its own player.
+- **The speaking bar shows the right person again.** Fixed a bug where the talking indicator in meetings and on the in-game bar could light up the wrong player, or two players' voices could collapse onto a single name, especially after rounds where player slots got reshuffled. Each voice now reliably follows its own player.
 - **No more being heard from across the map.** Caused by the same mix-up: a player's voice could ignore distance and come through from anywhere (and, the flip side, a player who was actually nearby could go unheard). Voice now tracks each player's real position again, so proximity works as intended.
 - **Fixed a crash/kick around the end-game screen.** Dropping to the end-game results and rejoining the lobby could spam errors and get you disconnected. The voice HUD now steps aside cleanly during that transition, so the freeze-and-kick is gone.
 - **The end-game group call is no longer ear-splitting.** On the results screen everyone was played back at full blast; levels are now dialed to a comfortable volume while staying clearly audible.
@@ -280,7 +304,7 @@ This Perfect Comms release gives the voice settings menu a cleaner, easier-to-re
 - **A heads-up when you refresh voice.** Pressing a voice-refresh key now shows a quick on-screen message so you know it worked. Refreshing as the host lets everyone know; refreshing just for yourself shows only to you.
 - **No more freeze when switching microphone or speaker mid-game.** Changing your mic or speaker quickly no longer risks a crash, and leaving the speaker on "Default" now follows whatever your computer's current default speaker is.
 - **Fixed some players' audio going flat (pure mono, non-directional).** In some cases a player's voice lost its proximity and direction and came through evenly no matter where they were on the map. Their audio now plays back with the correct distance and direction again.
-- **More "I can hear you but you can't hear me" fixes.** Several cases where a voice link got stuck on one side — so one player could be heard but couldn't hear back, or a connected player made no sound at all — now sort themselves out automatically instead of needing a rejoin.
+- **More "I can hear you but you can't hear me" fixes.** Several cases where a voice link got stuck on one side could leave one player audible but unable to hear back, or leave a connected player completely silent. These cases now sort themselves out automatically instead of needing a rejoin.
 - **Voice is a touch smoother still.** Continued behind-the-scenes tuning keeps speech steady through uneven connections, with a little less stutter.
 ## Perfect Comms v2.1.3
 
@@ -295,12 +319,12 @@ This Perfect Comms release targets choppy / robotic voice (the kind where a play
 - **Smoother framerate in big lobbies.** Voice-related per-frame work that grew with the player count was trimmed, reducing hitches at 12+ players.
 ## Perfect Comms v2.1.2
 
-This Perfect Comms release is a big stutter-and-lag-spike fix — if voice was making your game hitch, freeze, or drop, it should feel much smoother now.
+This Perfect Comms release is a big stutter-and-lag-spike fix. If voice was making your game hitch, freeze, or drop, it should feel much smoother now.
 
 ### What's Changed
 
-- **Much smoother voice** — the stutters and lag spikes around joining, talking, and hearing players should be greatly reduced.
-- **Nat Fix (on by default)** — helps players behind strict NATs or firewalls connect when they couldn't before.
+- **Much smoother voice.** The stutters and lag spikes around joining, talking, and hearing players should be greatly reduced.
+- **Nat Fix (on by default).** Helps players behind strict NATs or firewalls connect when they couldn't before.
 - **Steadier connections** that recover more gracefully instead of constantly dropping and retrying.
 ## Perfect Comms v2.1.1
 
@@ -476,16 +500,16 @@ This is the backend rewrite release. Perfect Comms no longer depends on Among Us
 
 ## Perfect Comms v1.0.0
 
-**PUBLIC BETA — expect bugs.**  
+**PUBLIC BETA: expect bugs.**
 This is the first public Perfect Comms release. It is ready for real lobbies, but still needs wider testing.
 
 ### What makes this release special
 
-- **Fully integrated proximity chat** — voice runs inside Among Us, no separate voice app needed.
-- **Supported mod behaviours** — TOU-Mira blackmailed players stay muted, and Jailor can unmute jailed players.
-- **No more hackers messing with the voice** — voice stays tied to compatible Perfect Comms clients.
-- **Built-in Voice Lobbies** — find compatible voice lobbies from the main menu and join with one click.
-- **In-game update prompt** — players can be sent straight to the newest release when an update drops.
+- **Fully integrated proximity chat.** Voice runs inside Among Us, no separate voice app needed.
+- **Supported mod behaviours.** TOU-Mira blackmailed players stay muted, and Jailor can unmute jailed players.
+- **No more hackers messing with the voice.** Voice stays tied to compatible Perfect Comms clients.
+- **Built-in Voice Lobbies.** Find compatible voice lobbies from the main menu and join with one click.
+- **In-game update prompt.** Players can be sent straight to the newest release when an update drops.
 
 ### Added
 

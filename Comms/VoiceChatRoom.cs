@@ -725,18 +725,6 @@ public class VoiceChatRoom
         }
     }
 
-    internal static void RequestHostVoiceRefreshFromKeybind()
-    {
-        var current = Current;
-        if (current == null)
-        {
-            VoiceDiagnostics.Log("voice.refresh.ignored", "reason=no-room trigger=keybind");
-            return;
-        }
-
-        current.RequestHostVoiceRefreshFromHost();
-    }
-
     internal static void RequestLocalVoiceRefreshFromKeybind()
     {
         var current = Current;
@@ -756,24 +744,6 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("voice.refresh.local.requested",
             $"backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)} peers={_voiceBackend?.PeerCount ?? 0}");
         ApplyLocalVoiceRefresh("keybind");
-    }
-
-    private void RequestHostVoiceRefreshFromHost()
-    {
-        if (!IsLocalHost())
-        {
-            VoiceDiagnostics.Log("voice.refresh.rejected", "reason=not-host trigger=keybind");
-            return;
-        }
-
-        if (!TryBeginLocalVoiceRefreshCooldown("voice.refresh.rate_limited", "host-keybind"))
-            return;
-
-        var localClientId = ResolveLocalClientId(CurrentSnapshot);
-        VoiceDiagnostics.Log("voice.refresh.host-local.requested",
-            $"hostClient={localClientId} remoteRefresh=false backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)}");
-
-        ApplyLocalVoiceRefresh("host-keybind");
     }
 
     private bool TryBeginLocalVoiceRefreshCooldown(string rateLimitedEvent, string trigger)
@@ -799,20 +769,6 @@ public class VoiceChatRoom
 
         lastRequestTime = now;
         return true;
-    }
-
-    internal static void ApplyHostVoiceRefreshFromRpc(PlayerControl sender, int nonce)
-    {
-        var current = Current;
-        if (current == null)
-        {
-            VoiceDiagnostics.Log("voice.refresh.ignored", $"reason=no-room trigger=rpc nonce={nonce}");
-            return;
-        }
-
-        var senderIdentity = VoiceHostAuthority.FromPlayer(sender, "rpc-object");
-        VoiceDiagnostics.Log("voice.refresh.rejected",
-            $"{senderIdentity.ToDiagnosticFields()} reason={VoiceHostRefreshRpc.RemoteRefreshRejectionReason} nonce={nonce}");
     }
 
     private void ApplyLocalVoiceRefresh(string trigger)

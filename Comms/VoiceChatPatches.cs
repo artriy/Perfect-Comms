@@ -13,7 +13,6 @@ public static class VoiceChatPatches
     private static int _lastSpeakerToggleFrame = -1;
     private static int _lastVolumeToggleFrame = -1;
     private static int _lastLocalRefreshFrame = -1;
-    private static int _lastHostRefreshFrame = -1;
     private static int _lastRadioChannelCycleFrame = -1;
     private static int _lastMicModeToggleFrame = -1;
     private static System.DateTime _lastKbErrorLogUtc;
@@ -27,7 +26,6 @@ public static class VoiceChatPatches
         VoiceChatKeybinds.ToggleSpeaker.OnActivate(ToggleSpeakerFromInput);
         VoiceChatKeybinds.VolumeMenu.OnActivate(ToggleVolumeMenuFromInput);
         VoiceChatKeybinds.LocalVoiceRefresh.OnActivate(RequestLocalRefreshFromInput);
-        VoiceChatKeybinds.HostVoiceRefresh.OnActivate(RequestHostRefreshFromInput);
         VoiceChatKeybinds.CycleTeamRadioChannel.OnActivate(CycleTeamRadioChannelFromInput);
         VoiceChatKeybinds.ToggleMicMode.OnActivate(ToggleMicModeFromInput);
     }
@@ -61,7 +59,6 @@ public static class VoiceChatPatches
             VoiceChatKeybinds.VolumeMenu.FireIfPressed();
             UpdateAliveDeadMixHold();
             VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
-            VoiceChatKeybinds.HostVoiceRefresh.FireIfPressed();
             VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
             VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
 
@@ -210,13 +207,6 @@ public static class VoiceChatPatches
         if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastLocalRefreshFrame)) return;
         VoiceChatRoom.RequestLocalVoiceRefreshFromKeybind();
-    }
-
-    private static void RequestHostRefreshFromInput()
-    {
-        if (ShouldIgnoreToggleKeybinds()) return;
-        if (!TryConsumeToggleFrame(ref _lastHostRefreshFrame)) return;
-        VoiceChatRoom.RequestHostVoiceRefreshFromKeybind();
     }
 
     private static void CycleTeamRadioChannelFromInput()

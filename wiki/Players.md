@@ -40,7 +40,7 @@ Compatible mods can add more host tabs. See [Host Settings](Host-Settings) for e
 - `Shift+N`: deafen or undeafen; deafening mutes playback and pauses microphone transmission.
 - `Shift+B`: open persistent per-player volume sliders and speaking meters.
 - `V`: hold Team Radio; `G`: cycle eligible channels.
-- `F7`: refresh your voice session; `F8`: host-only refresh of the host's local voice session.
+- `F7`: refresh your local voice session.
 
 On Android, hold the microphone button for push to talk. Tap Team Radio to cycle channels or hold it to transmit.
 
