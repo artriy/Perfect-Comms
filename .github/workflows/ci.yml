@@ -44,6 +44,8 @@ jobs:
         run: dotnet build PerfectComms.csproj -c Android --no-restore --nologo
       - name: Run managed tests
         run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore --nologo
+      - name: Run Android managed tests
+        run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Android --no-restore --nologo
 
   native-quality:
     name: Native format, lint, and tests

@@ -11,7 +11,7 @@ using Object = UnityEngine.Object;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-public static class VoiceChatHudState
+public static partial class VoiceChatHudState
 {
     internal enum SharedMicTooltipOwner
     {
@@ -26,11 +26,6 @@ public static class VoiceChatHudState
     private static GameObject?     _spkButtonObj;
     private static PassiveButton?  _jailButton;
     private static GameObject?     _jailButtonObj;
-#if ANDROID
-    private static PassiveButton?  _radioTouchButton;
-    private static GameObject?     _radioTouchButtonObj;
-#endif
-
     // Cached child SpriteRenderers so the per-frame refresh/sort paths avoid Transform.Find + GetComponent
     // and GetComponentsInChildren (managed array alloc + IL2CPP interop) every frame. Captured when the
     // (one-time) buttons are created; re-acquired automatically if a cache entry is null.
@@ -39,19 +34,6 @@ public static class VoiceChatHudState
     private static SpriteRenderer[]? _micButtonSrs;
     private static SpriteRenderer[]? _spkButtonSrs;
     private static SpriteRenderer[]? _jailButtonSrs;
-#if ANDROID
-    private static SpriteRenderer? _radioTouchIconSr;
-    private static SpriteRenderer[]? _radioTouchButtonSrs;
-    private static int _micTouchFingerId = -1;
-    private static int _radioTouchFingerId = -1;
-    private static float _radioTouchStartTime;
-    private static bool _radioTouchTransmitStarted;
-    private static bool _touchPushToTalkHeld;
-    private static bool _touchTeamRadioHeld;
-    private static float _suppressMicClickUntilUnscaledTime;
-    private const float RadioTouchHoldThresholdSeconds = 0.18f;
-    private const float HandledTouchClickSuppressionSeconds = 0.35f;
-#endif
     private const float ButtonScale = 0.42f;
     private const int   ButtonSortOrder = 32760;
     private const int   TooltipSortOrder = 32767;
@@ -400,39 +382,6 @@ public static class VoiceChatHudState
                 _jailButtonObj.transform.position = jailPos;
         }
     }
-
-#if ANDROID
-    private static void ClampVoiceButtonViewportPositions(
-        Camera cam,
-        ref Vector3 micPos,
-        ref Vector3 spkPos,
-        ref Vector3 radioPos,
-        ref Vector3 jailPos)
-    {
-        float minX = float.PositiveInfinity;
-        float maxX = float.NegativeInfinity;
-        float minY = float.PositiveInfinity;
-        float maxY = float.NegativeInfinity;
-        IncludeProposedButtonViewportBounds(
-            cam, _micButtonObj, _micButtonSrs, micPos, ref minX, ref maxX, ref minY, ref maxY);
-        IncludeProposedButtonViewportBounds(
-            cam, _spkButtonObj, _spkButtonSrs, spkPos, ref minX, ref maxX, ref minY, ref maxY);
-        if (_radioTouchButtonObj != null && _radioTouchButtonObj.activeSelf)
-            IncludeProposedButtonViewportBounds(
-                cam, _radioTouchButtonObj, _radioTouchButtonSrs, radioPos,
-                ref minX, ref maxX, ref minY, ref maxY);
-        if (!_jailOnCard && _jailButtonObj != null && _jailButtonObj.activeSelf)
-            IncludeProposedButtonViewportBounds(
-                cam, _jailButtonObj, _jailButtonSrs, jailPos,
-                ref minX, ref maxX, ref minY, ref maxY);
-
-        var delta = ButtonGroupClampDelta(cam, minX, maxX, minY, maxY);
-        micPos += delta;
-        spkPos += delta;
-        radioPos += delta;
-        jailPos += delta;
-    }
-#endif
 
     private static void ClampVoiceButtonViewportPositions(Camera cam, ref Vector3 micPos, ref Vector3 spkPos, ref Vector3 jailPos)
     {
@@ -817,26 +766,7 @@ public static class VoiceChatHudState
         }
 
 #if ANDROID
-        if (_radioTouchButtonObj == null)
-        {
-            var obj = CreateHudButton(
-                hud,
-                root,
-                "radio-touch",
-                "VC_RadioTouchButton",
-                "VoiceChatPlugin.Resources.MicOn.png",
-                AndroidRadioButtonClickNoOp,
-                ShowRadioTooltip,
-                hideTooltipOnMouseOut: true,
-                out var button,
-                out var icon,
-                out var renderers);
-            _radioTouchButtonObj = obj;
-            _radioTouchButton = button;
-            _radioTouchIconSr = icon;
-            _radioTouchButtonSrs = renderers;
-            CreateRadioTouchLabel(obj);
-        }
+        EnsureAndroidRadioTouchButton(hud, root);
 #endif
     }
 
@@ -958,7 +888,7 @@ public static class VoiceChatHudState
         _micButtonObj.SetActive(true);
         _spkButtonObj.SetActive(true);
 #if ANDROID
-        _radioTouchButtonObj?.SetActive(CanUseTeamRadio());
+        UpdateAndroidRadioTouchButtonVisibility();
 #endif
 
         bool jailVisible = VoiceRoleMuteState.CanLocalJailorUnmute(out byte jailedId);
@@ -1087,19 +1017,7 @@ public static class VoiceChatHudState
             }
         }
 #if ANDROID
-        if (_radioTouchButtonObj != null)
-        {
-            var sr = ResolveIconSr(_radioTouchButtonObj, ref _radioTouchIconSr);
-            if (sr != null)
-            {
-                sr.sprite = Sprites.MicOn;
-                sr.color = IsInTeamRadioMode()
-                    ? new Color(1f, 0.55f, 0.1f)
-                    : CanUseTeamRadioInput()
-                        ? new Color(1f, 0.78f, 0.22f)
-                        : new Color(0.55f, 0.45f, 0.3f);
-            }
-        }
+        RefreshAndroidRadioTouchButtonVisuals();
 #endif
     }
     internal static void ApplyMicState()
@@ -1360,6 +1278,9 @@ public static class VoiceChatHudState
         && !_speakerMuted
         && !IsManualMuteActive()
         && !TryGetLocalTransmitBlockReason(out _)
+#if ANDROID
+        && AndroidTeamRadioPhaseSupportsPrivateRouting()
+#endif
         && !TeamRadioBlockedByMeetingPolicy();
 
     // Gating both input and active-mode prevents entering radio mid-meeting when host forbids it,
@@ -1390,12 +1311,20 @@ public static class VoiceChatHudState
     {
         var next = VoiceRoleMuteState.GetNextTeamRadioChannel(PlayerControl.LocalPlayer, _teamRadioChannel);
         if (next == _teamRadioChannel)
+        {
+#if ANDROID
+            ShowCompactStatus(AndroidTeamRadioChannelStatus(next));
+#endif
             return;
+        }
 
         _teamRadioChannel = next;
         InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
+#if ANDROID
+        ShowCompactStatus(AndroidTeamRadioChannelStatus(next));
+#endif
         var tooltipOwner = ResolveSharedMicTooltipRefreshOwner(
             _micTooltip?.activeSelf == true,
             _sharedMicTooltipOwner);
@@ -1440,213 +1369,6 @@ public static class VoiceChatHudState
         RefreshButtonVisuals();
     }
 
-#if ANDROID
-    private static void AndroidMicButtonClick()
-    {
-        if (ShouldSuppressHandledTouchClick(
-                _micTouchFingerId >= 0,
-                Time.unscaledTime,
-                _suppressMicClickUntilUnscaledTime))
-        {
-            _suppressMicClickUntilUnscaledTime = 0f;
-            return;
-        }
-
-        ToggleMutePublic();
-    }
-
-    internal static bool ShouldSuppressHandledTouchClick(
-        bool touchStillTracked,
-        float unscaledTime,
-        float suppressUntilUnscaledTime)
-        => touchStillTracked
-        || suppressUntilUnscaledTime > 0f && unscaledTime <= suppressUntilUnscaledTime;
-
-    private static void AndroidRadioButtonClickNoOp()
-    {
-        // Touch down/up is handled explicitly below so a short tap can cycle channels while a
-        // sustained press transmits. PassiveButton still owns the visual hit surface.
-    }
-
-    private static void CreateRadioTouchLabel(GameObject button)
-    {
-        var labelObject = new GameObject("RadioLabel");
-        labelObject.transform.SetParent(button.transform, false);
-        labelObject.transform.localPosition = new Vector3(0.28f, -0.28f, -1f);
-        labelObject.layer = button.layer;
-        var label = labelObject.AddComponent<TextMeshPro>();
-        label.text = "R";
-        label.fontSize = 2f;
-        label.fontStyle = FontStyles.Bold;
-        label.color = new Color(1f, 0.88f, 0.28f);
-        label.alignment = TextAlignmentOptions.Center;
-        label.enableWordWrapping = false;
-        label.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
-        label.sortingOrder = ButtonSortOrder + 1;
-        label.rectTransform.sizeDelta = new Vector2(0.65f, 0.65f);
-    }
-
-    private static void UpdateAndroidTouchInput()
-    {
-        if (VoiceChatPatches.ShouldSuppressVoiceInput())
-        {
-            ReleaseAndroidTouchInput();
-            return;
-        }
-
-        UpdateAndroidPushToTalkTouch();
-        UpdateAndroidRadioTouch();
-    }
-
-    private static void UpdateAndroidPushToTalkTouch()
-    {
-        if (!IsPushToTalkMode() || _micButtonObj == null || !_micButtonObj.activeInHierarchy)
-        {
-            ReleaseAndroidPushToTalkTouch();
-            return;
-        }
-
-        if (_micTouchFingerId >= 0)
-        {
-            if (!TryFindTouch(_micTouchFingerId, out var tracked)
-                || tracked.phase is TouchPhase.Ended or TouchPhase.Canceled)
-                ReleaseAndroidPushToTalkTouch();
-            return;
-        }
-
-        for (int i = 0; i < Input.touchCount; i++)
-        {
-            var touch = Input.GetTouch(i);
-            if (touch.phase != TouchPhase.Began || touch.fingerId == _radioTouchFingerId) continue;
-            if (!TouchHitsButton(touch.position, _micButtonObj)) continue;
-
-            _micTouchFingerId = touch.fingerId;
-            _touchPushToTalkHeld = true;
-            ApplyPushToTalkHeld(_keyboardPushToTalkHeld || _touchPushToTalkHeld);
-            break;
-        }
-    }
-
-    private static void UpdateAndroidRadioTouch()
-    {
-        if (_radioTouchButtonObj == null
-            || !_radioTouchButtonObj.activeInHierarchy
-            || !CanUseTeamRadioInput())
-        {
-            ReleaseAndroidRadioTouch();
-            return;
-        }
-
-        if (_radioTouchFingerId >= 0)
-        {
-            if (!TryFindTouch(_radioTouchFingerId, out var tracked))
-            {
-                ReleaseAndroidRadioTouch();
-                return;
-            }
-
-            if (tracked.phase is TouchPhase.Ended or TouchPhase.Canceled)
-            {
-                bool cycle = !_radioTouchTransmitStarted && tracked.phase == TouchPhase.Ended;
-                ReleaseAndroidRadioTouch();
-                if (cycle && CanUseTeamRadioInput()) CycleTeamRadioChannel();
-                return;
-            }
-
-            if (!_radioTouchTransmitStarted
-                && Time.unscaledTime - _radioTouchStartTime >= RadioTouchHoldThresholdSeconds)
-            {
-                _radioTouchTransmitStarted = true;
-                _touchTeamRadioHeld = true;
-                ApplyTeamRadioHold(_keyboardTeamRadioHeld || _touchTeamRadioHeld);
-            }
-            return;
-        }
-
-        for (int i = 0; i < Input.touchCount; i++)
-        {
-            var touch = Input.GetTouch(i);
-            if (touch.phase != TouchPhase.Began || touch.fingerId == _micTouchFingerId) continue;
-            if (!TouchHitsButton(touch.position, _radioTouchButtonObj)) continue;
-
-            _radioTouchFingerId = touch.fingerId;
-            _radioTouchStartTime = Time.unscaledTime;
-            _radioTouchTransmitStarted = false;
-            break;
-        }
-    }
-
-    private static bool TryFindTouch(int fingerId, out Touch touch)
-    {
-        for (int i = 0; i < Input.touchCount; i++)
-        {
-            var candidate = Input.GetTouch(i);
-            if (candidate.fingerId != fingerId) continue;
-            touch = candidate;
-            return true;
-        }
-        touch = default;
-        return false;
-    }
-
-    private static bool TouchHitsButton(Vector2 screenPosition, GameObject button)
-    {
-        var cam = MainCamera();
-        if (cam == null) return false;
-        var world = cam.ScreenToWorldPoint(new Vector3(screenPosition.x, screenPosition.y, ButtonViewportDepth));
-        var renderers = button.GetComponentsInChildren<SpriteRenderer>(true);
-        foreach (var renderer in renderers)
-        {
-            if (renderer == null || renderer.sprite == null) continue;
-            var bounds = renderer.bounds;
-            float padding = Mathf.Max(bounds.size.x, bounds.size.y) * 0.30f;
-            if (world.x >= bounds.min.x - padding && world.x <= bounds.max.x + padding
-                && world.y >= bounds.min.y - padding && world.y <= bounds.max.y + padding)
-                return true;
-        }
-        return false;
-    }
-
-    private static void ReleaseAndroidPushToTalkTouch()
-    {
-        bool handledTouch = _micTouchFingerId >= 0;
-        _micTouchFingerId = -1;
-        if (handledTouch)
-            _suppressMicClickUntilUnscaledTime =
-                Time.unscaledTime + HandledTouchClickSuppressionSeconds;
-        if (!_touchPushToTalkHeld) return;
-        _touchPushToTalkHeld = false;
-        ApplyPushToTalkHeld(_keyboardPushToTalkHeld);
-    }
-
-    private static void ReleaseAndroidRadioTouch()
-    {
-        _radioTouchFingerId = -1;
-        _radioTouchStartTime = 0f;
-        _radioTouchTransmitStarted = false;
-        if (!_touchTeamRadioHeld) return;
-        _touchTeamRadioHeld = false;
-        ApplyTeamRadioHold(_keyboardTeamRadioHeld);
-    }
-
-    private static void ReleaseAndroidTouchInput()
-    {
-        ReleaseAndroidPushToTalkTouch();
-        ReleaseAndroidRadioTouch();
-    }
-
-    private static void ResetAndroidTouchState()
-    {
-        _micTouchFingerId = -1;
-        _radioTouchFingerId = -1;
-        _radioTouchStartTime = 0f;
-        _radioTouchTransmitStarted = false;
-        _touchPushToTalkHeld = false;
-        _touchTeamRadioHeld = false;
-        _suppressMicClickUntilUnscaledTime = 0f;
-    }
-#endif
-
     internal static void ToggleSpeakerPublic() => SetSpeakerMuted(!_speakerMuted);
 
     internal static void JailUnmutePublic()
@@ -1676,33 +1398,19 @@ public static class VoiceChatHudState
         if (_jailButtonObj != null)
             _jailButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
 #if ANDROID
-        if (_radioTouchButtonObj != null)
-            _radioTouchButtonObj.transform.localScale = Vector3.one * (_overlayScale * ButtonScale);
+        ApplyAndroidRadioOverlayScale();
 #endif
         PositionButtons();
     }
     private static void DestroyButtons()
     {
 #if ANDROID
-        // A scene teardown can destroy the touch target without producing TouchPhase.Ended.
-        // Close every transmit source before discarding finger ownership so capture cannot latch.
-        if (_touchPushToTalkHeld || _touchTeamRadioHeld
-            || _micTouchFingerId >= 0 || _radioTouchFingerId >= 0)
-            ReleaseTransmitHoldsFailClosed();
+        DestroyAndroidTouchControls();
 #endif
         BestEffortDestroy(ref _micButtonObj);
         BestEffortDestroy(ref _spkButtonObj);
         BestEffortDestroy(ref _jailButtonObj);
-#if ANDROID
-        BestEffortDestroy(ref _radioTouchButtonObj);
-#endif
         _micButton   = null; _spkButton   = null; _jailButton  = null;
-#if ANDROID
-        _radioTouchButton = null;
-        _radioTouchIconSr = null;
-        _radioTouchButtonSrs = null;
-        ResetAndroidTouchState();
-#endif
     }
 
     private static void DestroyTooltips()
@@ -2041,11 +1749,22 @@ public static class VoiceChatHudState
             : IsInTeamRadioMode() ? $"Team Radio: {VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel())} (held)"
             : pushToTalkMode ? "Push To Talk"
             : "Active";
+        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
+
+#if ANDROID
+        bool radioVisible = _radioTouchButtonObj?.activeInHierarchy == true;
+        _micTooltipTmp.text =
+            "<b>Microphone</b>\n" +
+            $"Status: {status}\n" +
+            (radioVisible ? $"Team Radio Channel: {channel}\n" : string.Empty) +
+            $"Volume: {(int)((tab?.MicVolume.Value ?? 1f) * 100f)}%\n" +
+            AndroidVoiceUiPolicy.MicrophoneTooltipAction(
+                pushToTalkMode,
+                radioVisible);
+#else
         string muteKey  = VoiceChatKeybinds.ToggleMute.Label;
         string radioKey = VoiceChatKeybinds.TeamRadio.Label;
         string cycleKey = VoiceChatKeybinds.CycleTeamRadioChannel.Label;
-        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
-
         _micTooltipTmp.text =
             "<b>Microphone</b>\n" +
             $"Status: {status}\n" +
@@ -2054,6 +1773,7 @@ public static class VoiceChatHudState
             (pushToTalkMode
                 ? $"Push To Talk active  |  Team Radio: {radioKey} (hold)  |  Cycle: {cycleKey}"
                 : $"Mute: {muteKey}  |  Team Radio: {radioKey} (hold)  |  Cycle: {cycleKey}");
+#endif
 
         PositionNear(_micTooltip, _micButtonObj);
         KeepTooltipOnTop(_micTooltip, ref _micTooltipRenderers, ref _micTooltipTmps);
@@ -2066,44 +1786,25 @@ public static class VoiceChatHudState
 
         string status = _speakerMuted ? "Deafened" : "Active";
         var tab = VoiceSettings.Instance;
+#if ANDROID
+        _spkTooltipTmp.text =
+            "<b>Speaker</b>\n" +
+            $"Status: {status}\n" +
+            $"Volume: {(int)((tab?.MasterVolume.Value ?? 0f) * 100f)}%\n" +
+            AndroidVoiceUiPolicy.SpeakerTooltipAction;
+#else
         string hotkey = VoiceChatKeybinds.ToggleSpeaker.Label;
-
         _spkTooltipTmp.text =
             "<b>Speaker</b>\n" +
             $"Status: {status}\n" +
             $"Volume: {(int)((tab?.MasterVolume.Value ?? 0f) * 100f)}%\n" +
             $"Hotkey: {hotkey}";
+#endif
 
         PositionNear(_spkTooltip, _spkButtonObj);
         KeepTooltipOnTop(_spkTooltip, ref _spkTooltipRenderers, ref _spkTooltipTmps);
         _spkTooltip.SetActive(true);
     }
-
-#if ANDROID
-    private static void ShowRadioTooltip()
-    {
-        if (_micTooltip == null || _micTooltipTmp == null || _radioTouchButtonObj == null) return;
-
-        _sharedMicTooltipOwner = SharedMicTooltipOwner.Radio;
-
-        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
-        string status = TryGetLocalTransmitBlockReason(out string transmitBlockReason)
-            ? transmitBlockReason
-            : TeamRadioBlockedByMeetingPolicy() ? "Unavailable in this phase"
-            : IsInTeamRadioMode() ? "Transmitting"
-            : CanUseTeamRadioInput() ? "Ready"
-            : "Unavailable";
-        _micTooltipTmp.text =
-            "<b>Team Radio</b>\n" +
-            $"Status: {status}\n" +
-            $"Channel: {channel}\n" +
-            "Tap: change channel  |  Hold: transmit";
-
-        PositionNear(_micTooltip, _radioTouchButtonObj);
-        KeepTooltipOnTop(_micTooltip, ref _micTooltipRenderers, ref _micTooltipTmps);
-        _micTooltip.SetActive(true);
-    }
-#endif
 
     private static void HideTooltips()
     {
@@ -2177,7 +1878,19 @@ public static class VoiceChatHudState
     }
 
     internal static bool CanUseTeamRadioInput()
-        => CanUseTeamRadio() && !TryGetLocalTransmitBlockReason(out _) && !TeamRadioBlockedByMeetingPolicy();
+#if ANDROID
+        => AndroidTeamRadioInputAvailable(
+            CanUseTeamRadio(),
+            AndroidTeamRadioPhaseSupportsPrivateRouting(),
+            _speakerMuted,
+            IsManualMuteActive(),
+            TryGetLocalTransmitBlockReason(out _),
+            TeamRadioBlockedByMeetingPolicy());
+#else
+        => CanUseTeamRadio()
+        && !TryGetLocalTransmitBlockReason(out _)
+        && !TeamRadioBlockedByMeetingPolicy();
+#endif
 
     internal static bool CanUseImpostorRadioInput()
         => CanUseTeamRadioInput();

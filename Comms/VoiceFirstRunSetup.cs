@@ -378,7 +378,11 @@ internal static class VoiceFirstRunSetup
         var journey = BuildCard(_pageRoot, "SetupJourney", leftW + gap, -82f, rightW, 368f);
         AddCardTitle(journey, "What you'll set up", "Three focused steps, then one review.");
         BuildJourneyRow(journey, -76f, "A", "Audio", "Choose your input, output, and playback level.");
+#if ANDROID
+        BuildJourneyRow(journey, -167f, "C", "Controls", AndroidVoiceUiPolicy.ControlsJourneyHelp);
+#else
         BuildJourneyRow(journey, -167f, "C", "Controls", "Talk mode, startup behavior, and shortcuts.");
+#endif
         BuildJourneyRow(journey, -258f, "H", "HUD", "Choose a layout using the live lobby preview.");
     }
 
@@ -470,7 +474,11 @@ internal static class VoiceFirstRunSetup
     private static void BuildControlsPage()
     {
         if (_pageRoot == null || _shell == null || _draft == null) return;
+#if ANDROID
+        BuildPageHeading("Choose how you talk", "Set your talk mode and learn the in-game touch controls.");
+#else
         BuildPageHeading("Choose how you talk", "Set your talk mode and the controls you will use in a lobby.");
+#endif
 
         const float gap = 18f;
         float leftW = 388f;
@@ -480,6 +488,12 @@ internal static class VoiceFirstRunSetup
         var binds = BuildCard(_pageRoot, "BindingsCard", leftW + gap, ContentTopY, rightW, cardH);
 
         AddCardTitle(talk, "Talk behavior", "These can be changed later in Settings.");
+        string microphoneModeHelp =
+#if ANDROID
+            "Open Mic uses voice activation. Push To Talk sends only while you hold the microphone button.";
+#else
+            "Open Mic uses voice activation. Push To Talk only sends while its key is held.";
+#endif
         AddRow(new VoiceUiKit.StepperRow(
                 () => (int)_draft.MicMode,
                 i => _draft.MicMode = (VoiceMicMode)Mathf.Clamp(i, 0, 1),
@@ -487,7 +501,7 @@ internal static class VoiceFirstRunSetup
                 i => i == 0 ? "Open Mic" : "Push To Talk",
                 compactFullWidth: true)
             .Build(talk, "Microphone mode", leftW, -63f, 84f,
-                "Open Mic uses voice activation. Push To Talk only sends while its key is held."));
+                microphoneModeHelp));
         AddRow(new VoiceUiKit.ToggleRow(
                 () => _draft.StartMuted,
                 v => _draft.StartMuted = v)
@@ -524,10 +538,10 @@ internal static class VoiceFirstRunSetup
             () => _draft.OpenVoiceSettings, v => _draft.OpenVoiceSettings = v,
             null);
 #else
-        AddCardTitle(binds, "In-game controls", "Touch controls stay visible while you play.");
-        BuildJourneyRow(binds, -74f, "M", "Microphone", "Tap the mic control to mute or unmute yourself.");
-        BuildJourneyRow(binds, -160f, "S", "Voice playback", "Tap the speaker control to mute incoming voice.");
-        BuildJourneyRow(binds, -246f, "V", "Voice menu", "Open the voice panel for volume and player controls.");
+        AddCardTitle(binds, "In-game touch controls", "Open Voice Settings later from the Among Us Options menu.");
+        BuildJourneyRow(binds, -74f, "M", "Microphone", AndroidVoiceUiPolicy.MicrophoneControlHelp);
+        BuildJourneyRow(binds, -160f, "R", "Team Radio", AndroidVoiceUiPolicy.TeamRadioControlHelp);
+        BuildJourneyRow(binds, -246f, "S", "Voice playback", "Tap the speaker button to mute incoming voice.");
 #endif
     }
 
@@ -615,10 +629,17 @@ internal static class VoiceFirstRunSetup
         BuildSummaryCard(w + gap, w, "Controls", new[]
         {
             "Mode: " + talkMode,
+#if ANDROID
+            _draft.MicMode == VoiceMicMode.PushToTalk
+                ? "PTT: hold the microphone button"
+                : "Mic button: tap to mute",
+            "Radio (when available): tap to change channel / hold to talk",
+#else
             _draft.MicMode == VoiceMicMode.PushToTalk
                 ? "PTT: " + _draft.PushToTalk.Label
                 : "Mute mic: " + _draft.ToggleMute.Label,
             "Voice menu: " + _draft.OpenVoiceSettings.Label,
+#endif
             $"Start muted: {YesNo(_draft.StartMuted)} / Playback muted: {YesNo(_draft.StartDeafened)}",
         }, () => GoTo(ControlsPage));
 
@@ -933,9 +954,13 @@ internal static class VoiceFirstRunSetup
         bool pushToTalk = _draft.MicMode == VoiceMicMode.PushToTalk;
         if (_micModeHelpText != null)
         {
+#if ANDROID
+            _micModeHelpText.text = AndroidVoiceUiPolicy.MicModeHelp(pushToTalk);
+#else
             _micModeHelpText.text = pushToTalk
                 ? "Voice is sent only while your\nPush to Talk shortcut is held."
                 : "Voice activation sends speech\nautomatically when you talk.";
+#endif
             _micModeHelpText.color = pushToTalk ? SetupWarning : VoiceUiKit.Accent;
         }
         if (_pushToTalkRow != null)

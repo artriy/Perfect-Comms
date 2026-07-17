@@ -27,7 +27,28 @@ public static class VoiceSettingsPanel
     private const float ScrollbarMinThumbHeight = 30f;
 
     private static readonly string[] Categories =
+#if ANDROID
+        AndroidVoiceUiPolicy.SettingsCategories;
+#else
         { "AUDIO", "DEVICES", "KEYBINDS", "HUD", "ADVANCED" };
+#endif
+
+    private static readonly VoiceSettingsCategory[] CategoryOrder =
+#if ANDROID
+        AndroidVoiceUiPolicy.SettingsCategoryOrder;
+#else
+    {
+        VoiceSettingsCategory.Audio,
+        VoiceSettingsCategory.Devices,
+        VoiceSettingsCategory.Keybinds,
+        VoiceSettingsCategory.Hud,
+        VoiceSettingsCategory.Advanced,
+    };
+#endif
+
+    internal static int CategoryCountForCurrentPlatform => Categories.Length;
+    internal static string CategoryNameForCurrentPlatform(int index) => Categories[index];
+    internal static VoiceSettingsCategory CategoryForCurrentPlatform(int index) => CategoryOrder[index];
 
     private static VoiceUiKit.PanelShell? _shell;
     private static VoiceUiKit.CategoryRail? _rail;
@@ -310,13 +331,16 @@ public static class VoiceSettingsPanel
     {
         var defs = new List<Entry>();
         var s = VoiceSettings.Instance!;
-        switch (cat)
+        if ((uint)cat >= (uint)CategoryOrder.Length)
+            return defs;
+
+        switch (CategoryOrder[cat])
         {
-            case 0: BuildAudio(defs, s); break;
-            case 1: BuildDevices(defs, s); break;
-            case 2: BuildKeybinds(defs, s); break;
-            case 3: BuildHud(defs, s); break;
-            case 4: BuildAdvanced(defs, s); break;
+            case VoiceSettingsCategory.Audio: BuildAudio(defs, s); break;
+            case VoiceSettingsCategory.Devices: BuildDevices(defs, s); break;
+            case VoiceSettingsCategory.Keybinds: BuildKeybinds(defs, s); break;
+            case VoiceSettingsCategory.Hud: BuildHud(defs, s); break;
+            case VoiceSettingsCategory.Advanced: BuildAdvanced(defs, s); break;
         }
         return defs;
     }

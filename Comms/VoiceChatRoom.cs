@@ -314,12 +314,19 @@ public class VoiceChatRoom
     }
 
     private static VoiceCaptureRuntimeOptions BuildCaptureRuntimeOptions(VoiceChatLocalSettings? settings)
-        => new(
+    {
+        var options = new VoiceCaptureRuntimeOptions(
             settings?.SyntheticMicTone.Value ?? false,
             settings?.MicCalibrationDiagnostics.Value ?? false,
             settings?.NoiseSuppressionEnabled.Value ?? false,
             settings?.EchoCancellationEnabled.Value ?? true,
             settings?.MicSensitivity.Value ?? 1f);
+#if ANDROID
+        return AndroidVoiceCapturePolicy.Normalize(options);
+#else
+        return options;
+#endif
+    }
 
     public void RebuildCaptureSupervisor() => _perfectCommsVoice?.RebuildCaptureSupervisor();
 
