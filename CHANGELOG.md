@@ -50,7 +50,7 @@ together.
   > <sub>Keyboard and mouse chords are supported throughout the rebindable controls, with `Shift+M` for mic mute, `Shift+N` for deafen, and `Shift+B` for the player-volume mixer by default. Deafening mutes playback and pauses microphone transmission. Per-player levels persist locally from 0%-200%, optional hold bindings can independently focus living or dead voices, and both refresh keys rebuild only the local voice session through one shared cooldown.</sub>
 
 - **Safer, clearer release packages.**
-  > <sub>Steam and itch.io users get `PerfectComms+dependencies x86.zip`; Epic Games Store and Microsoft Store users get `PerfectComms+dependencies x64.zip`. Both include the matching pinned BepInEx loader, Perfect Comms, hashes, and audited notices. `PerfectComms.dll` and `PerfectCommsAndroid.dll` remain available for existing BepInEx or Android installations.</sub>
+  > <sub>Steam and itch.io users get `PerfectComms+dependencies-win-x86-steam-itch.zip`; Epic Games Store and Microsoft Store users get `PerfectComms+dependencies-win-x64-epic-msstore.zip`. Both include the matching pinned BepInEx loader, Perfect Comms, hashes, and audited notices. `PerfectComms.dll` and `PerfectCommsAndroid.dll` remain available for existing BepInEx or Android installations.</sub>
 
 - **Much deeper automated validation.**
   > <sub>CI now builds and smoke-tests every helper and audio-processing target, checks Windows architecture labels, validates the Android ABI and microphone manifest, exercises helper-to-helper WebRTC plus live TURN relay, audits Rust dependencies and licenses, and refuses to publish unless the managed, native, RTC, packaging, version, and exact-main-tip gates all pass.</sub>

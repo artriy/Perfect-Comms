@@ -51,8 +51,8 @@ CI regenerates this file from the locked graph and rejects drift.
 
 ## Optional Windows dependency bundles
 
-The platform-specific `PerfectComms+dependencies x86.zip` and
-`PerfectComms+dependencies x64.zip` assets additionally redistribute the
+The platform-specific `PerfectComms+dependencies-win-x86-steam-itch.zip` and
+`PerfectComms+dependencies-win-x64-epic-msstore.zip` assets additionally redistribute the
 matching official BepInEx 6 build 735 loader and runtime. Those assets include
 `DEPENDENCY_THIRD_PARTY_NOTICES.md` plus exact license texts under
 `licenses/dependencies/` for BepInEx, UnityDoorstop, CoreCLR, Il2CppInterop,

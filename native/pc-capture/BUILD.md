@@ -62,7 +62,7 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 ## CI
 
 - `.github/workflows/native-helpers.yml`: builds the five desktop targets on GitHub-hosted runners (`windows-latest` x64/x86, `ubuntu-latest` x64, `macos-latest` universal x64+arm64), uploads `helper-*` artifacts, and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP loading.
-- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies x86.zip`, `PerfectComms+dependencies x64.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
+- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies-win-x86-steam-itch.zip`, `PerfectComms+dependencies-win-x64-epic-msstore.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 

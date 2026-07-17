@@ -55,8 +55,8 @@ DEPENDENCY_PE_MACHINES = {
 }
 
 DEPENDENCY_PUBLIC_ARCHIVE_NAMES = {
-    "dependencies-win-x86": "PerfectComms+dependencies x86.zip",
-    "dependencies-win-x64": "PerfectComms+dependencies x64.zip",
+    "dependencies-win-x86": "PerfectComms+dependencies-win-x86-steam-itch.zip",
+    "dependencies-win-x64": "PerfectComms+dependencies-win-x64-epic-msstore.zip",
 }
 
 DEPENDENCY_CORE_FILES = {

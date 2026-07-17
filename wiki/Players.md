@@ -4,7 +4,7 @@ This is the player guide for installing Perfect Comms, completing the guided set
 
 ## Get started
 
-1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and use the dependency bundle for your store: `PerfectComms+dependencies x86.zip` for Steam/itch.io or `PerfectComms+dependencies x64.zip` for Epic Games Store/Microsoft Store.
+1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and use the dependency bundle for your store: `PerfectComms+dependencies-win-x86-steam-itch.zip` for Steam/itch.io or `PerfectComms+dependencies-win-x64-epic-msstore.zip` for Epic Games Store/Microsoft Store.
 2. Launch Among Us and complete the guided Welcome, Audio, Controls, HUD, and Review steps.
 3. Open **Voice Settings** from Options or press `F10` whenever you want to change your local setup.
 4. If you host, open **Host Voice Settings** from the lobby game-settings console or press `F11`.

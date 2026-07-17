@@ -106,8 +106,8 @@ microphone transmission until you undeafen.
 ## Install
 
 1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or download the bundle for your platform from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest), which already includes BepInEx and Perfect Comms:
-   - **`PerfectComms+dependencies x86.zip`** for **Steam and itch.io** (x86).
-   - **`PerfectComms+dependencies x64.zip`** for **Epic Games Store and Microsoft Store** (x64).
+   - **`PerfectComms+dependencies-win-x86-steam-itch.zip`** for **Steam and itch.io** (x86).
+   - **`PerfectComms+dependencies-win-x64-epic-msstore.zip`** for **Epic Games Store and Microsoft Store** (x64).
 
    Extract the selected bundle into the Among Us folder so `winhttp.dll` sits beside `Among Us.exe`.
 2. If you installed BepInEx separately, drop `PerfectComms.dll` into `BepInEx/plugins`.

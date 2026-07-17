@@ -312,7 +312,7 @@ if ($Configuration -ne "Android") {
             Architecture = "win-x86"
             Label = "Windows x86 (32-bit)"
             PlatformLabel = "Steam and itch.io"
-            ArchiveBaseName = "PerfectComms+dependencies x86"
+            ArchiveBaseName = "PerfectComms+dependencies-win-x86-steam-itch"
             Source = $x86Source
             ArchiveSha256 = "9cd83eae4d47ab07e4ad7f4d98a0085f60fb4b61957857ff197c8729cf1bc483"
         },
@@ -320,7 +320,7 @@ if ($Configuration -ne "Android") {
             Architecture = "win-x64"
             Label = "Windows x64 (64-bit)"
             PlatformLabel = "Epic Games Store and Microsoft Store"
-            ArchiveBaseName = "PerfectComms+dependencies x64"
+            ArchiveBaseName = "PerfectComms+dependencies-win-x64-epic-msstore"
             Source = $x64Source
             ArchiveSha256 = "badef8112853a00939a0df6ca143bc0a4e3dc02bd4d21b873302731bfa0e4df4"
         }
