@@ -20,7 +20,7 @@ namespace VoiceChatPlugin;
 public class VoiceChatPluginMain : BasePlugin
 {
     public const string Id = "com.edgetel.perfectcomms";
-    public const string Version = "4.0.0";
+    public const string Version = "4.0.1";
     public static ManualLogSource Logger { get; private set; } = null!;
     internal static ConfigFile PluginConfig { get; private set; } = null!;
     public Harmony Harmony { get; } = new(Id);

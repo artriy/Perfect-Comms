@@ -1,5 +1,39 @@
 # Changelog
 
+## Perfect Comms v4.0.1
+
+Perfect Comms v4.0.1 is a focused stability update for the new v4 voice engine. It fixes the reported Steam Proton startup failure, keeps voice and Push To Talk working through the results screen, removes the brief audio cut when returning to the lobby, and improves native audio reliability across desktop systems.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.0.1/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### What's Changed
+
+- **Steam Proton voice startup is fixed.**
+  > <sub>Fixed the Linux helper failure that left players seeing “Voice unavailable, retrying audio helper” while voice remained stuck on “Connecting.” Perfect Comms now verifies that the Linux helper actually launched and can use an alternate safe location when either the Steam library or temporary folder blocks execution.</sub>
+
+- **The brief results-to-lobby audio cut is fixed.**
+  > <sub>Voice could disappear for roughly a second while Among Us rebuilt the player list after the results screen. Existing voice connections now remain active through that short transition and expire after a short safety window if the lobby roster never finishes rebuilding.</sub>
+
+- **Push To Talk now works on the results screen.**
+  > <sub>Holding and releasing your Push To Talk key now updates the microphone normally after a match ends instead of remaining silent or stuck in its previous state.</sub>
+
+- **The results-screen speaking bar stays complete.**
+  > <sub>Cached avatars, names, and silent-player slots now remain visible when the results scene removes the live in-game player objects. This also keeps Show All Players stable through the results screen.</sub>
+
+- **Ghost avatars update correctly.**
+  > <sub>Deaths revealed during meetings now update promptly on the speaking bar</sub>
+
+- **Native audio helpers are more dependable.**
+  > <sub>Helper retries, reconnects, and shutdown cleanup are more reliable, reducing stuck helper processes after a failed launch. CrossOver preserves the signed macOS helper on Intel and Apple Silicon, while Windows selects the correct self-contained 32-bit or 64-bit components, including on Windows-on-ARM systems running the game through emulation.</sub>
+
+- **Glitch-hacked voice muting is consistent.**
+  > <sub>The Mute Glitch Hacked option now blocks affected players correctly during tasks and meetings.</sub>
+
+- **Completed Mod Integration API 1.1 support.**
+  > <sub>Mod Integration API 1.1 is now complete, allowing compatible mods to add custom voice channels, listener-specific routing and mutes, alternate listening positions, synchronized host options, and privacy-safe voice overlays without maintaining their own Perfect Comms fork.</sub>
+
 ## Perfect Comms v4.0.0
 
 <p align="center">
