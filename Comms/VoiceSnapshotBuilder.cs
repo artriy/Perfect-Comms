@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using PerfectComms.Api;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -27,6 +28,14 @@ internal static class VoiceSnapshotBuilder
         var cameraView = ResolveCameraView(local, mapId);
         var phase = VoiceSceneState.ResolvePhase();
         var apiPhase = VoiceModBridge.ToApiPhase(phase);
+        VoiceModRegistry.NotifyPhase(apiPhase, local);
+
+        bool localBaseDead = local?.Data != null &&
+                             (local.Data.IsDead || local.Data.Role?.IsDead == true);
+        VoicePlayerTraits localTraits = local != null
+            ? VoiceModRegistry.ResolvePlayerTraits(local, apiPhase, isLocal: true, localBaseDead)
+            : VoicePlayerTraits.None;
+        bool localVoiceDead = localBaseDead || (localTraits & VoicePlayerTraits.VoiceDead) != 0;
 
         // Resolve once: is the LOCAL player controlling a victim (Puppeteer/Parasite)? Used to relocate/augment
         // their proximity hearing to the victim's surroundings when the host has the matching toggle on.
@@ -54,8 +63,12 @@ internal static class VoiceSnapshotBuilder
         if (local != null)
         {
             localExternal = VoiceModRegistry.ResolvePlayer(local, apiPhase, isLocal: true,
-                isDead: local.Data?.IsDead == true);
-            if (localControlMode == VoiceControlHearingMode.None && localExternal.ListenerActive)
+                isDead: localVoiceDead);
+            var settings = VoiceRoomSettingsState.Current;
+            bool builtInOriginActive =
+                localControlMode == VoiceControlHearingMode.PuppeteerSwap && settings.PuppeteerHearFromVictim ||
+                localControlMode == VoiceControlHearingMode.ParasiteAdditive && settings.ParasiteHearFromVictim;
+            if (!builtInOriginActive && localExternal.ListenerActive)
             {
                 localControlledVictimPos = localExternal.ListenerOrigin;
                 localControlledVictimLight = localExternal.ListenerLightRadius;
@@ -86,7 +99,7 @@ internal static class VoiceSnapshotBuilder
                 out byte jailorId,
                 out bool isParasiteControlled,
                 out bool isPuppeteerControlled,
-                out _,
+                out bool isCrewpostor,
                 out bool isVampire,
                 out bool isLover,
                 out byte loverPartnerId,
@@ -103,15 +116,46 @@ internal static class VoiceSnapshotBuilder
 
             bool dataDead = data?.IsDead == true;
             bool roleOnlyDead = !dataDead && data?.Role?.IsDead == true;
+            bool baseDead = dataDead || roleOnlyDead;
+            bool playerIsLocal = player.PlayerId == localPlayerId;
+            VoicePlayerTraits traits = playerIsLocal
+                ? localTraits
+                : VoiceModRegistry.ResolvePlayerTraits(
+                    player,
+                    apiPhase,
+                    isLocal: false,
+                    isDead: baseDead,
+                    localIsDead: localVoiceDead);
+            bool voiceDead = baseDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
+            bool voiceSpectator = roleOnlyDead || (traits & VoicePlayerTraits.Spectator) != 0;
+            ExternalVoiceState external = playerIsLocal
+                ? localExternal
+                : VoiceModRegistry.ResolvePlayer(
+                    player,
+                    apiPhase,
+                    isLocal: false,
+                    isDead: voiceDead,
+                    localIsDead: localVoiceDead);
+            external = external with
+            {
+                Pair = VoiceModRegistry.ResolvePair(
+                    local,
+                    player,
+                    apiPhase,
+                    localVoiceDead,
+                    voiceDead),
+            };
             players.Add(new VoicePlayerSnapshot(
                 player.PlayerId,
                 clientId,
                 name,
                 (Vector2)player.transform.position,
-                player.PlayerId == localPlayerId,
-                dataDead || roleOnlyDead,
-                roleOnlyDead,
-                VoiceRoleMuteState.IsVoiceImpostor(player),
+                playerIsLocal,
+                voiceDead,
+                voiceSpectator,
+                data?.Role?.IsImpostor == true ||
+                (VoiceRoomSettingsState.Current.CrewpostorUsesImpostorVoice && isCrewpostor) ||
+                (traits & VoicePlayerTraits.ImpostorVoice) != 0,
                 isVampire,
                 isLover,
                 loverPartnerId,
@@ -131,12 +175,10 @@ internal static class VoiceSnapshotBuilder
                 mediumSpiritPosition,
                 isMediatedGhost,
                 mediatingMediumId,
-                player.PlayerId == localPlayerId ? localControlMode : VoiceControlHearingMode.None,
-                player.PlayerId == localPlayerId ? localControlledVictimPos : default,
-                player.PlayerId == localPlayerId ? localControlledVictimLight : -1f,
-                player.PlayerId == localPlayerId
-                    ? localExternal
-                    : VoiceModRegistry.ResolvePlayer(player, apiPhase, isLocal: false, isDead: dataDead || roleOnlyDead),
+                playerIsLocal ? localControlMode : VoiceControlHearingMode.None,
+                playerIsLocal ? localControlledVictimPos : default,
+                playerIsLocal ? localControlledVictimLight : -1f,
+                external,
                 IsGlitchHacked: isGlitchHacked));
         }
         }

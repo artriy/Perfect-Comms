@@ -1,38 +1,68 @@
+using System;
+using PerfectComms.Api;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-// All third-party mod voice state for one player, resolved once per snapshot build by
-// VoiceModRegistry from registered PerfectComms.Api callbacks. Bundling every external field
-// here keeps the mod API fully isolated from the core VoicePlayerSnapshot shape: the engine
-// reads plain resolved values, never a mod callback. Default = neutral (no external effect).
-//
-// ChannelShape: 0 = Proximity, 1 = Radio, 2 = Muffle (mirrors PerfectComms.Api.VoiceAudioShape).
+// Resolved third-party state is stored as plain values on the snapshot. No mod callback runs in
+// the backend/audio loop. A player may hold several namespaced channel memberships at once.
+internal readonly record struct ExternalVoiceChannelState(
+    string Key,
+    bool CanTransmit,
+    int Shape,
+    float Volume,
+    bool HasOrigin,
+    Vector2 Origin);
+
+internal readonly record struct ExternalVoicePairState(
+    VoicePairVerdict Verdict,
+    string Reason,
+    bool Muffled,
+    int Shape,
+    float Volume,
+    bool HasSpeakerOrigin,
+    Vector2 SpeakerOrigin,
+    bool HasListenerOrigin,
+    Vector2 ListenerOrigin)
+{
+    internal static readonly ExternalVoicePairState None = new(
+        VoicePairVerdict.Pass,
+        string.Empty,
+        false,
+        (int)VoicePairRouteShape.Proximity,
+        1f,
+        false,
+        default,
+        false,
+        default);
+}
+
 internal readonly record struct ExternalVoiceState(
-    // Gate (Primitive 1)
+    // Speaker-wide gate state.
     bool Muted,
     bool Muffled,
     string Reason,
-    // Channel (Primitive 2) - two players with the same non-empty key hear each other.
-    string ChannelKey,
-    bool ChannelTwoWay,
-    int ChannelShape,
-    float ChannelVolume,
-    // Optional spatial origin for a Proximity-shaped channel (e.g. a Medium seance spirit point).
-    // When ChannelHasOrigin is true, the listener hears the speaker from ChannelOrigin with falloff.
-    bool ChannelHasOrigin,
-    Vector2 ChannelOrigin,
-    // Listener-origin (Primitive 3) - local player only.
+    // Every channel membership returned by this player's registered resolvers.
+    ExternalVoiceChannelState[]? Channels,
+    // Local-player listener-origin state.
     bool ListenerActive,
     Vector2 ListenerOrigin,
     float ListenerLightRadius,
-    bool ListenerReplace)
+    bool ListenerReplace,
+    // Local-listener/speaker pair state. This is resolved separately for each client snapshot.
+    ExternalVoicePairState Pair)
 {
     public static readonly ExternalVoiceState None = new(
-        false, false, "",
-        "", true, 1, 1f,
-        false, default,
-        false, default, -1f, true);
+        false,
+        false,
+        string.Empty,
+        null,
+        false,
+        default,
+        -1f,
+        true,
+        ExternalVoicePairState.None);
 
     public bool HasReason => !string.IsNullOrEmpty(Reason);
+    public ReadOnlySpan<ExternalVoiceChannelState> ChannelSpan => Channels;
 }

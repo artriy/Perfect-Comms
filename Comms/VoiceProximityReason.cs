@@ -21,6 +21,7 @@ internal enum VoiceProximityReason
     RoleMuted,
     GracePeriod,
     ModChannel,
+    ModPairRoute,
     MeetingLiving,
     TeamRadio,
     TeamRadioMuted,

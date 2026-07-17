@@ -8,8 +8,9 @@
 ### Mod Developers
 - [Mod Integration](Mod-Integration)
 - [Examples](Mod-Integration-Examples)
-- [Gate: Mute & Muffle](Mod-Integration-Gate)
+- [Gate, Muffle & Traits](Mod-Integration-Gate)
 - [Channels](Mod-Integration-Channels)
-- [Listener Origin](Mod-Integration-Listener-Origin)
+- [Listener Origin & Filter](Mod-Integration-Listener-Origin)
+- [Overlay Privacy](Mod-Integration-Overlay-Privacy)
 - [Host Options & Tabs](Mod-Integration-Host-Options)
 - [API Reference](Mod-Integration-API-Reference)

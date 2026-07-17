@@ -225,6 +225,11 @@ public static class HostSettingsPanel
                     () => n.Value, v => n.Value = v, n.Min, n.Max,
                     v => $"<color=#22D3EE>{v.ToString(n.Format, CultureInfo.InvariantCulture)}</color>")
                     .Build(_shell.PaneRoot, n.Label, paneW, y, RowH, n.HelpText);
+            case ModNumberHolder mn:
+                return new VoiceUiKit.SliderRow(
+                    () => mn.Value, v => mn.Value = v, mn.Min, mn.Max,
+                    v => $"<color=#22D3EE>{v.ToString(mn.Format, CultureInfo.InvariantCulture)}</color>")
+                    .Build(_shell.PaneRoot, mn.Label, paneW, y, RowH, mn.HelpText);
         }
         return null;
     }

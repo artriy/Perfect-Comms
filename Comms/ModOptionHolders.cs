@@ -55,3 +55,39 @@ public sealed class ModEnumHolder : OptionHolder
         set => VoiceModRegistry.SetEnumValue(_composedKey, value);
     }
 }
+
+public sealed class ModNumberHolder : OptionHolder
+{
+    private readonly string _composedKey;
+
+    public float Min { get; }
+    public float Max { get; }
+    public float Step { get; }
+    public string Format { get; }
+
+    public ModNumberHolder(
+        string composedKey,
+        string label,
+        float min,
+        float max,
+        float step,
+        string format,
+        string helpText)
+    {
+        _composedKey = composedKey;
+        Label = label;
+        Min = min;
+        Max = max;
+        Step = step;
+        Format = string.IsNullOrWhiteSpace(format) ? "0.0" : format;
+        HelpText = string.IsNullOrWhiteSpace(helpText)
+            ? "Adjusts this host option provided by the connected mod. The host's choice is synchronized to the lobby."
+            : helpText;
+    }
+
+    public float Value
+    {
+        get => VoiceModRegistry.GetNumberValue(_composedKey);
+        set => VoiceModRegistry.SetNumberValue(_composedKey, value);
+    }
+}

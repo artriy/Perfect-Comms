@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
-/// Authenticated remote-host option overlay, isolated from PlayerControl-dependent registry code so
+/// Remote host-snapshot option overlay, isolated from PlayerControl-dependent registry code so
 /// session cleanup is safe during teardown and test hosts. Local values remain owned by the registry;
 /// this overlay is seeded from registered defaults for each complete host snapshot.
 /// </summary>
@@ -12,8 +12,10 @@ internal static class VoiceModRemoteOptionState
 {
     private static readonly Dictionary<string, bool> BoolDefaults = new();
     private static readonly Dictionary<string, int> EnumDefaults = new();
+    private static readonly Dictionary<string, float> NumberDefaults = new();
     private static readonly Dictionary<string, bool> RemoteBools = new();
     private static readonly Dictionary<string, int> RemoteEnums = new();
+    private static readonly Dictionary<string, float> RemoteNumbers = new();
 
     internal static bool IsActive { get; private set; }
 
@@ -29,20 +31,44 @@ internal static class VoiceModRemoteOptionState
         if (IsActive) RemoteEnums.TryAdd(key, defaultValue);
     }
 
+    internal static void RegisterNumber(string key, float defaultValue)
+    {
+        NumberDefaults.TryAdd(key, defaultValue);
+        if (IsActive) RemoteNumbers.TryAdd(key, defaultValue);
+    }
+
     internal static void RemovePrefix(string prefix)
     {
         RemoveMatching(BoolDefaults, prefix);
         RemoveMatching(EnumDefaults, prefix);
+        RemoveMatching(NumberDefaults, prefix);
         RemoveMatching(RemoteBools, prefix);
         RemoveMatching(RemoteEnums, prefix);
+        RemoveMatching(RemoteNumbers, prefix);
+    }
+
+    internal static void RemoveKeys(IReadOnlyList<string> keys)
+    {
+        for (int i = 0; i < keys.Count; i++)
+        {
+            string key = keys[i];
+            BoolDefaults.Remove(key);
+            EnumDefaults.Remove(key);
+            NumberDefaults.Remove(key);
+            RemoteBools.Remove(key);
+            RemoteEnums.Remove(key);
+            RemoteNumbers.Remove(key);
+        }
     }
 
     internal static void BeginSync()
     {
         RemoteBools.Clear();
         RemoteEnums.Clear();
+        RemoteNumbers.Clear();
         foreach (var pair in BoolDefaults) RemoteBools[pair.Key] = pair.Value;
         foreach (var pair in EnumDefaults) RemoteEnums[pair.Key] = pair.Value;
+        foreach (var pair in NumberDefaults) RemoteNumbers[pair.Key] = pair.Value;
         IsActive = true;
     }
 
@@ -50,6 +76,7 @@ internal static class VoiceModRemoteOptionState
     {
         RemoteBools.Clear();
         RemoteEnums.Clear();
+        RemoteNumbers.Clear();
         IsActive = false;
     }
 
@@ -59,8 +86,12 @@ internal static class VoiceModRemoteOptionState
     internal static int GetEnum(string key)
         => RemoteEnums.TryGetValue(key, out var value) ? value : 0;
 
+    internal static float GetNumber(string key)
+        => RemoteNumbers.TryGetValue(key, out var value) ? value : 0f;
+
     internal static void SetBool(string key, bool value) => RemoteBools[key] = value;
     internal static void SetEnum(string key, int value) => RemoteEnums[key] = value;
+    internal static void SetNumber(string key, float value) => RemoteNumbers[key] = value;
 
     private static void RemoveMatching<T>(Dictionary<string, T> values, string prefix)
     {

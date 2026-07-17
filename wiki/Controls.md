@@ -1,6 +1,6 @@
 # Player Settings & Controls
 
-Open **Voice Settings** from the Among Us Options menu or press `F10`. These settings are local: they change your own microphone, playback, controls, and HUD without changing the host's lobby rules.
+Open **Voice Settings** from the Among Us Options menu. On desktop, you can also press `F10`. These settings are local: they change your own microphone, playback, controls, and HUD without changing the host's lobby rules.
 
 On a new install, Perfect Comms first opens a guided setup for audio devices and tests, talk controls, a live HUD layout preview, and a final review. You can run it again at any time from **Advanced > First-Time Setup**.
 
@@ -31,9 +31,9 @@ Mic and speaker volume range from 10% to 200%. Mic Sensitivity ranges from 0.25 
 
 The guided setup also provides an optional live microphone meter, mic test, and output test.
 
-## Keybinds tab
+## Keybinds tab (desktop)
 
-Every binding can use a keyboard key, mouse button, exact modifier, or modifier chord. Select a binding and press the new key or chord; clear it to leave the action unbound.
+The Android build uses touch controls and does not show this keyboard tab. On desktop, every binding can use a keyboard key, mouse button, exact modifier, or modifier chord. Select a binding and press the new key or chord; clear it to leave the action unbound.
 
 | Action | Default |
 | :--- | :---: |
@@ -90,7 +90,7 @@ Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at th
 
 ### Meeting and role UI
 
-- **Meeting Speaking Overlay** adds a colored glow to speaking player cards while respecting concealment and blindness rules. It is on by default.
+- **Meeting Speaking Overlay** normally adds a colored glow to the real speaker's public meeting card. Task-world disguises, concealment, and blindness do not change it once the meeting publicly reveals identities; compatible mod privacy rules can still hide or reattribute the indicator. It is on by default.
 - **Jail Unmute Placement** puts the Jailor's temporary unmute control on either the Voice HUD or the jailed player's meeting card. Meeting Card is the default.
 
 ## Advanced tab
@@ -105,12 +105,22 @@ During guided setup, **Use existing settings** keeps every current value and mar
 
 Press `Shift+B` to open **Player Volumes**. Each other player has a persistent local slider from 0% to 200%, a reset-to-100% action, and a live speaking meter. These adjustments affect only what you hear.
 
-## In-game and Android controls
+## In-game controls
+
+### Desktop
 
 - **Push to talk (`C`)** transmits only while held when Mic Mode is Push To Talk.
 - **Team radio (`V`)** transmits on the selected eligible team channel; **Cycle (`G`)** changes channel.
-- **Refresh voice (`F7`)** rebuilds only your voice session and has a 10-second cooldown.
+- **Refresh voice (`F7`)** rebuilds only your local voice session and has a 10-second cooldown.
 - **Deafen (`Shift+N`)** mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.
-- On Android, hold the microphone button to transmit in push-to-talk mode. Tap Team Radio to cycle channels or hold it to transmit.
+
+### Android
+
+The Android Voice Settings panel contains Audio, Devices, HUD, and Advanced tabs. It uses the in-game touch buttons instead of desktop keybinds:
+
+- In **Open Mic** mode, tap the microphone button to mute or unmute.
+- In **Push To Talk** mode, hold the microphone button while speaking and release it to stop.
+- When Team Radio is available, tap its button to change channel or hold it to transmit.
+- Tap the speaker button to deafen or undeafen. Deafening mutes playback and pauses microphone transmission.
 
 See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Host Settings](Host-Settings)

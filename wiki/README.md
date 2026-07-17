@@ -32,9 +32,10 @@ git add -A && git commit -m "docs: update Perfect Comms wiki" && git push
 | `Host-Settings.md` | Match-wide host settings tabs |
 | `Mod-Integration.md` | Mod API landing + setup |
 | `Mod-Integration-Examples.md` | Integration examples |
-| `Mod-Integration-Gate.md` | Gate: mute & muffle |
-| `Mod-Integration-Channels.md` | Channels: private & team radio |
-| `Mod-Integration-Listener-Origin.md` | Listener origin |
+| `Mod-Integration-Gate.md` | Gate, muffle, and player traits |
+| `Mod-Integration-Channels.md` | Channels and pair routing |
+| `Mod-Integration-Listener-Origin.md` | Listener origin, filter, and phase observer |
 | `Mod-Integration-Host-Options.md` | Host options & tabs |
+| `Mod-Integration-Overlay-Privacy.md` | Identity-bearing overlay privacy |
 | `Mod-Integration-API-Reference.md` | API reference |
 | `_Sidebar.md` | Sidebar navigation |

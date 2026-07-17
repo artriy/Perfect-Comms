@@ -2,7 +2,7 @@
 
 The host controls the match-wide voice rules. Host changes sync automatically to every player; players separately control their own devices, volumes, keybinds, and HUD.
 
-Open **Host Voice Settings** from the lobby game-settings console or press `F11`. The panel is host-only and closes automatically if host authority moves to another player. Hover the **!** beside an option for its in-game explanation.
+Open **Host Voice Settings** from the lobby game-settings console. On desktop, the host can also press `F11`. The panel closes automatically if host authority moves to another player. Hover the **!** beside an option for its in-game explanation.
 
 ## Proximity tab
 
@@ -50,23 +50,31 @@ Conditional rows appear only when their parent rule is enabled.
 | **Team Radio - Usable in Meetings** | Off | Allows eligible channels during meetings. |
 | **Team Radio - Usable in Tasks Phase** | On | Allows eligible channels during ordinary task gameplay. |
 
-Players hold `V` to transmit and press `G` to cycle the channels available to their role. Additional radio rows appear as their related options are enabled.
+On desktop, players hold `V` to transmit and press `G` to cycle the channels available to their role. On Android, they tap the Team Radio button to cycle or hold it to transmit. Additional radio rows appear as their related options are enabled.
 
 ## TOU MIRA tab
 
-This built-in tab is always present. Its options take effect only when compatible TOU-Mira roles and game states are available:
+This built-in tab is always present. Its 17 rows take effect only when compatible TOU-Mira roles and game states are available:
 
-- **Blackmailer:** mute the blackmailed player in meetings; optionally keep the mute for the next task round.
-- **Parasite:** mute the controlled victim and optionally hear from the victim's position.
-- **Puppeteer:** mute the controlled victim and optionally hear from the victim's position.
-- **Swooper:** mute while swooped.
-- **Eclipsal / Grenadier:** muffle incoming voice for blinded or flashed players.
-- **Hypnotist:** muffle incoming voice for affected players during Mass Hysteria.
-- **Crewpostor:** use impostor private-voice and team-radio routing.
-- **Glitch:** mute hacked players.
-- **Jailor:** mute the jailee in meetings, allow temporary unmute, and optionally keep the jail active after the Jailor dies.
-- **Medium Ghost Voice:** choose None, Medium to Ghost, Ghost to Medium, or Both during tasks.
-- **Vampire and Lovers Team Radio:** enable their private team channels when Team Radio is on.
+| Setting | Default | What it controls |
+| :--- | :---: | :--- |
+| **Blackmailer: Mute Blackmailed in Meetings** | On | Mutes the currently blackmailed player during Meeting and Exile voice. |
+| **Blackmailer: Mute Blackmailed Next Round** | Off | Carries the meeting mute into the following task round. |
+| **Parasite: Mute Controlled Victim** | On | Mutes the active controlled victim during tasks. |
+| **Parasite: Also Hear Controlled Victim** | On | Adds the victim's position and light radius as another hearing point for the Parasite. |
+| **Puppeteer: Mute Controlled Victim** | On | Mutes the active controlled victim during tasks. |
+| **Puppeteer: Hear From Controlled Victim** | On | Replaces the Puppeteer's hearing point with the victim's position and light radius. |
+| **Swooper: Mute While Swooped** | On | Mutes a Swooper while the swoop is active. |
+| **Eclipsal/Grenadier: Muffle Blinded/Flashed Hearing** | On | Muffles incoming voice for the affected local listener. |
+| **Hypnotist: Muffle Hypnotized During Hysteria** | On | Muffles incoming voice for affected players during Mass Hysteria. |
+| **Crewpostor: Use Impostor Voice** | On | Uses impostor-equivalent private voice and Team Radio classification. |
+| **Glitch: Mute Hacked Players** | On | Mutes a player while the Glitch's Hack effect is active. |
+| **Jailor: Mute Jailee in Meetings** | On | Mutes the jailee during Meeting and Exile voice unless temporarily allowed. |
+| **Jailor: Jail Persists If Jailor Dies** | Off | Keeps meeting voice jail active after the Jailor dies; shown when jailee muting is enabled. |
+| **Jailor: Can Unmute Jailee** | On | Lets the Jailor temporarily permit the jailee to speak. |
+| **Medium: Ghost Voice** | None | Chooses None, Medium to Ghost, Ghost to Medium, or Both during tasks. |
+| **Team Radio - Vampires** | On | Enables the vampire channel while Team Radio and the current phase permit it. |
+| **Team Radio - Lovers** | On | Enables the lovers channel while Team Radio and the current phase permit it. |
 
 Role rules activate automatically when their matching mod and role state are available and otherwise stay dormant.
 
@@ -76,6 +84,6 @@ Other compatible mods can add their own tab under **Mod Behaviour**, with synced
 
 ## How synchronization works
 
-Host changes sync automatically. Joining players receive the current rules, and only the host can edit them.
+Host changes are broadcast automatically, and a joining player requests the current rules. The in-game editor is available only while that player is the lobby host.
 
 See also: [Installing Perfect Comms](Installing-Perfect-Comms) · [Player Settings & Controls](Controls)

@@ -1,208 +1,418 @@
-# Examples
+# API 1.1 Role Recipes
 
-Worked examples that recreate familiar Town of Us style role behaviours with the public API. Each shows the same pattern you would use in your own mod: reference your **own** role/modifier types at compile time (no reflection), and return a verdict only when your role applies.
+These examples show how an external role mod can reproduce Perfect Comms' 17 TOU-Mira host rows with public API 1.1. Names such as `MyRoles`, `MyVoiceState`, and `MyRadio` are placeholders for your mod's own synchronized API.
 
-All snippets assume you registered under one mod id and have already confirmed Perfect Comms is present (see [Mod Integration](Mod-Integration)).
+Call `Register()` only after the soft-dependency check in [Mod Integration](Mod-Integration). Register once and call `PerfectCommsApi.Unregister(Mod)` before a supported dynamic reload.
 
-```csharp
-using PerfectComms.Api;
-const string Mod = "com.me.mymod";
-```
-
-← Back to **[Mod Integration](Mod-Integration)**
+Back to **[Mod Integration](Mod-Integration)**
 
 ---
 
-## Blackmailer
+## Complete 17-row parity matrix
 
-**Behaviour:** a blackmailed player cannot talk during meetings. Optionally they also stay muted for the following round.
+| # | Built-in host row / default | External API implementation | State the role mod must own |
+| :---: | :--- | :--- | :--- |
+| 1 | `MuteBlackmailedInMeetings` / On | Bool option + Meeting/Exile speaker `Mute` | Current blackmailed player |
+| 2 | `MuteBlackmailedNextRound` / Off | Bool option + Meeting-or-Exile → Tasks observer + Tasks speaker `Mute` | Persisted affected player ids and clear boundary |
+| 3 | `MuteParasiteControlled` / On | Bool option + Tasks speaker `Mute` | Active controlled victim |
+| 4 | `ParasiteHearFromVictim` / On | Bool option + contextual listener origin, `Additive` | Parasite-to-victim link, victim position/light radius |
+| 5 | `MutePuppeteerControlled` / On | Bool option + Tasks speaker `Mute` | Active controlled victim |
+| 6 | `PuppeteerHearFromVictim` / On | Bool option + contextual listener origin, `Replace` | Puppeteer-to-victim link, victim position/light radius |
+| 7 | `MuteSwooperWhileSwooped` / On | Bool option + Tasks/Meeting/Exile speaker `Mute` while swooped | Active swoop state |
+| 8 | `MuffleBlindedOrFlashedHearing` / On | Bool option + contextual listener filter | Per-viewer Eclipsal/Grenadier effect state |
+| 9 | `MuffleHypnotizedDuringHysteria` / On | Bool option + contextual listener filter | Hypnotized target and Mass Hysteria state |
+| 10 | `CrewpostorUsesImpostorVoice` / On | Bool option + `VoicePlayerTraits.ImpostorVoice` | Crewpostor classification |
+| 11 | `MuteGlitchHacked` / On | Bool option + Tasks/Meeting/Exile speaker `Mute` while hacked | Active Glitch Hack state |
+| 12 | `MuteJailedInMeetings` / On | Bool option + Meeting/Exile speaker `Mute` | Jailee and owning Jailor |
+| 13 | `JailPersistsAfterJailorDeath` / Off | Conditional bool option + jail rule checks Jailor alive state | Jailor alive/dead and persisted jail |
+| 14 | `JailorCanUnmuteJailed` / On | Bool option + jail rule reads synchronized temporary allow flag | Jailor UI/input plus allow/revoke RPC |
+| 15 | `MediumGhostVoice` / None | Enum option + Tasks-only pair Route/Mute rules | Active Medium, spirit position, and the selected mediated ghost for the reverse direction |
+| 16 | `TeamRadioVampires` / On | Bool option + shared channel; receive-only except while transmitting | Vampire membership, phase policy, hold state, UI/input/RPC |
+| 17 | `TeamRadioLovers` / On | Bool option + pair-scoped channel; receive-only except while transmitting | Partner pairing, phase policy, hold state, UI/input/RPC |
 
-**Primitive:** [Gate](Mod-Integration-Gate). Two host toggles drive it.
+Every built-in row has a public-API equivalent. The API supplies voice policy and option synchronization; the external mod supplies role truth and role networking.
+
+---
+
+## Register all parity options
+
+The exact keys below are safe because API keys are scoped to your own `modId`; they do not overwrite Perfect Comms' built-in settings.
 
 ```csharp
-PerfectCommsApi.RegisterModTab(Mod, "My Mod");
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("MuteBlackmailed", "<color=#FF1919><b>Blackmailer</b></color>: Mute in Meetings", true));
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("MuteBlackmailedNextRound", "<color=#FF1919><b>Blackmailer</b></color>: Mute Next Round", false));
+private const string Mod = "com.me.mymod";
 
-PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
+private static void RegisterParityOptions()
 {
-    // Your own modifier, your own check - no Perfect Comms internals.
-    bool blackmailed = ctx.Player.GetModifier<BlackmailedModifier>() != null;
-    if (!blackmailed) return VoiceRuleResult.Pass;
+    PerfectCommsApi.RegisterModTab(Mod, "My Mod Voice");
 
-    // Meetings: muted when the host enabled it.
-    if (ctx.Phase == VoicePhaseKind.Meeting && ctx.GetOption("MuteBlackmailed"))
-        return VoiceRuleResult.Mute("Blackmailed");
+    void Toggle(
+        string key,
+        string label,
+        bool value,
+        Func<VoiceHostOptionContext, bool>? visible = null)
+        => PerfectCommsApi.RegisterHostOption(
+            Mod,
+            new VoiceHostOption(key, label, value)
+            {
+                Visible = visible
+            });
 
-    // Tasks of the following round: muted when the next-round toggle is on.
-    if (ctx.Phase == VoicePhaseKind.Tasks
-        && ctx.GetOption("MuteBlackmailedNextRound")
-        && MyRoles.WasBlackmailedLastMeeting(ctx.Player))
-        return VoiceRuleResult.Mute("Blackmailed");
+    Toggle("MuteBlackmailedInMeetings", "Blackmailer: Mute in Meetings", true);
+    Toggle("MuteBlackmailedNextRound", "Blackmailer: Mute Next Round", false);
+    Toggle("MuteParasiteControlled", "Parasite: Mute Controlled Victim", true);
+    Toggle("ParasiteHearFromVictim", "Parasite: Also Hear Victim", true);
+    Toggle("MutePuppeteerControlled", "Puppeteer: Mute Controlled Victim", true);
+    Toggle("PuppeteerHearFromVictim", "Puppeteer: Hear From Victim", true);
+    Toggle("MuteSwooperWhileSwooped", "Swooper: Mute While Swooped", true);
+    Toggle("MuffleBlindedOrFlashedHearing", "Eclipsal/Grenadier: Muffle Hearing", true);
+    Toggle("MuffleHypnotizedDuringHysteria", "Hypnotist: Muffle During Hysteria", true);
+    Toggle("CrewpostorUsesImpostorVoice", "Crewpostor: Use Impostor Voice", true);
+    Toggle("MuteGlitchHacked", "Glitch: Mute Hacked Players", true);
+    Toggle("MuteJailedInMeetings", "Jailor: Mute Jailee in Meetings", true);
+    Toggle(
+        "JailPersistsAfterJailorDeath",
+        "Jailor: Jail Persists If Jailor Dies",
+        false,
+        ctx => ctx.GetOption("MuteJailedInMeetings"));
+    Toggle("JailorCanUnmuteJailed", "Jailor: Can Unmute Jailee", true);
+    Toggle("TeamRadioVampires", "Team Radio: Vampires", true);
+    Toggle("TeamRadioLovers", "Team Radio: Lovers", true);
 
-    return VoiceRuleResult.Pass;
-});
+    PerfectCommsApi.RegisterHostEnumOption(
+        Mod,
+        new VoiceHostEnumOption(
+            "MediumGhostVoice",
+            "Medium: Ghost Voice",
+            Default: 0,
+            Choices: new[]
+            {
+                "None",
+                "Medium → Ghost",
+                "Ghost → Medium",
+                "Both"
+            }));
+}
 ```
 
-> `WasBlackmailedLastMeeting` is your own bookkeeping - track who was blackmailed when the meeting ended and clear it when the next meeting starts. The API only needs the boolean.
+Add descriptions in production code; they become the in-game help text. The helper is only to keep this page readable.
 
 ---
 
-## Jailor
-
-**Behaviour:** the jailed player is muted in meetings, but the Jailor can choose to let them speak.
-
-**Primitive:** [Gate](Mod-Integration-Gate), gated on your own "is this player jailed, and has the jailor opened their mic?" state.
+## Speaker rules: Blackmailer, control, Swooper, Glitch, and Jailor
 
 ```csharp
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("MuteJailed", "<color=#A6A6A6><b>Jailor</b></color>: Mute Jailee in Meetings", true));
-
-PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
+private static void RegisterSpeakerRules()
 {
-    if (ctx.Phase != VoicePhaseKind.Meeting) return VoiceRuleResult.Pass;
-    if (!ctx.GetOption("MuteJailed")) return VoiceRuleResult.Pass;
+    PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
+    {
+        bool deliberation = ctx.Phase is VoicePhaseKind.Meeting or VoicePhaseKind.Exile;
+        bool liveGame = ctx.Phase is VoicePhaseKind.Tasks or VoicePhaseKind.Meeting or VoicePhaseKind.Exile;
 
-    var jail = ctx.Player.GetModifier<JailedModifier>();
-    if (jail == null) return VoiceRuleResult.Pass;
+        if (liveGame &&
+            ctx.GetOption("MuteGlitchHacked") &&
+            MyRoles.IsGlitchHacked(ctx.Player))
+        {
+            return VoiceRuleResult.Mute("Hacked");
+        }
 
-    // Jailor unmuted them this meeting -> let them speak.
-    if (MyRoles.JailorAllowedVoice(ctx.Player)) return VoiceRuleResult.Pass;
+        if (liveGame &&
+            ctx.GetOption("MuteSwooperWhileSwooped") &&
+            MyRoles.IsSwooped(ctx.Player))
+        {
+            return VoiceRuleResult.Mute("Swooped");
+        }
 
-    return VoiceRuleResult.Mute("Jailed");
-});
+        if (deliberation)
+        {
+            if (ctx.GetOption("MuteBlackmailedInMeetings") &&
+                MyRoles.IsCurrentlyBlackmailed(ctx.Player))
+            {
+                return VoiceRuleResult.Mute("Blackmailed");
+            }
+
+            if (ctx.GetOption("MuteJailedInMeetings") &&
+                MyRoles.TryGetJail(ctx.Player, out byte jailorId))
+            {
+                bool jailorValid =
+                    ctx.GetOption("JailPersistsAfterJailorDeath") ||
+                    MyRoles.IsAlive(jailorId);
+                bool temporarilyAllowed =
+                    ctx.GetOption("JailorCanUnmuteJailed") &&
+                    MyVoiceState.IsJailVoiceAllowed(ctx.Player.PlayerId);
+
+                if (jailorValid && !temporarilyAllowed)
+                    return VoiceRuleResult.Mute("Jailed");
+            }
+        }
+
+        if (ctx.Phase == VoicePhaseKind.Tasks)
+        {
+            if (ctx.GetOption("MuteBlackmailedNextRound") &&
+                MyVoiceState.IsBlackmailedNextRound(ctx.Player.PlayerId))
+                return VoiceRuleResult.Mute("Blackmailed");
+
+            if (ctx.GetOption("MuteParasiteControlled") &&
+                MyRoles.IsParasiteControlled(ctx.Player))
+                return VoiceRuleResult.Mute("Parasite controlled");
+
+            if (ctx.GetOption("MutePuppeteerControlled") &&
+                MyRoles.IsPuppeteerControlled(ctx.Player))
+                return VoiceRuleResult.Mute("Puppeteer controlled");
+
+        }
+
+        return VoiceRuleResult.Pass;
+    });
+
+    PerfectCommsApi.RegisterVoicePhaseObserver(Mod, ctx =>
+    {
+        if (ctx.Phase == VoicePhaseKind.Lobby)
+        {
+            MyVoiceState.ResetBlackmailVoiceState();
+        }
+        else if (ctx.Phase == VoicePhaseKind.Meeting)
+        {
+            MyVoiceState.BeginMeetingBlackmailTracking();
+        }
+        else if ((ctx.PreviousPhase is VoicePhaseKind.Meeting or VoicePhaseKind.Exile) &&
+                 ctx.Phase == VoicePhaseKind.Tasks)
+        {
+            MyVoiceState.CommitBlackmailForNextRound();
+        }
+    });
+}
 ```
 
-> The "jailor opened the mic" decision is your mod's own networked state. Perfect Comms just reads the resulting boolean each frame, so the verdict converges on every client.
+### Phase-owned bookkeeping
+
+If a role effect should end on death, include that in `MyRoles` or add an explicit `ctx.IsDead` condition. API gates can intentionally act on voice-dead players; they do not silently skip them.
+
+These three bookkeeping methods must operate on state your mod already owns and synchronizes. The observer supplies deterministic meeting-start, post-Exile/post-Meeting, and lobby-reset boundaries but does not send the data.
+
+The Jailor's temporary unmute button and allow/revoke RPC also belong to the role mod. Perfect Comms only reads the resulting flag.
 
 ---
 
-## Puppeteer
-
-**Behaviour:** while the Puppeteer controls a victim, the victim is muted, and the Puppeteer hears the world **from the victim's body** (their own body is frozen).
-
-**Primitives:** [Gate](Mod-Integration-Gate) for the victim mute + [Listener Origin](Mod-Integration-Listener-Origin) (`Replace`) for the hearing swap.
+## Parasite and Puppeteer listener origins
 
 ```csharp
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("MutePuppeteered", "<color=#FF1919><b>Puppeteer</b></color>: Mute Controlled Victim", true));
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("PuppeteerHearsVictim", "<color=#FF1919><b>Puppeteer</b></color>: Hear From Victim", true));
-
-// 1) Mute the controlled victim.
-PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
-    ctx.GetOption("MutePuppeteered") && ctx.Player.GetModifier<PuppeteerControlModifier>() != null
-        ? VoiceRuleResult.Mute("Controlled")
-        : VoiceRuleResult.Pass);
-
-// 2) Relocate the Puppeteer's hearing to the victim's position (local player only).
-PerfectCommsApi.RegisterListenerOrigin(Mod, local =>
+private static void RegisterControlHearing()
 {
-    var victim = MyRoles.VictimControlledBy(local);   // the player this local Puppeteer is driving
-    return victim != null
-        ? new VoiceListenerResult(victim.transform.position, LightRadius: -1f, VoiceListenerMode.Replace)
-        : null;
-});
+    PerfectCommsApi.RegisterContextualListenerOrigin(Mod, ctx =>
+    {
+        if (ctx.Phase != VoicePhaseKind.Tasks)
+            return null;
+
+        if (ctx.GetOption("PuppeteerHearFromVictim") &&
+            MyRoles.PuppeteerVictim(ctx.Listener) is PlayerControl puppet)
+        {
+            return new VoiceListenerResult(
+                (Vector2)puppet.transform.position,
+                LightRadius: MyRoles.LightRadiusAt(puppet),
+                VoiceListenerMode.Replace);
+        }
+
+        if (ctx.GetOption("ParasiteHearFromVictim") &&
+            MyRoles.ParasiteVictim(ctx.Listener) is PlayerControl victim)
+        {
+            return new VoiceListenerResult(
+                (Vector2)victim.transform.position,
+                LightRadius: MyRoles.LightRadiusAt(victim),
+                VoiceListenerMode.Additive);
+        }
+
+        return null;
+    });
+}
 ```
 
-> Listener-origin callbacks receive only the local `PlayerControl`, not a `VoiceRuleContext`, so they cannot call `ctx.GetOption`. If you want the swap to honour a host toggle, only set the controlling state in `MyRoles.VictimControlledBy` when your synced toggle is on, or simply always relocate and let the victim-mute toggle govern the audible result. (For a Parasite-style "hear your own body **and** the victim", use `VoiceListenerMode.Additive` instead of `Replace`.)
+`Replace` hears from the Puppeteer victim instead of the local body. `Additive` lets the Parasite hear from both positions. Both parity routes use the controlled victim's resolved light radius. Use `LightRadius: -1` only when you intentionally want to inherit the listener's own radius; `0` disables the vision-radius limit.
 
 ---
 
-## Medium
-
-**Behaviour:** a living Medium and the dead players can talk to each other privately during tasks, as a two-way séance channel, while the living crew cannot hear it.
-
-**Primitive:** [Channel](Mod-Integration-Channels). Everyone on the séance shares one key; non-members never resolve it, so they are excluded automatically.
+## Eclipsal, Grenadier, and Hypnotist listener muffle
 
 ```csharp
-PerfectCommsApi.RegisterHostEnumOption(Mod,
-    new VoiceHostEnumOption("MediumVoice", "<color=#A680FF><b>Medium</b></color>: Ghost Voice",
-        Default: 3, Choices: new[] { "Off", "Medium -> Ghosts", "Ghosts -> Medium", "Both" }));
-
-PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
+private static void RegisterListenerEffects()
 {
-    // Channel membership: the living Medium and any dead player join the same key.
-    bool isMedium = ctx.Player.GetRole<MediumRole>() != null && !ctx.IsDead;
-    bool isGhost  = ctx.IsDead;
-    if (!isMedium && !isGhost) return null;
+    PerfectCommsApi.RegisterContextualListenerFilter(Mod, ctx =>
+    {
+        bool blinded =
+            ctx.GetOption("MuffleBlindedOrFlashedHearing") &&
+            (MyRoles.IsEclipsalBlinded(ctx.Listener) ||
+             MyRoles.IsGrenadierFlashed(ctx.Listener));
 
-    // One shared key for the séance. (Use a per-medium key if you support multiple mediums.)
-    return new VoiceChannelResult("medium-seance", TwoWay: true, Shape: VoiceAudioShape.Radio);
-});
+        bool hypnotized =
+            ctx.GetOption("MuffleHypnotizedDuringHysteria") &&
+            MyRoles.IsMassHysteriaActive &&
+            MyRoles.IsHypnotized(ctx.Listener);
+
+        return new VoiceListenerFilterResult(blinded || hypnotized);
+    });
+}
 ```
 
-### Directional variants
+This muffles every audible incoming route for that local listener. It does not alter what the affected player transmits.
 
-The host enum above offers one-way modes. Channels express direction with `TwoWay`:
+---
 
-- **Medium -> Ghosts only:** ghosts hear the medium, not vice versa. Give the *medium* a one-way link and ghosts a listen-only side:
+## Crewpostor player trait
 
 ```csharp
-PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
+private static void RegisterCrewpostor()
 {
-    int mode = ctx.GetEnumOption("MediumVoice");      // 0 Off, 1 M->G, 2 G->M, 3 Both
-    if (mode == 0) return null;
-
-    bool isMedium = ctx.Player.GetRole<MediumRole>() != null && !ctx.IsDead;
-    bool isGhost  = ctx.IsDead;
-    if (!isMedium && !isGhost) return null;
-
-    // Both -> two-way. Otherwise the speaker side that is allowed gets a one-way link.
-    bool twoWay = mode == 3;
-    return new VoiceChannelResult("medium-seance", TwoWay: twoWay, Shape: VoiceAudioShape.Radio);
-});
+    PerfectCommsApi.RegisterVoicePlayerTraits(Mod, ctx =>
+        ctx.GetOption("CrewpostorUsesImpostorVoice") &&
+        MyRoles.IsCrewpostor(ctx.Player)
+            ? VoicePlayerTraits.ImpostorVoice
+            : VoicePlayerTraits.None);
+}
 ```
 
-> Channels are full-volume radio by default. For a spatial seance (the ghost is loud near the spirit point and fades with distance), set `Shape: VoiceAudioShape.Proximity` and pass `Origin: spiritPosition` on the channel result - the listener then hears from that point with falloff, no separate listener-origin call needed. See [Channels: Spatial channels](Mod-Integration-Channels#spatial-channels-origin).
+`ImpostorVoice` participates in the same vent, ghost-hearing, team-radio, and viewer classification as built-in impostor voice.
 
 ---
 
-## Swooper / invisibility
+## Medium directional ghost voice
 
-**Behaviour:** while a role is invisible (swooped, vanished, phased), they cannot be heard.
-
-**Primitive:** [Gate](Mod-Integration-Gate). Fold every "invisible" modifier into one check.
+Use pair rules so the selected Medium/spirit relationship stays private and each direction can be controlled independently:
 
 ```csharp
-PerfectCommsApi.RegisterHostOption(Mod,
-    new VoiceHostOption("MuteHidden", "<color=#8E7CC3><b>Hidden Roles</b></color>: Mute While Hidden", true));
-
-PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
+private static void RegisterMedium()
 {
-    if (!ctx.GetOption("MuteHidden")) return VoiceRuleResult.Pass;
-    bool hidden =
-        ctx.Player.GetModifier<SwoopModifier>() != null ||
-        ctx.Player.GetModifier<VanishModifier>() != null;
-    return hidden ? VoiceRuleResult.Mute("Hidden") : VoiceRuleResult.Pass;
-});
+    PerfectCommsApi.RegisterVoicePairRule(Mod, ctx =>
+    {
+        if (ctx.Phase != VoicePhaseKind.Tasks)
+            return VoicePairResult.Pass;
+
+        int mode = ctx.GetEnumOption("MediumGhostVoice");
+        if (mode == 0)
+            return VoicePairResult.Pass;
+
+        bool mediumToGhost = mode is 1 or 3;
+        bool ghostToMedium = mode is 2 or 3;
+
+        if (MyRoles.IsActiveMedium(ctx.Speaker))
+        {
+            // A mediating Medium's voice is private from living non-ghost listeners.
+            if (!ctx.ListenerIsDead)
+                return VoicePairResult.Mute("Medium private voice");
+
+            return mediumToGhost
+                ? VoicePairResult.Route(
+                    VoicePairRouteShape.Proximity,
+                    speakerOrigin: MyRoles.MediumSpiritPosition(ctx.Speaker),
+                    listenerOrigin: MyRoles.VoicePosition(ctx.Listener),
+                    reason: "Medium to ghost")
+                : VoicePairResult.Mute("Medium direction disabled");
+        }
+
+        if (ghostToMedium &&
+            MyRoles.IsActiveMedium(ctx.Listener) &&
+            ctx.SpeakerIsDead)
+        {
+            if (!MyRoles.IsSelectedSpirit(ctx.Listener, ctx.Speaker))
+                return VoicePairResult.Mute("Non-selected ghost");
+
+            return VoicePairResult.Route(
+                VoicePairRouteShape.Ghost,
+                speakerOrigin: MyRoles.VoicePosition(ctx.Speaker),
+                listenerOrigin: MyRoles.MediumSpiritPosition(ctx.Listener),
+                reason: "Ghost to Medium");
+        }
+
+        return VoicePairResult.Pass;
+    });
+}
 ```
+
+For built-in parity, the first branch routes the active Medium to every dead listener when that direction is enabled. The reverse branch accepts only the ghost selected by that Medium. A different role design can add a selected-pair check to the first branch too.
+
+Pair `Mute` results are important: they prevent ordinary proximity or a different permissive route from revealing a private Medium interaction.
 
 ---
 
-## System-wide effect (Hacker jam)
+## Vampire and Lovers push-to-radio
 
-**Behaviour:** while a system effect is active, everyone is muted for its duration.
-
-**Primitive:** global gate - cheaper than a per-player rule.
+All eligible members keep a channel membership. A player becomes a transmitter only while the role mod's synchronized radio hold state is true:
 
 ```csharp
-PerfectCommsApi.RegisterGlobalGate(Mod, VoicePhaseKind.Meeting, () => MySystems.JamActive, "Jammed");
-PerfectCommsApi.RegisterGlobalGate(Mod, VoicePhaseKind.Tasks,   () => MySystems.JamActive, "Jammed");
+private static void RegisterRoleRadios()
+{
+    PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
+    {
+        if (!ctx.IsDead &&
+            MyRadio.IsVoicePhaseEnabled(ctx.Phase) &&
+            ctx.GetOption("TeamRadioVampires") &&
+            MyRoles.IsVampire(ctx.Player))
+        {
+            return new VoiceChannelResult(
+                "radio:vampires",
+                TwoWay: MyRadio.IsTransmitting(ctx.Player.PlayerId),
+                Shape: VoiceAudioShape.Radio);
+        }
+
+        return null;
+    });
+
+    PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
+    {
+        if (ctx.IsDead ||
+            !MyRadio.IsVoicePhaseEnabled(ctx.Phase) ||
+            !ctx.GetOption("TeamRadioLovers") ||
+            MyRoles.LoverPairId(ctx.Player) is not byte pairId)
+        {
+            return null;
+        }
+
+        return new VoiceChannelResult(
+            $"radio:lovers:{pairId}",
+            TwoWay: MyRadio.IsTransmitting(ctx.Player.PlayerId),
+            Shape: VoiceAudioShape.Radio);
+    });
+}
 ```
+
+`TwoWay: false` is receive-only: the player can hear a matching transmitter but cannot be heard back. When their synchronized hold state becomes true, the same membership transmits.
+
+`MyRadio.IsVoicePhaseEnabled` is the role mod's synchronized phase policy; use it to mirror whichever Tasks/Meeting/Exile availability your radio UI exposes. Perfect Comms does not add the radio keybind/button, eligibility UI, selected-channel state, phase policy, or hold-state RPC. The mod must publish those state changes to every client that evaluates the channel.
 
 ---
 
-## Notes carried by every example
+## Complete registration
 
-- The role/modifier checks (`GetModifier<T>`, `GetRole<T>`, `MyRoles.*`) are **your** mod's API - you reference your own types directly. Perfect Comms never sees them.
-- Keep callbacks cheap; they run ~20x/second per player.
-- Return `Pass` / `null` whenever your role does not apply.
-- Everything derives from local state, so all clients converge with no networking (host option *values* are synced for you).
+```csharp
+internal static void Register()
+{
+    RegisterParityOptions();
+    RegisterSpeakerRules();
+    RegisterControlHearing();
+    RegisterListenerEffects();
+    RegisterCrewpostor();
+    RegisterMedium();
+    RegisterRoleRadios();
+}
+
+internal static void Unregister()
+    => PerfectCommsApi.Unregister(Mod);
+```
+
+Overlay privacy is separate from audio policy. Register viewer/speaker overlay rules when a role's disguise or concealment should hide or alias Perfect Comms' identity-bearing UI.
+
+---
 
 ## Next
 
-- **[API Reference](Mod-Integration-API-Reference)** - every type and method.
-- **[Gate](Mod-Integration-Gate)** · **[Channels](Mod-Integration-Channels)** · **[Listener Origin](Mod-Integration-Listener-Origin)** · **[Host Options & Tabs](Mod-Integration-Host-Options)**
+- **[API Reference](Mod-Integration-API-Reference)** - exact records, signatures, precedence, and fallbacks.
+- **[Gate](Mod-Integration-Gate)** - speaker/global policy and traits.
+- **[Channels](Mod-Integration-Channels)** - receive-only membership and pair routing.
+- **[Listener Origin](Mod-Integration-Listener-Origin)** - contextual listener behavior and phase observers.
+- **[Host Options](Mod-Integration-Host-Options)** - numeric and conditional rows.
+- **[Overlay Privacy](Mod-Integration-Overlay-Privacy)** - hide, dim, or alias voice UI.
+
+## Current status / limitations
+
+**Currently broken:** None of the documented API 1.1 primitives on this page.
+
+- Perfect Comms synchronizes registered host-option values only. The role mod owns all gameplay state, targets/pairs, lifecycle history, buttons/keybinds, UI, and role RPCs used by these recipes.
+- These callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

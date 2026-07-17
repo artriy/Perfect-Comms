@@ -1,93 +1,139 @@
-# Listener Origin
+# Listener Origin, Filter & Phase Observer
 
-This primitive relocates **where the local player hears from**. Normally you hear proximity audio from your own body; a listener-origin override makes you hear from somewhere else - another player, a camera, a fixed point.
+Listener origin changes where the local player hears task-world spatial audio from. Listener filters muffle all audible incoming Perfect Comms audio for the local player. Contextual API 1.1 forms add phase and host-option access without removing the original delegates.
 
-← Back to **[Mod Integration](Mod-Integration)**
+Back to **[Mod Integration](Mod-Integration)**
 
 ---
 
-## How it works
-
-Register a callback for the **local player only**. Return where they should hear from this frame, or `null` for normal hearing:
+## Contextual listener origin
 
 ```csharp
-PerfectCommsApi.RegisterListenerOrigin("com.me.mymod", local =>
+PerfectCommsApi.RegisterContextualListenerOrigin("com.me.mymod", ctx =>
 {
-    // `local` is the local PlayerControl.
-    if (MyRoles.IsSpiritWalking(local) && MyRoles.SpiritTarget(local) is PlayerControl ghost)
-        return new VoiceListenerResult(
-            ghost.transform.position,
-            LightRadius: -1f,                 // -1 = inherit the local player's light radius
-            VoiceListenerMode.Additive);
+    if (ctx.Phase != VoicePhaseKind.Tasks ||
+        !ctx.GetOption("SpiritHearing") ||
+        MyRoles.SpiritPosition(ctx.Listener) is not Vector2 spirit)
+    {
+        return null;
+    }
 
-    return null;                              // hear normally
+    return new VoiceListenerResult(
+        Origin: spirit,
+        LightRadius: -1f,
+        Mode: VoiceListenerMode.Additive);
 });
 ```
 
----
+`VoiceListenerContext` contains the local `Listener`, exact API phase, effective `IsDead`, and `GetOption`, `GetEnumOption`, and `GetNumberOption`.
 
-## `VoiceListenerResult`
+The original signature remains supported unchanged:
 
 ```csharp
-new VoiceListenerResult(
-    Origin,        // Vector2 world position to hear from
-    LightRadius,   // sight/vision radius at that origin; -1 inherits local
-    Mode);         // Replace or Additive
+PerfectCommsApi.RegisterListenerOrigin(Mod, local =>
+    MyRoles.ControlledTarget(local) is PlayerControl target
+        ? new VoiceListenerResult(
+            (Vector2)target.transform.position,
+            -1f,
+            VoiceListenerMode.Replace)
+        : null);
 ```
 
-### Modes
+Legacy and contextual origin callbacks share one registration list. The first finite, non-null origin wins; exceptions and invalid origins are neutral.
 
-| `VoiceListenerMode` | Behaviour |
+---
+
+## Replace, Additive, and light radius
+
+| Mode | Task-phase behavior |
 | :--- | :--- |
-| `Replace` | Hear **entirely** from `Origin`. Your own body is silent as a hearing source. Use for "you are fully somewhere else" (possession, remote control). |
-| `Additive` | Hear from **both** your own body and `Origin`; per speaker the louder of the two wins. Use for "you also hear over there" (spirit link, eavesdrop). |
+| `Replace` | Calculate spatial hearing entirely from the override origin. |
+| `Additive` | Compare body-origin and override-origin audibility per speaker; keep the more audible result. |
+
+`LightRadius` matters when the host limits hearing to vision:
+
+| Value | Meaning |
+| :--- | :--- |
+| Any negative value, including `-1` | Inherit the local player's resolved light radius. |
+| `0` | Disable vision-radius limiting at the override origin. |
+| Positive finite value | Use this explicit radius at the override origin. |
+| Non-finite value | Normalize to inheritance. |
+
+Listener-origin relocation is task-phase only. Meeting/Lobby voice does not use the task-world override.
+
+An enabled active built-in Parasite or Puppeteer control-hearing origin takes precedence. If its corresponding built-in host behavior is disabled, an external origin can apply normally.
 
 ---
 
-## Patterns
+## Contextual listener filter
 
-**Possession - hear entirely as the victim:**
-
-```csharp
-PerfectCommsApi.RegisterListenerOrigin("com.me.mymod", local =>
-    MyRoles.PossessedVictim(local) is PlayerControl victim
-        ? new VoiceListenerResult(victim.transform.position, -1f, VoiceListenerMode.Replace)
-        : null);
-```
-
-**Spirit link - hear your own surroundings AND a linked ghost's:**
+Use a contextual filter when blindness, hypnosis, or another listener-owned state should muffle all incoming audio:
 
 ```csharp
-PerfectCommsApi.RegisterListenerOrigin("com.me.mymod", local =>
-    MyRoles.LinkedSpiritPosition(local) is Vector2 pos
-        ? new VoiceListenerResult(pos, -1f, VoiceListenerMode.Additive)
-        : null);
+PerfectCommsApi.RegisterContextualListenerFilter("com.me.mymod", ctx =>
+    new VoiceListenerFilterResult(
+        Muffle: ctx.GetOption("MuffleBlinded") &&
+                 MyRoles.IsBlinded(ctx.Listener)));
 ```
+
+The original boolean delegate also remains supported:
+
+```csharp
+PerfectCommsApi.RegisterListenerFilter(
+    "com.me.mymod",
+    local => MyRoles.IsBlinded(local));
+```
+
+Legacy and contextual filters share one list and compose as “any muffle.” One active result applies the low-pass effect to all audible incoming routes for the local listener. It does not change that player's transmitted voice and cannot select one speaker; use `VoiceRuleResult.Muffle` or a pair `Muffle` for that.
+
+Filter results are frame-cached. Exceptions are neutral: a throwing legacy predicate behaves as `false`, and a throwing contextual callback returns no muffle.
 
 ---
 
-## Notes
+## Phase observers
 
-- **Local player only** - this controls *your* hearing, not how others hear you. To change how a player is *heard*, use a [Gate](Mod-Integration-Gate) or [Channel](Mod-Integration-Channels).
-- **Built-in control hearing wins.** If a supported mod's built-in control ability (e.g. an existing puppeteer/parasite) is already relocating your hearing this frame, your override stands aside. Otherwise it applies.
-- Reuses the same engine path as built-in control hearing, so spatial falloff, sight, and occlusion all work from the new origin exactly as they would from your body.
-- Fail-closed: a throwing callback yields `null` (normal hearing).
+A phase observer runs once when the API phase changes:
+
+```csharp
+PerfectCommsApi.RegisterVoicePhaseObserver("com.me.mymod", ctx =>
+{
+    if ((ctx.PreviousPhase is VoicePhaseKind.Meeting or VoicePhaseKind.Exile) &&
+        ctx.Phase == VoicePhaseKind.Tasks)
+    {
+        MyVoiceState.AdvanceNextRoundEffects();
+    }
+});
+```
+
+`VoicePhaseChangedContext` contains `PreviousPhase`, `Phase`, `LocalPlayer`, and all three scoped option accessors. The first observed phase initializes the tracker without firing. Later changes fire once before the new phase's player callbacks.
+
+Several internal menu/lobby states map to `VoicePhaseKind.Lobby`; moving between them does not create an API phase transition. Exile is a distinct API phase, so normal post-meeting bookkeeping must accept `Exile -> Tasks` as shown above (and `Meeting -> Tasks` for flows without Exile). Observer exceptions are ignored.
+
+Observers are useful for integration-owned derived bookkeeping, such as activating a synchronized “muted next round” flag. They do not network or authoritatively create that state.
 
 ---
 
-## Related: Listener filter (muffle what you hear)
+## Choosing the primitive
 
-Listener-origin changes *where* you hear from. A listener **filter** changes *how* you hear: while active, it muffles ALL incoming audio for the local player (a low-pass on what you hear, not on what you say). Use it for blinded / flashed / hypnotised hearing effects.
+- Move or add the local task-world hearing position: listener origin.
+- Muffle everything one listener hears: listener filter.
+- Muffle one speaker for every listener: speaker rule.
+- Muffle or route one speaker/listener pair: pair rule.
+- Run lifecycle bookkeeping at a phase boundary: phase observer.
 
-```csharp
-PerfectCommsApi.RegisterListenerFilter("com.me.mymod", local => MyRoles.IsBlinded(local));
-```
-
-While the predicate returns true, everything the local player hears is muffled. No netcode; fail-closed (a throw = no muffle). This is the listener-side counterpart to a [Gate](Mod-Integration-Gate)'s `Muffle`, which muffles a specific speaker rather than all incoming audio.
+Register callbacks once, keep them cheap, and return neutral values when inactive. `PerfectCommsApi.Unregister(modId)` removes legacy and contextual callbacks plus observers for that exact id.
 
 ---
 
 ## Next
 
-- **[Host Options & Tabs](Mod-Integration-Host-Options)** - make the effect host-configurable.
-- **[API Reference](Mod-Integration-API-Reference)** - full signatures.
+- **[Channels](Mod-Integration-Channels)** - speaker/listener pair routing and spatial channels.
+- **[Host Options & Tabs](Mod-Integration-Host-Options)** - options available in contextual callbacks.
+- **[Examples](Mod-Integration-Examples)** - Parasite, Puppeteer, blindness, hypnosis, and next-round recipes.
+
+## Current status / limitations
+
+**Currently broken:** None of the documented API 1.1 primitives on this page.
+
+- Perfect Comms synchronizes registered host-option values only. Your mod owns controller/target state, world positions, phase-persistent role state, UI, and role RPCs.
+- Listener callbacks and observers coordinate cooperative clients; they are not hostile-client authentication or enforcement.

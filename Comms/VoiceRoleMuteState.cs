@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using HarmonyLib;
+using PerfectComms.Api;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -196,8 +197,17 @@ internal static partial class VoiceRoleMuteState
 
     internal static bool IsVoiceDead(PlayerControl? player)
     {
-        var data = player?.Data;
-        return data != null && (data.IsDead || data.Role?.IsDead == true);
+        if (player == null)
+            return false;
+
+        var data = player.Data;
+        bool baseDead = data != null && (data.IsDead || data.Role?.IsDead == true);
+        VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
+            player,
+            VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase()),
+            player == PlayerControl.LocalPlayer,
+            baseDead);
+        return baseDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
     }
 
     internal static bool TryGetLocalVoiceBlockReason(out string reason)
@@ -209,19 +219,32 @@ internal static partial class VoiceRoleMuteState
         Update();
 
         var local = PlayerControl.LocalPlayer;
-        if (local == null || IsVoiceDead(local))
+        if (local == null)
             return false;
 
-        // Third-party mod gate (PerfectComms.Api): mute my own mic if any registered rule or a
-        // phase-scoped global gate says so. Runs only in voice-active phases.
-        if (VoiceSceneState.IsMeetingVoicePhase(phase) || VoiceSceneState.IsTaskVoicePhase(phase))
+        var localData = local.Data;
+        bool baseDead = localData != null &&
+                        (localData.IsDead || localData.Role?.IsDead == true);
+        VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
+            local,
+            VoiceModBridge.ToApiPhase(phase),
+            isLocal: true,
+            baseDead);
+        bool voiceDead = baseDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
+
+        // API gates apply to local capture in every voice phase and before built-in living-only rules.
+        if (VoiceModRegistry.LocalGate(
+                local,
+                VoiceModBridge.ToApiPhase(phase),
+                voiceDead,
+                out var modReason))
         {
-            if (VoiceModRegistry.LocalGate(local, VoiceModBridge.ToApiPhase(phase), isDead: false, out var modReason))
-            {
-                reason = string.IsNullOrEmpty(modReason) ? "Role Muted" : modReason;
-                return true;
-            }
+            reason = string.IsNullOrEmpty(modReason) ? "Role Muted" : modReason;
+            return true;
         }
+
+        if (voiceDead)
+            return false;
 
         GetPlayerRoleState(local, out bool isBlackmailed, out bool isJailed, out byte jailorId,
             out bool isParasiteControlled, out bool isPuppeteerControlled, out bool isCrewpostor,
@@ -442,11 +465,22 @@ internal static partial class VoiceRoleMuteState
     {
         if (player?.Data?.Role?.IsImpostor == true)
             return true;
-        if (!VoiceRoomSettingsState.Current.CrewpostorUsesImpostorVoice)
-            return false;
+        if (VoiceRoomSettingsState.Current.CrewpostorUsesImpostorVoice)
+        {
+            GetPlayerRoleState(player, out _, out _, out _, out _, out _, out bool isCrewpostor, out _, out _, out _, out _, out _, out _);
+            if (isCrewpostor)
+                return true;
+        }
 
-        GetPlayerRoleState(player, out _, out _, out _, out _, out _, out bool isCrewpostor, out _, out _, out _, out _, out _, out _);
-        return isCrewpostor;
+        if (player == null) return false;
+        var data = player.Data;
+        bool baseDead = data != null && (data.IsDead || data.Role?.IsDead == true);
+        VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
+            player,
+            VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase()),
+            player == PlayerControl.LocalPlayer,
+            baseDead);
+        return (traits & VoicePlayerTraits.ImpostorVoice) != 0;
     }
 
     internal static bool CanUseTeamRadio(PlayerControl? player)
@@ -785,6 +819,12 @@ internal static partial class VoiceRoleMuteState
             return true;
         }
 
+        if (settings.MuteGlitchHacked && state.IsGlitchHacked)
+        {
+            reason = VoiceProximityReason.GlitchHacked;
+            return true;
+        }
+
         if (settings.MuteSwooperWhileSwooped && state.IsSwooped)
         {
             reason = VoiceProximityReason.Swooped;
@@ -817,6 +857,12 @@ internal static partial class VoiceRoleMuteState
     {
         _ = playerId;
         reason = VoiceProximityReason.Proximity;
+
+        if (settings.MuteGlitchHacked && state.IsGlitchHacked)
+        {
+            reason = VoiceProximityReason.GlitchHacked;
+            return true;
+        }
 
         if (settings.MuteSwooperWhileSwooped && state.IsSwooped)
         {

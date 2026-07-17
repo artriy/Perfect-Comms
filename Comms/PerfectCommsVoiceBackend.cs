@@ -2958,13 +2958,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (snapshot.Phase == VoiceGamePhase.EndGame)
                 result = VoiceProximityCalculator.CalculateEndGame();
             else if (VoiceSceneState.IsLobbyVoicePhase(snapshot.Phase))
-                result = VoiceProximityCalculator.CalculateLobby(target, listenerPos);
+                result = VoiceProximityCalculator.CalculateLobby(localPlayer, target, listenerPos);
             else if (VoiceSceneState.IsMeetingVoicePhase(snapshot.Phase))
                 result = VoiceProximityCalculator.CalculateMeeting(localPlayer, target, peer.RadioActive, snapshot.Phase, peer.RadioChannel);
             else
                 result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
 
-            if (result.Audible && VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame())
+            result = VoiceProximityCalculator.ApplyExternalAudioEffects(result, target, snapshot.Phase);
+            if (snapshot.Phase != VoiceGamePhase.EndGame &&
+                result.Audible &&
+                VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame())
                 result = result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)

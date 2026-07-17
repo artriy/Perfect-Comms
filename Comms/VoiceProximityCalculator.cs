@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using PerfectComms.Api;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -36,6 +37,12 @@ internal static class VoiceProximityCalculator
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
         Vector2? listenerPos)
+        => CalculateLobby(null, targetPlayer, listenerPos);
+
+    public static VoiceProximityResult CalculateLobby(
+        VoicePlayerSnapshot? localPlayer,
+        VoicePlayerSnapshot? targetPlayer,
+        Vector2? listenerPos)
     {
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
@@ -44,6 +51,11 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable);
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener);
+
+        if (TryGetModPairRoute(localPlayer, target, 1f, out var pairRoute, listenerPos))
+            return pairRoute;
+        if (TryGetModChannelRoute(localPlayer, target, 1f, out var channelRoute, listenerPos))
+            return channelRoute;
 
         var s = VoiceRoomSettingsState.Current;
         float maxDistance = s.MaxChatDistance;
@@ -94,11 +106,15 @@ internal static class VoiceProximityCalculator
         if (VoiceRoleMuteState.IsMeetingVoiceBlocked(target, phase))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetMeetingBlockReason(target, phase));
 
+        Vector2? meetingListenerPosition = localPlayer?.Position;
+        if (TryGetModPairRoute(localPlayer, target, 1f, out var pairRoute, meetingListenerPosition))
+            return pairRoute;
+
         // Third-party mod channel (PerfectComms.Api Primitive 2): local & target sharing a channel
         // hear each other with the channel's audio shape, before built-in team radio. The channel
         // owns its membership (it may deliberately include dead players, e.g. a Medium seance), so
         // this is NOT gated on target/local life state.
-        if (TryGetModChannelRoute(localPlayer, target, 1f, out var meetingModChannel))
+        if (TryGetModChannelRoute(localPlayer, target, 1f, out var meetingModChannel, meetingListenerPosition))
             return meetingModChannel;
 
         if (s.TeamRadio && s.TeamRadioInMeetings && targetRadioActive && !targetDead)
@@ -156,9 +172,12 @@ internal static class VoiceProximityCalculator
             // PerfectComms.Api listener-origin override (ungated - the API stands alone).
             bool replace = (mode == VoiceControlHearingMode.PuppeteerSwap && cs.PuppeteerHearFromVictim)
                 || mode == VoiceControlHearingMode.ExternalReplace;
+            float overrideLightRadius = localPlayer!.Value.ControlledVictimLightRadius < 0f
+                ? localLightRadius
+                : localPlayer.Value.ControlledVictimLightRadius;
             if (replace)
                 return CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
-                    localPlayer.Value.ControlledVictimLightRadius, mapId, cameraViewActive, activeCameraIndex,
+                    overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
                     activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
                     previousWallCoefficient, targetRadioChannel);
 
@@ -171,7 +190,7 @@ internal static class VoiceProximityCalculator
                     cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
                     targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel);
                 var fromVictim = CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
-                    localPlayer.Value.ControlledVictimLightRadius, mapId, cameraViewActive, activeCameraIndex,
+                    overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
                     activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
                     previousWallCoefficient, targetRadioChannel);
                 return Louder(fromSelf, fromVictim);
@@ -238,6 +257,18 @@ internal static class VoiceProximityCalculator
         if (ShouldMeetingLobbyOnlyBlockTaskVoice(s, localDead, targetDead))
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
 
+        // Host-enforced speaker mutes remain authoritative over every private API route.
+        if (VoiceRoleMuteState.IsTaskVoiceBlocked(target))
+            return VoiceProximityResult.Muted(VoiceRoleMuteState.GetTaskBlockReason(target), previousWallCoefficient);
+
+        if (TryGetModPairRoute(
+                localPlayer,
+                target,
+                previousWallCoefficient,
+                out var pairRoute,
+                localListenerPos))
+            return pairRoute;
+
         var mediumGhostRoute = TryCalculateMediumGhostRoute(localPlayer, target, localListenerPos, s, previousWallCoefficient);
         if (mediumGhostRoute.HasValue)
             return mediumGhostRoute.Value;
@@ -246,9 +277,6 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
         if (commsSabActive && s.CommsSabDisables && !localDead && !localMediatingMedium)
             return VoiceProximityResult.Muted(VoiceProximityReason.CommsSabotage, previousWallCoefficient);
-
-        if (VoiceRoleMuteState.IsTaskVoiceBlocked(target))
-            return VoiceProximityResult.Muted(VoiceRoleMuteState.GetTaskBlockReason(target), previousWallCoefficient);
 
         // Third-party mod channel (PerfectComms.Api Primitive 2), before built-in team radio. The
         // channel owns its membership (may deliberately include dead players, e.g. a Medium seance),
@@ -387,12 +415,56 @@ internal static class VoiceProximityCalculator
         => settings.OnlyMeetingOrLobby &&
            (settings.OnlyMeetingOrLobbyAffectsGhosts || !localDead || !targetDead);
 
-    // PerfectComms.Api channel route. local & target hear each other when they resolved the same
-    // non-empty channel key this frame. Shape: Radio (full volume, no falloff) / Muffle (full
-    // volume, low-pass) / Proximity. A Proximity channel that carries a spatial Origin is heard
-    // from that point with distance falloff (e.g. a Medium seance heard from the spirit position);
-    // listenerPos is required for that and is only available on the task path.
-    // Directional links (TwoWay=false on the speaker) suppress the reverse direction.
+    private static bool TryGetModPairRoute(
+        VoicePlayerSnapshot? localPlayer,
+        VoicePlayerSnapshot target,
+        float wallCoefficient,
+        out VoiceProximityResult result,
+        Vector2? listenerPos = null)
+    {
+        result = default;
+        if (!localPlayer.HasValue) return false;
+
+        ExternalVoicePairState pair = target.External.Pair;
+        if (pair.Verdict == VoicePairVerdict.Mute)
+        {
+            result = VoiceProximityResult.Muted(VoiceProximityReason.RoleMuted, wallCoefficient);
+            return true;
+        }
+        if (pair.Verdict != VoicePairVerdict.Route)
+            return false;
+
+        float volume = Math.Clamp(pair.Volume, 0f, 1f);
+        if ((VoicePairRouteShape)pair.Shape == VoicePairRouteShape.Radio)
+        {
+            result = new(0f, 0f, volume, 0f, VoiceAudioFilterMode.Radio,
+                volume > 0f, VoiceProximityReason.ModPairRoute, wallCoefficient);
+            return true;
+        }
+
+        Vector2 source = pair.HasSpeakerOrigin ? pair.SpeakerOrigin : target.Position;
+        Vector2 listener = pair.HasListenerOrigin
+            ? pair.ListenerOrigin
+            : listenerPos ?? localPlayer.Value.Position;
+        var settings = VoiceRoomSettingsState.Current;
+        float distance = Distance(source, listener);
+        float spatial = VoiceAudioOcclusion.ApplyFalloff(
+            distance,
+            settings.MaxChatDistance,
+            (VoiceFalloffMode)settings.FalloffMode) * volume;
+        if (spatial < LowVolumeFloor) spatial = 0f;
+        float pan = VoiceChatRoom.GetPan(listener.x, source.x);
+        bool ghost = (VoicePairRouteShape)pair.Shape == VoicePairRouteShape.Ghost;
+        result = ghost
+            ? new(0f, spatial, 0f, pan, VoiceAudioFilterMode.Ghost,
+                spatial > 0f, VoiceProximityReason.ModPairRoute, wallCoefficient)
+            : new(spatial, 0f, 0f, pan, VoiceAudioFilterMode.None,
+                spatial > 0f, VoiceProximityReason.ModPairRoute, wallCoefficient);
+        return true;
+    }
+
+    // Every matching membership is considered. TwoWay=false is a receive-only membership, so a
+    // target with that membership cannot transmit through it but can hear another transmitting member.
     private static bool TryGetModChannelRoute(
         VoicePlayerSnapshot? localPlayer,
         VoicePlayerSnapshot target,
@@ -403,40 +475,72 @@ internal static class VoiceProximityCalculator
         result = default;
         if (!localPlayer.HasValue) return false;
         var local = localPlayer.Value;
+        ExternalVoiceChannelState[]? localChannels = local.External.Channels;
+        ExternalVoiceChannelState[]? targetChannels = target.External.Channels;
+        if (localChannels == null || targetChannels == null) return false;
 
-        string localKey = local.External.ChannelKey;
-        string targetKey = target.External.ChannelKey;
-        if (string.IsNullOrEmpty(targetKey) || !string.Equals(localKey, targetKey, System.StringComparison.Ordinal))
-            return false;
-
-        // Directional: a one-way link from the speaker (target) is suppressed unless the listener
-        // (local) also shares the link two-way. Both two-way is the common case.
-        if (!target.External.ChannelTwoWay && !local.External.ChannelTwoWay)
-            return false;
-
-        float volume = Mathf.Clamp01(target.External.ChannelVolume);
-        var filter = VoiceModBridge.ToFilterMode(target.External.ChannelShape);
-
-        // Spatial proximity channel: hear the speaker from the channel's Origin point with falloff.
-        if (filter == VoiceAudioFilterMode.None && target.External.ChannelHasOrigin && listenerPos.HasValue)
+        bool found = false;
+        VoiceProximityResult best = default;
+        for (int targetIndex = 0; targetIndex < targetChannels.Length; targetIndex++)
         {
-            var s = VoiceRoomSettingsState.Current;
-            float dist = Distance(target.External.ChannelOrigin, listenerPos.Value);
-            float spatial = VoiceAudioOcclusion.ApplyFalloff(dist, s.MaxChatDistance, (VoiceFalloffMode)s.FalloffMode) * volume;
-            if (spatial < LowVolumeFloor) spatial = 0f;
-            float spatialPan = VoiceChatRoom.GetPan(listenerPos.Value.x, target.External.ChannelOrigin.x);
-            result = new(spatial, 0f, 0f, spatialPan, VoiceAudioFilterMode.None, spatial > 0f, VoiceProximityReason.ModChannel, wallCoefficient);
-            return true;
+            ExternalVoiceChannelState targetChannel = targetChannels[targetIndex];
+            if (!targetChannel.CanTransmit || string.IsNullOrEmpty(targetChannel.Key)) continue;
+
+            bool shared = false;
+            for (int localIndex = 0; localIndex < localChannels.Length; localIndex++)
+            {
+                if (!string.Equals(
+                        localChannels[localIndex].Key,
+                        targetChannel.Key,
+                        StringComparison.Ordinal))
+                    continue;
+                shared = true;
+                break;
+            }
+            if (!shared) continue;
+
+            float volume = Math.Clamp(targetChannel.Volume, 0f, 1f);
+            var filter = VoiceModBridge.ToFilterMode(targetChannel.Shape);
+            if (filter == VoiceAudioFilterMode.None)
+            {
+                Vector2 source = targetChannel.HasOrigin ? targetChannel.Origin : target.Position;
+                Vector2 listener = listenerPos ?? local.Position;
+                var settings = VoiceRoomSettingsState.Current;
+                float distance = Distance(source, listener);
+                float spatial = VoiceAudioOcclusion.ApplyFalloff(
+                    distance,
+                    settings.MaxChatDistance,
+                    (VoiceFalloffMode)settings.FalloffMode) * volume;
+                if (spatial < LowVolumeFloor) spatial = 0f;
+                float spatialPan = VoiceChatRoom.GetPan(listener.x, source.x);
+                var candidate = new VoiceProximityResult(
+                    spatial, 0f, 0f, spatialPan, VoiceAudioFilterMode.None,
+                    spatial > 0f, VoiceProximityReason.ModChannel, wallCoefficient);
+                if (!found || IsLouder(candidate, best)) best = candidate;
+                found = true;
+                continue;
+            }
+
+            VoiceProximityResult flatCandidate = filter switch
+            {
+                VoiceAudioFilterMode.Radio => new(0f, 0f, volume, 0f,
+                    VoiceAudioFilterMode.Radio, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
+                VoiceAudioFilterMode.ListenerMuffle => new(volume, 0f, 0f, 0f,
+                    VoiceAudioFilterMode.ListenerMuffle, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
+                _ => new(volume, 0f, 0f, 0f,
+                    VoiceAudioFilterMode.None, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
+            };
+            if (!found || IsLouder(flatCandidate, best)) best = flatCandidate;
+            found = true;
         }
 
-        result = filter switch
-        {
-            VoiceAudioFilterMode.Radio => new(0f, 0f, volume, 0f, VoiceAudioFilterMode.Radio, true, VoiceProximityReason.ModChannel, wallCoefficient),
-            VoiceAudioFilterMode.ListenerMuffle => new(volume, 0f, 0f, 0f, VoiceAudioFilterMode.ListenerMuffle, true, VoiceProximityReason.ModChannel, wallCoefficient),
-            _ => new(volume, 0f, 0f, 0f, VoiceAudioFilterMode.None, true, VoiceProximityReason.ModChannel, wallCoefficient),
-        };
-        return true;
+        result = best;
+        return found;
     }
+
+    private static bool IsLouder(VoiceProximityResult candidate, VoiceProximityResult current)
+        => candidate.NormalVolume + candidate.GhostVolume + candidate.RadioVolume
+           > current.NormalVolume + current.GhostVolume + current.RadioVolume;
 
     private static bool CanHearTeamRadio(
         VoicePlayerSnapshot? localPlayer,
@@ -550,6 +654,29 @@ internal static class VoiceProximityCalculator
         _listenerMuffleFrame = frame;
         _listenerMuffleValue = VoiceRoleMuteState.IsLocalListenerAudioMuffled();
         return _listenerMuffleValue;
+    }
+
+    internal static VoiceProximityResult ApplyExternalAudioEffects(
+        VoiceProximityResult result,
+        VoicePlayerSnapshot? targetPlayer,
+        VoiceGamePhase? phase = null)
+    {
+        // The EndGame roster is transition-retained and its per-player callbacks cannot be
+        // re-resolved after PlayerControls disappear. Keep the fresh results-screen group call
+        // free of stale task/meeting mute, muffle, and pair state.
+        if (phase == VoiceGamePhase.EndGame)
+            return result;
+        if (!targetPlayer.HasValue)
+            return result;
+
+        ExternalVoiceState external = targetPlayer.Value.External;
+        if (external.Muted || external.Pair.Verdict == VoicePairVerdict.Mute)
+            return VoiceProximityResult.Muted(VoiceProximityReason.RoleMuted, result.WallCoefficient);
+
+        if (result.Audible && (external.Muffled || external.Pair.Muffled))
+            return result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
+
+        return result;
     }
 
     private static float ResolveSightLimitedMaxDistance(
