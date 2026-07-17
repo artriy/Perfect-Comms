@@ -30,12 +30,12 @@ git add -A && git commit -m "docs: update Perfect Comms wiki" && git push
 | `Installing-Perfect-Comms.md` | Player installation and troubleshooting |
 | `Controls.md` | Local settings tabs, controls, and defaults |
 | `Host-Settings.md` | Match-wide host settings tabs |
-| `Mod-Integration.md` | Mod API landing + setup |
-| `Mod-Integration-Examples.md` | Integration examples |
-| `Mod-Integration-Gate.md` | Gate, muffle, and player traits |
-| `Mod-Integration-Channels.md` | Channels and pair routing |
-| `Mod-Integration-Listener-Origin.md` | Listener origin, filter, and phase observer |
-| `Mod-Integration-Host-Options.md` | Host options & tabs |
-| `Mod-Integration-Overlay-Privacy.md` | Identity-bearing overlay privacy |
-| `Mod-Integration-API-Reference.md` | API reference |
+| `Mod-Integration.md` | Mod Integration landing and setup |
+| `Mod-Integration-Examples.md` | API 1.1 Role Recipes |
+| `Mod-Integration-Gate.md` | Gate, Muffle & Player Traits |
+| `Mod-Integration-Channels.md` | Channels & Pair Routing |
+| `Mod-Integration-Listener-Origin.md` | Listener Origin, Filter & Phase Observer |
+| `Mod-Integration-Host-Options.md` | Host Options & Tabs |
+| `Mod-Integration-Overlay-Privacy.md` | Overlay Privacy |
+| `Mod-Integration-API-Reference.md` | API Reference |
 | `_Sidebar.md` | Sidebar navigation |
