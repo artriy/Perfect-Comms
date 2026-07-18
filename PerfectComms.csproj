@@ -56,8 +56,8 @@
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
 		<!-- These assemblies are loaded from embedded resources at runtime. Keep them
 		     explicit so a clean restore always stages the exact files embedded below. -->
-		<PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.Text.Json" Version="8.0.6" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Encodings.Web" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Json" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIOClient" Version="3.1.2" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIO.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIO.Serializer.Core" Version="3.1.2" PrivateAssets="all" GeneratePathProperty="true" />
