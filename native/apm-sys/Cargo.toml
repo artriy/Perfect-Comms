@@ -8,4 +8,4 @@ license = "LGPL-2.1-only"
 path = "src/lib.rs"
 
 [dependencies]
-libloading = "0.8"
+libloading = "0.9"
