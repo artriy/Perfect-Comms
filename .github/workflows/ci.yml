@@ -23,6 +23,7 @@ jobs:
         run: |
           python3 -m py_compile scripts/verify-release-assets.py
           python3 -m py_compile scripts/verify-package-layout.py
+          python3 -m py_compile scripts/verify-native-license-inventory.py
           python3 scripts/verify-release-assets.py --self-test
           python3 scripts/verify-package-layout.py --self-test
           bash scripts/fetch-bepinex.sh --self-test
@@ -84,6 +85,7 @@ jobs:
           tool: cargo-about@0.9.1
       - name: Verify native dependency license inventory
         run: |
+          python3 scripts/verify-native-license-inventory.py --self-test
           cargo fetch --locked --manifest-path native/pc-mobile/Cargo.toml
           cargo about generate \
             --manifest-path native/pc-mobile/Cargo.toml \
@@ -91,7 +93,9 @@ jobs:
             native/cargo-about.hbs \
             --frozen --fail \
             --output-file "$RUNNER_TEMP/native-rust-dependencies.html"
-          cmp Libs/native-rust-dependencies.html "$RUNNER_TEMP/native-rust-dependencies.html"
+          python3 scripts/verify-native-license-inventory.py \
+            Libs/native-rust-dependencies.html \
+            "$RUNNER_TEMP/native-rust-dependencies.html"
 
   worker:
     name: Cloudflare worker tests and dry run

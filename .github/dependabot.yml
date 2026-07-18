@@ -80,7 +80,11 @@ updates:
           - "*"
 
   - package-ecosystem: nuget
-    directory: "/"
+    # Keep the production and test lock files in one update graph. A root-only
+    # update can otherwise leave the test project's ProjectReference lock stale.
+    directories:
+      - "/"
+      - "/PerfectComms.Tests"
     schedule:
       interval: weekly
       day: monday
@@ -88,29 +92,16 @@ updates:
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
     groups:
-      managed-production-dependencies:
+      managed-dependencies:
+        # Update a dependency across both directories in one PR, without coupling
+        # unrelated runtime and test upgrades into the same migration.
+        group-by: dependency-name
         patterns:
           - "*"
     ignore:
       # These packages are coupled to the BepInEx/Among Us runtime contract and
       # require deliberate compatibility testing rather than automated bumps.
       - dependency-name: "BepInEx.*"
-      - dependency-name: "SocketIO*"
-      - dependency-name: "AmongUs.GameLibs.Steam"
-
-  - package-ecosystem: nuget
-    directory: "/PerfectComms.Tests"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    groups:
-      managed-test-dependencies:
-        patterns:
-          - "*"
-    ignore:
       - dependency-name: "AmongUs.GameLibs.Steam"
 
   - package-ecosystem: nuget

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using SocketIOClient;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -44,7 +45,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 _dirty = true;
             }
 
-            await socket.EmitAsync("lobbybrowser", true).ConfigureAwait(false);
+            await socket.EmitAsync("lobbybrowser", new object[] { true }).ConfigureAwait(false);
         };
 
         socket.OnDisconnected += (_, _) =>
@@ -66,7 +67,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 var lobbies = ReadLobbyArray(response);
                 lock (Gate)
                 {
-                    if (!ReferenceEquals(_socket, socket)) return;
+                    if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
                     Listings.Clear();
                     var accepted = 0;
                     foreach (var lobby in lobbies)
@@ -85,6 +86,8 @@ internal static class BetterCrewLinkLobbyBrowserClient
             {
                 MarkParseFailed(ex);
             }
+
+            return Task.CompletedTask;
         });
 
         socket.On("update_lobby", response =>
@@ -94,7 +97,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 var lobby = ReadLobby(response);
                 lock (Gate)
                 {
-                    if (!ReferenceEquals(_socket, socket)) return;
+                    if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
                     if (lobby != null && BetterCrewLinkLobbyMetadata.IsPerfectComms(lobby))
                         Listings[lobby.id] = BetterCrewLinkLobbyMetadata.ToListing(lobby);
                     else if (lobby != null)
@@ -107,6 +110,8 @@ internal static class BetterCrewLinkLobbyBrowserClient
             {
                 MarkParseFailed(ex);
             }
+
+            return Task.CompletedTask;
         });
 
         socket.On("remove_lobby", response =>
@@ -116,7 +121,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 var id = response.GetValue<int>(0);
                 lock (Gate)
                 {
-                    if (!ReferenceEquals(_socket, socket)) return;
+                    if (!ReferenceEquals(_socket, socket)) return Task.CompletedTask;
                     Listings.Remove(id);
                     _dirty = true;
                 }
@@ -125,6 +130,8 @@ internal static class BetterCrewLinkLobbyBrowserClient
             {
                 MarkParseFailed(ex);
             }
+
+            return Task.CompletedTask;
         });
 
         lock (Gate)
@@ -145,7 +152,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         SocketIOClient.SocketIO? socket;
         lock (Gate) socket = _socket;
         if (socket?.Connected == true)
-            _ = socket.EmitAsync("lobbybrowser", true);
+            _ = socket.EmitAsync("lobbybrowser", new object[] { true });
     }
 
     internal static bool TryConsumeSnapshot(out IReadOnlyList<VoiceLobbyListing> listings, out string status)
@@ -171,7 +178,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         var completion = new TaskCompletionSource<BetterCrewLinkLobbyJoinResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            await socket.EmitAsync("join_lobby", response =>
+            await socket.EmitAsync("join_lobby", new object[] { lobbyId }, response =>
             {
                 try
                 {
@@ -193,7 +200,9 @@ internal static class BetterCrewLinkLobbyBrowserClient
                 {
                     completion.TrySetResult(BetterCrewLinkLobbyJoinResult.Fail(ex.Message));
                 }
-            }, lobbyId).ConfigureAwait(false);
+
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -233,7 +242,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
 
     private static async Task DisconnectAsync(SocketIOClient.SocketIO socket)
     {
-        try { await socket.EmitAsync("lobbybrowser", false).ConfigureAwait(false); } catch { }
+        try { await socket.EmitAsync("lobbybrowser", new object[] { false }).ConfigureAwait(false); } catch { }
         try { await socket.DisconnectAsync().ConfigureAwait(false); } catch { }
         // Dispose releases the websocket, timers, and the unbounded reconnect loop's CTS.
         try { socket.Dispose(); } catch { }
@@ -246,7 +255,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         return true;
     }
 
-    private static BetterCrewLinkPublicLobby[] ReadLobbyArray(SocketIOClient.SocketIOResponse response)
+    private static BetterCrewLinkPublicLobby[] ReadLobbyArray(IEventContext response)
     {
         try
         {
@@ -259,7 +268,7 @@ internal static class BetterCrewLinkLobbyBrowserClient
         }
     }
 
-    private static BetterCrewLinkPublicLobby? ReadLobby(SocketIOClient.SocketIOResponse response)
+    private static BetterCrewLinkPublicLobby? ReadLobby(IEventContext response)
     {
         try
         {

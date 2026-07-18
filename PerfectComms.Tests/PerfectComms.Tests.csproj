@@ -42,6 +42,9 @@
 	<ItemGroup>
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+		<!-- Keep the production Socket.IO version explicit in both Dependabot directories so
+		     a grouped update regenerates this ProjectReference consumer's lock file too. -->
+		<PackageReference Include="SocketIOClient" Version="4.0.4" PrivateAssets="all" />
 		<PackageReference Include="xunit.v3" Version="3.2.2" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
 			<PrivateAssets>all</PrivateAssets>

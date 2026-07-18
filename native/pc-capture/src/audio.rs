@@ -785,7 +785,7 @@ impl CaptureClockMapper {
             None => BackendCaptureStep::First,
             Some(previous) => timestamp
                 .capture
-                .duration_since(&previous)
+                .checked_duration_since(previous)
                 .map_or(BackendCaptureStep::Reversed, |duration| {
                     BackendCaptureStep::Forward(Self::duration_ns(duration))
                 }),
@@ -793,7 +793,7 @@ impl CaptureClockMapper {
         self.previous_capture = Some(timestamp.capture);
         let capture_to_callback_ns = timestamp
             .callback
-            .duration_since(&timestamp.capture)
+            .checked_duration_since(timestamp.capture)
             .map(Self::duration_ns)
             .filter(|latency_ns| *latency_ns <= MAX_AEC_COMPONENT_US.saturating_mul(1_000));
         self.bridge.observe(
@@ -903,7 +903,9 @@ impl AecTiming {
         let timestamp = info.timestamp();
         Self::observe_latency(
             &self.output_latency_us,
-            timestamp.playback.duration_since(&timestamp.callback),
+            timestamp
+                .playback
+                .checked_duration_since(timestamp.callback),
             &self.invalid_timestamp_samples,
         );
     }
@@ -1245,7 +1247,7 @@ fn choose_device_display_name(
     extended: &[String],
     prefer_extended_friendly_name: bool,
 ) -> Option<String> {
-    // CPAL 0.17's WASAPI backend exposes DEVPKEY_Device_DeviceDesc as `name()`
+    // CPAL's WASAPI backend exposes DEVPKEY_Device_DeviceDesc as `name()`
     // (usually just "Microphone", "Speakers", or "Headphones") and preserves the
     // Windows endpoint FriendlyName as the first extended line. Other backends use
     // `name()` as their actual user-facing label, so only Windows opts into extended.
@@ -1264,11 +1266,11 @@ fn choose_device_display_name(
 }
 
 fn device_display_name(description: &cpal::DeviceDescription) -> Option<String> {
-    choose_device_display_name(
-        description.name(),
-        description.extended(),
-        cfg!(target_os = "windows"),
-    )
+    let extended = description
+        .extended()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    choose_device_display_name(description.name(), &extended, cfg!(target_os = "windows"))
 }
 
 pub fn enumerate_devices() -> Vec<DeviceInfo> {
@@ -1586,7 +1588,7 @@ pub fn spawn_cpal_capture(
     let stream_config: cpal::StreamConfig = config.into();
     let stream = match sample_format {
         cpal::SampleFormat::F32 => selected.device.build_input_stream(
-            &stream_config,
+            stream_config,
             move |data: &[f32], info| {
                 push(data, info);
             },
@@ -1594,7 +1596,7 @@ pub fn spawn_cpal_capture(
             None,
         ),
         cpal::SampleFormat::I16 => selected.device.build_input_stream(
-            &stream_config,
+            stream_config,
             {
                 let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
                 let mut scratch = Vec::with_capacity(max_samples);
@@ -1613,7 +1615,7 @@ pub fn spawn_cpal_capture(
             None,
         ),
         cpal::SampleFormat::U16 => selected.device.build_input_stream(
-            &stream_config,
+            stream_config,
             {
                 let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
                 let mut scratch = Vec::with_capacity(max_samples);
@@ -2013,7 +2015,7 @@ pub fn spawn_cpal_playback(
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => selected.device.build_output_stream(
-            &stream_config,
+            stream_config,
             move |data: &mut [f32], info| fill(data, info),
             make_err(),
             None,
@@ -2023,7 +2025,7 @@ pub fn spawn_cpal_playback(
             let oversize = errored.clone();
             let oversize_stop = stop.clone();
             selected.device.build_output_stream(
-                &stream_config,
+                stream_config,
                 move |data: &mut [i16], info| {
                     let data_len = data.len();
                     if data_len > scratch.len() {
@@ -2046,7 +2048,7 @@ pub fn spawn_cpal_playback(
             let oversize = errored.clone();
             let oversize_stop = stop.clone();
             selected.device.build_output_stream(
-                &stream_config,
+                stream_config,
                 move |data: &mut [u16], info| {
                     let data_len = data.len();
                     if data_len > scratch.len() {

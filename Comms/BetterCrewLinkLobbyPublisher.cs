@@ -90,7 +90,7 @@ internal static class BetterCrewLinkLobbyPublisher
                     _nextStandaloneRetryUtc = DateTime.MinValue;
                 }
             };
-            socket.On("clientPeerConfig", _ => { });
+            socket.On("clientPeerConfig", _ => Task.CompletedTask);
 
             _socket = socket;
             _serverUrl = serverUrl;
@@ -128,7 +128,7 @@ internal static class BetterCrewLinkLobbyPublisher
             if (!string.IsNullOrEmpty(joinedCode)
                 && !string.Equals(joinedCode, request.Code, StringComparison.Ordinal))
             {
-                try { await socket.EmitAsync("remove_lobby", joinedCode).ConfigureAwait(false); } catch { }
+                try { await socket.EmitAsync("remove_lobby", new object[] { joinedCode }).ConfigureAwait(false); } catch { }
                 if (!TryClearJoinedCode(socket, generation, joinedCode)) return;
                 joinedCode = null;
                 joinedClientId = -1;
@@ -193,10 +193,10 @@ internal static class BetterCrewLinkLobbyPublisher
             try
             {
                 if (!string.IsNullOrEmpty(joinedCode))
-                    await socket.EmitAsync("remove_lobby", joinedCode).ConfigureAwait(false);
+                    await socket.EmitAsync("remove_lobby", new object[] { joinedCode }).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(pendingCode)
                     && !string.Equals(pendingCode, joinedCode, StringComparison.Ordinal))
-                    await socket.EmitAsync("remove_lobby", pendingCode).ConfigureAwait(false);
+                    await socket.EmitAsync("remove_lobby", new object[] { pendingCode }).ConfigureAwait(false);
             }
             catch { }
 

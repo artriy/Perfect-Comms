@@ -75,7 +75,8 @@ try:
     assert ready["op"] == "ready", ready
     assert ready["format"] == {"rate": 48000, "channels": 1, "sample": "f32"}, ready
 
-    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True, "hpf": True})
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True,
+                  "ns_very_high": True, "hpf": True})
     send_control({"op": "set-diagnostics", "enabled": True})
     send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01,
                   "noise_gate_threshold": 0.003})
@@ -83,6 +84,7 @@ try:
     send_control({"op": "start"})
     levels = 0
     stats_seen = False
+    dsp_generation = None
     deadline2 = time.time() + 15
     while levels < 2 or not stats_seen:
         if time.time() > deadline2:
@@ -101,11 +103,56 @@ try:
             assert isinstance(msg.get("encoder_packet_loss_percent"), int), msg
             assert isinstance(msg.get("encoder_bitrate"), int), msg
             assert msg.get("diagnostics", {}).get("schema") == 1, msg
+            dsp_generation = msg.get("dsp_config_generation")
+            assert isinstance(dsp_generation, int), msg
+            assert msg.get("dsp_requested_ns") is True, msg
+            assert msg.get("dsp_requested_ns_very_high") is True, msg
+            if require_dsp == "--require-dsp":
+                assert msg.get("dsp_applied_ns") is True, msg
+                assert msg.get("dsp_applied_ns_very_high") is True, msg
+                assert msg.get("dsp_config_fully_applied") is True, msg
             stats_seen = True
 
+    def wait_for_dsp_state(after_generation, ns, ns_very_high):
+        deadline = time.time() + 15
+        while time.time() <= deadline:
+            frame_type, frame_body = recv_frame()
+            if frame_type != 0x01:
+                continue
+            message = json.loads(frame_body)
+            if message.get("op") != "stats":
+                continue
+            generation = message.get("dsp_config_generation")
+            if not isinstance(generation, int) or generation <= after_generation:
+                continue
+            expected = {
+                "dsp_requested_aec": True,
+                "dsp_requested_agc": False,
+                "dsp_requested_ns": ns,
+                "dsp_requested_ns_very_high": ns and ns_very_high,
+                "dsp_requested_hpf": True,
+                "dsp_apm_loaded": True,
+                "dsp_config_fully_applied": True,
+                "dsp_applied_aec": True,
+                "dsp_applied_agc": False,
+                "dsp_applied_ns": ns,
+                "dsp_applied_ns_very_high": ns and ns_very_high,
+                "dsp_applied_hpf": True,
+            }
+            for key, value in expected.items():
+                assert message.get(key) is value, message
+            return generation
+        raise RuntimeError("DSP reconfiguration was not confirmed by diagnostics within 15s")
+
     # Runtime suppression changes must reconfigure the already-loaded WebRTC APM in place.
-    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": False, "hpf": True})
-    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True, "hpf": True})
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": False,
+                  "ns_very_high": False, "hpf": True})
+    if require_dsp == "--require-dsp":
+        dsp_generation = wait_for_dsp_state(dsp_generation, False, False)
+    send_control({"op": "set-dsp", "aec": True, "agc": False, "ns": True,
+                  "ns_very_high": True, "hpf": True})
+    if require_dsp == "--require-dsp":
+        dsp_generation = wait_for_dsp_state(dsp_generation, True, True)
 
     # A lobby/session stop must leave the process reusable. Only control EOF (or owner exit)
     # owns process lifetime, including the Wine/CrossOver path where guest PIDs are unusable.
@@ -142,9 +189,12 @@ log = stderr.decode("utf-8", errors="replace")
 if failure is not None:
     raise RuntimeError(f"{failure}\nhelper stderr:\n{log}") from failure
 if require_dsp == "--require-dsp":
-    assert "dsp set apm=true webrtc-ns=false automatic-gain=false" in log, \
+    suppression_off = "dsp set apm=true webrtc-ns=false webrtc-ns-level=high automatic-gain=false"
+    suppression_on = "dsp set apm=true webrtc-ns=true webrtc-ns-level=very-high automatic-gain=false"
+    suppression_off_position = log.find(suppression_off)
+    assert suppression_off_position >= 0, \
         "suppression-off toggle did not reconfigure WebRTC APM:\n" + log
-    assert "dsp set apm=true webrtc-ns=true automatic-gain=false" in log, \
+    assert log.find(suppression_on, suppression_off_position + len(suppression_off)) >= 0, \
         "final helper bundle could not load and reconfigure WebRTC APM:\n" + log
 print(f"SMOKE_OK {name} stop_reusable=true eof_exit_seconds={disconnected_elapsed:.3f}")
 PY

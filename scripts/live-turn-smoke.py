@@ -216,7 +216,8 @@ class Helper:
 
 def configure(helper: Helper, remote_id: str, servers: list[dict[str, Any]]) -> None:
     helper.send({"op": "set-ice-servers", "servers": servers})
-    helper.send({"op": "set-dsp", "aec": True, "agc": True, "ns": True, "hpf": True})
+    helper.send({"op": "set-dsp", "aec": True, "agc": True, "ns": True,
+                 "ns_very_high": True, "hpf": True})
     helper.send({"op": "set-diagnostics", "enabled": True})
     helper.send({"op": "set-input", "gain": 1.0, "vad_threshold": 0.005,
                  "noise_gate_threshold": 0.003})

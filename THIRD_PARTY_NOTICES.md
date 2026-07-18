@@ -37,9 +37,9 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 
 | Assembly | Upstream and license text |
 |----------|---------------------------|
-| SocketIOClient, SocketIO.Core, SocketIO.Serializer.* 3.1.2 | [doghappy/socket.io-client-csharp](https://github.com/doghappy/socket.io-client-csharp), MIT. The exact license from the NuGet package's pinned upstream commit is in source at `Libs/socketio-client-csharp.LICENSE` and in release bundles at `licenses/SocketIOClient-MIT.txt`. |
-| System.Text.Encodings.Web 8.0.0 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is in source at `Libs/dotnet-runtime.LICENSE.TXT`; its package-specific notices are at `Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT`. Release bundles preserve both under `licenses/`. |
-| System.Text.Json 8.0.6 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is in source at `Libs/dotnet-runtime.LICENSE.TXT`; its package-specific notices are at `Libs/system-text-json.THIRD-PARTY-NOTICES.TXT`. Release bundles preserve both under `licenses/`. |
+| SocketIOClient 4.0.4, SocketIOClient.Common 4.0.0, SocketIOClient.Serializer 4.0.0.1 | [doghappy/socket.io-client-csharp](https://github.com/doghappy/socket.io-client-csharp), MIT. The exact license from the pinned upstream project is in source at `Libs/socketio-client-csharp.LICENSE` and in release bundles at `licenses/SocketIOClient-MIT.txt`. |
+| System.Text.Encodings.Web and System.Text.Json 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is in source at `Libs/dotnet-runtime.LICENSE.TXT`; the exact 10.x package notices are at `Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT` and `Libs/system-text-json.THIRD-PARTY-NOTICES.TXT`. Release bundles preserve them under `licenses/`. |
+| Microsoft.Bcl.AsyncInterfaces and System.IO.Pipelines 10.0.10; Microsoft.Extensions.DependencyInjection, DependencyInjection.Abstractions, Logging, Logging.Abstractions, Options, Primitives, and System.Diagnostics.DiagnosticSource 10.0.3 | [.NET runtime](https://github.com/dotnet/runtime), MIT. These Socket.IO runtime dependencies share the same 10.x NuGet third-party notice preserved with the System.Text package notices above. |
 
 ## Native Rust dependencies
 

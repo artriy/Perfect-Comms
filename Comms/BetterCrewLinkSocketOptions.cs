@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using SocketIOClient;
+using SocketIOClient.Common;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -18,10 +19,9 @@ internal static class BetterCrewLinkSocketOptions
             ReconnectionAttempts = int.MaxValue,
             // Bound connect/backoff so a dead server can't hang or tight-loop; reconnection stays unbounded for recovery.
             ConnectionTimeout = TimeSpan.FromSeconds(10),
-            ReconnectionDelay = 1000,
             ReconnectionDelayMax = 10000,
-            EIO = SocketIO.Core.EngineIO.V3,
-            Transport = SocketIOClient.Transport.TransportProtocol.WebSocket,
+            EIO = EngineIO.V3,
+            Transport = TransportProtocol.WebSocket,
             ExtraHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 [UserAgentHeader] = UserAgent,
