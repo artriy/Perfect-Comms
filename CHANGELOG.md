@@ -1,38 +1,56 @@
 # Changelog
 
-## Perfect Comms v4.0.1
+## Perfect Comms v4.1.0
 
-Perfect Comms v4.0.1 is a focused stability update for the new v4 voice engine. It fixes the reported Steam Proton startup failure, keeps voice and Push To Talk working through the results screen, removes the brief audio cut when returning to the lobby, and improves native audio reliability across desktop systems.
+Perfect Comms v4.1.0 makes the new v4 voice engine far more dependable. Steam Proton voice now starts properly, connections repair themselves when networks change, voice remains active between matches, and a new microphone playback test lets you hear how you sound before playing. This release also adds stronger optional noise cleanup, more stable HUD behavior, and completed support for compatible mods.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.0.1/assets/brand/divider.svg" alt="divider" width="900">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.0/assets/brand/divider.svg" alt="divider" width="900">
 </p>
 
-### What's Changed
+### Voice That Starts, Stays Connected, and Recovers
 
 - **Steam Proton voice startup is fixed.**
-  > <sub>Fixed the Linux helper failure that left players seeing “Voice unavailable, retrying audio helper” while voice remained stuck on “Connecting.” Perfect Comms now verifies that the Linux helper actually launched and can use an alternate safe location when either the Steam library or temporary folder blocks execution.</sub>
-
-- **The brief results-to-lobby audio cut is fixed.**
-  > <sub>Voice could disappear for roughly a second while Among Us rebuilt the player list after the results screen. Existing voice connections now remain active through that short transition and expire after a short safety window if the lobby roster never finishes rebuilding.</sub>
-
-- **Push To Talk now works on the results screen.**
-  > <sub>Holding and releasing your Push To Talk key now updates the microphone normally after a match ends instead of remaining silent or stuck in its previous state.</sub>
-
-- **The results-screen speaking bar stays complete.**
-  > <sub>Cached avatars, names, and silent-player slots now remain visible when the results scene removes the live in-game player objects. This also keeps Show All Players stable through the results screen.</sub>
-
-- **Ghost avatars update correctly.**
-  > <sub>Deaths revealed during meetings now update promptly on the speaking bar</sub>
-
-- **Native audio helpers are more dependable.**
-  > <sub>Helper retries, reconnects, and shutdown cleanup are more reliable, reducing stuck helper processes after a failed launch. CrossOver preserves the signed macOS helper on Intel and Apple Silicon, while Windows selects the correct self-contained 32-bit or 64-bit components, including on Windows-on-ARM systems running the game through emulation.</sub>
+  > <sub>Fixed the Linux helper failure that left players seeing “Voice unavailable, retrying audio helper” while voice remained stuck on “Connecting.” Perfect Comms now verifies that the helper actually launched and can use an alternate safe location when either the Steam library or temporary folder blocks execution.</sub>
 
 - **Voice follows VPN and network changes automatically.**
-  > <sub>When a VPN connects, a network adapter changes, or a route stops working, Perfect Comms now refreshes only the affected voice connections and gathers a new direct-first path automatically. Relay candidates remain available as a fallback without a manual relay mode.</sub>
+  > <sub>When a VPN connects, a network adapter changes, or a route stops working, Perfect Comms refreshes only the affected player connection and gathers a fresh direct-first path. Relay candidates remain available as fallback, so healthy connections stay peer-to-peer without requiring a manual relay mode.</sub>
+
+- **The results-to-lobby audio cut is fixed.**
+  > <sub>Voice connections now remain active while Among Us briefly rebuilds the player list after the results screen, preventing the short dropout that could happen when returning to the lobby.</sub>
+
+- **Push To Talk now works on the results screen.**
+  > <sub>Holding and releasing your Push To Talk key updates the microphone normally after a match ends instead of leaving it silent or stuck in its previous state.</sub>
+
+### Hear and Improve Your Microphone
+
+- **Hear your microphone before you play.**
+  > <sub>The Devices page now includes a Hear Your Microphone test that plays the selected microphone through your current output. It follows microphone, speaker, and volume changes without changing your mute setting. Headphones are recommended to prevent feedback.</sub>
+
+- **Optional one-second delayed playback.**
+  > <sub>Turn on Delayed Playback to speak first and hear the result one second later. It is off by default, remains synchronized during longer tests, and clears old audio when the device or delay mode changes. The test stops automatically when you leave Devices or close settings.</sub>
+
+- **Stronger noise suppression for difficult rooms.**
+  > <sub>Desktop players can enable a stronger WebRTC noise-suppression level for louder fans, keyboards, and background noise. It is optional, off by default, and may make very quiet speech sound less natural.</sub>
+
+### Smoother Voice and HUD Behavior
+
+- **The speaking bar remains complete and current.**
+  > <sub>Cached avatars, names, and silent-player slots remain visible when the results scene removes live player objects, keeping Show All Players stable. Deaths revealed during meetings also update promptly to the correct ghost appearance.</sub>
+
+- **Native audio helpers are more dependable across desktop systems.**
+  > <sub>Helper retries, reconnects, cancellation, and shutdown cleanup are more reliable, reducing stuck helper processes after failed launches. CrossOver preserves the signed macOS helper on Intel and Apple Silicon, while Windows selects the correct 32-bit or 64-bit components, including on Windows-on-ARM systems running the game through emulation.</sub>
+
+### Mod Support and Maintenance
 
 - **Completed Mod Integration API 1.1 support.**
-  > <sub>Mod Integration API 1.1 is now complete, allowing compatible mods to add custom voice channels, listener-specific routing and mutes, alternate listening positions, synchronized host options, and privacy-safe voice overlays without maintaining their own Perfect Comms fork.</sub>
+  > <sub>Compatible mods can add custom voice channels, listener-specific routing and mutes, alternate listening positions, synchronized host options, and privacy-safe overlays without maintaining their own Perfect Comms fork.</sub>
+
+- **Bundled components and release checks are up to date.**
+  > <sub>The libraries behind networking, audio, Voice Lobbies, and the embedded .NET runtime have been refreshed. Expanded checks now guard the correct components and architecture for every supported platform.</sub>
+
+- **The player and modding guides have been refreshed.**
+  > <sub>Installation, controls, host settings, player help, and Mod Integration API documentation now match the v4 engine and its current options.</sub>
 
 ## Perfect Comms v4.0.0
 
