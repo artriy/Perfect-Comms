@@ -45,6 +45,18 @@
 		<!-- Keep the production Socket.IO version explicit in both Dependabot directories so
 		     a grouped update regenerates this ProjectReference consumer's lock file too. -->
 		<PackageReference Include="SocketIOClient" Version="4.0.4" PrivateAssets="all" />
+		<!-- Pin the embedded production runtime closure here as direct private test dependencies.
+		     Socket.IO only declares 10.0.3 minimums, so without these pins this lock file can
+		     silently test older assemblies than the single-DLL plugin embeds. -->
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.Options" Version="10.0.10" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.Extensions.Primitives" Version="10.0.10" PrivateAssets="all" />
+		<!-- net10 also supplies DiagnosticSource, but retain the direct pin so this directory's
+		     lock file records the exact servicing package embedded by the production project. -->
+		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.10" PrivateAssets="all" NoWarn="NU1510" />
 		<PackageReference Include="xunit.v3" Version="3.2.2" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
 			<PrivateAssets>all</PrivateAssets>

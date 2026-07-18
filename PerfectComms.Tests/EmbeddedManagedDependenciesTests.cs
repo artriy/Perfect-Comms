@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
@@ -31,5 +32,45 @@ public sealed class EmbeddedManagedDependenciesTests
         Assert.DoesNotContain("Lib.SocketIO.Core.dll", resources);
         Assert.DoesNotContain("Lib.SocketIO.Serializer.Core.dll", resources);
         Assert.DoesNotContain("Lib.SocketIO.Serializer.SystemTextJson.dll", resources);
+    }
+
+    [Fact]
+    public void EmbeddedDotNetRuntimeDependenciesUsePinnedServicingVersion()
+    {
+        var assembly = typeof(BetterCrewLinkLobbyPublisher).Assembly;
+        var runtimeResources = new[]
+        {
+            "Lib.Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+            "Lib.Microsoft.Extensions.DependencyInjection.dll",
+            "Lib.Microsoft.Extensions.Logging.Abstractions.dll",
+            "Lib.Microsoft.Extensions.Logging.dll",
+            "Lib.Microsoft.Extensions.Options.dll",
+            "Lib.Microsoft.Extensions.Primitives.dll",
+            "Lib.System.Diagnostics.DiagnosticSource.dll",
+        };
+
+        foreach (var resourceName in runtimeResources)
+        {
+            using var resource = assembly.GetManifestResourceStream(resourceName);
+            Assert.NotNull(resource);
+
+            var extractedPath = Path.Combine(
+                Path.GetTempPath(),
+                $"perfectcomms-embedded-{Guid.NewGuid():N}.dll");
+
+            try
+            {
+                using (var extracted = File.Create(extractedPath))
+                    resource.CopyTo(extracted);
+
+                var productVersion = FileVersionInfo.GetVersionInfo(extractedPath).ProductVersion;
+                Assert.NotNull(productVersion);
+                Assert.StartsWith("10.0.10+", productVersion, StringComparison.Ordinal);
+            }
+            finally
+            {
+                File.Delete(extractedPath);
+            }
+        }
     }
 }
