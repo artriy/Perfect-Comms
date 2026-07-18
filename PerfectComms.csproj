@@ -65,13 +65,13 @@
 		     pinned BepInEx 6 runtime. Embed the netstandard2.0 assets so the plugin remains
 		     a self-contained single DLL on every supported launcher. -->
 		<PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Options" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Primitives" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.3" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.Options" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Extensions.Primitives" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.IO.Pipelines" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 	</ItemGroup>
 
