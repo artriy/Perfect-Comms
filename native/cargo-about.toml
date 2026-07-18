@@ -23,3 +23,14 @@ targets = [
 ignore-build-dependencies = false
 ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
+
+# rkyv_derive 0.8.17 packages both its root MIT license and a second,
+# differently formatted MIT license under src/serde. Filesystem traversal order
+# can otherwise make cargo-about select a different text on Windows and Linux.
+[rkyv_derive.clarify]
+license = 'MIT'
+
+[[rkyv_derive.clarify.files]]
+path = 'LICENSE'
+license = 'MIT'
+checksum = '635111a955495b5d8d34b8052f69656e8e45f6437f9266329077b9aad5fbe8d3'
