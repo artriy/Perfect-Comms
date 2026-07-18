@@ -140,6 +140,14 @@ internal static class SidecarProtocol
     public static byte[] SetSyntheticFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-synthetic\",\"enabled\":{JsonBool(enabled)}}}");
 
+    public static byte[] SetMonitorFrame(bool enabled, bool delayed, float gain)
+    {
+        gain = NormalizeMasterGain(gain);
+        int delayMs = enabled && delayed ? 1000 : 0;
+        return EncodeControl(
+            $"{{\"op\":\"set-monitor\",\"enabled\":{JsonBool(enabled)},\"delay_ms\":{delayMs},\"gain\":{gain.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}}}");
+    }
+
     public static byte[] SetInputFrame(float gain, float vadThreshold, float noiseGateThreshold)
     {
         gain = NormalizeInputGain(gain);

@@ -348,7 +348,13 @@ public class VoiceChatRoom
     }
 
     public void ToggleMute() => SetMute(!Mute);
-    public void SetLoopBack(bool lb) => _voiceBackend?.SetLoopBack(lb);
+    public bool SetLoopBack(bool enabled, bool delayed = false, float gain = 1f)
+    {
+        var backend = _voiceBackend;
+        if (backend == null) return false;
+        backend.SetLoopBack(enabled, delayed, gain);
+        return true;
+    }
 
     // ======================================================================
     // Microphone

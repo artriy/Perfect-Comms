@@ -56,6 +56,10 @@ internal sealed class FirstRunAudioPreview : IDisposable
     private int _microphoneSignalDetected;
     private int _outputTestCompleted;
     private bool _micPausedForTone;
+    private bool _monitorPlayback;
+    private bool _monitorDelayed;
+    private float _monitorGain = 1f;
+    private VoiceChatRoom? _monitorRoom;
 
 #if WINDOWS
     private SidecarVoiceLease? _lease;
@@ -78,6 +82,8 @@ internal sealed class FirstRunAudioPreview : IDisposable
     private GameObject? _toneObject;
     private AudioSource? _toneSource;
     private AudioClip? _toneClip;
+    private AndroidMicrophoneMonitor? _androidMonitor;
+    private AndroidMicrophoneMonitorOutput? _androidMonitorOutput;
     private int _permissionGeneration;
 #endif
 
@@ -154,6 +160,32 @@ internal sealed class FirstRunAudioPreview : IDisposable
 
     internal void Tick()
     {
+        if (_monitorRoom != null)
+        {
+            var room = _monitorRoom;
+            if (!ReferenceEquals(room, VoiceChatRoom.Current))
+            {
+                try { room.SetLoopBack(false); } catch { }
+                _monitorRoom = null;
+                FailMicrophone("Voice room changed - restart the microphone test");
+            }
+            else
+            {
+                if (!room.SetLoopBack(true, _monitorDelayed, _monitorGain))
+                {
+                    _monitorRoom = null;
+                    FailMicrophone("Voice room audio stopped - restart the microphone test");
+                }
+                else
+                {
+                    _level = Math.Clamp(room.LocalMicLevel, 0f, 1f);
+                    _speaking = _level >= 0.035f;
+                    long now = Environment.TickCount64;
+                    Volatile.Write(ref _lastLevelTick, now);
+                    if (_speaking) Volatile.Write(ref _lastSignalTick, now);
+                }
+            }
+        }
 #if WINDOWS
         if (Interlocked.Exchange(ref _desktopFailurePending, 0) != 0)
         {
@@ -182,9 +214,64 @@ internal sealed class FirstRunAudioPreview : IDisposable
 #endif
     }
 
-    internal void StartMicrophone(FirstRunSetupDraft draft)
+    private bool TryStartRoomMonitor()
+    {
+        if (!_monitorPlayback || VoiceChatRoom.Current is not { } room) return false;
+        if (!room.SetLoopBack(true, _monitorDelayed, _monitorGain)) return false;
+        _monitorRoom = room;
+        MarkListening();
+        SetMicrophoneStatus(_monitorDelayed
+            ? "Microphone test is on with a one-second delay"
+            : "Microphone test is on - use headphones to avoid feedback");
+        return true;
+    }
+
+    internal void StartMicrophone(
+        FirstRunSetupDraft draft,
+        bool monitorPlayback = false,
+        bool delayedPlayback = false)
     {
         if (_disposed) return;
+        StopMicrophone();
+        _monitorPlayback = monitorPlayback;
+        _monitorDelayed = monitorPlayback && delayedPlayback;
+        _monitorGain = float.IsFinite(draft.MasterVolume)
+            ? Math.Clamp(draft.MasterVolume, 0f, 2f)
+            : 1f;
+        if (_monitorPlayback && VoiceChatRoom.Current != null)
+        {
+#if ANDROID
+            if (MicrophoneTestLifecyclePolicy.RequiresRoomMicrophonePermission(
+                    _monitorPlayback,
+                    roomPresent: true,
+                    Application.HasUserAuthorization(UserAuthorization.Microphone)))
+            {
+                lock (_microphoneStateGate)
+                {
+                    Volatile.Write(ref _microphoneTestActive, 1);
+                    Volatile.Write(ref _listening, 0);
+                    _micPausedForTone = false;
+                    SetMicrophoneStatus("Waiting for microphone permission...");
+                }
+                int roomPermissionGeneration = ++_permissionGeneration;
+                FirstRunSetupPermissionRequester.Request(granted =>
+                {
+                    if (_disposed || roomPermissionGeneration != _permissionGeneration) return;
+                    if (!granted)
+                    {
+                        FailMicrophone("Microphone permission denied - receive-only still works");
+                        return;
+                    }
+                    if (!TryStartRoomMonitor())
+                        FailMicrophone("Voice room changed - restart the microphone test");
+                });
+                return;
+            }
+#endif
+            if (TryStartRoomMonitor()) return;
+            FailMicrophone("Could not start microphone playback in the current voice room");
+            return;
+        }
 #if WINDOWS
         var microphoneRoute = ResolveMicrophoneRoute(draft);
         if (microphoneRoute == MicrophoneRouteResolution.WaitingForDeviceList)
@@ -194,7 +281,6 @@ internal sealed class FirstRunAudioPreview : IDisposable
             return;
         }
 #endif
-        StopMicrophone();
         lock (_microphoneStateGate)
         {
             Volatile.Write(ref _microphoneTestActive, 1);
@@ -240,7 +326,9 @@ internal sealed class FirstRunAudioPreview : IDisposable
             hpf: true);
         _lease.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
         _lease.SelectMicDevice(draft.MicrophoneDevice);
-        _lease.SetMicActive(true);
+        _lease.SelectOutputDevice(draft.SpeakerDevice);
+        _lease.SetMonitor(_monitorPlayback, _monitorDelayed, draft.MasterVolume);
+        if (!_monitorPlayback) _lease.SetMicActive(true);
         MarkListening();
         if (microphoneRoute == MicrophoneRouteResolution.FellBackToDefault)
             SetMicrophonePriorityStatus(
@@ -271,6 +359,18 @@ internal sealed class FirstRunAudioPreview : IDisposable
     internal void RefreshMicrophoneSettings(FirstRunSetupDraft draft)
     {
         if (!IsListening || IsPlayingTone) return;
+        _monitorGain = float.IsFinite(draft.MasterVolume)
+            ? Math.Clamp(draft.MasterVolume, 0f, 2f)
+            : 1f;
+        if (_monitorRoom != null)
+        {
+            if (!_monitorRoom.SetLoopBack(true, _monitorDelayed, _monitorGain))
+            {
+                _monitorRoom = null;
+                FailMicrophone("Voice room audio stopped - restart the microphone test");
+            }
+            return;
+        }
 #if WINDOWS
         _lease?.SetDsp(
             aec: draft.EchoCancellation,
@@ -279,8 +379,13 @@ internal sealed class FirstRunAudioPreview : IDisposable
             nsVeryHigh: draft.StrongerNoiseSuppression,
             hpf: true);
         _lease?.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
+        _lease?.SetMonitor(_monitorPlayback, _monitorDelayed, draft.MasterVolume);
 #elif ANDROID
         _androidMicrophone?.SetVolume(draft.MicVolume);
+        _androidMonitor?.Configure(
+            _monitorPlayback,
+            _monitorDelayed,
+            draft.MasterVolume);
 #endif
     }
 
@@ -291,6 +396,9 @@ internal sealed class FirstRunAudioPreview : IDisposable
 
     internal void StopMicrophone()
     {
+        var monitorRoom = _monitorRoom;
+        _monitorRoom = null;
+        try { monitorRoom?.SetLoopBack(false); } catch { }
         lock (_microphoneStateGate)
         {
             Volatile.Write(ref _microphoneTestActive, 0);
@@ -300,6 +408,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
             SetMicrophoneStatus("Mic check is off");
         }
 #if WINDOWS
+        try { _lease?.SetMonitor(false, false, 1f); } catch { }
         StopDesktopLease();
 #elif ANDROID
         _permissionGeneration++;
@@ -308,7 +417,14 @@ internal sealed class FirstRunAudioPreview : IDisposable
             _androidMicrophone.Dispose();
             _androidMicrophone = null;
         }
+        try { _androidMonitor?.Configure(false, false, 1f); } catch { }
+        try { _androidMonitorOutput?.Dispose(); } catch { }
+        _androidMonitorOutput = null;
+        _androidMonitor = null;
 #endif
+        _monitorPlayback = false;
+        _monitorDelayed = false;
+        _monitorGain = 1f;
     }
 
     internal void PlayTestSound(FirstRunSetupDraft draft)
@@ -438,12 +554,23 @@ internal sealed class FirstRunAudioPreview : IDisposable
     {
         _micPausedForTone = IsMicrophoneTestActive;
         if (!_micPausedForTone) return;
+        var monitorRoom = _monitorRoom;
+        _monitorRoom = null;
+        try { monitorRoom?.SetLoopBack(false); } catch { }
 #if WINDOWS
+        try { _lease?.SetMonitor(false, false, 1f); } catch { }
         try { _lease?.SetMicActive(false); } catch { }
 #elif ANDROID
         _permissionGeneration++;
         StopAndroidCaptureOnly();
+        try { _androidMonitor?.Configure(false, false, 1f); } catch { }
+        try { _androidMonitorOutput?.Dispose(); } catch { }
+        _androidMonitorOutput = null;
+        _androidMonitor = null;
 #endif
+        _monitorPlayback = false;
+        _monitorDelayed = false;
+        _monitorGain = 1f;
         lock (_microphoneStateGate)
         {
             Volatile.Write(ref _microphoneTestActive, 0);
@@ -722,6 +849,15 @@ internal sealed class FirstRunAudioPreview : IDisposable
             StopAndroidCaptureOnly();
             return;
         }
+        if (_monitorPlayback)
+        {
+            _androidMonitor = new AndroidMicrophoneMonitor();
+            _androidMonitor.Configure(
+                true,
+                _monitorDelayed,
+                activeDraft.MasterVolume);
+            _androidMonitorOutput = new AndroidMicrophoneMonitorOutput(_androidMonitor);
+        }
         MarkListening();
         if (microphoneRoute == MicrophoneRouteResolution.FellBackToDefault)
             SetMicrophonePriorityStatus(
@@ -730,6 +866,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
 
     private void OnAndroidSamples(float[] samples, int count)
     {
+        _androidMonitor?.Write(samples, count);
         float peak = 0f;
         for (int i = 0; i < count; i++)
             peak = Math.Max(peak, Math.Abs(samples[i]));

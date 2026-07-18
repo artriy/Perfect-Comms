@@ -81,6 +81,9 @@ try:
     send_control({"op": "set-input", "gain": 1.0, "vad_threshold": 0.01,
                   "noise_gate_threshold": 0.003})
     send_control({"op": "set-synthetic", "enabled": True})
+    # Exercise the protocol-13 monitor command on every helper without requiring an audio output
+    # device on headless CI runners. Enabled monitor mixing is covered by focused audio tests.
+    send_control({"op": "set-monitor", "enabled": False, "delay_ms": 0, "gain": 1.0})
     send_control({"op": "start"})
     levels = 0
     stats_seen = False

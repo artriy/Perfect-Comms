@@ -25,6 +25,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     private readonly AudioSource _source;
     private readonly AudioClip _clip;
     private readonly MobileVoiceClient _voice;
+    private readonly AndroidMicrophoneMonitor? _microphoneMonitor;
     private int _readCallbacks;
     private int _readErrors;
     private int _oversizeCallbacks;
@@ -39,9 +40,12 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     public bool IsPlaying => _source != null && _source.isPlaying;
     public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
 
-    public AndroidEnginePcmSpeaker(MobileVoiceClient voice)
+    public AndroidEnginePcmSpeaker(
+        MobileVoiceClient voice,
+        AndroidMicrophoneMonitor? microphoneMonitor = null)
     {
         _voice = voice ?? throw new ArgumentNullException(nameof(voice));
+        _microphoneMonitor = microphoneMonitor;
 
         var host = VoiceChatPluginMain.ResidentObject
             ?? throw new InvalidOperationException("[VC] ResidentObject is null");
@@ -99,6 +103,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
                 Array.Clear(_scratch, 0, count);
                 Interlocked.Increment(ref _readErrors);
             }
+            _microphoneMonitor?.MixInto(_scratch, count);
         }
         for (var i = 0; i < count; i++) data[i] = _scratch[i];
     }

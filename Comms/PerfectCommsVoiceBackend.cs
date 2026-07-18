@@ -131,6 +131,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID
     private MobileVoiceClient? _mobileVoice;
     private AndroidEnginePcmSpeaker? _mobileSpeaker;
+    private readonly AndroidMicrophoneMonitor _androidMicrophoneMonitor = new();
     private long _mobileVoiceStartRetryAtMs;
     private int _mobileVoiceGeneration;
     private int _mobileSpeakerRetryAttempts;
@@ -833,13 +834,36 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 ScheduleVoiceRecovery("unmuted", immediate: true);
         }
 #elif ANDROID
-        if (mute) StopAndroidMicrophone("muted");
+        if (mute && !_loopBack) StopAndroidMicrophone("muted");
+        else if (mute) _mobileVoice?.SetMicActive(false);
         else StartAndroidMicrophone("unmuted");
 #endif
         VoiceDiagnostics.Log("voice.mute", $"mute={Mute} micReady={_microphoneReady} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)}");
     }
     public void ToggleMute() => SetMute(!Mute);
-    public void SetLoopBack(bool loopBack) { }
+    private volatile bool _loopBack;
+    private volatile bool _loopBackDelayed;
+    private volatile float _loopBackGain = 1f;
+
+    public void SetLoopBack(bool loopBack, bool delayed, float gain)
+    {
+        delayed &= loopBack;
+        gain = float.IsFinite(gain) ? Math.Clamp(gain, 0f, 2f) : 1f;
+        if (_loopBack == loopBack && _loopBackDelayed == delayed &&
+            Math.Abs(_loopBackGain - gain) < 0.0001f) return;
+        _loopBack = loopBack;
+        _loopBackDelayed = delayed;
+        _loopBackGain = gain;
+#if WINDOWS
+        _voice?.SetMonitor(loopBack, delayed, gain);
+#elif ANDROID
+        _androidMicrophoneMonitor.Configure(loopBack, delayed, gain * _micVolume);
+        if (loopBack && Mute)
+            StartAndroidMicrophone("microphone-test");
+        else if (!loopBack && Mute)
+            StopAndroidMicrophone("microphone-test-ended");
+#endif
+    }
     private float _masterVolume = 1f;
     public void SetMasterVolume(float volume)
     {
@@ -857,6 +881,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _voice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
 #elif ANDROID
         _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
+        _androidMicrophoneMonitor.Configure(_loopBack, _loopBackDelayed, _loopBackGain * _micVolume);
 #endif
     }
 
@@ -1495,6 +1520,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             Interlocked.Increment(ref _sidecarLevelEventsTotal);
             Interlocked.Exchange(ref _lastSidecarLevelUtcTicks, DateTime.UtcNow.Ticks);
 
+            if (_loopBack && _voiceReady && (Mute || !_microphoneRequested))
+            {
+                _localLevel = peak;
+                _localSpeaking = speaking;
+                return;
+            }
+
             // A final queued level can arrive just after mute/stop or a device/source command. It is
             // useful raw telemetry, but it must not establish capture provenance for the new source.
             // pc-capture publishes at 100 ms through a latest-wins one-slot mailbox; hold the new
@@ -1678,6 +1710,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             return;
         }
+
+        voice.SetMonitor(_loopBack, _loopBackDelayed, _loopBackGain);
 
         var outputDevices = voice.OutputDevices.ToArray();
         var health = voice.Health;
@@ -2389,7 +2423,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         mv.OnLevel += (peak, speaking) =>
         {
             if (!IsCurrentMobileVoice(mv, callbackGeneration)) return;
-            if (Mute)
+            if (Mute && !_loopBack)
             {
                 _localLevel = 0f;
                 _localSpeaking = false;
@@ -2478,7 +2512,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         try
         {
-            _mobileSpeaker = new AndroidEnginePcmSpeaker(voice);
+            _mobileSpeaker = new AndroidEnginePcmSpeaker(voice, _androidMicrophoneMonitor);
             _speakerReady = _mobileSpeaker.IsPlaying;
             _mobileSpeakerRetryAttempts = 0;
             _mobileSpeakerRetryAtMs = 0;
@@ -2663,6 +2697,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         Interlocked.Increment(ref _micCallbacks);
         int samples = Math.Min(Math.Max(length, 0), buffer.Length);
         Interlocked.Add(ref _micBytes, samples * sizeof(float));
+#if ANDROID
+        if (_loopBack && samples > 0)
+        {
+            _androidMicrophoneMonitor.Write(buffer, samples);
+            float peak = 0f;
+            for (int i = 0; i < samples; i++) peak = Math.Max(peak, Math.Abs(buffer[i]));
+            _localLevel = peak;
+            _localSpeaking = peak >= Math.Max(0.0001f, _vadThreshold);
+        }
+#endif
         if (Mute)
         {
             Interlocked.Increment(ref _micMutedDrops);

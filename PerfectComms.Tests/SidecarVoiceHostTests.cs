@@ -239,6 +239,7 @@ public sealed class SidecarVoiceHostTests
         public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
         public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
         public void SetSynthetic(bool enabled) => SyntheticCalls.Add(enabled);
+        public void SetMonitor(bool enabled, bool delayed, float gain) { }
         public void SetInput(float gain, float vadThreshold, float noiseGateThreshold) { }
         public void SetMicActive(bool active) => MicActiveCalls.Add(active);
         public void SelectMicDevice(string deviceId) { }

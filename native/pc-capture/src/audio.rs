@@ -3,19 +3,115 @@ use crate::diagnostics::{
     StreamDescriptor,
 };
 use crate::proto::{
-    AudioFrame, CaptureFrameMetadata, CaptureFrameProducer, DeviceInfo, PlaybackRing,
-    FRAME_SAMPLES, SAMPLE_RATE,
+    AudioFrame, CaptureFrameMetadata, CaptureFrameProducer, DeviceInfo, PlaybackConsumer,
+    PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE,
 };
 use crate::rtc::NativeCounters;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::input::SyntheticTone as ToneSource;
 pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneMonitorConfigChange {
+    Unchanged,
+    GainOnly,
+    Playout,
+}
+
+pub struct MicrophoneMonitorState {
+    enabled: AtomicBool,
+    delay_pairs: AtomicU32,
+    gain_bits: AtomicU32,
+    playout_generation: AtomicU64,
+}
+
+impl Default for MicrophoneMonitorState {
+    fn default() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            delay_pairs: AtomicU32::new(0),
+            gain_bits: AtomicU32::new(1.0f32.to_bits()),
+            playout_generation: AtomicU64::new(0),
+        }
+    }
+}
+
+impl MicrophoneMonitorState {
+    pub fn configure<F>(
+        &self,
+        enabled: bool,
+        delay_pairs: usize,
+        gain: f32,
+        reset_playout: F,
+    ) -> MicrophoneMonitorConfigChange
+    where
+        F: FnOnce(),
+    {
+        let delay_pairs = if enabled {
+            delay_pairs.min(u32::MAX as usize) as u32
+        } else {
+            0
+        };
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        let gain_bits = gain.to_bits();
+        let enabled_changed = self.enabled.load(Ordering::Acquire) != enabled;
+        let delay_changed = self.delay_pairs.load(Ordering::Acquire) != delay_pairs;
+        let gain_changed = self.gain_bits.load(Ordering::Acquire) != gain_bits;
+
+        if !enabled_changed && !delay_changed {
+            if !gain_changed {
+                return MicrophoneMonitorConfigChange::Unchanged;
+            }
+            self.gain_bits.store(gain_bits, Ordering::Release);
+            return MicrophoneMonitorConfigChange::GainOnly;
+        }
+
+        // Make the callback fail silent before the old delayed timeline is discarded. The
+        // generation then forces its interpolation and priming state to reset before the new
+        // configuration can become audible.
+        self.enabled.store(false, Ordering::Release);
+        reset_playout();
+        self.delay_pairs.store(delay_pairs, Ordering::Release);
+        self.gain_bits.store(gain_bits, Ordering::Release);
+        self.playout_generation.fetch_add(1, Ordering::AcqRel);
+        self.enabled.store(enabled, Ordering::Release);
+        MicrophoneMonitorConfigChange::Playout
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn delay_pairs(&self) -> usize {
+        self.delay_pairs.load(Ordering::Acquire) as usize
+    }
+
+    fn gain(&self) -> f32 {
+        f32::from_bits(self.gain_bits.load(Ordering::Acquire))
+    }
+
+    fn playout_generation(&self) -> u64 {
+        self.playout_generation.load(Ordering::Acquire)
+    }
+
+    pub fn reset_playout<F>(&self, reset_playout: F)
+    where
+        F: FnOnce(),
+    {
+        reset_playout();
+        self.playout_generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
 
 const DOWNMIX_SWITCH_RATIO: f64 = 1.6;
 const CORRELATED_STEREO_THRESHOLD: f64 = 0.55;
@@ -1892,10 +1988,135 @@ impl UnderrunFader {
     }
 }
 
+const MONITOR_IMMEDIATE_TARGET_PAIRS: usize = FRAME_SAMPLES;
+const MONITOR_DEPTH_RESPONSE: f64 = 0.05;
+const MONITOR_MAX_RATE_ADJUSTMENT: f64 = 0.004;
+
+fn monitor_target_pairs(delay_pairs: usize) -> usize {
+    if delay_pairs == 0 {
+        MONITOR_IMMEDIATE_TARGET_PAIRS
+    } else {
+        delay_pairs
+    }
+}
+
+fn monitor_effective_ratio(nominal_ratio: f64, queued_pairs: usize, target_pairs: usize) -> f64 {
+    if target_pairs == 0 {
+        return nominal_ratio;
+    }
+    let error = (queued_pairs as f64 - target_pairs as f64) / target_pairs as f64;
+    nominal_ratio
+        * (1.0
+            + (error * MONITOR_DEPTH_RESPONSE)
+                .clamp(-MONITOR_MAX_RATE_ADJUSTMENT, MONITOR_MAX_RATE_ADJUSTMENT))
+}
+
+struct MonitorPlayout {
+    observed_generation: u64,
+    primed: bool,
+    s0: (f32, f32),
+    s1: (f32, f32),
+    s0_available: bool,
+    s1_available: bool,
+    pos: f64,
+    underrun_fader: UnderrunFader,
+}
+
+impl Default for MonitorPlayout {
+    fn default() -> Self {
+        Self {
+            observed_generation: u64::MAX,
+            primed: false,
+            s0: (0.0, 0.0),
+            s1: (0.0, 0.0),
+            s0_available: false,
+            s1_available: false,
+            pos: 1.0,
+            underrun_fader: UnderrunFader::default(),
+        }
+    }
+}
+
+impl MonitorPlayout {
+    fn reset_interpolation(&mut self) {
+        self.primed = false;
+        self.s0 = (0.0, 0.0);
+        self.s1 = (0.0, 0.0);
+        self.s0_available = false;
+        self.s1_available = false;
+        self.pos = 1.0;
+    }
+
+    fn reset_for_generation(&mut self, generation: u64) {
+        self.observed_generation = generation;
+        self.reset_interpolation();
+        self.underrun_fader = UnderrunFader::default();
+    }
+
+    fn render(
+        &mut self,
+        ring: &PlaybackConsumer,
+        state: &MicrophoneMonitorState,
+        nominal_ratio: f64,
+    ) -> (f32, f32) {
+        let generation = state.playout_generation();
+        if generation != self.observed_generation {
+            self.reset_for_generation(generation);
+        }
+
+        if !state.enabled() {
+            self.reset_interpolation();
+            return self.underrun_fader.process((0.0, 0.0), false);
+        }
+
+        let target_pairs = monitor_target_pairs(state.delay_pairs());
+        let queued_pairs = ring.len();
+        if !self.primed {
+            if queued_pairs < target_pairs {
+                return self.underrun_fader.process((0.0, 0.0), false);
+            }
+            // A prior underrun can leave interpolation history even though the ring itself is
+            // empty. Start every newly primed timeline from silence so stale audio cannot bridge
+            // a capture outage or generation reset.
+            self.reset_interpolation();
+            self.primed = true;
+        }
+
+        let effective_ratio = monitor_effective_ratio(nominal_ratio, queued_pairs, target_pairs);
+        while self.pos >= 1.0 {
+            self.s0 = self.s1;
+            self.s0_available = self.s1_available;
+            match ring.pop_stereo() {
+                Some(pair) => {
+                    self.s1 = pair;
+                    self.s1_available = true;
+                }
+                None => {
+                    self.s1 = (0.0, 0.0);
+                    self.s1_available = false;
+                    self.primed = false;
+                }
+            }
+            self.pos -= 1.0;
+        }
+
+        let t = self.pos as f32;
+        let pair = (
+            self.s0.0 + (self.s1.0 - self.s0.0) * t,
+            self.s0.1 + (self.s1.1 - self.s0.1) * t,
+        );
+        let available = self.s0_available || self.s1_available;
+        self.pos += effective_ratio;
+        self.underrun_fader.process(pair, available)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cpal_playback(
     device_id: Option<String>,
     playback: Arc<Mutex<PlaybackRing>>,
+    monitor_playback: Arc<Mutex<PlaybackRing>>,
+    monitor_state: Arc<MicrophoneMonitorState>,
     stop: Arc<AtomicBool>,
     counters: Arc<NativeCounters>,
     progress: Arc<PlaybackProgress>,
@@ -1933,13 +2154,18 @@ pub fn spawn_cpal_playback(
         .lock()
         .map_err(|_| "playback ring lock poisoned".to_string())?
         .consumer();
+    let cb_monitor_ring = monitor_playback
+        .lock()
+        .map_err(|_| "monitor playback ring lock poisoned".to_string())?
+        .consumer();
     let target_pairs = (FRAME_SAMPLES * 4) as f64;
-    let mut s0 = (0.0f32, 0.0f32);
-    let mut s1 = (0.0f32, 0.0f32);
-    let mut s0_available = false;
-    let mut s1_available = false;
-    let mut pos = 1.0f64;
-    let mut underrun_fader = UnderrunFader::default();
+    let mut remote_s0 = (0.0f32, 0.0f32);
+    let mut remote_s1 = (0.0f32, 0.0f32);
+    let mut remote_s0_available = false;
+    let mut remote_s1_available = false;
+    let mut remote_pos = 1.0f64;
+    let mut remote_underrun_fader = UnderrunFader::default();
+    let mut monitor_playout = MonitorPlayout::default();
     let fill_counters = counters.clone();
     let fill_progress = progress.clone();
     let fill_timing = aec_timing.clone();
@@ -1960,36 +2186,51 @@ pub fn spawn_cpal_playback(
         fill_counters
             .playback_callbacks
             .fetch_add(1, Ordering::Relaxed);
-        let err = (cb_ring.len() as f64 - target_pairs) / target_pairs;
-        let eff_ratio = ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004));
+        let queued_pairs = cb_ring.len();
+        let eff_ratio = if queued_pairs == 0 {
+            ratio
+        } else {
+            let err = (queued_pairs as f64 - target_pairs) / target_pairs;
+            ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004))
+        };
         let mut requested_pairs = 0u64;
         let mut consumed_pairs = 0u64;
         let mut underrun_pairs = 0u64;
         for f in 0..frames {
-            while pos >= 1.0 {
-                s0 = s1;
-                s0_available = s1_available;
+            while remote_pos >= 1.0 {
+                remote_s0 = remote_s1;
+                remote_s0_available = remote_s1_available;
                 requested_pairs += 1;
                 match cb_ring.pop_stereo() {
                     Some(pair) => {
-                        s1 = pair;
-                        s1_available = true;
+                        remote_s1 = pair;
+                        remote_s1_available = true;
                         consumed_pairs += 1;
                     }
                     None => {
-                        s1 = (0.0, 0.0);
-                        s1_available = false;
+                        remote_s1 = (0.0, 0.0);
+                        remote_s1_available = false;
+                        // Local monitoring is not a remote packet. Keep the remote underrun
+                        // counters honest even while the monitor is producing audible output.
                         underrun_pairs += 1;
                     }
                 }
-                pos -= 1.0;
+                remote_pos -= 1.0;
             }
-            let t = pos as f32;
-            let l = s0.0 + (s1.0 - s0.0) * t;
-            let r = s0.1 + (s1.1 - s0.1) * t;
-            let (l, r) = underrun_fader.process((l, r), s0_available || s1_available);
+            let remote_t = remote_pos as f32;
+            let remote_pair = (
+                remote_s0.0 + (remote_s1.0 - remote_s0.0) * remote_t,
+                remote_s0.1 + (remote_s1.1 - remote_s0.1) * remote_t,
+            );
+            let remote_pair = remote_underrun_fader
+                .process(remote_pair, remote_s0_available || remote_s1_available);
+            remote_pos += eff_ratio;
+
+            let monitor_pair = monitor_playout.render(&cb_monitor_ring, &monitor_state, ratio);
+            let monitor_gain = monitor_state.gain();
+            let l = (remote_pair.0 + monitor_pair.0 * monitor_gain).clamp(-1.0, 1.0);
+            let r = (remote_pair.1 + monitor_pair.1 * monitor_gain).clamp(-1.0, 1.0);
             write_out_frame(out, f, out_channels, l, r);
-            pos += eff_ratio;
         }
         fill_counters
             .playback_requested_pairs
@@ -2143,6 +2384,116 @@ pub fn spawn_cpal_playback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn stereo_test_pairs(count: usize) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(count * 2);
+        for index in 0..count {
+            let sample = (index + 1) as f32 / count.max(1) as f32;
+            samples.push(sample);
+            samples.push(sample);
+        }
+        samples
+    }
+
+    #[test]
+    fn monitor_gain_only_update_preserves_playout_generation() {
+        let state = MicrophoneMonitorState::default();
+        let resets = Cell::new(0);
+        let reset = || resets.set(resets.get() + 1);
+
+        assert_eq!(
+            state.configure(true, 48_000, 1.0, reset),
+            MicrophoneMonitorConfigChange::Playout
+        );
+        let generation = state.playout_generation();
+        assert_eq!(resets.get(), 1);
+
+        assert_eq!(
+            state.configure(true, 48_000, 0.5, reset),
+            MicrophoneMonitorConfigChange::GainOnly
+        );
+        assert_eq!(state.playout_generation(), generation);
+        assert_eq!(state.gain(), 0.5);
+        assert_eq!(resets.get(), 1);
+
+        assert_eq!(
+            state.configure(true, 48_000, 0.5, reset),
+            MicrophoneMonitorConfigChange::Unchanged
+        );
+        assert_eq!(state.playout_generation(), generation);
+        assert_eq!(resets.get(), 1);
+
+        assert_eq!(
+            state.configure(true, 24_000, 0.5, reset),
+            MicrophoneMonitorConfigChange::Playout
+        );
+        assert!(state.playout_generation() > generation);
+        assert_eq!(resets.get(), 2);
+    }
+
+    #[test]
+    fn monitor_delayed_playout_primes_then_drains_without_retaining_a_tail() {
+        let state = MicrophoneMonitorState::default();
+        let mut ring = PlaybackRing::new(16);
+        state.configure(true, 4, 1.0, || ring.discard_all());
+        let consumer = ring.consumer();
+        let mut playout = MonitorPlayout::default();
+
+        ring.push(&stereo_test_pairs(3));
+        let _ = playout.render(&consumer, &state, 1.0);
+        assert!(!playout.primed);
+        assert_eq!(consumer.len(), 3);
+
+        ring.push(&stereo_test_pairs(1));
+        let _ = playout.render(&consumer, &state, 1.0);
+        assert!(playout.primed);
+
+        for _ in 0..16 {
+            let _ = playout.render(&consumer, &state, 1.0);
+        }
+        assert_eq!(consumer.len(), 0);
+        assert!(!playout.primed);
+    }
+
+    #[test]
+    fn monitor_generation_reset_discards_and_reprimes_the_timeline() {
+        let state = MicrophoneMonitorState::default();
+        let mut ring = PlaybackRing::new(16);
+        state.configure(true, 4, 1.0, || ring.discard_all());
+        let consumer = ring.consumer();
+        let mut playout = MonitorPlayout::default();
+
+        ring.push(&stereo_test_pairs(4));
+        let _ = playout.render(&consumer, &state, 1.0);
+        assert!(playout.primed);
+        let generation = state.playout_generation();
+
+        state.reset_playout(|| ring.discard_all());
+        assert!(state.playout_generation() > generation);
+        ring.push(&stereo_test_pairs(3));
+        let _ = playout.render(&consumer, &state, 1.0);
+        assert!(!playout.primed);
+        assert_eq!(consumer.len(), 3);
+
+        ring.push(&stereo_test_pairs(1));
+        let _ = playout.render(&consumer, &state, 1.0);
+        assert!(playout.primed);
+    }
+
+    #[test]
+    fn monitor_clock_depth_correction_is_bounded_and_bidirectional() {
+        let nominal = 1.0;
+        let target = 48_000;
+        assert_eq!(monitor_effective_ratio(nominal, target, target), nominal);
+
+        let low = monitor_effective_ratio(nominal, 0, target);
+        let high = monitor_effective_ratio(nominal, target * 2, target);
+        assert!(low < nominal);
+        assert!(high > nominal);
+        assert!((low - (1.0 - MONITOR_MAX_RATE_ADJUSTMENT)).abs() < f64::EPSILON);
+        assert!((high - (1.0 + MONITOR_MAX_RATE_ADJUSTMENT)).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn explicit_device_selection_never_falls_back_to_default() {

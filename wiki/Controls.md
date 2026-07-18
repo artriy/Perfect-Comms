@@ -29,6 +29,8 @@ Mic and speaker volume range from 10% to 200%. Mic Sensitivity ranges from 0.25 
 - **Speaker** selects the voice playback device on Windows. **Default** follows the system output device.
 - Android playback follows the current Android audio route, so it does not show a separate Speaker selector.
 - Device rows show the full selected name and keep a saved device visible if it is temporarily unavailable.
+- **Hear Your Microphone** plays the selected microphone through your selected speaker or current Android output so you can check how you actually sound. Headphones are recommended to prevent feedback.
+- **Delayed Playback** adds a one-second delay to that microphone test, letting you speak first and listen back afterward. The test stops automatically when you leave the Devices tab or close Voice Settings.
 
 The guided setup also provides an optional live microphone meter, mic test, and output test.
 

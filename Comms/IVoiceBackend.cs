@@ -22,7 +22,7 @@ internal interface IVoiceBackend : IDisposable
 
     void SetMute(bool mute);
     void ToggleMute();
-    void SetLoopBack(bool loopBack);
+    void SetLoopBack(bool loopBack, bool delayed, float gain);
     void SetMasterVolume(float volume);
     void SetMicVolume(float volume);
     void SetNoiseGate(float noiseGateThreshold, float vadThreshold);

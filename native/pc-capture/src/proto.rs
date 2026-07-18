@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 12;
+pub const PROTO_VERSION: u32 = 13;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -507,6 +507,11 @@ impl PlaybackRingInner {
             }
         }
     }
+
+    fn discard_all(&self) {
+        let written = self.write_sequence.load(Ordering::Acquire);
+        self.read_sequence.store(written, Ordering::Release);
+    }
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -568,6 +573,10 @@ impl PlaybackRing {
         self.inner.dropped.load(Ordering::Relaxed)
     }
 
+    pub fn discard_all(&self) {
+        self.inner.discard_all();
+    }
+
     pub fn consumer(&self) -> PlaybackConsumer {
         PlaybackConsumer {
             inner: self.inner.clone(),
@@ -619,6 +628,12 @@ pub enum InboundOp {
     SetDiagnostics { enabled: bool },
     #[serde(rename = "set-synthetic")]
     SetSynthetic { enabled: bool },
+    #[serde(rename = "set-monitor")]
+    SetMonitor {
+        enabled: bool,
+        delay_ms: u32,
+        gain: f32,
+    },
     #[serde(rename = "set-input")]
     SetInput {
         gain: f32,
@@ -1043,7 +1058,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 12);
+        assert_eq!(PROTO_VERSION, 13);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -1096,6 +1111,20 @@ mod tests {
         match parse_inbound(r#"{"op":"set-synthetic","enabled":true}"#).unwrap() {
             InboundOp::SetSynthetic { enabled } => assert!(enabled),
             other => panic!("expected set-synthetic, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"set-monitor","enabled":true,"delay_ms":1000,"gain":0.75}"#)
+            .unwrap()
+        {
+            InboundOp::SetMonitor {
+                enabled,
+                delay_ms,
+                gain,
+            } => {
+                assert!(enabled);
+                assert_eq!(delay_ms, 1000);
+                assert_eq!(gain, 0.75);
+            }
+            other => panic!("expected set-monitor, got {other:?}"),
         }
         match parse_inbound(
             r#"{"op":"set-input","gain":1.25,"vad_threshold":0.006,"noise_gate_threshold":0.003}"#,
@@ -1726,7 +1755,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 12);
+        assert_eq!(v["proto"], 13);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

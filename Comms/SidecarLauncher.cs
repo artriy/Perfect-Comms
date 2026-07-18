@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -45,8 +46,20 @@ internal readonly record struct WineLaunchControlPaths(
     string ExitPath,
     string CancellationPath);
 
+internal readonly record struct NativeHelperProtocolProbeResult(
+    bool Started,
+    bool TimedOut,
+    int ExitCode,
+    string StandardOutput,
+    bool StandardOutputTruncated,
+    string Diagnostic);
+
 internal static class SidecarLauncher
 {
+    internal const int NativeHelperProtocolProbeTimeoutMs = 2_000;
+    private const string NativeHelperProtocolArgument = "--protocol-version";
+    private const int NativeHelperProtocolOutputLimit = 64;
+    private const int NativeHelperProtocolDiagnosticLimit = 256;
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
     internal const int WineHelperExitWaitMs = 4_500;
     internal const string WinePrivateDirectoryScript = """
@@ -256,6 +269,15 @@ internal static class SidecarLauncher
         """;
     private static readonly object BundleVersionGate = new();
     private static readonly Dictionary<string, string> BundleVersions = new(StringComparer.Ordinal);
+    private static readonly object NativeHelperProtocolGate = new();
+    private static readonly Dictionary<string, NativeHelperIdentity> ValidatedNativeHelpers = new(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
+    private readonly record struct NativeHelperIdentity(
+        long Length,
+        long CreationTimeUtcTicks,
+        long LastWriteTimeUtcTicks);
 
     public static string TargetTriple()
         => TargetTripleFor(
@@ -1286,6 +1308,298 @@ internal static class SidecarLauncher
             throw new ArgumentException("Value cannot be null or whitespace.", parameterName);
     }
 
+    private static bool TryValidateNativeHelperProtocol(string helperPath, out string failureReason)
+        => TryValidateNativeHelperProtocol(
+            helperPath,
+            RunNativeHelperProtocolProbe,
+            out failureReason);
+
+    internal static bool TryValidateNativeHelperProtocol(
+        string helperPath,
+        Func<string, int, NativeHelperProtocolProbeResult> probe,
+        out string failureReason)
+    {
+        if (probe == null) throw new ArgumentNullException(nameof(probe));
+        failureReason = string.Empty;
+        if (!TryGetNativeHelperIdentity(
+                helperPath,
+                out var normalizedPath,
+                out var identity,
+                out failureReason))
+        {
+            LogNativeHelperProtocolFailure(helperPath, failureReason);
+            return false;
+        }
+
+        lock (NativeHelperProtocolGate)
+        {
+            if (!TryGetNativeHelperIdentity(
+                    normalizedPath,
+                    out _,
+                    out identity,
+                    out failureReason))
+            {
+                ValidatedNativeHelpers.Remove(normalizedPath);
+                LogNativeHelperProtocolFailure(normalizedPath, failureReason);
+                return false;
+            }
+            if (ValidatedNativeHelpers.TryGetValue(normalizedPath, out var cached))
+            {
+                if (cached == identity)
+                {
+                    VoiceDiagnostics.Log(
+                        "sidecar.launch",
+                        $"event=protocol-preflight-cache-hit expected={SidecarVoiceClient.Proto} helper={SafeDiagnosticField(normalizedPath, 512)}");
+                    return true;
+                }
+                ValidatedNativeHelpers.Remove(normalizedPath);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            NativeHelperProtocolProbeResult result;
+            try
+            {
+                result = probe(normalizedPath, NativeHelperProtocolProbeTimeoutMs);
+            }
+            catch (Exception ex)
+            {
+                result = new NativeHelperProtocolProbeResult(
+                    false, false, -1, string.Empty, false, ExceptionDiagnostic(ex));
+            }
+            if (!TryAcceptNativeHelperProtocolProbe(result, out failureReason))
+            {
+                LogNativeHelperProtocolFailure(
+                    normalizedPath,
+                    failureReason,
+                    stopwatch.ElapsedMilliseconds);
+                return false;
+            }
+
+            if (!TryGetNativeHelperIdentity(
+                    normalizedPath,
+                    out _,
+                    out var validatedIdentity,
+                    out failureReason) ||
+                validatedIdentity != identity)
+            {
+                failureReason =
+                    "native helper protocol preflight failed: helper changed while it was being validated";
+                LogNativeHelperProtocolFailure(
+                    normalizedPath,
+                    failureReason,
+                    stopwatch.ElapsedMilliseconds);
+                return false;
+            }
+
+            ValidatedNativeHelpers[normalizedPath] = validatedIdentity;
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=protocol-preflight-complete expected={SidecarVoiceClient.Proto} actual={SidecarVoiceClient.Proto} elapsedMs={stopwatch.ElapsedMilliseconds} helper={SafeDiagnosticField(normalizedPath, 512)}");
+            return true;
+        }
+    }
+
+    private static bool TryAcceptNativeHelperProtocolProbe(
+        NativeHelperProtocolProbeResult result,
+        out string failureReason)
+    {
+        failureReason = string.Empty;
+        var diagnostic = SanitizeStderrForDiagnostics(result.Diagnostic, string.Empty);
+        if (!result.Started)
+        {
+            failureReason = diagnostic.Length == 0
+                ? "native helper protocol preflight failed to start"
+                : $"native helper protocol preflight failed to start: {diagnostic}";
+            return false;
+        }
+        if (result.TimedOut)
+        {
+            failureReason =
+                $"native helper protocol preflight timed out after {NativeHelperProtocolProbeTimeoutMs} ms";
+            return false;
+        }
+        if (result.ExitCode != 0)
+        {
+            failureReason = diagnostic.Length == 0
+                ? $"native helper protocol preflight failed with exit code {result.ExitCode}"
+                : $"native helper protocol preflight failed with exit code {result.ExitCode}: {diagnostic}";
+            return false;
+        }
+        if (result.StandardOutputTruncated)
+        {
+            failureReason =
+                $"native helper protocol preflight failed: {NativeHelperProtocolArgument} output exceeded {NativeHelperProtocolOutputLimit} characters";
+            return false;
+        }
+
+        var actual = result.StandardOutput.Trim();
+        var expected = SidecarVoiceClient.Proto.ToString(
+            System.Globalization.CultureInfo.InvariantCulture);
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+        {
+            var safeActual = SanitizeStderrForDiagnostics(actual, string.Empty);
+            if (safeActual.Length == 0) safeActual = "<empty>";
+            failureReason =
+                $"native helper protocol mismatch: expected {expected}, got {safeActual}";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryGetNativeHelperIdentity(
+        string helperPath,
+        out string normalizedPath,
+        out NativeHelperIdentity identity,
+        out string failureReason)
+    {
+        normalizedPath = helperPath;
+        identity = default;
+        failureReason = string.Empty;
+        try
+        {
+            normalizedPath = Path.GetFullPath(helperPath);
+            var info = new FileInfo(normalizedPath);
+            info.Refresh();
+            if (!info.Exists)
+            {
+                failureReason =
+                    "native helper protocol preflight failed: helper file is unavailable";
+                return false;
+            }
+            identity = new NativeHelperIdentity(
+                info.Length,
+                info.CreationTimeUtc.Ticks,
+                info.LastWriteTimeUtc.Ticks);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            failureReason =
+                $"native helper protocol preflight could not inspect helper: {ExceptionDiagnostic(ex)}";
+            return false;
+        }
+    }
+
+    private static NativeHelperProtocolProbeResult RunNativeHelperProtocolProbe(
+        string helperPath,
+        int timeoutMs)
+    {
+        var standardOutput = new BoundedProtocolProbeCapture(NativeHelperProtocolOutputLimit);
+        var standardError = new BoundedProtocolProbeCapture(NativeHelperProtocolDiagnosticLimit);
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(helperPath)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            },
+        };
+        process.StartInfo.ArgumentList.Add(NativeHelperProtocolArgument);
+        var started = false;
+        try
+        {
+            if (!process.Start())
+            {
+                return new NativeHelperProtocolProbeResult(
+                    false,
+                    false,
+                    -1,
+                    string.Empty,
+                    false,
+                    "Process.Start returned false");
+            }
+            started = true;
+            var stdoutDrain = DrainProtocolProbeStream(process.StandardOutput, standardOutput);
+            var stderrDrain = DrainProtocolProbeStream(process.StandardError, standardError);
+            var timedOut = !process.WaitForExit(timeoutMs);
+            if (timedOut)
+                KillQuietly(process);
+            else
+                process.WaitForExit();
+            CompleteProtocolProbeDrain(process, stdoutDrain, stderrDrain);
+
+            var exitCode = -1;
+            try { if (!timedOut) exitCode = process.ExitCode; } catch { }
+            var stdout = standardOutput.Snapshot();
+            var stderr = standardError.Snapshot();
+            return new NativeHelperProtocolProbeResult(
+                true,
+                timedOut,
+                exitCode,
+                stdout.Text,
+                stdout.Truncated,
+                SanitizeStderrForDiagnostics(stderr.Text, string.Empty));
+        }
+        catch (Exception ex)
+        {
+            var stdout = standardOutput.Snapshot();
+            return new NativeHelperProtocolProbeResult(
+                started,
+                false,
+                -1,
+                stdout.Text,
+                stdout.Truncated,
+                ExceptionDiagnostic(ex));
+        }
+        finally
+        {
+            if (started && !ProcessExited(process))
+                KillQuietly(process);
+        }
+    }
+
+    private static async Task DrainProtocolProbeStream(
+        StreamReader reader,
+        BoundedProtocolProbeCapture capture)
+    {
+        var buffer = new char[128];
+        try
+        {
+            while (true)
+            {
+                var read = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                if (read == 0) return;
+                capture.Append(buffer, read);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private static void CompleteProtocolProbeDrain(
+        Process process,
+        Task stdoutDrain,
+        Task stderrDrain)
+    {
+        var drains = new[] { stdoutDrain, stderrDrain };
+        try
+        {
+            if (Task.WaitAll(drains, 500)) return;
+        }
+        catch
+        {
+        }
+        try { process.StandardOutput.Close(); } catch { }
+        try { process.StandardError.Close(); } catch { }
+        try { Task.WaitAll(drains, 100); } catch { }
+    }
+
+    private static void LogNativeHelperProtocolFailure(
+        string helperPath,
+        string failureReason,
+        long elapsedMs = 0)
+    {
+        VoiceDiagnostics.Log(
+            "sidecar.launch",
+            $"event=protocol-preflight-failed expected={SidecarVoiceClient.Proto} elapsedMs={elapsedMs} helper={SafeDiagnosticField(helperPath, 512)} reason={SafeDiagnosticField(failureReason, 320)}");
+    }
+
     public static SidecarDeviceEnumerationResult EnumerateDevices()
     {
         try
@@ -1323,6 +1637,8 @@ internal static class SidecarLauncher
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-prepare wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
+            if (!wine && !TryValidateNativeHelperProtocol(helperPath, out _))
+                return SidecarDeviceEnumerationResult.Failure;
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
             paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
             outPath = paths.HandshakePath;
@@ -1499,6 +1815,12 @@ internal static class SidecarLauncher
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=prepare wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
+            if (!wine &&
+                !TryValidateNativeHelperProtocol(helperPath, out var protocolFailure))
+            {
+                result.FailureReason = protocolFailure;
+                return result;
+            }
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
             paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
             result.HandshakePath = paths.HandshakePath;
@@ -1747,6 +2069,39 @@ internal static class SidecarLauncher
         }
         if (value.Length > maxChars) builder.Append("...");
         return builder.ToString();
+    }
+
+    private sealed class BoundedProtocolProbeCapture
+    {
+        private readonly object _gate = new();
+        private readonly StringBuilder _text;
+        private readonly int _limit;
+        private bool _truncated;
+
+        public BoundedProtocolProbeCapture(int limit)
+        {
+            _limit = limit;
+            _text = new StringBuilder(limit);
+        }
+
+        public void Append(char[] buffer, int count)
+        {
+            lock (_gate)
+            {
+                var remaining = _limit - _text.Length;
+                var accepted = Math.Min(Math.Max(remaining, 0), count);
+                if (accepted > 0)
+                    _text.Append(buffer, 0, accepted);
+                if (accepted != count)
+                    _truncated = true;
+            }
+        }
+
+        public (string Text, bool Truncated) Snapshot()
+        {
+            lock (_gate)
+                return (_text.ToString(), _truncated);
+        }
     }
 
     private static int SafeProcessId(Process process)

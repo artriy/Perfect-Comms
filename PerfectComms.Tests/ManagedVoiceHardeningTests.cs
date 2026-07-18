@@ -315,8 +315,24 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(12, SidecarVoiceClient.Proto);
+        Assert.Equal(13, SidecarVoiceClient.Proto);
         Assert.Equal(3, SidecarProtocol.MobileAbi);
+    }
+
+    [Theory]
+    [InlineData(true, false, 0)]
+    [InlineData(true, true, 1000)]
+    [InlineData(false, true, 0)]
+    public void NativeMicrophoneMonitorUsesBoundedExplicitContract(
+        bool enabled,
+        bool delayed,
+        int expectedDelayMs)
+    {
+        var root = DecodeControl(SidecarProtocol.SetMonitorFrame(enabled, delayed, 99f));
+        Assert.Equal("set-monitor", root.GetProperty("op").GetString());
+        Assert.Equal(enabled, root.GetProperty("enabled").GetBoolean());
+        Assert.Equal(expectedDelayMs, root.GetProperty("delay_ms").GetInt32());
+        Assert.Equal(2f, root.GetProperty("gain").GetSingle());
     }
 
     [Theory]

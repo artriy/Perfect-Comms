@@ -15,7 +15,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 12 adds coordinated logical ICE restart for network-interface changes. Protocol 11 adds
+    // Protocol 13 adds local microphone monitoring with optional delayed playback. Protocol 12 adds
+    // coordinated logical ICE restart for network-interface changes. Protocol 11 adds
     // selectable high/very-high WebRTC noise suppression. Protocol 10 sends
     // stable audio device IDs separately from display names.
     // Protocol 9 adds the speech-safe native noise-gate threshold and complete receive/path
@@ -23,7 +24,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 12;
+    public const int Proto = 13;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -248,6 +249,14 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public void SetSynthetic(bool enabled)
     {
         SendCommand("set-synthetic", () => SidecarProtocol.SetSyntheticFrame(enabled), $"enabled={enabled}");
+    }
+
+    public void SetMonitor(bool enabled, bool delayed, float gain)
+    {
+        SendCommand(
+            "set-monitor",
+            () => SidecarProtocol.SetMonitorFrame(enabled, delayed, gain),
+            $"enabled={enabled} delayed={delayed} gain={FormatFloat(gain)}");
     }
 
     public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)

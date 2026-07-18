@@ -51,6 +51,7 @@ internal interface ISidecarVoiceClient : IDisposable
         IEnumerable<IceServer>? iceServers);
     void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf);
     void SetSynthetic(bool enabled);
+    void SetMonitor(bool enabled, bool delayed, float gain);
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
     void SelectMicDevice(string deviceId);
@@ -211,6 +212,8 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client => client.SetDsp(aec, agc, ns, nsVeryHigh, hpf));
     public void SetSynthetic(bool enabled)
         => _host.Use(this, client => client.SetSynthetic(enabled));
+    public void SetMonitor(bool enabled, bool delayed, float gain)
+        => _host.Use(this, client => client.SetMonitor(enabled, delayed, gain));
     public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)
         => _host.Use(this, client => client.SetInput(gain, vadThreshold, noiseGateThreshold));
     public void SetMicActive(bool active)
@@ -432,6 +435,7 @@ internal sealed class SidecarVoiceHostCore
     {
         try { client.SetMicActive(false); } catch { }
         try { client.SetSynthetic(false); } catch { }
+        try { client.SetMonitor(false, false, 1f); } catch { }
         try
         {
             client.SendGameState(

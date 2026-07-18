@@ -11,7 +11,7 @@ Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled
 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the WebRTC
 (webrtc-rs) peer transport with proximity mixing, so mic, peer audio, and
 playback all live in this helper. Android uses the same DRED-capable codec while
-intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 12.
+intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 13.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -41,7 +41,7 @@ Frame: `[u8 type][u32 len little-endian][payload]`.
   the same bounded playback path used by the live peer mix.
 
 Control ops (mod->helper): `hello`, `select-device`, `select-output-device`, `start`, `stop`,
-`ping`, `set-dsp`, `set-diagnostics`, `set-input`, `set-synthetic`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
+`ping`, `set-dsp`, `set-diagnostics`, `set-input`, `set-synthetic`, `set-monitor`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
 `add-ice-candidate`, `game-state`.
 Control ops (helper->mod): `ready`, `devices`, `outputDevices`, `level`, `error`, `pong`,
 `local-sdp`, `local-candidate`, `peer-state`, `peer-levels`, `media-state`, `stats`.
@@ -54,6 +54,9 @@ off structural health counters. `level` and batched
 decoded pre-route `peer-levels` telemetry are emitted every 100 ms through bounded latest-wins
 mailboxes, so a slow UI/IPC consumer cannot stall capture or playout. `set-synthetic` switches
 between the selected live microphone and the diagnostic tone without restarting the helper.
+`set-monitor` mixes the processed local microphone into the selected output with a bounded gain
+and optional delayed playout. Monitor timing is clock-corrected independently from remote voice,
+and capture-generation changes discard and re-prime its local-only timeline.
 
 ## Test
 

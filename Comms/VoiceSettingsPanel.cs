@@ -72,6 +72,8 @@ public static class VoiceSettingsPanel
     private static bool _livePreviewUnavailable;
     private static bool _lastLivePreviewEnabled;
     private static float _livePreviewProgress;
+    private static FirstRunAudioPreview? _microphoneTest;
+    private static bool _microphoneTestDelayed;
     private static int _deferredShowFrame = -1;
 
     private static bool ShellAlive => _shell != null && _shell.Root != null;
@@ -148,6 +150,8 @@ public static class VoiceSettingsPanel
                 DisableLivePreview();
                 ApplyPanelPresentation();
             }
+            if (MicrophoneTestLifecyclePolicy.ShouldDisableForCategory(CategoryOrder[selectedIndex]))
+                DisableMicrophoneTest();
             _expandedMixSettings = MixSettingsExpansion.None;
             _rebuildRequested = false;
             _revealExpandedMix = false;
@@ -215,6 +219,7 @@ public static class VoiceSettingsPanel
         _animT = 0f;
         _activeRow = null;
         DisableLivePreview();
+        DisableMicrophoneTest();
         if (_shell != null && _shell.Root != null)
         {
             _shell.Group.alpha = 0f;
@@ -241,6 +246,9 @@ public static class VoiceSettingsPanel
         CancelScrollbarDrag();
         _shown = false;
         DisableLivePreview();
+        DisableMicrophoneTest();
+        try { _microphoneTest?.Dispose(); } catch { }
+        _microphoneTest = null;
         if (_livePreview != null)
         {
             _livePreview.Dispose();
@@ -268,6 +276,7 @@ public static class VoiceSettingsPanel
         _livePreviewUnavailable = false;
         _livePreviewProgress = 0f;
         _lastLivePreviewEnabled = false;
+        _microphoneTestDelayed = false;
     }
 
     private static void DisableLivePreview()
@@ -279,6 +288,16 @@ public static class VoiceSettingsPanel
         _lastLivePreviewEnabled = false;
         _livePreviewProgress = 0f;
         _livePreview?.Suspend();
+    }
+
+    private static void DisableMicrophoneTest()
+    {
+        try { _microphoneTest?.StopMicrophone(); }
+        catch (Exception ex)
+        {
+            global::VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning(
+                "[PC-UI] Could not stop microphone test: " + ex.Message);
+        }
     }
 
     private static void RebuildRows(bool resetScroll)
@@ -526,7 +545,7 @@ public static class VoiceSettingsPanel
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
                 () => (int)s.MicrophoneDeviceIndex.Value,
-                i => s.MicrophoneDeviceIndex.Value = (MicDeviceEnum)i,
+                i => SetMicrophoneDeviceIndex(s, i),
                 () => VoiceChatLocalSettings.MicDeviceNames.Length,
                 i => DeviceName(VoiceChatLocalSettings.MicDeviceNames, i),
                 fullWidthValue: true)
@@ -542,7 +561,7 @@ public static class VoiceSettingsPanel
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
                 () => (int)s.SpeakerDeviceIndex.Value,
-                i => s.SpeakerDeviceIndex.Value = (SpkDeviceEnum)i,
+                i => SetSpeakerDeviceIndex(s, i),
                 () => VoiceChatLocalSettings.SpkDeviceNames.Length,
                 i => DeviceName(VoiceChatLocalSettings.SpkDeviceNames, i),
                 fullWidthValue: true)
@@ -550,6 +569,78 @@ public static class VoiceSettingsPanel
                     SettingHelp(s.SpeakerDeviceIndex))
         });
 #endif
+
+        Section(defs, "MICROPHONE TEST");
+        defs.Add(new Entry
+        {
+            Key = "Microphone Test",
+            Visible = Always,
+            Build = (pane, paneW, y) => new VoiceUiKit.ActionRow(ToggleMicrophoneTest)
+                .Build(
+                    pane,
+                    "Hear Your Microphone",
+                    _microphoneTest?.IsMicrophoneTestActive == true ? "Stop Test" : "Start Test",
+                    paneW,
+                    y,
+                    RowH,
+                    "Plays the selected microphone through the selected speaker so you can check how it sounds. Headphones are recommended to prevent feedback.")
+        });
+        Toggle(
+            defs,
+            "Delayed Playback",
+            () => _microphoneTestDelayed,
+            SetMicrophoneTestDelayed,
+            "Adds a one-second delay, making it easier to speak first and then listen to the captured result.");
+    }
+
+    private static void SetMicrophoneDeviceIndex(VoiceChatLocalSettings settings, int index)
+    {
+        bool restart = _microphoneTest?.IsMicrophoneTestActive == true;
+        if (restart) DisableMicrophoneTest();
+        settings.MicrophoneDeviceIndex.Value = (MicDeviceEnum)index;
+        if (restart) StartMicrophoneTest();
+    }
+
+#if WINDOWS
+    private static void SetSpeakerDeviceIndex(VoiceChatLocalSettings settings, int index)
+    {
+        bool restart = _microphoneTest?.IsMicrophoneTestActive == true;
+        if (restart) DisableMicrophoneTest();
+        settings.SpeakerDeviceIndex.Value = (SpkDeviceEnum)index;
+        if (restart) StartMicrophoneTest();
+    }
+#endif
+
+    private static void ToggleMicrophoneTest()
+    {
+        if (_microphoneTest?.IsMicrophoneTestActive == true)
+            DisableMicrophoneTest();
+        else
+            StartMicrophoneTest();
+        _rebuildRequested = true;
+    }
+
+    private static void StartMicrophoneTest()
+    {
+        var settings = VoiceSettings.Instance;
+        if (settings == null) return;
+        _microphoneTest ??= new FirstRunAudioPreview();
+        var draft = FirstRunSetupDraft.CaptureExisting(settings);
+        _microphoneTest.StartMicrophone(
+            draft,
+            monitorPlayback: true,
+            delayedPlayback: _microphoneTestDelayed);
+        if (!_microphoneTest.IsMicrophoneTestActive)
+            VoiceChatHudState.ShowToastThreadSafe(_microphoneTest.MicrophoneStatus);
+    }
+
+    private static void SetMicrophoneTestDelayed(bool delayed)
+    {
+        if (_microphoneTestDelayed == delayed) return;
+        bool restart = _microphoneTest?.IsMicrophoneTestActive == true;
+        if (restart) DisableMicrophoneTest();
+        _microphoneTestDelayed = delayed;
+        if (restart) StartMicrophoneTest();
     }
 
     private static string DeviceName(string[] names, int i)
@@ -761,6 +852,7 @@ public static class VoiceSettingsPanel
         }
 
         float dt = Mathf.Max(0f, Time.unscaledDeltaTime);
+        _microphoneTest?.Tick();
         UpdateLivePreview(dt);
         if (_animT < 1f)
             _animT = Mathf.Min(1f, _animT + dt / 0.22f);

@@ -1,6 +1,6 @@
 use crate::audio::{
     monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, AecTiming,
-    PlaybackProgress, ToneSource,
+    MicrophoneMonitorConfigChange, MicrophoneMonitorState, PlaybackProgress, ToneSource,
 };
 use crate::codec::{
     decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
@@ -43,6 +43,8 @@ const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_millis(750);
 const ENCODER_PRIVACY_EPOCH_TIMEOUT: Duration = Duration::from_secs(2);
 const PLAYBACK_WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
 const CRITICAL_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MONITOR_RING_CAPACITY_PAIRS: usize = proto::SAMPLE_RATE as usize * 2;
+const MAX_MONITOR_DELAY_MS: u32 = 1500;
 
 fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
@@ -1248,11 +1250,14 @@ fn reap_finished_playback_worker(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_playback(
     out_thread: &Mutex<Option<std::thread::JoinHandle<()>>>,
     out_selected: &Mutex<Option<String>>,
     out_stop: &Arc<AtomicBool>,
     playback: &Arc<Mutex<PlaybackRing>>,
+    monitor_playback: &Arc<Mutex<PlaybackRing>>,
+    monitor_state: &Arc<MicrophoneMonitorState>,
     last_spawn_ns: &AtomicU64,
     counters: &Arc<NativeCounters>,
     supervision: &PlaybackSupervision,
@@ -1269,6 +1274,8 @@ fn ensure_playback(
         last_spawn_ns.store(now, Ordering::Release);
         let dev = out_selected.lock().unwrap().clone();
         let pb = playback.clone();
+        let monitor_pb = monitor_playback.clone();
+        let monitor = monitor_state.clone();
         let st = out_stop.clone();
         let stats = counters.clone();
         let playback_progress = supervision.progress.clone();
@@ -1299,6 +1306,8 @@ fn ensure_playback(
                 spawn_cpal_playback(
                     dev,
                     pb,
+                    monitor_pb,
+                    monitor,
                     st,
                     stats.clone(),
                     playback_progress,
@@ -1526,6 +1535,8 @@ fn run_authenticated_session(
     )));
 
     let playback = Arc::new(Mutex::new(PlaybackRing::new(8 * proto::AUDIO_OUT_FRAMES)));
+    let monitor_playback = Arc::new(Mutex::new(PlaybackRing::new(MONITOR_RING_CAPACITY_PAIRS)));
+    let monitor_state = Arc::new(MicrophoneMonitorState::default());
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
@@ -1643,6 +1654,8 @@ fn run_authenticated_session(
     let writer_capture_diagnostics = media_diagnostics.capture.clone();
     let writer_privacy = encoder_privacy.clone();
     let writer_transmit_enabled = capture_transmit_enabled.clone();
+    let writer_monitor_playback = monitor_playback.clone();
+    let writer_monitor_state = monitor_state.clone();
     let writer_handle = spawn_critical_worker("encoder", session_supervisor.clone(), move || {
         let mut encoder = encoder;
         let mut level_cadence = LevelCadence::new(Instant::now());
@@ -1651,6 +1664,7 @@ fn run_authenticated_session(
         let mut noise_gate = NoiseGate::default();
         let mut applied_encoder_policy_generation = 0u64;
         let mut active_encoder_epoch = 0u64;
+        let mut monitor_stereo = vec![0.0f32; proto::AUDIO_OUT_SAMPLES];
         let mut frame = AudioFrame {
             encoder_epoch: 0,
             capture_generation: 0,
@@ -1684,7 +1698,9 @@ fn run_authenticated_session(
             }
             let dropped = writer_ring.dropped();
             if writer_ring.pop_into(&mut frame) {
-                if !writer_transmit_enabled.load(Ordering::Acquire) {
+                let transmit_enabled = writer_transmit_enabled.load(Ordering::Acquire);
+                let monitor_enabled = writer_monitor_state.enabled();
+                if !transmit_enabled && !monitor_enabled {
                     continue;
                 }
                 let f = &mut frame;
@@ -1709,9 +1725,15 @@ fn run_authenticated_session(
                 if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.pre_dsp.record(&f.samples);
                 }
-                let mut dsp = writer_dsp.lock().unwrap();
                 let capture_stream = (f.capture_generation, f.capture_open_attempt);
-                if last_capture_stream != Some(capture_stream) {
+                let capture_stream_changed = last_capture_stream != Some(capture_stream);
+                if capture_stream_changed && writer_monitor_state.enabled() {
+                    writer_monitor_state.reset_playout(|| {
+                        writer_monitor_playback.lock().unwrap().discard_all();
+                    });
+                }
+                let mut dsp = writer_dsp.lock().unwrap();
+                if capture_stream_changed {
                     dsp.begin_capture_generation();
                     noise_gate.reset();
                     last_capture_stream = Some(capture_stream);
@@ -1755,6 +1777,26 @@ fn run_authenticated_session(
                 ) {
                     continue;
                 }
+                if monitor_enabled {
+                    for (index, sample) in f.samples.iter().copied().enumerate() {
+                        monitor_stereo[index * 2] = sample;
+                        monitor_stereo[index * 2 + 1] = sample;
+                    }
+                    writer_monitor_playback
+                        .lock()
+                        .unwrap()
+                        .push(&monitor_stereo);
+                }
+                if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
+                    writer_telemetry.publish_local(window_peak, window_peak >= input.vad_threshold);
+                    if dropped != last_dropped {
+                        eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
+                        last_dropped = dropped;
+                    }
+                }
+                if !transmit_enabled {
+                    continue;
+                }
                 let policy = writer_rtc.encoder_policy_snapshot();
                 if policy.generation != applied_encoder_policy_generation {
                     if let Err(error) =
@@ -1787,13 +1829,6 @@ fn run_authenticated_session(
                     eprintln!("pc-capture: Opus encoder produced no packet for a valid frame");
                     return;
                 }
-                if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
-                    writer_telemetry.publish_local(window_peak, window_peak >= input.vad_threshold);
-                    if dropped != last_dropped {
-                        eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
-                        last_dropped = dropped;
-                    }
-                }
             } else {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -1810,6 +1845,8 @@ fn run_authenticated_session(
     let drain_rtc = rtc.clone();
     let drain_stop = rtc_stop.clone();
     let drain_playback = playback.clone();
+    let drain_monitor_playback = monitor_playback.clone();
+    let drain_monitor_state = monitor_state.clone();
     let drain_dsp = dsp.clone();
     let drain_gs = game_state.clone();
     let drain_out_thread = out_thread.clone();
@@ -1982,6 +2019,8 @@ fn run_authenticated_session(
                         &drain_out_selected,
                         &drain_out_stop,
                         &drain_playback,
+                        &drain_monitor_playback,
+                        &drain_monitor_state,
                         &drain_out_spawn,
                         &drain_counters,
                         &drain_playback_supervision,
@@ -2055,6 +2094,8 @@ fn run_authenticated_session(
                     &out_selected,
                     &out_stop,
                     &playback,
+                    &monitor_playback,
+                    &monitor_state,
                     &out_spawn_ns,
                     &counters,
                     &playback_supervision,
@@ -2086,6 +2127,9 @@ fn run_authenticated_session(
                     InboundOp::SelectOutputDevice { id } => {
                         let requested_output = id.clone();
                         *out_selected.lock().unwrap() = Some(id);
+                        monitor_state.reset_playout(|| {
+                            monitor_playback.lock().unwrap().discard_all();
+                        });
 
                         if let Err(error) = stop_playback_bounded(
                             &out_thread,
@@ -2121,6 +2165,8 @@ fn run_authenticated_session(
                             &out_selected,
                             &out_stop,
                             &playback,
+                            &monitor_playback,
+                            &monitor_state,
                             &out_spawn_ns,
                             &counters,
                             &playback_supervision,
@@ -2154,9 +2200,13 @@ fn run_authenticated_session(
                     }
                     InboundOp::Stop => {
                         capture_transmit_enabled.store(false, Ordering::Release);
-                        if let Err(error) = producer.stop() {
-                            eprintln!("pc-capture: critical media failure: capture stop: {error}");
-                            break 'control;
+                        if !monitor_state.enabled() {
+                            if let Err(error) = producer.stop() {
+                                eprintln!(
+                                    "pc-capture: critical media failure: capture stop: {error}"
+                                );
+                                break 'control;
+                            }
                         }
                         let epoch = match encoder_privacy.request() {
                             Ok(epoch) => epoch,
@@ -2214,6 +2264,52 @@ fn run_authenticated_session(
                             break 'control;
                         }
                     }
+                    InboundOp::SetMonitor {
+                        enabled,
+                        delay_ms,
+                        gain,
+                    } => {
+                        let bounded_delay_ms = delay_ms.min(MAX_MONITOR_DELAY_MS);
+                        let delay_pairs =
+                            bounded_delay_ms as usize * proto::SAMPLE_RATE as usize / 1000;
+                        let bounded_gain = if gain.is_finite() {
+                            gain.clamp(0.0, 2.0)
+                        } else {
+                            1.0
+                        };
+                        let change =
+                            monitor_state.configure(enabled, delay_pairs, bounded_gain, || {
+                                monitor_playback.lock().unwrap().discard_all()
+                            });
+                        if change == MicrophoneMonitorConfigChange::Playout {
+                            if enabled {
+                                if let Err(error) = producer.start() {
+                                    eprintln!(
+                                    "pc-capture: critical media failure: monitor capture start: {error}"
+                                );
+                                    break 'control;
+                                }
+                                ensure_playback(
+                                    &out_thread,
+                                    &out_selected,
+                                    &out_stop,
+                                    &playback,
+                                    &monitor_playback,
+                                    &monitor_state,
+                                    &out_spawn_ns,
+                                    &counters,
+                                    &playback_supervision,
+                                );
+                            } else if !capture_transmit_enabled.load(Ordering::Acquire) {
+                                if let Err(error) = producer.stop() {
+                                    eprintln!(
+                                    "pc-capture: critical media failure: monitor capture stop: {error}"
+                                );
+                                    break 'control;
+                                }
+                            }
+                        }
+                    }
                     InboundOp::Ping => {
                         if write_frame(&conn, &encode_control(&pong_json(now_ns()))).is_err() {
                             break 'control;
@@ -2266,6 +2362,8 @@ fn run_authenticated_session(
                             &out_selected,
                             &out_stop,
                             &playback,
+                            &monitor_playback,
+                            &monitor_state,
                             &out_spawn_ns,
                             &counters,
                             &playback_supervision,
@@ -2848,13 +2946,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":12,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":13,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":12,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":13,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -2991,7 +3089,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":12,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":13,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -3047,7 +3145,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":12,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":13,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -3056,7 +3154,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 12);
+                assert_eq!(v["proto"], 13);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -3127,7 +3225,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":12,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":13,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -3201,7 +3299,7 @@ mod tests {
         let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         unauthorized
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":12,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":13,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
@@ -3220,7 +3318,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":12,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":13,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());
