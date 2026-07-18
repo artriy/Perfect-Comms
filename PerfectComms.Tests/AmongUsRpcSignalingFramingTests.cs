@@ -23,6 +23,8 @@ public sealed class AmongUsRpcSignalingFramingTests
     [InlineData((byte)4)]
     [InlineData((byte)5)]
     [InlineData((byte)6)]
+    [InlineData((byte)7)]
+    [InlineData((byte)8)]
     public void RoundTripsTwoKilobytePayload(byte typeByte)
     {
         var type = (SignalMsgType)typeByte;
@@ -37,13 +39,15 @@ public sealed class AmongUsRpcSignalingFramingTests
     }
 
     [Fact]
-    public void OfferAndAnswerAreGzipCompressedOnTheWire()
+    public void SdpOffersAnswersAndIceRestartsAreGzipCompressedOnTheWire()
     {
         var payload = SdpLikePayload(2048);
         var offerFrame = AmongUsRpcSignaling.Frame(SignalMsgType.Offer, payload);
+        var restartFrame = AmongUsRpcSignaling.Frame(SignalMsgType.IceRestartOffer, payload);
         var helloFrame = AmongUsRpcSignaling.Frame(SignalMsgType.Hello, payload);
 
         Xunit.Assert.True(offerFrame.Length < helloFrame.Length);
+        Xunit.Assert.True(restartFrame.Length < helloFrame.Length);
         Xunit.Assert.Equal(3 + 2048, helloFrame.Length);
     }
 

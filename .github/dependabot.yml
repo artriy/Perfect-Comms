@@ -1,0 +1,127 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/cloudflare/perfect-comms-lobbies"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      worker-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: "/native/pc-capture"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      pc-capture-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: "/native/pc-mobile"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      pc-mobile-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: "/native/apm-sys"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      apm-sys-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: "/native/rtc-interop"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      rtc-interop-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      managed-production-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      # These packages are coupled to the BepInEx/Among Us runtime contract and
+      # require deliberate compatibility testing rather than automated bumps.
+      - dependency-name: "BepInEx.*"
+      - dependency-name: "SocketIO*"
+      - dependency-name: "AmongUs.GameLibs.Steam"
+
+  - package-ecosystem: nuget
+    directory: "/PerfectComms.Tests"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      managed-test-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      - dependency-name: "AmongUs.GameLibs.Steam"
+
+  - package-ecosystem: nuget
+    directory: "/native/rtc-interop/sipsorcery-answer"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      rtc-interop-dependencies:
+        patterns:
+          - "*"

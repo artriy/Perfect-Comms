@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 10;
+pub const PROTO_VERSION: u32 = 12;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -612,6 +612,7 @@ pub enum InboundOp {
         aec: bool,
         agc: bool,
         ns: bool,
+        ns_very_high: bool,
         hpf: bool,
     },
     #[serde(rename = "set-diagnostics")]
@@ -643,6 +644,14 @@ pub enum InboundOp {
     },
     #[serde(rename = "add-ice-candidate")]
     AddIceCandidate { peer_id: String, candidate: String },
+    #[serde(rename = "restart-ice")]
+    RestartIce {
+        peer_id: String,
+        #[serde(default)]
+        relay_only: bool,
+        #[serde(default = "default_true")]
+        create_offer: bool,
+    },
     #[serde(rename = "set-ice-servers")]
     SetIceServers { servers: Vec<IceServer> },
     #[serde(rename = "game-state")]
@@ -763,12 +772,14 @@ pub struct NativeStatsSnapshot {
     pub dsp_requested_aec: bool,
     pub dsp_requested_agc: bool,
     pub dsp_requested_ns: bool,
+    pub dsp_requested_ns_very_high: bool,
     pub dsp_requested_hpf: bool,
     pub dsp_apm_loaded: bool,
     pub dsp_config_fully_applied: bool,
     pub dsp_applied_aec: bool,
     pub dsp_applied_agc: bool,
     pub dsp_applied_ns: bool,
+    pub dsp_applied_ns_very_high: bool,
     pub dsp_applied_hpf: bool,
     pub input_gain: f32,
     pub input_vad_threshold: f32,
@@ -1032,7 +1043,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 10);
+        assert_eq!(PROTO_VERSION, 12);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -1045,13 +1056,22 @@ mod tests {
 
     #[test]
     fn parse_set_dsp() {
-        let op = parse_inbound(r#"{"op":"set-dsp","aec":true,"agc":false,"ns":true,"hpf":false}"#)
-            .unwrap();
+        let op = parse_inbound(
+            r#"{"op":"set-dsp","aec":true,"agc":false,"ns":true,"ns_very_high":true,"hpf":false}"#,
+        )
+        .unwrap();
         match op {
-            InboundOp::SetDsp { aec, agc, ns, hpf } => {
+            InboundOp::SetDsp {
+                aec,
+                agc,
+                ns,
+                ns_very_high,
+                hpf,
+            } => {
                 assert!(aec);
                 assert!(!agc);
                 assert!(ns);
+                assert!(ns_very_high);
                 assert!(!hpf);
             }
             other => panic!("expected set-dsp, got {other:?}"),
@@ -1068,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v7_peer_and_capture_ops() {
+    fn parse_peer_and_capture_ops() {
         match parse_inbound(r#"{"op":"set-diagnostics","enabled":false}"#).unwrap() {
             InboundOp::SetDiagnostics { enabled } => assert!(!enabled),
             other => panic!("expected set-diagnostics, got {other:?}"),
@@ -1153,6 +1173,33 @@ mod tests {
                 assert_eq!(candidate, "c");
             }
             other => panic!("expected add-ice-candidate, got {other:?}"),
+        }
+        match parse_inbound(
+            r#"{"op":"restart-ice","peer_id":"p5","relay_only":true,"create_offer":false}"#,
+        )
+        .unwrap()
+        {
+            InboundOp::RestartIce {
+                peer_id,
+                relay_only,
+                create_offer,
+            } => {
+                assert_eq!(peer_id, "p5");
+                assert!(relay_only);
+                assert!(!create_offer);
+            }
+            other => panic!("expected restart-ice, got {other:?}"),
+        }
+        match parse_inbound(r#"{"op":"restart-ice","peer_id":"p6"}"#).unwrap() {
+            InboundOp::RestartIce {
+                relay_only,
+                create_offer,
+                ..
+            } => {
+                assert!(!relay_only);
+                assert!(create_offer);
+            }
+            other => panic!("expected restart-ice defaults, got {other:?}"),
         }
     }
 
@@ -1254,12 +1301,14 @@ mod tests {
             dsp_requested_aec: true,
             dsp_requested_agc: true,
             dsp_requested_ns: true,
+            dsp_requested_ns_very_high: true,
             dsp_requested_hpf: false,
             dsp_apm_loaded: true,
             dsp_config_fully_applied: false,
             dsp_applied_aec: true,
             dsp_applied_agc: false,
             dsp_applied_ns: true,
+            dsp_applied_ns_very_high: true,
             dsp_applied_hpf: false,
             input_gain: 1.25,
             input_vad_threshold: 0.006,
@@ -1307,12 +1356,14 @@ mod tests {
         assert_eq!(value["dsp_requested_aec"], true);
         assert_eq!(value["dsp_requested_agc"], true);
         assert_eq!(value["dsp_requested_ns"], true);
+        assert_eq!(value["dsp_requested_ns_very_high"], true);
         assert_eq!(value["dsp_requested_hpf"], false);
         assert_eq!(value["dsp_apm_loaded"], true);
         assert_eq!(value["dsp_config_fully_applied"], false);
         assert_eq!(value["dsp_applied_aec"], true);
         assert_eq!(value["dsp_applied_agc"], false);
         assert_eq!(value["dsp_applied_ns"], true);
+        assert_eq!(value["dsp_applied_ns_very_high"], true);
         assert_eq!(value["dsp_applied_hpf"], false);
         assert_eq!(value["input_gain"], 1.25);
         assert_eq!(value["input_vad_threshold"], 0.006);
@@ -1675,7 +1726,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 10);
+        assert_eq!(v["proto"], 12);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

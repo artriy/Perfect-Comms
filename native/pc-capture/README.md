@@ -7,11 +7,11 @@ Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
 control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
 stdin token auth) to the PerfectComms BepInEx mod.
 
-Also runs DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus
+Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus
 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the WebRTC
 (webrtc-rs) peer transport with proximity mixing, so mic, peer audio, and
 playback all live in this helper. Android uses the same DRED-capable codec while
-intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 10.
+intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 12.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally

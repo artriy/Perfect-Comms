@@ -129,6 +129,7 @@ internal sealed class FirstRunSetupDraft
     internal float MasterVolume;
     internal VoiceMicMode MicMode;
     internal bool NoiseSuppression;
+    internal bool StrongerNoiseSuppression;
     internal bool EchoCancellation;
     internal bool StartMuted;
     internal bool StartDeafened;
@@ -172,6 +173,7 @@ internal sealed class FirstRunSetupDraft
             MasterVolume = DefaultMasterVolume,
             MicMode = VoiceMicMode.OpenMic,
             NoiseSuppression = true,
+            StrongerNoiseSuppression = false,
             EchoCancellation = true,
             StartMuted = false,
             StartDeafened = false,
@@ -211,6 +213,7 @@ internal sealed class FirstRunSetupDraft
             MasterVolume = settings.MasterVolume.Value,
             MicMode = settings.MicMode.Value,
             NoiseSuppression = settings.NoiseSuppressionEnabled.Value,
+            StrongerNoiseSuppression = settings.StrongerNoiseSuppressionEnabled.Value,
             EchoCancellation = settings.EchoCancellationEnabled.Value,
             StartMuted = settings.StartMuted.Value,
             StartDeafened = settings.StartDeafened.Value,
@@ -304,6 +307,7 @@ internal sealed class FirstRunSetupDraft
         settings.MasterVolume.Value = MasterVolume;
         settings.MicMode.Value = MicMode;
         settings.NoiseSuppressionEnabled.Value = NoiseSuppression;
+        settings.StrongerNoiseSuppressionEnabled.Value = StrongerNoiseSuppression;
         settings.EchoCancellationEnabled.Value = EchoCancellation;
         settings.StartMuted.Value = StartMuted;
         settings.StartDeafened.Value = StartDeafened;

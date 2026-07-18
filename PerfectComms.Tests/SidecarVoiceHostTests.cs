@@ -25,7 +25,7 @@ public sealed class SidecarVoiceHostTests
         Assert.True(first.EnsureStarted("mic-a", "spk-a"));
         first.SetMicActive(true);
         first.SetSynthetic(true);
-        first.AddPeer("42", isOfferer: true, relayOnly: false, generation: 1);
+        first.AddPeer("42", isOfferer: true, generation: 1);
         first.SendGameState(false, 1f, new[]
         {
             new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0)
@@ -60,7 +60,7 @@ public sealed class SidecarVoiceHostTests
         var host = new SidecarVoiceHostCore(() => fake);
         var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
         Assert.True(lease.EnsureStarted("mic", "spk"));
-        Assert.True(lease.AddPeer("42", isOfferer: true, relayOnly: false, generation: 1));
+        Assert.True(lease.AddPeer("42", isOfferer: true, generation: 1));
         fake.RemoveFailuresRemaining = 1;
 
         Assert.False(lease.RemovePeer("42"));
@@ -236,15 +236,15 @@ public sealed class SidecarVoiceHostTests
 
         private int StartCountBacking;
 
-        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
-        public void SetDsp(bool aec, bool agc, bool ns, bool hpf) { }
+        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
+        public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
         public void SetSynthetic(bool enabled) => SyntheticCalls.Add(enabled);
         public void SetInput(float gain, float vadThreshold, float noiseGateThreshold) { }
         public void SetMicActive(bool active) => MicActiveCalls.Add(active);
         public void SelectMicDevice(string deviceId) { }
         public void SelectOutputDevice(string deviceId) { }
         public void SendOutputTestFrame(float[] interleavedStereo) { }
-        public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation) => true;
+        public bool AddPeer(string peerId, bool isOfferer, int generation) => true;
         public bool RemovePeer(string peerId)
         {
             RemovedPeers.Add(peerId);
@@ -252,6 +252,7 @@ public sealed class SidecarVoiceHostTests
             RemoveFailuresRemaining--;
             return false;
         }
+        public bool RestartIce(string peerId, bool createOffer) => true;
         public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => true;
         public bool AddIceCandidate(string peerId, string candidate) => true;
         public void SetIceServers(IEnumerable<IceServer> servers) { }

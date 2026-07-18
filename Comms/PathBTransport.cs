@@ -24,10 +24,13 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public bool AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
-        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation) == true;
+    public bool AddPeer(int clientId, bool isOfferer, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, generation) == true;
 
     public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
+
+    public bool RestartIce(int clientId, bool createOffer) =>
+        _voice()?.RestartIce(PeerId(clientId), createOffer) == true;
 
     public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
 
@@ -50,10 +53,13 @@ internal sealed class MobileVoiceTransport : IVoiceTransport
     public static bool TryParseClientId(string peerId, out int clientId)
         => int.TryParse(peerId, NumberStyles.Integer, CultureInfo.InvariantCulture, out clientId);
 
-    public bool AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation)
-        => _voice()?.AddPeer(PeerId(clientId), isOfferer, relayOnly, generation) == true;
+    public bool AddPeer(int clientId, bool isOfferer, int generation)
+        => _voice()?.AddPeer(PeerId(clientId), isOfferer, generation) == true;
 
     public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
+
+    public bool RestartIce(int clientId, bool createOffer) =>
+        _voice()?.RestartIce(PeerId(clientId), createOffer) == true;
 
     public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
 

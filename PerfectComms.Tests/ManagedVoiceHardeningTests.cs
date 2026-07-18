@@ -227,16 +227,35 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Theory]
-    [InlineData(true, false, false)]
-    [InlineData(false, true, false)]
-    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(false, false, false)]
     public void PendingTurnIntentAlwaysSchedulesAnotherCredentialAttempt(
         bool pendingPeers,
-        bool forceAwaiting,
-        bool refreshAwaiting)
+        bool refreshAwaiting,
+        bool expected)
     {
-        Assert.True(PerfectCommsVoiceBackend.ShouldRetryPendingTurnIntent(
-            pendingPeers, forceAwaiting, refreshAwaiting));
+        Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldRetryPendingTurnIntent(
+            pendingPeers, refreshAwaiting));
+    }
+
+    [Theory]
+    [InlineData(2_499, 1_000, 0, false)]
+    [InlineData(2_500, 1_000, 0, true)]
+    [InlineData(20_000, 1_000, 10_000, false)]
+    [InlineData(25_000, 1_000, 10_000, true)]
+    public void NetworkChangeIceRestartIsDebouncedAndRateLimited(
+        long nowMs,
+        long signaledAtMs,
+        long lastAppliedMs,
+        bool expected)
+    {
+        Assert.Equal(expected, PerfectCommsVoiceBackend.ShouldRestartIceForNetworkChange(
+            nowMs,
+            signaledAtMs,
+            lastAppliedMs,
+            debounceMs: 1_500,
+            cooldownMs: 15_000));
     }
 
     [Fact]
@@ -296,8 +315,29 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(10, SidecarVoiceClient.Proto);
+        Assert.Equal(12, SidecarVoiceClient.Proto);
         Assert.Equal(3, SidecarProtocol.MobileAbi);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public void NativeNoiseSuppressionContractSelectsVeryHighOnlyWhenEnabled(
+        bool enabled,
+        bool stronger,
+        bool expectedVeryHigh)
+    {
+        var root = DecodeControl(SidecarProtocol.SetDspFrame(
+            aec: true,
+            agc: false,
+            ns: enabled,
+            nsVeryHigh: stronger,
+            hpf: true));
+
+        Assert.Equal("set-dsp", root.GetProperty("op").GetString());
+        Assert.Equal(enabled, root.GetProperty("ns").GetBoolean());
+        Assert.Equal(expectedVeryHigh, root.GetProperty("ns_very_high").GetBoolean());
     }
 
     [Theory]
@@ -519,7 +559,7 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
-    public void PreservedSameRoomCollapseAdvancesBackoffAndReachesRelayAttempt()
+    public void PreservedSameRoomCollapseAdvancesRecoveryBackoff()
     {
         Assert.True(VoiceChatRoom.ShouldPreserveMissingPeerRecoveryState(
             forceRebuild: true,
@@ -527,29 +567,6 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(5f, VoiceChatRoom.RecoveryBackoffSeconds(0));
         Assert.Equal(10f, VoiceChatRoom.RecoveryBackoffSeconds(1));
         Assert.Equal(20f, VoiceChatRoom.RecoveryBackoffSeconds(2));
-        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 0,
-            openChannelsRaw: 0,
-            remotePlayers: 2,
-            globalAttempt: 1));
-        Assert.True(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 0,
-            openChannelsRaw: 0,
-            remotePlayers: 2,
-            globalAttempt: 2));
-    }
-
-    [Fact]
-    public void RelayEscalationUsesEstablishedTransportNotRouteMappings()
-    {
-        Assert.True(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 0, openChannelsRaw: 0, remotePlayers: 2, globalAttempt: 2));
-        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 1, openChannelsRaw: 1, remotePlayers: 2, globalAttempt: 2));
-        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 0, openChannelsRaw: 1, remotePlayers: 2, globalAttempt: 2));
-        Assert.False(VoiceChatRoom.ShouldEscalateTotalCollapseToRelay(
-            openPeers: 0, openChannelsRaw: 0, remotePlayers: 2, globalAttempt: 1));
     }
 
     [Fact]

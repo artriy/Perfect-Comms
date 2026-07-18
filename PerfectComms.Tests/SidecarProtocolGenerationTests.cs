@@ -9,7 +9,7 @@ public sealed class SidecarProtocolGenerationTests
     [Fact]
     public void PeerAddCarriesRequiredGeneration()
     {
-        var frame = SidecarProtocol.AddPeerFrame("peer-7", isOfferer: true, relayOnly: true, generation: 41);
+        var frame = SidecarProtocol.AddPeerFrame("peer-7", isOfferer: true, generation: 41);
 
         Xunit.Assert.True(SidecarProtocol.TryParseFrame(
             frame,
@@ -23,10 +23,30 @@ public sealed class SidecarProtocolGenerationTests
         Xunit.Assert.Equal("peer-add", doc.RootElement.GetProperty("op").GetString());
         Xunit.Assert.Equal("peer-7", doc.RootElement.GetProperty("peer_id").GetString());
         Xunit.Assert.True(doc.RootElement.GetProperty("offerer").GetBoolean());
-        Xunit.Assert.True(doc.RootElement.GetProperty("relay_only").GetBoolean());
+        Xunit.Assert.False(doc.RootElement.GetProperty("relay_only").GetBoolean());
         Xunit.Assert.Equal(41, doc.RootElement.GetProperty("generation").GetInt32());
         Xunit.Assert.Throws<ArgumentOutOfRangeException>(() =>
-            SidecarProtocol.AddPeerFrame("peer-7", true, false, generation: 0));
+            SidecarProtocol.AddPeerFrame("peer-7", true, generation: 0));
+    }
+
+    [Fact]
+    public void IceRestartCarriesAutomaticMixedPolicyAndOfferRole()
+    {
+        var frame = SidecarProtocol.RestartIceFrame("peer-7", createOffer: true);
+
+        Xunit.Assert.True(SidecarProtocol.TryParseFrame(
+            frame,
+            frame.Length,
+            out var type,
+            out var payloadOffset,
+            out var payloadLength,
+            out _));
+        Xunit.Assert.Equal(SidecarProtocol.TypeControl, type);
+        using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(frame, payloadOffset, payloadLength));
+        Xunit.Assert.Equal("restart-ice", doc.RootElement.GetProperty("op").GetString());
+        Xunit.Assert.Equal("peer-7", doc.RootElement.GetProperty("peer_id").GetString());
+        Xunit.Assert.False(doc.RootElement.GetProperty("relay_only").GetBoolean());
+        Xunit.Assert.True(doc.RootElement.GetProperty("create_offer").GetBoolean());
     }
 
     [Fact]

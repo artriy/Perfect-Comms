@@ -240,6 +240,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> VoiceFalloffSoftness { get; }
     public ConfigEntry<VoiceMicMode> MicMode { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
+    public ConfigEntry<bool> StrongerNoiseSuppressionEnabled { get; }
     public ConfigEntry<bool> EchoCancellationEnabled { get; }
     public ConfigEntry<bool> StartMuted { get; }
     public ConfigEntry<bool> StartDeafened { get; }
@@ -617,6 +618,9 @@ public class VoiceChatLocalSettings
 
         NoiseSuppressionEnabled = config.Bind("Audio", "NoiseSuppressionEnabled", true,
             new ConfigDescription("Use WebRTC noise suppression on outgoing microphone audio while preserving quiet speech."));
+
+        StrongerNoiseSuppressionEnabled = config.Bind("Audio", "StrongerNoiseSuppressionEnabled", false,
+            new ConfigDescription("Use stronger WebRTC noise suppression. This can remove more background noise but may make quiet speech sound less natural."));
 
         EchoCancellationEnabled = config.Bind("Audio", "EchoCancellationEnabled", true,
             new ConfigDescription("Cancel echo/feedback of incoming voice picked up by your microphone."));
@@ -1251,7 +1255,8 @@ public class VoiceChatLocalSettings
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
         else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
-                 configEntry == NoiseSuppressionEnabled || configEntry == EchoCancellationEnabled ||
+                 configEntry == NoiseSuppressionEnabled || configEntry == StrongerNoiseSuppressionEnabled ||
+                 configEntry == EchoCancellationEnabled ||
                  configEntry == SyntheticMicTone ||
                  configEntry == MicCalibrationDiagnostics)
         {

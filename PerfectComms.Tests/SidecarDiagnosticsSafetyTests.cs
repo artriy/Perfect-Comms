@@ -390,24 +390,26 @@ public sealed class SidecarDiagnosticsSafetyTests
         const string current = """
             {"dsp_config_generation":4,
              "dsp_requested_aec":true,"dsp_requested_agc":true,
-             "dsp_requested_ns":false,"dsp_requested_hpf":true,
+             "dsp_requested_ns":false,"dsp_requested_ns_very_high":false,"dsp_requested_hpf":true,
              "dsp_apm_loaded":true,"dsp_config_fully_applied":false,
              "dsp_applied_aec":true,"dsp_applied_agc":false,
-             "dsp_applied_ns":false,"dsp_applied_hpf":true,
+             "dsp_applied_ns":false,"dsp_applied_ns_very_high":false,"dsp_applied_hpf":true,
              "input_gain":1.25,"input_vad_threshold":0.0001,
              "input_noise_gate_threshold":0.003}
             """;
 
         Assert.True(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics(current, out var details));
         Assert.Contains("dspConfigGeneration=4", details);
-        Assert.Contains("dspRequestedAec=true dspRequestedAgc=true dspRequestedNs=false dspRequestedHpf=true", details);
+        Assert.Contains("dspRequestedAec=true dspRequestedAgc=true dspRequestedNs=false dspRequestedNsVeryHigh=false dspRequestedHpf=true", details);
         Assert.Contains("dspApmLoaded=true dspConfigFullyApplied=false", details);
-        Assert.Contains("dspAppliedAec=true dspAppliedAgc=false dspAppliedNs=false dspAppliedHpf=true", details);
+        Assert.Contains("dspAppliedAec=true dspAppliedAgc=false dspAppliedNs=false dspAppliedNsVeryHigh=false dspAppliedHpf=true", details);
         Assert.Contains("inputGain=1.25 vadThreshold=0.0001 noiseGateThreshold=0.003", details);
 
         Assert.True(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics("{}", out var oldDetails));
         Assert.Contains("dspConfigGeneration=na", oldDetails);
+        Assert.Contains("dspRequestedNsVeryHigh=na", oldDetails);
         Assert.Contains("dspApmLoaded=na dspConfigFullyApplied=na", oldDetails);
+        Assert.Contains("dspAppliedNsVeryHigh=na", oldDetails);
         Assert.Contains("inputGain=na vadThreshold=na noiseGateThreshold=na", oldDetails);
         Assert.False(SidecarVoiceClient.TryDescribeNativeDspInputForDiagnostics("{bad", out _));
     }

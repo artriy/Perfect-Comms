@@ -77,7 +77,6 @@ public class VoiceChatRoom
         TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
     // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the native media session.
     private bool _forceBackendRebuild;
-    private bool _relayOnlyForSession;
     private string? _activeRoomCode;
     private string? _activeRegion;
     internal IEnumerable<VoiceRemoteOverlayState> RemoteOverlayStates => _voiceBackend?.RemoteOverlayStates ?? Enumerable.Empty<VoiceRemoteOverlayState>();
@@ -313,6 +312,7 @@ public class VoiceChatRoom
             settings?.SyntheticMicTone.Value ?? false,
             settings?.MicCalibrationDiagnostics.Value ?? false,
             settings?.NoiseSuppressionEnabled.Value ?? false,
+            settings?.StrongerNoiseSuppressionEnabled.Value ?? false,
             settings?.EchoCancellationEnabled.Value ?? true,
             settings?.MicSensitivity.Value ?? 1f);
 #if ANDROID
@@ -1136,8 +1136,6 @@ public class VoiceChatRoom
         _forceBackendRebuild = false;
         var continuingSameRoom = string.Equals(_activeRoomCode, roomCode, StringComparison.Ordinal);
         var preserveRecoveryState = ShouldPreserveMissingPeerRecoveryState(forceRebuild, continuingSameRoom);
-        if (!continuingSameRoom)
-            _relayOnlyForSession = false;
 
         if (!forceRebuild
             && _voiceBackend != null
@@ -1156,7 +1154,7 @@ public class VoiceChatRoom
         _lastSentHostSettings = null;
         _hostSettingsRequestGate.Reset();
         ResetRadioStateSync();
-        var backend = new PerfectCommsVoiceBackend(roomCode, region, _relayOnlyForSession);
+        var backend = new PerfectCommsVoiceBackend(roomCode, region);
         if (Volatile.Read(ref _closed) != 0)
         {
             backend.Dispose();
@@ -1219,7 +1217,7 @@ public class VoiceChatRoom
         {
             VoiceDiagnostics.Log(
                 "transport.peer-recovery.state-preserved",
-                $"{VoiceDiagnostics.DescribeRoom(roomCode)} globalAttempts={_globalRebuildAttempts} targetedAttempts={_missingPeerRecoveryAttempts} relayOnly={_relayOnlyForSession}");
+                $"{VoiceDiagnostics.DescribeRoom(roomCode)} globalAttempts={_globalRebuildAttempts} targetedAttempts={_missingPeerRecoveryAttempts} icePolicy=mixed");
         }
         StartBootstrapWindow("native media session started");
         ForceUpdateLocalProfile();
@@ -1339,21 +1337,6 @@ public class VoiceChatRoom
         bool didGlobal = false;
         if (finalCollapseAttempt)
         {
-            // Automated relay escalation: if we've never mapped a single peer despite repeated global rebuilds
-            // (remotePlayers exist but mappedPeers==0), direct/STUN ICE is clearly not working for this client
-            // (strict/symmetric NAT, or a Wine box where host-candidate gathering fails). Latch the native session
-            // to relay-only ICE before this rebuild so the fresh peer connections route through TURN. The
-            // session latch only fires after total failure, so a client whose voice already works never reaches here.
-            if (ShouldEscalateTotalCollapseToRelay(
-                    openPeers,
-                    openChannelsRaw,
-                    remotePlayers,
-                    _globalRebuildAttempts + 1))
-            {
-                _relayOnlyForSession = true;
-                _perfectCommsVoice?.EscalateToRelayOnly($"global-attempt-{_globalRebuildAttempts + 1}");
-            }
-
             ClearVoiceUiForLifecycleReset("missing peer recovery");
             // Rebuild only after a confirmed total collapse. Dispose sends Bye first so surviving
             // peers discard the old negotiation generation before the replacement starts.
@@ -1417,19 +1400,6 @@ public class VoiceChatRoom
     internal static bool IsMeshCollapse(int mappedPeers, int remotePlayers)
         => mappedPeers == 0 || (remotePlayers > 0 && mappedPeers * 2 < remotePlayers);
 
-    // Route records are created from the game roster before ICE connects, so mappedPeers cannot
-    // prove transport health. Escalate only after repeated attempts with no established channel at
-    // all (including temporarily-unmapped survivors), which identifies a true direct/STUN collapse.
-    internal static bool ShouldEscalateTotalCollapseToRelay(
-        int openPeers,
-        int openChannelsRaw,
-        int remotePlayers,
-        int globalAttempt)
-        => remotePlayers > 0
-           && openPeers == 0
-           && openChannelsRaw == 0
-           && globalAttempt >= 2;
-
     // Exponential backoff (seconds) for a recovery attempt counter: the base interval doubled per prior
     // non-improving attempt, clamped so a stubborn shortfall slows down instead of re-firing every interval.
     // Pure + unit-tested. Shared by the targeted and global/collapse paths (each with its own counter).
@@ -1437,8 +1407,8 @@ public class VoiceChatRoom
         => MissingPeerRecoveryIntervalSeconds * (1 << Math.Min(Math.Max(attempts, 0), MissingPeerRecoveryBackoffShiftCap));
 
     // A watchdog-requested rebuild of the same authenticated room is one recovery generation,
-    // not a fresh session. Keep its attempt counter, elapsed backoff and relay latch so repeated
-    // failures advance toward relay and the capped interval instead of restarting at attempt one.
+    // not a fresh session. Keep its attempt counter and elapsed backoff so repeated failures advance
+    // toward the capped interval instead of restarting at attempt one.
     internal static bool ShouldPreserveMissingPeerRecoveryState(bool forceRebuild, bool continuingSameRoom)
         => forceRebuild && continuingSameRoom;
 

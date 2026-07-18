@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Capture, playback, DSP (WebRTC-APM AEC3/high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 10.
+Capture, playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 12.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -66,7 +66,7 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 10` (the `Proto` constant in `SidecarVoiceClient`). Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of protocol 6's per-peer relay-only ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 12` (the `Proto` constant in `SidecarVoiceClient`). Protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of the older protocol 6 ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
 
 ## Media diagnostics
 

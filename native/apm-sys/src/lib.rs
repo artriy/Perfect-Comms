@@ -99,6 +99,15 @@ const FRAME: usize = 960;
 const MAX_STREAM_DELAY_MS: i32 = 500;
 // Chromium's getUserMedia voice pipeline uses WebRTC noise suppression at kHigh.
 const NS_LEVEL_HIGH: c_int = 2;
+const NS_LEVEL_VERY_HIGH: c_int = 3;
+
+fn noise_suppression_level(very_high: bool) -> c_int {
+    if very_high {
+        NS_LEVEL_VERY_HIGH
+    } else {
+        NS_LEVEL_HIGH
+    }
+}
 
 fn sanitize_stream_delay_ms(delay_ms: i32) -> i32 {
     delay_ms.clamp(0, MAX_STREAM_DELAY_MS)
@@ -119,6 +128,7 @@ impl Apm {
         lib_path: &str,
         echo: bool,
         noise_suppression: bool,
+        noise_suppression_very_high: bool,
         agc2: bool,
         hpf: bool,
     ) -> Result<Apm, String> {
@@ -140,7 +150,13 @@ impl Apm {
                 chunk,
                 processed: Vec::new(),
             };
-            me.apply(echo, noise_suppression, agc2, hpf)?;
+            me.apply(
+                echo,
+                noise_suppression,
+                noise_suppression_very_high,
+                agc2,
+                hpf,
+            )?;
             me.sc = (me.api.sc_create)(RATE, 1);
             if me.sc.is_null() {
                 return Err("stream-config".into());
@@ -153,6 +169,7 @@ impl Apm {
         &mut self,
         echo: bool,
         noise_suppression: bool,
+        noise_suppression_very_high: bool,
         agc2: bool,
         hpf: bool,
     ) -> Result<(), String> {
@@ -162,7 +179,11 @@ impl Apm {
                 return Err("config-create".into());
             }
             (self.api.set_echo)(c, echo as c_int, 0);
-            (self.api.set_ns)(c, noise_suppression as c_int, NS_LEVEL_HIGH);
+            (self.api.set_ns)(
+                c,
+                noise_suppression as c_int,
+                noise_suppression_level(noise_suppression_very_high),
+            );
             (self.api.set_gc1)(c, 0, 0, 0, 0, 0);
             (self.api.set_gc2)(c, agc2 as c_int);
             (self.api.set_hpf)(c, hpf as c_int);
@@ -183,10 +204,17 @@ impl Apm {
         &mut self,
         echo: bool,
         noise_suppression: bool,
+        noise_suppression_very_high: bool,
         agc2: bool,
         hpf: bool,
     ) -> Result<(), String> {
-        self.apply(echo, noise_suppression, agc2, hpf)
+        self.apply(
+            echo,
+            noise_suppression,
+            noise_suppression_very_high,
+            agc2,
+            hpf,
+        )
     }
 
     pub fn chunk(&self) -> usize {
@@ -311,7 +339,8 @@ impl Drop for Apm {
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_frame_chunks, process_frame_chunks_fail_open, sanitize_stream_delay_ms, Apm, FRAME,
+        analyze_frame_chunks, noise_suppression_level, process_frame_chunks_fail_open,
+        sanitize_stream_delay_ms, Apm, FRAME, NS_LEVEL_HIGH, NS_LEVEL_VERY_HIGH,
     };
 
     #[test]
@@ -372,11 +401,17 @@ mod tests {
     }
 
     #[test]
+    fn noise_suppression_strength_maps_to_supported_webrtc_levels() {
+        assert_eq!(noise_suppression_level(false), NS_LEVEL_HIGH);
+        assert_eq!(noise_suppression_level(true), NS_LEVEL_VERY_HIGH);
+    }
+
+    #[test]
     #[ignore]
     fn loads_and_processes_a_frame() {
         let path =
             std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
-        let mut apm = Apm::load(&path, true, true, false, true).expect("load");
+        let mut apm = Apm::load(&path, true, true, false, false, true).expect("load");
         let mut frame = vec![0.0f32; 960];
         apm.analyze_reverse(&frame).expect("analyze reverse");
         apm.process_capture_with_stream_delay(&mut frame, 73)
@@ -389,8 +424,9 @@ mod tests {
     fn high_noise_suppression_attenuates_stationary_noise() {
         let path =
             std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
-        let mut bypass = Apm::load(&path, false, false, false, false).expect("load bypass");
-        let mut suppressed = Apm::load(&path, false, true, false, false).expect("load suppressed");
+        let mut bypass = Apm::load(&path, false, false, false, false, false).expect("load bypass");
+        let mut suppressed =
+            Apm::load(&path, false, true, false, false, false).expect("load suppressed");
         let mut random_state = 0x1234_5678u32;
         let mut bypass_energy = 0.0f64;
         let mut suppressed_energy = 0.0f64;

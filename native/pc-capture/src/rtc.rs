@@ -5,13 +5,18 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
+use webrtc::ice::network_type::NetworkType;
+use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
+use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
@@ -39,6 +44,13 @@ const RTP_EGRESS_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 const RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const ENCODER_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const ENCODER_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(6);
+// ICE checks normally nominate host immediately, srflx after 500 ms, and prflx after 1 s.
+// Hold a successful relay pair for one additional second so direct paths discovered during
+// ordinary Internet jitter win without adding more than two seconds to a genuinely relayed call.
+const RELAY_ACCEPTANCE_MIN_WAIT: Duration = Duration::from_millis(2_000);
+const ICE_GATHERING_IDLE_WAIT: Duration = Duration::from_secs(6);
+const ICE_RESTART_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_BUFFERED_LOCAL_ICE: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedPacket {
@@ -567,7 +579,7 @@ fn network_path_from_stats(
         snapshot.relay = snapshot.local_candidate_type.eq_ignore_ascii_case("relay")
             || snapshot.remote_candidate_type.eq_ignore_ascii_case("relay");
         snapshot.current_rtt_ms = finite_nonnegative(pair.current_round_trip_time * 1000.0);
-        // webrtc-rs 0.11 leaves both available-bitrate fields at their zero defaults. Preserve
+        // webrtc-rs 0.17.1 leaves both available-bitrate fields at their zero defaults. Preserve
         // the wire fields for backward-compatible diagnostics, but mark them unsupported and do
         // not feed them into encoder policy.
         snapshot.bandwidth_estimate_valid = false;
@@ -881,8 +893,118 @@ struct PeerHandle {
     pc: Arc<RTCPeerConnection>,
     outbound_tx: tokio::sync::mpsc::Sender<OutboundPacket>,
     outbound_writer: tokio::task::JoinHandle<()>,
+    stats_worker: tokio::task::JoinHandle<()>,
+    candidate_gate: Arc<LocalCandidateGate>,
+    state_signal_gate: Arc<StateSignalGate>,
     generation: u32,
     min_encoder_epoch: u64,
+}
+
+/// ICE restart gathers candidates before the replacement SDP is emitted. Buffering those
+/// candidates keeps the signaling order deterministic: the remote peer applies the new ICE
+/// credentials first, then receives trickled candidates for that credential generation.
+#[derive(Default)]
+struct LocalCandidateGate {
+    buffered: Mutex<Option<Vec<String>>>,
+}
+
+impl LocalCandidateGate {
+    fn hold(&self) {
+        *self.buffered.lock().unwrap() = Some(Vec::new());
+    }
+
+    #[cfg(test)]
+    fn queue_or_pass(&self, candidate: String) -> Option<String> {
+        let mut buffered = self.buffered.lock().unwrap();
+        match buffered.as_mut() {
+            Some(queue) => {
+                if queue.len() >= MAX_BUFFERED_LOCAL_ICE {
+                    queue.remove(0);
+                }
+                queue.push(candidate);
+                None
+            }
+            None => Some(candidate),
+        }
+    }
+
+    fn send_or_queue(
+        &self,
+        candidate: String,
+        signal: &Sender<LocalSignal>,
+        peer_id: &str,
+        generation: u32,
+    ) {
+        let mut buffered = self.buffered.lock().unwrap();
+        if let Some(queue) = buffered.as_mut() {
+            if queue.len() >= MAX_BUFFERED_LOCAL_ICE {
+                queue.remove(0);
+            }
+            queue.push(candidate);
+        } else {
+            // Keep the gate locked through enqueue. A transport replacement can then hold this
+            // gate before its signaling barrier and prove that no old candidate follows it.
+            let _ = signal.send(LocalSignal::Candidate {
+                peer_id: peer_id.to_string(),
+                generation,
+                candidate,
+            });
+        }
+    }
+
+    fn release(&self) -> Vec<String> {
+        self.buffered.lock().unwrap().take().unwrap_or_default()
+    }
+
+    fn cancel(&self) {
+        *self.buffered.lock().unwrap() = None;
+    }
+}
+
+struct StateSignalGate {
+    enabled: Mutex<bool>,
+}
+
+impl StateSignalGate {
+    fn new() -> Self {
+        Self {
+            enabled: Mutex::new(true),
+        }
+    }
+
+    fn send_if_enabled(
+        &self,
+        signal: &Sender<LocalSignal>,
+        peer_id: &str,
+        generation: u32,
+        state: String,
+    ) {
+        let enabled = self.enabled.lock().unwrap();
+        if *enabled {
+            let _ = signal.send(LocalSignal::PeerState {
+                peer_id: peer_id.to_string(),
+                generation,
+                state,
+            });
+        }
+    }
+
+    fn disable_with_replacement_barrier(
+        &self,
+        signal: &Sender<LocalSignal>,
+        peer_id: &str,
+        generation: u32,
+    ) {
+        let mut enabled = self.enabled.lock().unwrap();
+        *enabled = false;
+        // This known state is also a FIFO barrier: all old state/candidate events precede it,
+        // and events from the replacement transport follow it.
+        let _ = signal.send(LocalSignal::PeerState {
+            peer_id: peer_id.to_string(),
+            generation,
+            state: "connecting".to_string(),
+        });
+    }
 }
 
 async fn cancel_outbound_writer(
@@ -902,9 +1024,12 @@ async fn close_peer_handle(handle: PeerHandle) {
         pc,
         outbound_tx,
         outbound_writer,
+        stats_worker,
         ..
     } = handle;
     cancel_outbound_writer(outbound_tx, outbound_writer).await;
+    stats_worker.abort();
+    let _ = stats_worker.await;
     let _ = pc.close().await;
 }
 
@@ -917,6 +1042,7 @@ struct PeerConfig {
 
 pub struct RtcEngine {
     rt: Runtime,
+    apis: RtcApis,
     peers: Mutex<HashMap<String, PeerHandle>>,
     peer_configs: Mutex<HashMap<String, PeerConfig>>,
     ice_servers: Mutex<Vec<RTCIceServer>>,
@@ -942,7 +1068,61 @@ fn opus_capability() -> RTCRtpCodecCapability {
     }
 }
 
-fn build_api() -> Result<API, webrtc::Error> {
+struct RtcApis {
+    ephemeral: Arc<API>,
+    shared_udp: Option<Arc<API>>,
+}
+
+impl RtcApis {
+    fn new(rt: &Runtime) -> Self {
+        let ephemeral = Arc::new(build_api(None).expect("rtc WebRTC API"));
+        let shared_udp = rt.block_on(async {
+            match UdpSocket::bind("0.0.0.0:0").await {
+                Ok(socket) => {
+                    let local_addr = socket.local_addr().ok();
+                    let mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
+                    match build_api(Some(UDPNetwork::Muxed(mux))) {
+                        Ok(api) => {
+                            if let Some(addr) = local_addr {
+                                eprintln!(
+                                    "pc-capture: rtc shared-udp-mux ready local={addr} family=ipv4"
+                                );
+                            }
+                            Some(Arc::new(api))
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "pc-capture: rtc shared-udp-mux disabled reason=api-build error={error}"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "pc-capture: rtc shared-udp-mux disabled reason=socket-bind error={error}"
+                    );
+                    None
+                }
+            }
+        });
+        Self {
+            ephemeral,
+            shared_udp,
+        }
+    }
+
+    fn for_peer(&self, ice_servers: &[RTCIceServer], relay_only: bool) -> Arc<API> {
+        if should_use_shared_udp_mux(ice_servers, relay_only) {
+            if let Some(api) = &self.shared_udp {
+                return api.clone();
+            }
+        }
+        self.ephemeral.clone()
+    }
+}
+
+fn build_api(udp_network: Option<UDPNetwork>) -> Result<API, webrtc::Error> {
     let mut m = MediaEngine::default();
     m.register_codec(
         RTCRtpCodecParameters {
@@ -954,13 +1134,22 @@ fn build_api() -> Result<API, webrtc::Error> {
     )?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut m)?;
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_relay_acceptance_min_wait(Some(RELAY_ACCEPTANCE_MIN_WAIT));
+    if let Some(udp_network) = udp_network {
+        // The shared socket is IPv4 so the mux never advertises an IPv6 candidate it cannot send.
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+        setting_engine.set_udp_network(udp_network);
+    }
     Ok(APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
+        .with_setting_engine(setting_engine)
         .build())
 }
 
 struct CreatePeerArgs {
+    api: Arc<API>,
     peer_id: String,
     offerer: bool,
     ice_servers: Vec<RTCIceServer>,
@@ -977,6 +1166,7 @@ struct CreatePeerArgs {
 
 async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> {
     let CreatePeerArgs {
+        api,
         peer_id,
         offerer,
         ice_servers,
@@ -990,7 +1180,6 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
         network_paths,
         min_encoder_epoch,
     } = args;
-    let api = build_api()?;
     let config = RTCConfiguration {
         ice_servers: servers_for_policy(&ice_servers, relay_only),
         ice_transport_policy: if relay_only {
@@ -1069,37 +1258,35 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
         }
     });
 
+    let candidate_gate = Arc::new(LocalCandidateGate::default());
+    let cand_gate = candidate_gate.clone();
     let cand_signal = out_local_signal.clone();
     let cand_peer = peer_id.clone();
     pc.on_ice_candidate(Box::new(move |c| {
+        let gate = cand_gate.clone();
         let signal = cand_signal.clone();
         let pid = cand_peer.clone();
         Box::pin(async move {
             if let Some(c) = c {
                 if let Ok(init) = c.to_json() {
                     if let Ok(s) = serde_json::to_string(&init) {
-                        let _ = signal.send(LocalSignal::Candidate {
-                            peer_id: pid,
-                            generation,
-                            candidate: s,
-                        });
+                        gate.send_or_queue(s, &signal, &pid, generation);
                     }
                 }
             }
         })
     }));
 
+    let state_signal_gate = Arc::new(StateSignalGate::new());
+    let state_gate = state_signal_gate.clone();
     let state_signal = out_local_signal.clone();
     let state_peer = peer_id.clone();
     pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+        let gate = state_gate.clone();
         let signal = state_signal.clone();
         let pid = state_peer.clone();
         Box::pin(async move {
-            let _ = signal.send(LocalSignal::PeerState {
-                peer_id: pid,
-                generation,
-                state: s.to_string(),
-            });
+            gate.send_if_enabled(&signal, &pid, generation, s.to_string());
         })
     }));
 
@@ -1137,7 +1324,7 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
     let stats_peer = peer_id.clone();
     let stats_policy = encoder_policy.clone();
     let stats_paths = network_paths.clone();
-    tokio::spawn(async move {
+    let stats_worker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(ENCODER_STATS_INTERVAL);
         loop {
             interval.tick().await;
@@ -1171,12 +1358,16 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
         let offer = match pc.create_offer(None).await {
             Ok(offer) => offer,
             Err(error) => {
+                stats_worker.abort();
+                let _ = stats_worker.await;
                 cancel_outbound_writer(outbound_tx, outbound_writer).await;
                 let _ = pc.close().await;
                 return Err(error);
             }
         };
         if let Err(error) = pc.set_local_description(offer).await {
+            stats_worker.abort();
+            let _ = stats_worker.await;
             cancel_outbound_writer(outbound_tx, outbound_writer).await;
             let _ = pc.close().await;
             return Err(error);
@@ -1195,6 +1386,9 @@ async fn create_peer(args: CreatePeerArgs) -> Result<PeerHandle, webrtc::Error> 
         pc,
         outbound_tx,
         outbound_writer,
+        stats_worker,
+        candidate_gate,
+        state_signal_gate,
         generation,
         min_encoder_epoch,
     })
@@ -1228,10 +1422,10 @@ fn is_supported_udp_turn_url(url: &str) -> bool {
         && value.eq_ignore_ascii_case("udp")
 }
 
-/// Direct attempts deliberately omit TURN URLs so healthy peers never allocate a relay.
-/// Relay retries receive only the UDP TURN URLs implemented by the pinned WebRTC stack. Keeping
-/// unsupported TCP/TLS URLs out of its configuration prevents a skipped URL from being mistaken
-/// for a real fallback. Splitting mixed entries preserves the original credentials.
+/// Normal peers gather STUN and supported TURN/UDP candidates together. ICE can therefore keep a
+/// direct route when one appears during the relay acceptance window instead of requiring a peer
+/// rebuild. Explicit relay-only peers still receive only TURN/UDP URLs. Unsupported TCP/TLS URLs
+/// stay out of the configuration because webrtc-rs 0.17.1 cannot gather them.
 fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceServer> {
     servers
         .iter()
@@ -1243,7 +1437,7 @@ fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceS
                     if relay_only {
                         is_supported_udp_turn_url(url)
                     } else {
-                        is_stun_url(url)
+                        is_stun_url(url) || is_supported_udp_turn_url(url)
                     }
                 })
                 .cloned()
@@ -1257,6 +1451,43 @@ fn servers_for_policy(servers: &[RTCIceServer], relay_only: bool) -> Vec<RTCIceS
             }
         })
         .collect()
+}
+
+/// webrtc-ice 0.17.1 deliberately skips server-reflexive gathering when `UDPNetwork::Muxed` is
+/// active. Use the single mesh socket only when no STUN URL would be sacrificed; Internet peers
+/// with STUN stay on reusable ephemeral-socket APIs so the optimization cannot increase relaying.
+fn should_use_shared_udp_mux(servers: &[RTCIceServer], relay_only: bool) -> bool {
+    !servers.is_empty()
+        && !relay_only
+        && !servers
+            .iter()
+            .flat_map(|server| server.urls.iter())
+            .any(|url| is_stun_url(url))
+}
+
+fn emit_buffered_local_candidates(
+    gate: &LocalCandidateGate,
+    signal: &Sender<LocalSignal>,
+    peer_id: &str,
+    generation: u32,
+) {
+    for candidate in gate.release() {
+        let _ = signal.send(LocalSignal::Candidate {
+            peer_id: peer_id.to_string(),
+            generation,
+            candidate,
+        });
+    }
+}
+
+async fn wait_for_ice_gathering_idle(pc: &RTCPeerConnection) -> bool {
+    tokio::time::timeout(ICE_GATHERING_IDLE_WAIT, async {
+        while pc.ice_gathering_state() == RTCIceGatheringState::Gathering {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 #[allow(dead_code)]
@@ -1286,8 +1517,10 @@ impl RtcEngine {
                 policy_worker.evaluate(Instant::now());
             }
         });
+        let apis = RtcApis::new(&rt);
         RtcEngine {
             rt,
+            apis,
             peers: Mutex::new(HashMap::new()),
             peer_configs: Mutex::new(HashMap::new()),
             ice_servers: Mutex::new(vec![RTCIceServer {
@@ -1319,10 +1552,6 @@ impl RtcEngine {
                 urls: s.urls.clone(),
                 username: s.username.clone().unwrap_or_default(),
                 credential: s.credential.clone().unwrap_or_default(),
-                // TURN API/custom coturn credentials are long-term username/password values.
-                // webrtc-rs rejects a populated credential whose type remains Unspecified before
-                // ICE gathering, so relay fallback would otherwise fail without one candidate.
-                credential_type: RTCIceCredentialType::Password,
             })
             .collect();
         *self.ice_servers.lock().unwrap() = mapped;
@@ -1381,8 +1610,10 @@ impl RtcEngine {
         }
         let signal = self.out_local_signal.clone();
         let servers = self.ice_servers.lock().unwrap().clone();
+        let api = self.apis.for_peer(&servers, relay_only);
         let pid = peer_id.clone();
         match self.rt.block_on(create_peer(CreatePeerArgs {
+            api,
             peer_id: pid,
             offerer,
             ice_servers: servers,
@@ -1422,6 +1653,91 @@ impl RtcEngine {
         eprintln!("pc-capture: rtc peer-remove peer={peer_id}");
     }
 
+    fn rebuild_peer_for_ice(
+        &self,
+        peer_id: &str,
+        relay_only: bool,
+        create_offer: bool,
+        generation: u32,
+    ) -> bool {
+        let Some(handle) = self.peers.lock().unwrap().remove(peer_id) else {
+            eprintln!(
+                "pc-capture: rtc ice-restart rebuild rejected peer={peer_id} generation={generation} reason=missing-peer"
+            );
+            self.emit_failed(peer_id, generation);
+            return false;
+        };
+        if handle.generation != generation {
+            let current_generation = handle.generation;
+            self.peers
+                .lock()
+                .unwrap()
+                .insert(peer_id.to_string(), handle);
+            eprintln!(
+                "pc-capture: rtc ice-restart rebuild rejected peer={peer_id} generation={generation} current_generation={current_generation} reason=generation-mismatch"
+            );
+            self.emit_failed(peer_id, generation);
+            return false;
+        }
+        // Hold the old candidate path first, then disable old state callbacks and enqueue a known
+        // `connecting` state. Since both callbacks keep their gates locked through channel enqueue,
+        // this state is a FIFO replacement barrier: no signal from the old transport can follow it.
+        handle.candidate_gate.hold();
+        handle.state_signal_gate.disable_with_replacement_barrier(
+            &self.out_local_signal,
+            peer_id,
+            generation,
+        );
+        let min_encoder_epoch = handle.min_encoder_epoch;
+        self.rt.block_on(close_peer_handle(handle));
+        self.pending_ice.lock().unwrap().remove(peer_id);
+        self.receive_queue.remove_peer(peer_id);
+        self.encoder_policy.register_peer(peer_id, generation);
+        self.network_paths.register_peer(peer_id, generation);
+
+        if let Some(config) = self.peer_configs.lock().unwrap().get_mut(peer_id) {
+            if config.generation == generation {
+                config.relay_only = relay_only;
+            }
+        }
+        let servers = self.ice_servers.lock().unwrap().clone();
+        let api = self.apis.for_peer(&servers, relay_only);
+        let result = self.rt.block_on(create_peer(CreatePeerArgs {
+            api,
+            peer_id: peer_id.to_string(),
+            offerer: create_offer,
+            ice_servers: servers,
+            relay_only,
+            generation,
+            out_local_signal: self.out_local_signal.clone(),
+            receive_queue: self.receive_queue.clone(),
+            outbound_epoch: self.outbound_epoch.clone(),
+            counters: self.counters.clone(),
+            encoder_policy: self.encoder_policy.clone(),
+            network_paths: self.network_paths.clone(),
+            min_encoder_epoch,
+        }));
+        match result {
+            Ok(handle) => {
+                self.peers
+                    .lock()
+                    .unwrap()
+                    .insert(peer_id.to_string(), handle);
+                eprintln!(
+                    "pc-capture: rtc ice-restart rebuilt peer={peer_id} generation={generation} relay_only={relay_only} create_offer={create_offer}"
+                );
+                true
+            }
+            Err(error) => {
+                eprintln!(
+                    "pc-capture: rtc ice-restart rebuild failed peer={peer_id} generation={generation} relay_only={relay_only} create_offer={create_offer} error={error}"
+                );
+                self.emit_failed(peer_id, generation);
+                false
+            }
+        }
+    }
+
     pub fn set_remote_sdp(&self, peer_id: &str, sdp_type: &str, sdp: &str) {
         eprintln!(
             "pc-capture: rtc remote-sdp begin peer={peer_id} type={sdp_type} sdp_bytes={} ",
@@ -1432,9 +1748,9 @@ impl RtcEngine {
             .lock()
             .unwrap()
             .get(peer_id)
-            .map(|h| Arc::clone(&h.pc));
-        let pc = match existing {
-            Some(p) => p,
+            .map(|h| (Arc::clone(&h.pc), h.candidate_gate.clone()));
+        let (pc, candidate_gate) = match existing {
+            Some(existing) => existing,
             None => {
                 let config = match self.peer_configs.lock().unwrap().get(peer_id).copied() {
                     Some(config) => config,
@@ -1447,8 +1763,10 @@ impl RtcEngine {
                 };
                 let signal = self.out_local_signal.clone();
                 let servers = self.ice_servers.lock().unwrap().clone();
+                let api = self.apis.for_peer(&servers, config.relay_only);
                 let pid = peer_id.to_string();
                 match self.rt.block_on(create_peer(CreatePeerArgs {
+                    api,
                     peer_id: pid,
                     offerer: false,
                     ice_servers: servers,
@@ -1464,8 +1782,9 @@ impl RtcEngine {
                 })) {
                     Ok(h) => {
                         let pc = Arc::clone(&h.pc);
+                        let candidate_gate = h.candidate_gate.clone();
                         self.peers.lock().unwrap().insert(peer_id.to_string(), h);
-                        pc
+                        (pc, candidate_gate)
                     }
                     Err(error) => {
                         eprintln!(
@@ -1518,7 +1837,7 @@ impl RtcEngine {
             .remove(peer_id)
             .unwrap_or_default();
         let pending_count = pending.len();
-        if let Err(error) = self.rt.block_on(async move {
+        let result = self.rt.block_on(async move {
             pc.set_remote_description(desc).await?;
             for cand in pending {
                 let init = serde_json::from_str::<RTCIceCandidateInit>(&cand).unwrap_or(
@@ -1542,19 +1861,139 @@ impl RtcEngine {
                 }
             }
             Ok::<(), webrtc::Error>(())
-        }) {
-            eprintln!(
-                "pc-capture: remote SDP failed peer={peer_id} generation={generation} type={sdp_type}: {error}"
-            );
-            let _ = failed_signal.send(LocalSignal::PeerState {
-                peer_id: failed_peer,
-                generation,
-                state: "failed".to_string(),
-            });
+        });
+        match result {
+            Err(error) => {
+                if is_offer {
+                    candidate_gate.cancel();
+                }
+                eprintln!(
+                    "pc-capture: remote SDP failed peer={peer_id} generation={generation} type={sdp_type}: {error}"
+                );
+                let _ = failed_signal.send(LocalSignal::PeerState {
+                    peer_id: failed_peer,
+                    generation,
+                    state: "failed".to_string(),
+                });
+            }
+            Ok(()) => {
+                if is_offer {
+                    emit_buffered_local_candidates(
+                        &candidate_gate,
+                        &self.out_local_signal,
+                        peer_id,
+                        generation,
+                    );
+                }
+                eprintln!(
+                    "pc-capture: rtc remote-sdp applied peer={peer_id} generation={generation} type={sdp_type} pending_ice={pending_count}"
+                );
+            }
+        }
+    }
+
+    /// Re-gathers ICE against the latest server snapshot and optionally emits a replacement
+    /// offer. webrtc-rs 0.17.1 can wedge while applying a restart offer to an established
+    /// connection, so established peers are rebuilt in place under the same identity/generation.
+    /// A still-new peer can use the library restart primitive directly.
+    pub fn restart_ice(&self, peer_id: &str, relay_only: bool, create_offer: bool) -> bool {
+        let peer = self.peers.lock().unwrap().get(peer_id).map(|handle| {
+            (
+                Arc::clone(&handle.pc),
+                handle.candidate_gate.clone(),
+                handle.generation,
+            )
+        });
+        let Some((pc, candidate_gate, generation)) = peer else {
+            eprintln!("pc-capture: rtc ice-restart rejected peer={peer_id} reason=missing-peer");
+            if let Some(config) = self.peer_configs.lock().unwrap().get(peer_id).copied() {
+                self.emit_failed(peer_id, config.generation);
+            }
+            return false;
+        };
+        if pc.connection_state() != RTCPeerConnectionState::New {
+            return self.rebuild_peer_for_ice(peer_id, relay_only, create_offer, generation);
+        }
+
+        let servers = servers_for_policy(&self.ice_servers.lock().unwrap(), relay_only);
+        let policy = if relay_only {
+            RTCIceTransportPolicy::Relay
         } else {
+            RTCIceTransportPolicy::All
+        };
+        let signal = self.out_local_signal.clone();
+        let pid = peer_id.to_string();
+        if create_offer && !self.rt.block_on(wait_for_ice_gathering_idle(&pc)) {
             eprintln!(
-                "pc-capture: rtc remote-sdp applied peer={peer_id} generation={generation} type={sdp_type} pending_ice={pending_count}"
+                "pc-capture: rtc ice-restart rejected peer={peer_id} generation={generation} reason=gathering-timeout"
             );
+            self.emit_failed(peer_id, generation);
+            return false;
+        }
+        candidate_gate.hold();
+
+        let result = self.rt.block_on(async move {
+            let operation = async {
+                // Preserve immutable certificates/bundle settings while refreshing the fields
+                // that are allowed to change after negotiation has started.
+                let mut configuration = pc.get_configuration().await;
+                configuration.ice_servers = servers;
+                configuration.ice_transport_policy = policy;
+                pc.set_configuration(configuration).await?;
+
+                if create_offer {
+                    pc.restart_ice().await?;
+                    let offer = pc.create_offer(None).await?;
+                    pc.set_local_description(offer).await?;
+                    if let Some(local) = pc.local_description().await {
+                        let _ = signal.send(LocalSignal::Sdp {
+                            peer_id: pid,
+                            generation,
+                            sdp_type: local.sdp_type.to_string(),
+                            sdp: local.sdp,
+                        });
+                    }
+                }
+                Ok::<(), webrtc::Error>(())
+            };
+            match tokio::time::timeout(ICE_RESTART_OPERATION_TIMEOUT, operation).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err(format!(
+                    "operation timed out after {}ms",
+                    ICE_RESTART_OPERATION_TIMEOUT.as_millis()
+                )),
+            }
+        });
+
+        match result {
+            Ok(()) => {
+                if let Some(config) = self.peer_configs.lock().unwrap().get_mut(peer_id) {
+                    if config.generation == generation {
+                        config.relay_only = relay_only;
+                    }
+                }
+                if create_offer {
+                    emit_buffered_local_candidates(
+                        &candidate_gate,
+                        &self.out_local_signal,
+                        peer_id,
+                        generation,
+                    );
+                }
+                eprintln!(
+                    "pc-capture: rtc ice-restart applied peer={peer_id} generation={generation} relay_only={relay_only} create_offer={create_offer}"
+                );
+                true
+            }
+            Err(error) => {
+                candidate_gate.cancel();
+                eprintln!(
+                    "pc-capture: rtc ice-restart failed peer={peer_id} generation={generation} relay_only={relay_only} create_offer={create_offer} error={error}"
+                );
+                self.emit_failed(peer_id, generation);
+                false
+            }
         }
     }
 
@@ -1826,11 +2265,10 @@ mod tests {
         assert_eq!(stored[1].urls, vec!["turn:turn.example.com:3478"]);
         assert_eq!(stored[1].username, "u");
         assert_eq!(stored[1].credential, "c");
-        assert_eq!(stored[1].credential_type, RTCIceCredentialType::Password);
     }
 
     #[test]
-    fn direct_and_relay_policies_split_mixed_ice_servers() {
+    fn normal_and_relay_policies_split_mixed_ice_servers() {
         let mixed = vec![
             RTCIceServer {
                 urls: vec![
@@ -1847,7 +2285,6 @@ mod tests {
                 ],
                 username: "user".to_string(),
                 credential: "secret".to_string(),
-                ..Default::default()
             },
             RTCIceServer {
                 urls: vec!["STUN:backup.example.com:3478".to_string()],
@@ -1855,10 +2292,18 @@ mod tests {
             },
         ];
 
-        let direct = servers_for_policy(&mixed, false);
-        assert_eq!(direct.len(), 2);
-        assert_eq!(direct[0].urls, vec!["stun:stun.example.com:3478"]);
-        assert_eq!(direct[1].urls, vec!["STUN:backup.example.com:3478"]);
+        let normal = servers_for_policy(&mixed, false);
+        assert_eq!(normal.len(), 2);
+        assert_eq!(
+            normal[0].urls,
+            vec![
+                "stun:stun.example.com:3478",
+                "turn:turn.example.com:3478?transport=udp"
+            ]
+        );
+        assert_eq!(normal[1].urls, vec!["STUN:backup.example.com:3478"]);
+        assert_eq!(normal[0].username, "user");
+        assert_eq!(normal[0].credential, "secret");
 
         let udp = servers_for_policy(&mixed, true);
         assert_eq!(udp.len(), 1);
@@ -1869,6 +2314,190 @@ mod tests {
 
         assert_eq!(udp[0].username, "user");
         assert_eq!(udp[0].credential, "secret");
+    }
+
+    #[test]
+    fn shared_udp_mux_never_replaces_stun_gathering() {
+        let stun = RTCIceServer {
+            urls: vec!["stun:stun.example.com:3478".to_string()],
+            ..Default::default()
+        };
+        let turn = RTCIceServer {
+            urls: vec!["turn:turn.example.com:3478?transport=udp".to_string()],
+            ..Default::default()
+        };
+
+        assert!(!should_use_shared_udp_mux(
+            &[stun.clone(), turn.clone()],
+            false
+        ));
+        assert!(should_use_shared_udp_mux(
+            std::slice::from_ref(&turn),
+            false
+        ));
+        assert!(!should_use_shared_udp_mux(&[], false));
+        assert!(!should_use_shared_udp_mux(&[turn], true));
+    }
+
+    #[test]
+    fn local_candidate_gate_preserves_restart_signal_order() {
+        let gate = LocalCandidateGate::default();
+        assert_eq!(
+            gate.queue_or_pass("initial".to_string()).as_deref(),
+            Some("initial")
+        );
+
+        gate.hold();
+        assert!(gate.queue_or_pass("restart-a".to_string()).is_none());
+        assert!(gate.queue_or_pass("restart-b".to_string()).is_none());
+        assert_eq!(gate.release(), vec!["restart-a", "restart-b"]);
+        assert_eq!(
+            gate.queue_or_pass("after-sdp".to_string()).as_deref(),
+            Some("after-sdp")
+        );
+    }
+
+    #[test]
+    fn ice_restart_offer_uses_new_credentials_and_sdp_precedes_candidates() {
+        let (tx, rx) = channel::<LocalSignal>();
+        let engine = RtcEngine::new(tx);
+        engine.set_ice_servers(&[]);
+        engine.add_peer("restart-offerer".to_string(), true, false, 51, 0);
+
+        let initial_offer = rx
+            .try_iter()
+            .find_map(|signal| match signal {
+                LocalSignal::Sdp { sdp_type, sdp, .. } if sdp_type == "offer" => Some(sdp),
+                _ => None,
+            })
+            .expect("initial offer");
+        let pc = Arc::clone(&engine.peers.lock().unwrap()["restart-offerer"].pc);
+        assert!(engine.rt.block_on(wait_for_ice_gathering_idle(&pc)));
+        // Discard any final candidates from the initial generation before checking restart order.
+        let _ = rx.try_iter().count();
+
+        assert!(engine.restart_ice("restart-offerer", false, true));
+        let restart_signals: Vec<_> = rx
+            .try_iter()
+            .filter(|signal| {
+                matches!(
+                    signal,
+                    LocalSignal::Sdp { .. } | LocalSignal::Candidate { .. }
+                )
+            })
+            .collect();
+        let restart_offer = restart_signals
+            .iter()
+            .find_map(|signal| match signal {
+                LocalSignal::Sdp { sdp_type, sdp, .. } if sdp_type == "offer" => Some(sdp),
+                _ => None,
+            })
+            .expect("restart offer");
+
+        assert_ne!(initial_offer, *restart_offer);
+        assert!(matches!(
+            restart_signals.first(),
+            Some(LocalSignal::Sdp { .. })
+        ));
+        assert!(!engine.peer_configs.lock().unwrap()["restart-offerer"].relay_only);
+    }
+
+    #[test]
+    fn answerer_prepare_holds_candidates_until_remote_offer() {
+        let (offer_tx, offer_rx) = channel::<LocalSignal>();
+        let (answer_tx, answer_rx) = channel::<LocalSignal>();
+        let offerer = RtcEngine::new(offer_tx);
+        let answerer = RtcEngine::new(answer_tx);
+        offerer.set_ice_servers(&[]);
+        answerer.set_ice_servers(&[]);
+        offerer.add_peer("answerer".to_string(), true, false, 51, 0);
+        answerer.add_peer("offerer".to_string(), false, false, 52, 0);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut connected = false;
+        while Instant::now() < deadline && !connected {
+            while let Ok(signal) = offer_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        answerer.set_remote_sdp("offerer", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        answerer.add_ice_candidate("offerer", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => connected |= state == "connected",
+                }
+            }
+            while let Ok(signal) = answer_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        offerer.set_remote_sdp("answerer", &sdp_type, &sdp)
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        offerer.add_ice_candidate("answerer", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => connected |= state == "connected",
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(connected, "initial peer connection did not complete");
+        let _ = offer_rx.try_iter().count();
+        let _ = answer_rx.try_iter().count();
+
+        assert!(answerer.restart_ice("offerer", false, false));
+        assert!(answer_rx.try_iter().all(|signal| !matches!(
+            signal,
+            LocalSignal::Sdp { .. } | LocalSignal::Candidate { .. }
+        )));
+
+        assert!(offerer.restart_ice("answerer", false, true));
+        let payload = vec![0x5a; 80];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_offer = false;
+        let mut saw_answer = false;
+        let mut saw_closed = false;
+        let mut received = false;
+        while Instant::now() < deadline && !received {
+            while let Ok(signal) = offer_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        saw_offer |= sdp_type == "offer";
+                        answerer.set_remote_sdp("offerer", &sdp_type, &sdp);
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        answerer.add_ice_candidate("offerer", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => saw_closed |= state == "closed",
+                }
+            }
+            while let Ok(signal) = answer_rx.try_recv() {
+                match signal {
+                    LocalSignal::Sdp { sdp_type, sdp, .. } => {
+                        saw_answer |= sdp_type == "answer";
+                        offerer.set_remote_sdp("answerer", &sdp_type, &sdp);
+                    }
+                    LocalSignal::Candidate { candidate, .. } => {
+                        offerer.add_ice_candidate("answerer", &candidate)
+                    }
+                    LocalSignal::PeerState { state, .. } => saw_closed |= state == "closed",
+                }
+            }
+            offerer.send_opus(&payload, 0);
+            while let Some(packet) = answerer.recv() {
+                received |= packet.payload == payload;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_offer, "restart offer was not emitted");
+        assert!(saw_answer, "restart answer was not emitted");
+        assert!(
+            !saw_closed,
+            "transport replacement leaked a closed peer state"
+        );
+        assert!(
+            received,
+            "media did not recover after the coordinated ICE restart"
+        );
     }
 
     #[test]

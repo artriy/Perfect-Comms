@@ -819,12 +819,6 @@ internal static partial class VoiceRoleMuteState
             return true;
         }
 
-        if (settings.MuteGlitchHacked && state.IsGlitchHacked)
-        {
-            reason = VoiceProximityReason.GlitchHacked;
-            return true;
-        }
-
         if (settings.MuteSwooperWhileSwooped && state.IsSwooped)
         {
             reason = VoiceProximityReason.Swooped;
@@ -857,12 +851,6 @@ internal static partial class VoiceRoleMuteState
     {
         _ = playerId;
         reason = VoiceProximityReason.Proximity;
-
-        if (settings.MuteGlitchHacked && state.IsGlitchHacked)
-        {
-            reason = VoiceProximityReason.GlitchHacked;
-            return true;
-        }
 
         if (settings.MuteSwooperWhileSwooped && state.IsSwooped)
         {

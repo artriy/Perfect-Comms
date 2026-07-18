@@ -30,7 +30,7 @@ jobs:
     needs: [quality, helpers, rtc]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
       - name: Verify release changelog
@@ -70,11 +70,11 @@ jobs:
             echo "release tag $GITHUB_REF_NAME must point to the current main tip: tag=$tag_commit main=$main_commit" >&2
             exit 1
           fi
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: "10.0.x"
       - name: Collect helpers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dl
       - name: Stage helpers into Libs
@@ -109,7 +109,7 @@ jobs:
       - name: Package (Android)
         run: bash scripts/package-release.sh Android
       - name: Upload Steam/itch.io x86 dependency artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "PerfectComms+dependencies-win-x86-steam-itch.zip"
           path: "artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip"
@@ -117,7 +117,7 @@ jobs:
           retention-days: 14
           overwrite: true
       - name: Upload Epic Games Store/Microsoft Store x64 dependency artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "PerfectComms+dependencies-win-x64-epic-msstore.zip"
           path: "artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip"
@@ -125,7 +125,7 @@ jobs:
           retention-days: 14
           overwrite: true
       - name: Upload standalone DLL artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: PerfectComms-standalone-dlls-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -140,7 +140,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Prepare GitHub release notes
         shell: bash
         run: |
@@ -161,17 +161,17 @@ jobs:
             exit 1
           fi
       - name: Download Steam/itch.io x86 dependency artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: "PerfectComms+dependencies-win-x86-steam-itch.zip"
           path: artifacts
       - name: Download Epic Games Store/Microsoft Store x64 dependency artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: "PerfectComms+dependencies-win-x64-epic-msstore.zip"
           path: artifacts
       - name: Download standalone DLL artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: PerfectComms-standalone-dlls-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts
@@ -184,7 +184,7 @@ jobs:
           test -s artifacts/PerfectComms.dll
           test -s artifacts/PerfectCommsAndroid.dll
       - name: Publish release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           name: Perfect Comms ${{ github.ref_name }}
           body_path: release-notes.md

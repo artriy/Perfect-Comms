@@ -181,6 +181,7 @@ public sealed class AndroidTouchInputDecisionTests
             SyntheticMicToneEnabled: true,
             MicCalibrationDiagnostics: true,
             NoiseSuppressionEnabled: true,
+            StrongerNoiseSuppressionEnabled: true,
             EchoCancellationEnabled: true,
             MicSensitivity: 1.5f);
 
@@ -189,6 +190,7 @@ public sealed class AndroidTouchInputDecisionTests
         Assert.True(normalized.SyntheticMicToneEnabled);
         Assert.True(normalized.MicCalibrationDiagnostics);
         Assert.False(normalized.NoiseSuppressionEnabled);
+        Assert.False(normalized.StrongerNoiseSuppressionEnabled);
         Assert.False(normalized.EchoCancellationEnabled);
         Assert.Equal(1.5f, normalized.MicSensitivity);
     }

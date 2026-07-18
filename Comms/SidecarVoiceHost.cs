@@ -41,6 +41,7 @@ internal interface ISidecarVoiceClient : IDisposable
         bool aec,
         bool agc,
         bool ns,
+        bool nsVeryHigh,
         bool hpf,
         float gain,
         float vadThreshold,
@@ -48,15 +49,16 @@ internal interface ISidecarVoiceClient : IDisposable
         bool synthetic,
         bool micActive,
         IEnumerable<IceServer>? iceServers);
-    void SetDsp(bool aec, bool agc, bool ns, bool hpf);
+    void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf);
     void SetSynthetic(bool enabled);
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
     void SelectMicDevice(string deviceId);
     void SelectOutputDevice(string deviceId);
     void SendOutputTestFrame(float[] interleavedStereo);
-    bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation);
+    bool AddPeer(string peerId, bool isOfferer, int generation);
     bool RemovePeer(string peerId);
+    bool RestartIce(string peerId, bool createOffer);
     bool SetRemoteSdp(string peerId, string sdpType, string sdp);
     bool AddIceCandidate(string peerId, string candidate);
     void SetIceServers(IEnumerable<IceServer> servers);
@@ -193,6 +195,7 @@ internal sealed class SidecarVoiceLease : IDisposable
         bool aec,
         bool agc,
         bool ns,
+        bool nsVeryHigh,
         bool hpf,
         float gain,
         float vadThreshold,
@@ -201,11 +204,11 @@ internal sealed class SidecarVoiceLease : IDisposable
         bool micActive,
         IEnumerable<IceServer>? iceServers)
         => _host.Use(this, client => client.TryConfigureInitialCapture(
-            micDevice, outputDevice, aec, agc, ns, hpf, gain, vadThreshold, noiseGateThreshold,
+            micDevice, outputDevice, aec, agc, ns, nsVeryHigh, hpf, gain, vadThreshold, noiseGateThreshold,
             synthetic, micActive, iceServers), false);
 
-    public void SetDsp(bool aec, bool agc, bool ns, bool hpf)
-        => _host.Use(this, client => client.SetDsp(aec, agc, ns, hpf));
+    public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf)
+        => _host.Use(this, client => client.SetDsp(aec, agc, ns, nsVeryHigh, hpf));
     public void SetSynthetic(bool enabled)
         => _host.Use(this, client => client.SetSynthetic(enabled));
     public void SetInput(float gain, float vadThreshold, float noiseGateThreshold)
@@ -218,10 +221,10 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client => client.SelectOutputDevice(deviceId));
     public void SendOutputTestFrame(float[] interleavedStereo)
         => _host.Use(this, client => client.SendOutputTestFrame(interleavedStereo));
-    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, int generation)
         => _host.Use(this, client =>
         {
-            if (!client.AddPeer(peerId, isOfferer, relayOnly, generation)) return false;
+            if (!client.AddPeer(peerId, isOfferer, generation)) return false;
             TrackPeer(peerId);
             return true;
         }, false);
@@ -232,6 +235,8 @@ internal sealed class SidecarVoiceLease : IDisposable
             if (written) UntrackPeer(peerId);
             return written;
         }, false);
+    public bool RestartIce(string peerId, bool createOffer)
+        => _host.Use(this, client => client.RestartIce(peerId, createOffer), false);
     public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
         => _host.Use(this, client => client.SetRemoteSdp(peerId, sdpType, sdp), false);
     public bool AddIceCandidate(string peerId, string candidate)

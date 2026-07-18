@@ -6,6 +6,7 @@ pub struct DspConfig {
     pub aec: bool,
     pub agc: bool,
     pub ns: bool,
+    pub ns_very_high: bool,
     pub hpf: bool,
 }
 
@@ -18,6 +19,7 @@ pub struct DspStatus {
     pub applied_aec: bool,
     pub applied_agc: bool,
     pub applied_ns: bool,
+    pub applied_ns_very_high: bool,
     pub applied_hpf: bool,
 }
 
@@ -29,10 +31,12 @@ impl DspStatus {
         let applied_aec = apm_loaded && requested.aec;
         let applied_agc = false;
         let applied_ns = apm_loaded && requested.ns;
+        let applied_ns_very_high = applied_ns && requested.ns_very_high;
         let applied_hpf = apm_loaded && requested.hpf;
         let config_fully_applied = requested.aec == applied_aec
             && requested.agc == applied_agc
             && requested.ns == applied_ns
+            && (!requested.ns || requested.ns_very_high == applied_ns_very_high)
             && requested.hpf == applied_hpf;
         Self {
             config_generation,
@@ -42,6 +46,7 @@ impl DspStatus {
             applied_aec,
             applied_agc,
             applied_ns,
+            applied_ns_very_high,
             applied_hpf,
         }
     }
@@ -53,6 +58,7 @@ impl Default for DspConfig {
             aec: true,
             agc: false,
             ns: true,
+            ns_very_high: false,
             hpf: true,
         }
     }
@@ -129,8 +135,16 @@ fn load_apm(cfg: &DspConfig) -> Option<Apm> {
     if !(cfg.aec || cfg.ns || cfg.hpf) {
         return None;
     }
-    // Run AEC3, high WebRTC noise suppression, and the high-pass filter without automatic gain.
-    match Apm::load(&lib_path(APM_LIB), cfg.aec, cfg.ns, false, cfg.hpf) {
+    // Run AEC3, selectable high/very-high WebRTC noise suppression, and the high-pass filter
+    // without automatic gain.
+    match Apm::load(
+        &lib_path(APM_LIB),
+        cfg.aec,
+        cfg.ns,
+        cfg.ns_very_high,
+        false,
+        cfg.hpf,
+    ) {
         Ok(a) => Some(a),
         Err(e) => {
             eprintln!("pc-capture: apm unavailable, mic passthrough: {e}");
@@ -144,9 +158,14 @@ impl Dsp {
         let apm = load_apm(&cfg);
         let web_rtc_ns_enabled = cfg.ns && apm.is_some();
         eprintln!(
-            "pc-capture: dsp apm={} webrtc-ns={} automatic-gain=false",
+            "pc-capture: dsp apm={} webrtc-ns={} webrtc-ns-level={} automatic-gain=false",
             apm.is_some(),
             web_rtc_ns_enabled,
+            if cfg.ns_very_high {
+                "very-high"
+            } else {
+                "high"
+            },
         );
         Dsp {
             apm,
@@ -161,7 +180,7 @@ impl Dsp {
     pub fn set(&mut self, cfg: DspConfig) {
         if cfg.aec || cfg.ns || cfg.hpf {
             if let Some(apm) = self.apm.as_mut() {
-                if let Err(e) = apm.set_config(cfg.aec, cfg.ns, false, cfg.hpf) {
+                if let Err(e) = apm.set_config(cfg.aec, cfg.ns, cfg.ns_very_high, false, cfg.hpf) {
                     eprintln!("pc-capture: apm reconfigure failed, reloading: {e}");
                     self.apm = load_apm(&cfg);
                 }
@@ -176,9 +195,10 @@ impl Dsp {
         self.config_generation = self.config_generation.saturating_add(1);
 
         eprintln!(
-            "pc-capture: dsp set apm={} webrtc-ns={} automatic-gain=false requested-agc={}",
+            "pc-capture: dsp set apm={} webrtc-ns={} webrtc-ns-level={} automatic-gain=false requested-agc={}",
             self.apm.is_some(),
             cfg.ns && self.apm.is_some(),
+            if cfg.ns_very_high { "very-high" } else { "high" },
             cfg.agc,
         );
     }
@@ -302,6 +322,7 @@ mod tests {
             aec: true,
             agc: true,
             ns: true,
+            ns_very_high: true,
             hpf: false,
         };
         let missing = DspStatus::from_state(7, requested, false);
@@ -312,12 +333,14 @@ mod tests {
         assert!(!missing.applied_aec);
         assert!(!missing.applied_agc);
         assert!(!missing.applied_ns);
+        assert!(!missing.applied_ns_very_high);
         assert!(!missing.applied_hpf);
 
         let loaded = DspStatus::from_state(8, requested, true);
         assert!(loaded.apm_loaded);
         assert!(loaded.applied_aec);
         assert!(loaded.applied_ns);
+        assert!(loaded.applied_ns_very_high);
         assert!(!loaded.applied_agc);
         assert!(!loaded.config_fully_applied);
     }
@@ -328,6 +351,7 @@ mod tests {
             aec: false,
             agc: false,
             ns: false,
+            ns_very_high: false,
             hpf: false,
         };
         let mut dsp = Dsp::new(disabled);
@@ -348,6 +372,7 @@ mod tests {
             aec: false,
             agc: false,
             ns: false,
+            ns_very_high: false,
             hpf: false,
         };
         let mut dsp = Dsp::new(disabled);
@@ -371,6 +396,7 @@ mod tests {
             aec: false,
             agc: false,
             ns: false,
+            ns_very_high: false,
             hpf: false,
         };
         let mut dsp = Dsp::new(disabled);

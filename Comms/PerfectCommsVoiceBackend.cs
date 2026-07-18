@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,7 +29,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         new("stun:global.stun.twilio.com:3478"),
     ];
     private static readonly HttpClient TurnHttp = new() { Timeout = TimeSpan.FromSeconds(6) };
-    private readonly bool _forceRelayForSession;
 
     private readonly MicPreprocessor _micPreprocessor = new();
     private readonly ConcurrentQueue<Action> _mainThreadActions = new();
@@ -55,7 +55,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private CancellationTokenSource? _turnCts;
     private bool _turnFetchInFlight;
     private bool _turnRefreshRelayPeersAwaiting;
-    private bool _turnForceRelayAwaiting;
     private int _turnFetchFailureRound;
     private int _turnConfigGeneration;
     private DateTime _turnFetchNotBeforeUtc = DateTime.MinValue;
@@ -179,6 +178,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private const int RpcRosterPollIntervalMs = 250;
     private const int RpcSessionTickIntervalMs = 100;
     private const int ManagedTurnRefreshPollIntervalMs = 5_000;
+    private const int NetworkChangeDebounceMs = 1_500;
+    private const int NetworkChangeCooldownMs = 15_000;
+    private long _networkChangeSignaledAtMs;
+    private long _networkChangeLastAppliedMs;
+    private bool _networkChangeSubscribed;
     private readonly HashSet<int> _rpcKnownClients = new();
     private readonly HashSet<int> _rpcPresentScratch = new();
     private readonly List<int> _rpcLeftScratch = new();
@@ -253,18 +257,28 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private volatile bool _disposed;
 
-    public PerfectCommsVoiceBackend(string roomCode, string region, bool forceRelayForSession = false)
+    public PerfectCommsVoiceBackend(string roomCode, string region)
     {
         RoomCode = roomCode;
         Region = region;
-        _forceRelayForSession = forceRelayForSession;
 
         RefreshConfiguredIceServers("startup");
         // Fetch short-lived relay credentials in parallel with normal direct ICE setup. Direct
         // peers still use host/srflx candidates, but a symmetric-NAT failure can now escalate
         // immediately instead of waiting for a credential round trip after the timeout.
         if (UsesManagedTurn())
-            EnsureManagedTurnCredentials(forceRelay: ShouldForceRelay(), refreshRelayPeers: false);
+            EnsureManagedTurnCredentials(refreshRelayPeers: false);
+#if WINDOWS || ANDROID
+        try
+        {
+            NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
+            _networkChangeSubscribed = true;
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("voice.ice.network-change", $"subscribed=false errorType={ex.GetType().Name}");
+        }
+#endif
         VoiceDiagnostics.Log("voice.engine.created",
             $"{VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} signaling=among-us-rpc");
         if (WineEnvironment.IsWine)
@@ -324,10 +338,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         lock (_turnSync)
             _pendingRelayPeerIds.Add(clientId);
-        EnsureManagedTurnCredentials(forceRelay: false, refreshRelayPeers: false);
+        EnsureManagedTurnCredentials(refreshRelayPeers: false);
     }
 
-    private void EnsureManagedTurnCredentials(bool forceRelay, bool refreshRelayPeers)
+    private void EnsureManagedTurnCredentials(bool refreshRelayPeers)
     {
         if (_disposed || !UsesManagedTurn()) return;
 
@@ -335,7 +349,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (TurnCredentialClient.TryGetFreshCached(DateTime.UtcNow, endpoint, out var cached) &&
             !TurnCredentialClient.NeedsRefresh(DateTime.UtcNow, endpoint))
         {
-            CompleteManagedTurnCredentials(cached, forceRelay, refreshRelayPeers);
+            CompleteManagedTurnCredentials(cached, refreshRelayPeers);
             return;
         }
 
@@ -343,7 +357,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         CancellationToken token;
         lock (_turnSync)
         {
-            _turnForceRelayAwaiting |= forceRelay;
             _turnRefreshRelayPeersAwaiting |= refreshRelayPeers;
             if (_turnFetchInFlight) return;
 
@@ -375,7 +388,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 var servers = await TurnCredentialClient.FetchAsync(TurnHttp, endpoint, ct)
                     .ConfigureAwait(false);
-                CompleteManagedTurnCredentials(servers, forceRelay: false, refreshRelayPeers: false, generation);
+                CompleteManagedTurnCredentials(servers, refreshRelayPeers: false, generation);
                 return;
             }
             catch (OperationCanceledException) { return; }
@@ -410,12 +423,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void CompleteManagedTurnCredentials(
         List<IceServer> servers,
-        bool forceRelay,
         bool refreshRelayPeers,
         int? generation = null)
     {
         int[] pendingPeers;
-        bool forceAwaiting;
         bool refreshAwaiting;
         CancellationTokenSource? completedCts;
         lock (_turnSync)
@@ -424,9 +435,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _managedIceServers = new List<IceServer>(servers);
             pendingPeers = _pendingRelayPeerIds.ToArray();
             _pendingRelayPeerIds.Clear();
-            forceAwaiting = _turnForceRelayAwaiting || forceRelay;
             refreshAwaiting = _turnRefreshRelayPeersAwaiting || refreshRelayPeers;
-            _turnForceRelayAwaiting = false;
             _turnRefreshRelayPeersAwaiting = false;
             _turnFetchInFlight = false;
             completedCts = _turnCts;
@@ -442,17 +451,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS || ANDROID
             var manager = _peerSession;
             if (manager == null) return;
+            var recreatedPeers = new HashSet<int>();
             foreach (var clientId in pendingPeers)
-                manager.EscalatePeer(clientId, Environment.TickCount64);
-            if (forceAwaiting && ShouldForceRelay())
-                manager.RebuildAll(forceRelay: true, nowMs: Environment.TickCount64);
-            else if (refreshAwaiting)
-                manager.RefreshRelayPeers(Environment.TickCount64);
+                if (manager.EscalatePeer(clientId, Environment.TickCount64))
+                    recreatedPeers.Add(clientId);
+            if (refreshAwaiting)
+                manager.RefreshRelayPeers(Environment.TickCount64, recreatedPeers);
 #endif
         });
         VoiceDiagnostics.Log(
             "voice.turn",
-            $"ready=true iceServers={servers.Count} escalations={pendingPeers.Length} refresh={refreshAwaiting} forceRelay={forceAwaiting}");
+            $"ready=true iceServers={servers.Count} escalations={pendingPeers.Length} refresh={refreshAwaiting} policy=mixed");
     }
 
     private void MaybeRefreshManagedTurnCredentials()
@@ -461,31 +470,28 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (!UsesManagedTurn()) return;
 
         bool pendingPeers;
-        bool forceAwaiting;
         bool refreshAwaiting;
         lock (_turnSync)
         {
             pendingPeers = _pendingRelayPeerIds.Count > 0;
-            forceAwaiting = _turnForceRelayAwaiting;
             refreshAwaiting = _turnRefreshRelayPeersAwaiting;
         }
-        if (ShouldRetryPendingTurnIntent(pendingPeers, forceAwaiting, refreshAwaiting))
+        if (ShouldRetryPendingTurnIntent(pendingPeers, refreshAwaiting))
         {
-            EnsureManagedTurnCredentials(forceAwaiting, refreshAwaiting);
+            EnsureManagedTurnCredentials(refreshAwaiting);
             return;
         }
 
         if (_peerSession?.HasRelayPeers != true) return;
         if (TurnCredentialClient.NeedsRefresh(DateTime.UtcNow, TurnCredentialsUrl()))
-            EnsureManagedTurnCredentials(forceRelay: false, refreshRelayPeers: true);
+            EnsureManagedTurnCredentials(refreshRelayPeers: true);
 #endif
     }
 
     internal static bool ShouldRetryPendingTurnIntent(
         bool pendingPeers,
-        bool forceAwaiting,
         bool refreshAwaiting)
-        => pendingPeers || forceAwaiting || refreshAwaiting;
+        => pendingPeers || refreshAwaiting;
 
     private void ResetTurnCredentialState()
     {
@@ -496,7 +502,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             cts = _turnCts;
             _turnCts = null;
             _turnFetchInFlight = false;
-            _turnForceRelayAwaiting = false;
             _turnRefreshRelayPeersAwaiting = false;
             _pendingRelayPeerIds.Clear();
             _managedIceServers.Clear();
@@ -510,9 +515,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         lock (_turnSync) return _pendingRelayPeerIds.Count;
     }
-
-    private bool ShouldForceRelay()
-        => _forceRelayForSession;
 
     private static bool TryGetCustomTurnServer(out IceServer server, out bool invalid)
     {
@@ -897,7 +899,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             captureVoice = _voice;
             captureSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
         }
-        captureVoice?.SetDsp(options.EchoCancellationEnabled, automaticMicGain, options.NoiseSuppressionEnabled, true);
+        captureVoice?.SetDsp(
+            options.EchoCancellationEnabled,
+            automaticMicGain,
+            options.NoiseSuppressionEnabled,
+            options.StrongerNoiseSuppressionEnabled,
+            true);
         captureVoice?.SetSynthetic(options.SyntheticMicToneEnabled);
         captureVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         if (restartCapture)
@@ -924,7 +931,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             StartAndroidMicrophone("capture-options");
 #endif
         VoiceDiagnostics.Log("voice.capture-options",
-            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} automaticMicGain={automaticMicGain} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
+            $"capture={DescribeCaptureMode()} syntheticTone={options.SyntheticMicToneEnabled} noiseSuppression={options.NoiseSuppressionEnabled} strongerNoiseSuppression={options.NoiseSuppressionEnabled && options.StrongerNoiseSuppressionEnabled} automaticMicGain={automaticMicGain} calibration={options.MicCalibrationDiagnostics} sensitivity={options.MicSensitivity:0.00}");
     }
 
     public void RebuildCaptureSupervisor()
@@ -1459,10 +1466,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=peer-state reason=session-manager-null client={clientId} generation={generation} state={state}");
                 return;
             }
-            var relayOnly = manager.TryGetPeerRelayOnly(clientId, out var relay) && relay;
             VoiceDiagnostics.Log(
                 "voice.ice.peer-state",
-                $"client={clientId} generation={generation} state={state} relayOnly={relayOnly.ToString().ToLowerInvariant()}");
+                $"client={clientId} generation={generation} state={state} policy=automatic-mixed");
             if (state == "connected")
                 manager.OnPeerConnected(clientId, generation);
             else if (state is "failed" or "closed")
@@ -1653,6 +1659,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _captureOptions.EchoCancellationEnabled,
             false,
             _captureOptions.NoiseSuppressionEnabled,
+            _captureOptions.StrongerNoiseSuppressionEnabled,
             true,
             _micVolume,
             _vadThreshold,
@@ -2191,8 +2198,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _rpcTransport!,
                 _rpcSender,
                 relayAvailable: RelayAvailable,
-                requestRelay: RequestRelayCredentials,
-                forceRelay: ShouldForceRelay);
+                requestRelay: RequestRelayCredentials);
         }
 
         var registeredNow = false;
@@ -2265,6 +2271,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             if (!registeredNow)
                 AmongUsRpcSignaling.ReplayDeferredHellos(_rpcSubscription);
+            MaybeRestartIceAfterNetworkChange(nowMs);
             _peerSession.Tick(nowMs);
         }
 
@@ -2277,6 +2284,48 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (nowMs < nextMs) return false;
         nextMs = nowMs + Math.Max(1, intervalMs);
         return true;
+    }
+
+    private void OnNetworkAddressChanged(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        var nowMs = Environment.TickCount64;
+        Volatile.Write(ref _networkChangeSignaledAtMs, nowMs == 0 ? 1 : nowMs);
+    }
+
+    private void MaybeRestartIceAfterNetworkChange(long nowMs)
+    {
+        var signaledAtMs = Volatile.Read(ref _networkChangeSignaledAtMs);
+        var lastAppliedMs = Volatile.Read(ref _networkChangeLastAppliedMs);
+        if (!ShouldRestartIceForNetworkChange(
+                nowMs,
+                signaledAtMs,
+                lastAppliedMs,
+                NetworkChangeDebounceMs,
+                NetworkChangeCooldownMs))
+            return;
+        if (Interlocked.CompareExchange(ref _networkChangeSignaledAtMs, 0, signaledAtMs) != signaledAtMs)
+            return;
+
+        Volatile.Write(ref _networkChangeLastAppliedMs, nowMs);
+        var restarted = _peerSession?.RestartIceAfterNetworkChange(nowMs) ?? 0;
+        VoiceDiagnostics.Log(
+            "voice.ice.network-change",
+            $"action=restart-ice peers={restarted} debounceMs={NetworkChangeDebounceMs} cooldownMs={NetworkChangeCooldownMs}");
+    }
+
+    internal static bool ShouldRestartIceForNetworkChange(
+        long nowMs,
+        long signaledAtMs,
+        long lastAppliedMs,
+        int debounceMs,
+        int cooldownMs)
+    {
+        if (signaledAtMs <= 0 || nowMs < signaledAtMs || nowMs - signaledAtMs < Math.Max(0, debounceMs))
+            return false;
+        return lastAppliedMs <= 0
+               || nowMs < lastAppliedMs
+               || nowMs - lastAppliedMs >= Math.Max(0, cooldownMs);
     }
 
     internal static bool ShouldReplaceRpcSession(int sessionLocalClientId, int currentLocalClientId)
@@ -2375,7 +2424,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         mv.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         mv.SetSynthetic(false);
         // Android intentionally ships without the desktop WebRTC APM side library.
-        mv.SetDsp(false, false, false, false);
+        mv.SetDsp(false, false, false, false, false);
         // A fresh engine is fail-closed. Explicit Stop when muted/not ready also resets any
         // encoder history before peers can be authorized; an already-running source gets Start.
         mv.SetMicActive(!Mute && _microphoneReady);
@@ -2451,10 +2500,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         if (_peerSession == null) return;
         var nowMs = Environment.TickCount64;
-        var relayOnly = _peerSession.TryGetPeerRelayOnly(clientId, out var relay) && relay;
         VoiceDiagnostics.Log(
             "voice.ice.peer-state",
-            $"client={clientId} generation={generation} state={state} relayOnly={relayOnly.ToString().ToLowerInvariant()} backend=mobile");
+            $"client={clientId} generation={generation} state={state} policy=automatic-mixed backend=mobile");
         if (state == "connected") _peerSession.OnPeerConnected(clientId, generation);
         else if (state is "failed" or "closed") _peerSession.OnPeerConnectionLost(clientId, generation, nowMs);
         else if (state == "disconnected") _peerSession.OnPeerConnectionDegraded(clientId, generation, nowMs);
@@ -3052,6 +3100,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _disposed = true;
         BestEffortDispose("turn-reset", ResetTurnCredentialState);
 #if WINDOWS || ANDROID
+        if (_networkChangeSubscribed)
+        {
+            BestEffortDispose("network-change-unsubscribe", () => NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged);
+            _networkChangeSubscribed = false;
+        }
         BestEffortDispose("peer-reset", () => _peerSession?.ResetAndNotify("backend-dispose"));
         if (_rpcOnMessageHooked)
         {
@@ -3096,29 +3149,16 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
     }
 
-    public void EscalateToRelayOnly(string reason)
-    {
-        if (_disposed) return;
-        var requested = 0;
-#if WINDOWS || ANDROID
-        requested = _peerSession?.EscalateAllToRelay(Environment.TickCount64) ?? 0;
-#endif
-        VoiceDiagnostics.Log(
-            "voice.ice.escalate",
-            $"reason={reason} peers={requested} relayAvailable={RelayAvailable()} managed={UsesManagedTurn()}");
-    }
-
     public void RebuildIceConnectionPool()
     {
         if (_disposed) return;
         ResetTurnCredentialState();
         RefreshConfiguredIceServers("settings-changed");
-        var forceRelay = ShouldForceRelay();
 #if WINDOWS || ANDROID
-        _peerSession?.RebuildAll(forceRelay && RelayAvailable(), Environment.TickCount64);
+        _peerSession?.RebuildAll(Environment.TickCount64);
 #endif
-        if (forceRelay && UsesManagedTurn())
-            EnsureManagedTurnCredentials(forceRelay: true, refreshRelayPeers: false);
+        if (UsesManagedTurn())
+            EnsureManagedTurnCredentials(refreshRelayPeers: false);
     }
 
     internal static bool RemoteConnectionWasRecreated(string previousUfrag, string incomingUfrag)
@@ -3801,7 +3841,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"managedMicCallbacks={Volatile.Read(ref _micCallbacks)} managedMicBytes={Volatile.Read(ref _micBytes)} managedMicSamples={Volatile.Read(ref _micSamples)} managedMicWindowSamples={micWindowSamples} managedMicPeak={micPeak:0.000000} managedMicRms={micRms:0.000000} managedMicCrest={micCrest:0.00} managedMicNonZeroSamples={micNonZeroSamples} managedMicSilentCallbacks={micSilentCallbacks} managedMicNearClipSamples={micNearClipSamples} managedMicClipPct={micClipPct:0.000} managedMicZeroCrossRate={micZeroCrossRate:0.0000} " +
             $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicProcessingFailures={Volatile.Read(ref _micProcessingFailures)} unityEncodeDroppedFrames={Volatile.Read(ref _unityEncodeDroppedFrames)}{mobilePlaybackText} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} " +
-            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerConfigured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDigitalSilence={Volatile.Read(ref _digitalSilenceDetected)}");
+            $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} strongerNoiseSuppression={_captureOptions.NoiseSuppressionEnabled && _captureOptions.StrongerNoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerConfigured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDigitalSilence={Volatile.Read(ref _digitalSilenceDetected)}");
         if (CaptureUsesUnity)
             VoiceDiagnostics.Log("voice.unity",
                 $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micProcessingFailures={Volatile.Read(ref _micProcessingFailures)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady}");

@@ -164,19 +164,22 @@ internal sealed class MobileVoiceClient : IDisposable
         }
     }
 
-    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, int generation)
     {
         // Serialize receiver-set expansion with mic pushes. This ensures an in-flight native push
         // finishes before AddPeer resets encoder/DRED history; native enforces the same boundary
         // for direct/concurrent FFI callers.
         lock (_micLock)
-            return Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation));
+            return Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, generation));
     }
     public bool RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
+    public bool RestartIce(string peerId, bool createOffer) =>
+        Control(SidecarProtocol.RestartIceFrame(peerId, createOffer));
     public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
     public bool AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
     public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
-    public void SetDsp(bool aec, bool agc, bool ns, bool hpf) => Control(SidecarProtocol.SetDspFrame(aec, agc, ns, hpf));
+    public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) =>
+        Control(SidecarProtocol.SetDspFrame(aec, agc, ns, nsVeryHigh, hpf));
     public void SetDiagnostics(bool enabled)
     {
         var requested = enabled ? 1 : 0;

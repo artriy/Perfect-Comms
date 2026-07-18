@@ -531,7 +531,7 @@ public sealed class SidecarLauncherCacheTests
         File.WriteAllText(
             helper,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 10; exit 0; fi\n" +
+            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 12; exit 0; fi\n" +
             "while [ \"$#\" -gt 0 ]; do\n" +
             "  if [ \"$1\" = \"--handshake\" ]; then shift; printf '%s' ok > \"$1\"; exit 0; fi\n" +
             "  shift\n" +
@@ -561,7 +561,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(helperExited);
             psi.ArgumentList.Add(launchCancelled);
             psi.ArgumentList.Add(launchNonce);
-            psi.ArgumentList.Add("10");
+            psi.ArgumentList.Add("12");
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             psi.ArgumentList.Add("--token-file");
@@ -617,7 +617,7 @@ public sealed class SidecarLauncherCacheTests
         File.WriteAllText(
             fallback,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 10; exit 0; fi\n" +
+            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 12; exit 0; fi\n" +
             $"printf '%s' fallback > '{selected}'\n" +
             "while [ \"$#\" -gt 0 ]; do\n" +
             "  if [ \"$1\" = \"--handshake\" ]; then shift; printf '%s' ok > \"$1\"; exit 0; fi\n" +
@@ -648,7 +648,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(control.ExitPath);
             psi.ArgumentList.Add(control.CancellationPath);
             psi.ArgumentList.Add(control.Nonce);
-            psi.ArgumentList.Add("10");
+            psi.ArgumentList.Add("12");
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             psi.ArgumentList.Add("--token-file");
@@ -703,7 +703,7 @@ public sealed class SidecarLauncherCacheTests
         File.WriteAllText(
             fallback,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 10; exit 0; fi\n" +
+            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 12; exit 0; fi\n" +
             "exit 0\n");
         try
         {
@@ -731,7 +731,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(control.ExitPath);
             psi.ArgumentList.Add(control.CancellationPath);
             psi.ArgumentList.Add(control.Nonce);
-            psi.ArgumentList.Add("10");
+            psi.ArgumentList.Add("12");
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             using var process = Process.Start(psi);

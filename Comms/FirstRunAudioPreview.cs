@@ -232,7 +232,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
             StopDesktopLease();
             return;
         }
-        _lease.SetDsp(draft.EchoCancellation, agc: false, draft.NoiseSuppression, hpf: true);
+        _lease.SetDsp(
+            aec: draft.EchoCancellation,
+            agc: false,
+            ns: draft.NoiseSuppression,
+            nsVeryHigh: draft.StrongerNoiseSuppression,
+            hpf: true);
         _lease.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
         _lease.SelectMicDevice(draft.MicrophoneDevice);
         _lease.SetMicActive(true);
@@ -267,7 +272,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
     {
         if (!IsListening || IsPlayingTone) return;
 #if WINDOWS
-        _lease?.SetDsp(draft.EchoCancellation, agc: false, draft.NoiseSuppression, hpf: true);
+        _lease?.SetDsp(
+            aec: draft.EchoCancellation,
+            agc: false,
+            ns: draft.NoiseSuppression,
+            nsVeryHigh: draft.StrongerNoiseSuppression,
+            hpf: true);
         _lease?.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
 #elif ANDROID
         _androidMicrophone?.SetVolume(draft.MicVolume);

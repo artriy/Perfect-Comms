@@ -11,6 +11,7 @@ internal static class AndroidVoiceCapturePolicy
         => options with
         {
             NoiseSuppressionEnabled = false,
+            StrongerNoiseSuppressionEnabled = false,
             EchoCancellationEnabled = false,
         };
 }

@@ -28,8 +28,8 @@ Perfect Comms v4.0.1 is a focused stability update for the new v4 voice engine. 
 - **Native audio helpers are more dependable.**
   > <sub>Helper retries, reconnects, and shutdown cleanup are more reliable, reducing stuck helper processes after a failed launch. CrossOver preserves the signed macOS helper on Intel and Apple Silicon, while Windows selects the correct self-contained 32-bit or 64-bit components, including on Windows-on-ARM systems running the game through emulation.</sub>
 
-- **Glitch-hacked voice muting is consistent.**
-  > <sub>The Mute Glitch Hacked option now blocks affected players correctly during tasks and meetings.</sub>
+- **Voice follows VPN and network changes automatically.**
+  > <sub>When a VPN connects, a network adapter changes, or a route stops working, Perfect Comms now refreshes only the affected voice connections and gathers a new direct-first path automatically. Relay candidates remain available as a fallback without a manual relay mode.</sub>
 
 - **Completed Mod Integration API 1.1 support.**
   > <sub>Mod Integration API 1.1 is now complete, allowing compatible mods to add custom voice channels, listener-specific routing and mutes, alternate listening positions, synchronized host options, and privacy-safe voice overlays without maintaining their own Perfect Comms fork.</sub>

@@ -10,10 +10,11 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal interface IVoiceTransport
 {
-    bool AddPeer(int clientId, bool isOfferer, bool relayOnly, int generation);
+    bool AddPeer(int clientId, bool isOfferer, int generation);
     bool RemovePeer(int clientId);
     bool SetRemoteSdp(int clientId, string sdpType, string sdp);
     bool AddIceCandidate(int clientId, string candidate);
+    bool RestartIce(int clientId, bool createOffer);
 }
 
 internal interface ISignalingSender
@@ -29,7 +30,6 @@ internal enum PeerState
     Answering,
     Connected,
     Established,
-    WaitingForRelay,
 }
 
 internal readonly struct PeerSessionDiagnosticsSnapshot
@@ -330,9 +330,10 @@ internal static class SignalPayload
 
 internal sealed class PeerSessionManager
 {
-    public const int ProtocolVersion = 4;
+    public const int ProtocolVersion = 5;
     public const int MinCompatibleVersion = 3;
     private const int ScopedControlProtocolVersion = 4;
+    private const int IceRestartProtocolVersion = 5;
     private const long HelloResendIntervalMs = 3000;
     private const long FailedHelloAckRetryIntervalMs = 500;
     internal const long DirectHandshakeTimeoutMs = 8000;
@@ -344,10 +345,10 @@ internal sealed class PeerSessionManager
     private const int MaxPendingRemoteCandidates = 64;
     private const long PendingRemoteCandidateTtlMs = 12000;
     private const long FailedLocalSignalRetryIntervalMs = 500;
+    private const long IceRestartOfferTimeoutMs = 5000;
     private const int MaxPendingLocalCandidates = 64;
     private const long FailedTransportCommandRetryIntervalMs = 500;
     private const long RelayCredentialRetryIntervalMs = 5000;
-    internal const long RelayCredentialRecoveryWindowMs = 30000;
     private const long MaxHelloBackoffMs = 60000;
     private const int MaxRetiredRemoteSessions = 8;
     private const int SynchronousResetRemovalRetryAttempts = 2;
@@ -395,14 +396,17 @@ internal sealed class PeerSessionManager
         public long LastProgressMs;
         public long LastReinitMs;
         public long DegradedSinceMs;
-        public long RelayWaitStartedMs;
         public long LastRelayRequestMs;
-        public bool RelayOnly;
         public bool RelayRequested;
+        public bool RelayCapable;
         public int Generation;
         public long NegotiationId;
         public bool NegotiationShared;
         public bool RestartRequested;
+        public bool IceRestartInProgress;
+        public bool IceRestartRequestPending;
+        public long IceRestartRequestStartedMs;
+        public long LastIceRestartRequestMs;
         public long LocalCandidatesAttempted;
         public long RemoteCandidatesReceived;
         public long RemoteCandidatesForwarded;
@@ -423,7 +427,6 @@ internal sealed class PeerSessionManager
     private readonly IVoiceTransport _transport;
     private readonly ISignalingSender _sender;
     private readonly Func<bool> _relayAvailable;
-    private readonly Func<bool> _forceRelay;
     private readonly Action<int> _requestRelay;
     private readonly Dictionary<int, PeerEntry> _peers = new();
     private readonly Dictionary<int, PendingRemoval> _pendingRemovals = new();
@@ -446,15 +449,13 @@ internal sealed class PeerSessionManager
         IVoiceTransport transport,
         ISignalingSender sender,
         Func<bool>? relayAvailable = null,
-        Action<int>? requestRelay = null,
-        Func<bool>? forceRelay = null)
+        Action<int>? requestRelay = null)
     {
         _localClientId = localClientId;
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _sender = sender ?? throw new ArgumentNullException(nameof(sender));
         _relayAvailable = relayAvailable ?? (() => false);
         _requestRelay = requestRelay ?? (_ => { });
-        _forceRelay = forceRelay ?? (() => false);
         _localSessionId = CreateSessionNonce();
     }
 
@@ -474,18 +475,7 @@ internal sealed class PeerSessionManager
         return false;
     }
 
-    internal bool TryGetPeerRelayOnly(int clientId, out bool relayOnly)
-    {
-        if (_peers.TryGetValue(clientId, out var peer))
-        {
-            relayOnly = peer.RelayOnly;
-            return true;
-        }
-        relayOnly = false;
-        return false;
-    }
-
-    internal bool HasRelayPeers => _peers.Values.Any(peer => peer.RelayOnly);
+    internal bool HasRelayPeers => _peers.Values.Any(peer => peer.RelayCapable);
 
     internal bool IsCompatiblePeer(int clientId)
         => _peers.TryGetValue(clientId, out var peer) && peer.HelloReceived;
@@ -506,14 +496,14 @@ internal sealed class PeerSessionManager
     {
         foreach (var peer in _peers.Values)
         {
-            if (peer.State == PeerState.WaitingForRelay)
+            if (peer.IceRestartRequestPending)
             {
-                var relayWaitElapsedMs = nowMs - peer.RelayWaitStartedMs;
-                if (relayWaitElapsedMs >= 0 && relayWaitElapsedMs < RelayCredentialRecoveryWindowMs)
+                var restartWaitElapsedMs = nowMs - peer.IceRestartRequestStartedMs;
+                if (peer.IceRestartRequestStartedMs > 0
+                    && restartWaitElapsedMs >= 0
+                    && restartWaitElapsedMs < IceRestartOfferTimeoutMs)
                     return true;
-                continue;
             }
-
             if (peer.State is not (PeerState.Offering or PeerState.Answering or PeerState.Connected))
                 continue;
             if (peer.LastProgressMs <= 0)
@@ -536,7 +526,7 @@ internal sealed class PeerSessionManager
                 _peers.OrderBy(pair => pair.Key).Select(pair =>
                 {
                     var peer = pair.Value;
-                    return $"{pair.Key}:{peer.State}/g{peer.Generation}/n{peer.NegotiationId}/relay{Bool(peer.RelayOnly)}/added{Bool(peer.Added)}/candAttempts{peer.LocalCandidatesAttempted}-rx{peer.RemoteCandidatesReceived}-forwarded{peer.RemoteCandidatesForwarded}-rejected{peer.RejectedCandidates}";
+                    return $"{pair.Key}:{peer.State}/g{peer.Generation}/n{peer.NegotiationId}/turn{Bool(peer.RelayCapable)}/added{Bool(peer.Added)}/candAttempts{peer.LocalCandidatesAttempted}-rx{peer.RemoteCandidatesReceived}-forwarded{peer.RemoteCandidatesForwarded}-rejected{peer.RejectedCandidates}";
                 }));
 
         return new PeerSessionDiagnosticsSnapshot(
@@ -567,17 +557,6 @@ internal sealed class PeerSessionManager
         {
             LogReject("recover", clientId, peer, "already-established");
             return false;
-        }
-        if (peer.State == PeerState.WaitingForRelay)
-        {
-            if (RelayAvailable())
-            {
-                LogEvent("recover", clientId, peer, "action=resume-relay-recovery");
-                peer.RelayRequested = false;
-                Reinitiate(clientId, peer, nowMs);
-                return true;
-            }
-            return EnsureRelayCredentialsRequested(clientId, peer, nowMs, "targeted-recovery");
         }
         if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
         {
@@ -643,19 +622,33 @@ internal sealed class PeerSessionManager
             }
             if (peer.Incompatible)
                 continue;
-            if (peer.State == PeerState.WaitingForRelay)
+            if (peer.IceRestartRequestPending
+                && peer.Added
+                && peer.State == PeerState.Established)
             {
-                if (RelayAvailable())
+                if (peer.IceRestartRequestStartedMs > 0
+                    && nowMs >= peer.IceRestartRequestStartedMs
+                    && nowMs - peer.IceRestartRequestStartedMs >= IceRestartOfferTimeoutMs)
                 {
-                    LogEvent("recover", pair.Key, peer, $"action=relay-credentials-ready waitMs={Elapsed(nowMs, peer.RelayWaitStartedMs)}");
-                    peer.RelayRequested = false;
+                    LogEvent(
+                        "ice-restart",
+                        pair.Key,
+                        peer,
+                        $"mode=recreate reason=restart-offer-timeout waitMs={nowMs - peer.IceRestartRequestStartedMs}");
                     Reinitiate(pair.Key, peer, nowMs);
+                    continue;
                 }
-                else
+                if (peer.LastIceRestartRequestMs == 0
+                    || nowMs - peer.LastIceRestartRequestMs >= FailedLocalSignalRetryIntervalMs)
                 {
-                    EnsureRelayCredentialsRequested(pair.Key, peer, nowMs, "relay-wait-tick");
+                    peer.LastIceRestartRequestMs = nowMs;
+                    SendSignal(
+                        pair.Key,
+                        peer,
+                        SignalMsgType.IceRestartRequest,
+                        ControlPayload(peer, SignalMsgType.IceRestartRequest),
+                        "ice-restart-request-retry");
                 }
-                continue;
             }
             if (peer.State is PeerState.Idle or PeerState.Greeted)
             {
@@ -726,9 +719,12 @@ internal sealed class PeerSessionManager
         peer.LastProgressMs = 0;
         peer.LastReinitMs = 0;
         peer.DegradedSinceMs = 0;
-        peer.RelayWaitStartedMs = 0;
         peer.LastRelayRequestMs = 0;
         peer.RelayRequested = false;
+        peer.IceRestartInProgress = false;
+        peer.IceRestartRequestPending = false;
+        peer.IceRestartRequestStartedMs = 0;
+        peer.LastIceRestartRequestMs = 0;
         LogEvent("peer-connected", clientId, peer, "accepted=true");
     }
 
@@ -773,8 +769,9 @@ internal sealed class PeerSessionManager
         }
     }
 
-    /// Marks one failed direct peer for relay. If credentials are already available the peer is
-    /// recreated immediately; otherwise the backend fetches them and calls EscalatePeer when ready.
+    /// Marks one failed direct peer for a mixed direct-plus-relay retry. If credentials are already
+    /// available the peer restarts immediately; otherwise the backend fetches them and calls
+    /// EscalatePeer when ready. Automatic recovery never forces relay-only policy.
     public void RequestRelayForPeer(int clientId, long nowMs = 0)
     {
         if (!_peers.TryGetValue(clientId, out var peer))
@@ -787,110 +784,103 @@ internal sealed class PeerSessionManager
             LogReject("relay-request", clientId, peer, peer.Incompatible ? "protocol-incompatible" : "hello-not-received");
             return;
         }
-        if (peer.RelayOnly)
-        {
-            LogReject("relay-request", clientId, peer, "already-relay-only");
-            return;
-        }
         peer.RelayRequested = true;
         var relayAvailable = RelayAvailable();
         LogEvent("relay-request", clientId, peer, $"nowMs={nowMs} credentialsAvailable={Bool(relayAvailable)}");
         if (relayAvailable)
-            SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
+            RestartWithMixedIce(clientId, peer, nowMs, "automatic-relay-ready");
         else
             _requestRelay(clientId);
     }
 
-    public void EscalatePeer(int clientId, long nowMs = 0)
+    public bool EscalatePeer(int clientId, long nowMs = 0)
     {
         if (!_peers.TryGetValue(clientId, out var peer))
         {
             LogReject("relay-escalate", clientId, null, "peer-unknown");
-            return;
+            return false;
         }
         if (peer.Incompatible || !peer.HelloReceived)
         {
             LogReject("relay-escalate", clientId, peer, peer.Incompatible ? "protocol-incompatible" : "hello-not-received");
-            return;
+            return false;
         }
         if (!peer.RelayRequested)
         {
             LogReject("relay-escalate", clientId, peer, "relay-not-requested");
-            return;
+            return false;
         }
         if (!RelayAvailable())
         {
             LogEvent("relay-escalate", clientId, peer, "action=request-credentials");
             _requestRelay(clientId);
-            return;
+            return false;
         }
-        if (peer.RelayOnly)
-        {
-            peer.RelayRequested = false;
-            LogEvent("relay-escalate", clientId, peer, "action=reinitiate-existing-relay-policy");
-            Reinitiate(clientId, peer, nowMs);
-            return;
-        }
-        LogEvent("relay-escalate", clientId, peer, "action=set-relay-policy");
-        SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
+        // EscalatePeer is called after the backend has installed a freshly fetched TURN snapshot.
+        // Recreate the logical session here so the underlying RTC peer is guaranteed to be built
+        // from that snapshot even when the credential callback arrives outside an active restart.
+        peer.RelayRequested = false;
+        peer.RelayCapable = true;
+        peer.IceRestartInProgress = false;
+        peer.IceRestartRequestPending = false;
+        peer.IceRestartRequestStartedMs = 0;
+        peer.LastIceRestartRequestMs = 0;
+        LogEvent("relay-escalate", clientId, peer, "action=recreate-for-new-server-snapshot mixedIce=true");
+        Reinitiate(clientId, peer, nowMs);
+        return true;
     }
 
-    public int EscalateAllToRelay(long nowMs = 0)
+    /// Recreates every current peer after an ICE-server setting change. The product always uses
+    /// automatic mixed ICE and lets candidate priority prefer direct paths over TURN.
+    public void RebuildAll(long nowMs = 0)
     {
-        var requested = 0;
-        foreach (var pair in _peers)
-        {
-            var peer = pair.Value;
-            if (peer.Incompatible || !peer.HelloReceived) continue;
-            if (peer.RelayOnly) continue;
-            peer.RelayRequested = true;
-            requested++;
-            var relayAvailable = RelayAvailable();
-            LogEvent("relay-escalate-all", pair.Key, peer, $"nowMs={nowMs} credentialsAvailable={Bool(relayAvailable)}");
-            if (relayAvailable)
-                SetPeerRelayPolicy(pair.Key, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
-            else
-                _requestRelay(pair.Key);
-        }
-        return requested;
-    }
-
-    /// Recreates every current peer after an explicit ICE setting change. Turning force-relay off
-    /// intentionally returns peers to direct-first so TURN allocations are not kept unnecessarily.
-    public void RebuildAll(bool forceRelay, long nowMs = 0)
-    {
-        var relayOnly = forceRelay && RelayAvailable();
         foreach (var pair in _peers)
         {
             var peer = pair.Value;
             if (peer.Incompatible || !peer.HelloReceived) continue;
             peer.RelayRequested = false;
-            if (peer.RelayOnly != relayOnly)
-            {
-                peer.RelayOnly = relayOnly;
-                SendSignal(pair.Key, peer, SignalMsgType.IceMode, IceModePayload(peer, relayOnly), "rebuild-all-policy-change");
-            }
-            LogEvent("rebuild", pair.Key, peer, $"forceRelay={Bool(forceRelay)} effectiveRelayOnly={Bool(relayOnly)} nowMs={nowMs}");
+            peer.RelayCapable = RelayAvailable();
+            LogEvent("rebuild", pair.Key, peer, $"mixedIce=true relayAvailable={Bool(peer.RelayCapable)} nowMs={nowMs}");
             Reinitiate(pair.Key, peer, nowMs);
         }
     }
 
-    /// Recreates only relay-backed peers after their ephemeral TURN credentials are refreshed.
-    /// Healthy direct peers are deliberately untouched.
-    public int RefreshRelayPeers(long nowMs = 0)
+    /// Restarts peers whose current ICE configuration can use ephemeral TURN credentials. Peers
+    /// that have only ever used STUN remain untouched.
+    public int RefreshRelayPeers(long nowMs = 0, ISet<int>? excludedClientIds = null)
     {
         var refreshed = 0;
         foreach (var pair in _peers)
         {
             var peer = pair.Value;
             if (peer.Incompatible || !peer.HelloReceived) continue;
-            if (!peer.RelayOnly) continue;
+            if (excludedClientIds?.Contains(pair.Key) == true) continue;
+            if (!peer.RelayCapable) continue;
             refreshed++;
-            SendSignal(pair.Key, peer, SignalMsgType.IceMode, IceModePayload(peer, true), "relay-credentials-refreshed");
-            LogEvent("relay-refresh", pair.Key, peer, $"nowMs={nowMs}");
+            LogEvent("relay-refresh", pair.Key, peer, $"action=recreate-for-new-server-snapshot nowMs={nowMs}");
             Reinitiate(pair.Key, peer, nowMs);
         }
         return refreshed;
+    }
+
+    /// Restarts established ICE agents after an operating-system network-address change. Protocol
+    /// v5 peers keep their media peer and renegotiate in place; older compatible peers use the
+    /// proven remove/recreate fallback.
+    public int RestartIceAfterNetworkChange(long nowMs = 0)
+    {
+        var restarted = 0;
+        foreach (var pair in _peers)
+        {
+            var peer = pair.Value;
+            if (peer.Incompatible || !peer.HelloReceived || !peer.Added) continue;
+            if (peer.State != PeerState.Established) continue;
+            if (peer.LastReinitMs != 0 && nowMs >= peer.LastReinitMs && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+                continue;
+            restarted++;
+            LogEvent("network-change", pair.Key, peer, $"action=restart-ice nowMs={nowMs}");
+            RestartPeerPreferInPlace(pair.Key, peer, nowMs, "network-address-changed");
+        }
+        return restarted;
     }
 
     private void RecoverPeer(int clientId, PeerEntry peer, long nowMs)
@@ -901,49 +891,17 @@ internal sealed class PeerSessionManager
             return;
         }
         LogEvent("recover", clientId, peer, $"begin=true nowMs={nowMs}");
-        if (!peer.RelayOnly)
+        peer.RelayRequested = true;
+        if (RelayAvailable())
         {
-            peer.RelayRequested = true;
-            if (RelayAvailable())
-            {
-                LogEvent("recover", clientId, peer, "action=escalate-to-relay");
-                SetPeerRelayPolicy(clientId, peer, relayOnly: true, notifyRemote: true, nowMs: nowMs);
-                return;
-            }
-            LogEvent("recover", clientId, peer, "action=request-relay-credentials");
-            _requestRelay(clientId);
-        }
-        else if (!RelayAvailable())
-        {
-            // Keep the negotiated relay-only policy while credentials refresh. Falling back to a
-            // direct generation here can both leak a TURN-only user's topology and desynchronize
-            // the two endpoints' ICE policies.
-            peer.RelayRequested = true;
-            ClearPendingLocalSignals(peer);
-            ClearPendingTransportCommands(peer);
-            peer.PendingRemoteCandidates.Clear();
-            if (peer.Added)
-            {
-                peer.Added = false;
-                peer.AfterRemove = AfterRemoveAction.None;
-                TryRemoveNativePeer(clientId, peer, nowMs, "wait-for-relay-credentials");
-            }
-            var failedGeneration = peer.Generation;
-            peer.Generation = NextGeneration();
-            peer.LastProgressMs = 0;
-            peer.DegradedSinceMs = 0;
-            peer.RelayWaitStartedMs = nowMs;
-            SetState(clientId, peer, PeerState.WaitingForRelay, "relay-failed-awaiting-credentials");
-            LogEvent(
-                "recover",
-                clientId,
-                peer,
-                $"action=refresh-relay-credentials health=open-false failedGeneration={failedGeneration}");
-            EnsureRelayCredentialsRequested(clientId, peer, nowMs, "relay-failed");
+            LogEvent("recover", clientId, peer, "action=restart-mixed-ice");
+            RestartWithMixedIce(clientId, peer, nowMs, "automatic-recovery");
             return;
         }
-        LogEvent("recover", clientId, peer, "action=reinitiate");
-        Reinitiate(clientId, peer, nowMs);
+        LogEvent("recover", clientId, peer, "action=request-relay-credentials");
+        EnsureRelayCredentialsRequested(clientId, peer, nowMs, "automatic-recovery");
+        LogEvent("recover", clientId, peer, "action=restart-direct-while-relay-pending");
+        RestartPeerPreferInPlace(clientId, peer, nowMs, "direct-retry-while-relay-pending");
     }
 
     private bool EnsureRelayCredentialsRequested(int clientId, PeerEntry peer, long nowMs, string reason)
@@ -967,28 +925,86 @@ internal sealed class PeerSessionManager
         }
     }
 
-    private static long Elapsed(long nowMs, long startedMs)
-        => startedMs > 0 && nowMs >= startedMs ? nowMs - startedMs : 0;
-
     private static long HandshakeTimeoutFor(PeerEntry peer)
-        => peer.RelayOnly ? RelayHandshakeTimeoutMs : DirectHandshakeTimeoutMs;
+        => peer.RelayCapable ? RelayHandshakeTimeoutMs : DirectHandshakeTimeoutMs;
 
-    private void SetPeerRelayPolicy(
-        int clientId,
-        PeerEntry peer,
-        bool relayOnly,
-        bool notifyRemote,
-        long nowMs)
+    private void RestartWithMixedIce(int clientId, PeerEntry peer, long nowMs, string reason)
     {
-        peer.RelayOnly = relayOnly;
+        var currentAgentHasTurn = peer.RelayCapable;
         peer.RelayRequested = false;
         LogEvent(
             "relay-policy",
             clientId,
             peer,
-            $"relayOnly={Bool(relayOnly)} notifyRemote={Bool(notifyRemote)} nowMs={nowMs}");
-        if (notifyRemote)
-            SendSignal(clientId, peer, SignalMsgType.IceMode, IceModePayload(peer, relayOnly), "relay-policy-change");
+            $"relayOnly=false mixedIce=true currentAgentHasTurn={Bool(currentAgentHasTurn)} reason={reason} nowMs={nowMs}");
+        if (currentAgentHasTurn)
+            RestartPeerPreferInPlace(clientId, peer, nowMs, reason);
+        else
+            Reinitiate(clientId, peer, nowMs);
+    }
+
+    private void RestartPeerPreferInPlace(int clientId, PeerEntry peer, long nowMs, string reason)
+    {
+        var canRestartInPlace = peer.RemoteProtocolVersion >= IceRestartProtocolVersion
+                                && peer.Added
+                                && !peer.PendingTransportRemove
+                                && peer.State == PeerState.Established;
+        if (!canRestartInPlace)
+        {
+            LogEvent("ice-restart", clientId, peer, $"mode=recreate reason={reason} nowMs={nowMs}");
+            Reinitiate(clientId, peer, nowMs);
+            return;
+        }
+
+        peer.LastReinitMs = nowMs;
+        peer.DegradedSinceMs = 0;
+        peer.LastRelayRequestMs = 0;
+        if (LocalIsOfferer(clientId))
+        {
+            StartIceRestartOffer(clientId, peer, nowMs, reason);
+            return;
+        }
+
+        peer.LastIceRestartRequestMs = nowMs;
+        if (!peer.IceRestartRequestPending)
+            peer.IceRestartRequestStartedMs = nowMs;
+        peer.IceRestartRequestPending = true;
+        var sent = SendSignal(
+            clientId,
+            peer,
+            SignalMsgType.IceRestartRequest,
+            ControlPayload(peer, SignalMsgType.IceRestartRequest),
+            reason);
+        LogEvent("ice-restart", clientId, peer, $"mode=in-place role=answerer requestSent={Bool(sent)} reason={reason}");
+    }
+
+    private void StartIceRestartOffer(int clientId, PeerEntry peer, long nowMs, string reason)
+    {
+        var previousNegotiationId = peer.NegotiationId;
+        ClearPendingLocalSignals(peer);
+        ClearPendingTransportCommands(peer);
+        peer.NegotiationId = NextNegotiationId();
+        peer.NegotiationShared = false;
+        peer.RestartRequested = false;
+        peer.IceRestartRequestPending = false;
+        peer.IceRestartRequestStartedMs = 0;
+        peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartInProgress = true;
+        peer.LastProgressMs = nowMs;
+        SetState(clientId, peer, PeerState.Offering, "ice-restart-local-offerer");
+        LogEvent(
+            "ice-restart",
+            clientId,
+            peer,
+            $"mode=in-place role=offerer previousNegotiation={previousNegotiationId} reason={reason}");
+        if (TransportRestartIce(clientId, peer, createOffer: true, reason))
+        {
+            peer.RelayCapable = RelayAvailable();
+            return;
+        }
+
+        peer.IceRestartInProgress = false;
+        LogEvent("ice-restart", clientId, peer, $"mode=recreate reason=transport-write-failed source={reason}");
         Reinitiate(clientId, peer, nowMs);
     }
 
@@ -1003,10 +1019,13 @@ internal sealed class PeerSessionManager
         var previousNegotiationId = peer.NegotiationId;
         ClearPendingLocalSignals(peer);
         ClearPendingTransportCommands(peer);
+        peer.IceRestartInProgress = false;
+        peer.IceRestartRequestPending = false;
+        peer.IceRestartRequestStartedMs = 0;
+        peer.LastIceRestartRequestMs = 0;
         peer.Generation = NextGeneration();
         peer.LastReinitMs = nowMs;
         peer.DegradedSinceMs = 0;
-        peer.RelayWaitStartedMs = 0;
         peer.LastRelayRequestMs = 0;
         LogEvent(
             "reinitiate",
@@ -1143,6 +1162,8 @@ internal sealed class PeerSessionManager
             case SignalMsgType.Bye: HandleBye(senderClientId, payload); break;
             case SignalMsgType.IceMode: HandleIceMode(senderClientId, payload, nowMs); break;
             case SignalMsgType.Restart: HandleRestart(senderClientId, payload, nowMs); break;
+            case SignalMsgType.IceRestartRequest: HandleIceRestartRequest(senderClientId, payload, nowMs); break;
+            case SignalMsgType.IceRestartOffer: HandleIceRestartOffer(senderClientId, payload, nowMs); break;
             default:
                 LogReject("signal-rx", senderClientId, existingPeer, "unknown-type", $"type={(byte)type} payloadBytes={payloadBytes}");
                 break;
@@ -1170,13 +1191,16 @@ internal sealed class PeerSessionManager
             return;
         }
         var isOffer = string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase);
+        var signalType = isOffer && peer.IceRestartInProgress
+            ? SignalMsgType.IceRestartOffer
+            : isOffer ? SignalMsgType.Offer : SignalMsgType.Answer;
         LogEvent(
             "local-sdp",
             clientId,
             peer,
-            $"accepted=true sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} signalType={(isOffer ? SignalMsgType.Offer : SignalMsgType.Answer)}");
+            $"accepted=true sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} signalType={signalType}");
         var signal = new PendingLocalSignal(
-            isOffer ? SignalMsgType.Offer : SignalMsgType.Answer,
+            signalType,
             peer.RemoteProtocolVersion >= ScopedControlProtocolVersion
                 ? SignalPayload.Sdp(_localSessionId, peer.NegotiationId, sdpType, sdp)
                 : SignalPayload.Sdp(peer.NegotiationId, sdpType, sdp));
@@ -1300,7 +1324,7 @@ internal sealed class PeerSessionManager
 
             peer.PendingLocalSdp = null;
             peer.LastProgressMs = nowMs;
-            if (sdp.Type == SignalMsgType.Offer)
+            if (sdp.Type is SignalMsgType.Offer or SignalMsgType.IceRestartOffer)
                 peer.NegotiationShared = true;
             if (sdp.Type == SignalMsgType.Answer)
                 SetState(clientId, peer, PeerState.Connected, "local-answer-retry-sent");
@@ -1393,11 +1417,13 @@ internal sealed class PeerSessionManager
         peer.LastTransportCommandAttemptMs = nowMs;
         if (TransportAddPeer(clientId, peer, isOfferer, reason))
         {
+            peer.RelayCapable = RelayAvailable();
             if (wasPending) peer.LastProgressMs = nowMs;
             return true;
         }
 
         peer.Added = false;
+        peer.RelayCapable = false;
         peer.PendingTransportAdd = true;
         LogEvent("transport-retry", clientId, peer, $"command=add-peer reason={reason} retryMs={FailedTransportCommandRetryIntervalMs}");
         return false;
@@ -2192,6 +2218,149 @@ internal sealed class PeerSessionManager
         Reinitiate(clientId, peer, nowMs);
     }
 
+    private void HandleIceRestartRequest(int clientId, byte[] payload, long nowMs)
+    {
+        var knownPeer = FindPeer(clientId);
+        if (!LocalIsOfferer(clientId))
+        {
+            LogReject("ice-restart-request", clientId, knownPeer, "local-role-is-answerer");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("ice-restart-request", clientId, null, "peer-unknown");
+            return;
+        }
+        if (peer.RemoteProtocolVersion < IceRestartProtocolVersion)
+        {
+            LogReject("ice-restart-request", clientId, peer, "protocol-too-old");
+            return;
+        }
+        if (!TryValidateControlPayload(
+                clientId,
+                peer,
+                SignalMsgType.IceRestartRequest,
+                payload,
+                requireActiveNegotiation: true))
+            return;
+        if (!peer.HelloReceived || !peer.Added || peer.State != PeerState.Established)
+        {
+            LogReject(
+                "ice-restart-request",
+                clientId,
+                peer,
+                !peer.HelloReceived ? "hello-not-received" : !peer.Added ? "native-peer-not-added" : "peer-not-established");
+            return;
+        }
+        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        {
+            LogReject("ice-restart-request", clientId, peer, "restart-throttled", $"nowMs={nowMs} lastRestartMs={peer.LastReinitMs}");
+            return;
+        }
+
+        LogEvent("signal-accepted", clientId, peer, $"type=IceRestartRequest nowMs={nowMs}");
+        RestartPeerPreferInPlace(clientId, peer, nowMs, "remote-ice-restart-request");
+    }
+
+    private void HandleIceRestartOffer(int clientId, byte[] payload, long nowMs)
+    {
+        var knownPeer = FindPeer(clientId);
+        if (LocalIsOfferer(clientId))
+        {
+            LogReject("ice-restart-offer", clientId, knownPeer, "local-role-is-offerer", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (!_peers.TryGetValue(clientId, out var peer))
+        {
+            LogReject("ice-restart-offer", clientId, null, "peer-unknown", $"payloadBytes={payload.Length}");
+            return;
+        }
+        if (peer.RemoteProtocolVersion < IceRestartProtocolVersion || !peer.HelloReceived)
+        {
+            LogReject(
+                "ice-restart-offer",
+                clientId,
+                peer,
+                peer.RemoteProtocolVersion < IceRestartProtocolVersion ? "protocol-too-old" : "hello-not-received");
+            return;
+        }
+        if (!TryReadRemoteSdp(
+                clientId,
+                peer,
+                "ice-restart-offer",
+                payload,
+                out var negotiationId,
+                out var sdpType,
+                out var sdp))
+            return;
+        if (negotiationId <= peer.NegotiationId
+            || !string.Equals(sdpType, "offer", StringComparison.OrdinalIgnoreCase))
+        {
+            LogReject(
+                "ice-restart-offer",
+                clientId,
+                peer,
+                negotiationId <= peer.NegotiationId ? "duplicate-or-stale-negotiation" : "sdp-type-mismatch",
+                $"receivedNegotiation={negotiationId} sdpType={LogSafe(sdpType)}");
+            return;
+        }
+        if (!peer.Added || peer.PendingTransportRemove || peer.State != PeerState.Established)
+        {
+            LogReject(
+                "ice-restart-offer",
+                clientId,
+                peer,
+                !peer.Added ? "native-peer-not-added" : peer.PendingTransportRemove ? "native-remove-pending" : "peer-not-established");
+            return;
+        }
+
+        ClearPendingLocalSignals(peer);
+        ClearPendingTransportCommands(peer);
+        var keptNativePeer = TransportRestartIce(
+            clientId,
+            peer,
+            createOffer: false,
+            reason: "remote-ice-restart-offer");
+        if (!keptNativePeer)
+        {
+            peer.Generation = NextGeneration();
+            peer.Added = false;
+            TryRemoveNativePeer(clientId, peer, nowMs, "ice-restart-configure-fallback");
+        }
+
+        peer.NegotiationId = negotiationId;
+        peer.NegotiationShared = true;
+        peer.RestartRequested = false;
+        peer.IceRestartRequestPending = false;
+        peer.IceRestartRequestStartedMs = 0;
+        peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartInProgress = keptNativePeer;
+        peer.LastReinitMs = nowMs;
+        peer.LastProgressMs = nowMs;
+        peer.RelayCapable = keptNativePeer && RelayAvailable();
+        peer.PendingTransportSdp = new PendingRemoteSdp(negotiationId, sdpType, sdp);
+        SetState(clientId, peer, PeerState.Answering, "remote-ice-restart-offer");
+        LogEvent(
+            "signal-accepted",
+            clientId,
+            peer,
+            $"type=IceRestartOffer inPlace={Bool(keptNativePeer)} sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
+
+        if (!keptNativePeer)
+        {
+            if (peer.PendingTransportRemove)
+            {
+                peer.PendingTransportAdd = true;
+                peer.PendingTransportAddOfferer = false;
+                return;
+            }
+            if (!TryAddNativePeer(clientId, peer, isOfferer: false, nowMs, "ice-restart-fallback"))
+                return;
+        }
+        if (TryWritePendingRemoteSdp(clientId, peer, nowMs, "remote-ice-restart-offer"))
+            ReplayPendingCandidates(clientId, peer, negotiationId, nowMs);
+    }
+
     private byte[] ControlPayload(PeerEntry peer, SignalMsgType type)
         => peer.RemoteProtocolVersion >= ScopedControlProtocolVersion
             ? SignalPayload.Control(
@@ -2274,14 +2443,6 @@ internal sealed class PeerSessionManager
         return true;
     }
 
-    private byte[] IceModePayload(PeerEntry peer, bool relayOnly)
-        => peer.RemoteProtocolVersion >= ScopedControlProtocolVersion
-            ? SignalPayload.IceMode(
-                _localSessionId,
-                peer.NegotiationShared ? peer.NegotiationId : 0,
-                relayOnly)
-            : SignalPayload.IceMode(relayOnly);
-
     private void HandleIceMode(int clientId, byte[] payload, long nowMs)
     {
         if (!_peers.TryGetValue(clientId, out var peer))
@@ -2322,30 +2483,22 @@ internal sealed class PeerSessionManager
         }
         if (requestedRelay && !RelayAvailable())
         {
-            // The other endpoint has identified this pair as needing TURN. Fetch credentials for
-            // this peer, but keep any currently healthy direct generation alive until they arrive.
+            // Protocol v3/v4 peers may still ask for relay-only mode. New clients keep the automatic
+            // mixed policy, fetch TURN credentials, and leave any healthy direct generation alive.
             peer.RelayRequested = true;
-            LogEvent("signal-accepted", clientId, peer, "type=IceMode requestedRelay=true action=request-credentials");
+            LogEvent("signal-accepted", clientId, peer, "type=IceMode legacy=true policy=mixed action=request-credentials");
             _requestRelay(clientId);
             return;
         }
 
-        // A remote direct-mode reset must not override this client's automatic relay-only session
-        // latch. One relay endpoint can still pair with a direct endpoint.
-        var relayOnly = requestedRelay || (ForceRelay() && RelayAvailable());
-        var changed = peer.RelayOnly != relayOnly;
-        peer.RelayOnly = relayOnly;
         peer.RelayRequested = false;
 
-        // A duplicate request is useful only for an already connected generation. During an
-        // active offer/answer it is most likely the other side seeing the same failure, so let the
-        // in-flight recreation finish instead of starting an offer storm.
         LogEvent(
             "signal-accepted",
             clientId,
             peer,
-            $"type=IceMode requestedRelay={Bool(requestedRelay)} effectiveRelayOnly={Bool(relayOnly)} changed={Bool(changed)} nowMs={nowMs}");
-        if (!changed && peer.State is not (PeerState.Connected or PeerState.Established))
+            $"type=IceMode legacy=true requestedRelay={Bool(requestedRelay)} policy=mixed nowMs={nowMs}");
+        if (peer.State is not (PeerState.Connected or PeerState.Established))
         {
             LogReject("ice-mode", clientId, peer, "duplicate-during-negotiation", $"requestedRelay={Bool(requestedRelay)}");
             return;
@@ -2355,7 +2508,7 @@ internal sealed class PeerSessionManager
             LogReject("ice-mode", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
             return;
         }
-        Reinitiate(clientId, peer, nowMs);
+        RestartPeerPreferInPlace(clientId, peer, nowMs, "legacy-ice-mode-request");
     }
 
     private void TryStartSession(int clientId, PeerEntry peer, long nowMs)
@@ -2445,8 +2598,6 @@ internal sealed class PeerSessionManager
             peer.ScopedHelloSent = false;
         if (sent && awaitingResponse && !peer.HelloReceived)
             peer.UnansweredHelloCount = Math.Min(peer.UnansweredHelloCount + 1, 30);
-        if (sent && peer.RelayOnly)
-            SendSignal(clientId, peer, SignalMsgType.IceMode, IceModePayload(peer, true), "initial-relay-policy");
         return sent;
     }
 
@@ -2550,11 +2701,7 @@ internal sealed class PeerSessionManager
     {
         if (!_peers.TryGetValue(clientId, out var peer))
         {
-            peer = new PeerEntry
-            {
-                RelayOnly = RelayAvailable() && ForceRelay(),
-                Generation = NextGeneration(),
-            };
+            peer = new PeerEntry { Generation = NextGeneration() };
             _peers[clientId] = peer;
             LogEvent("peer-created", clientId, peer, $"localOfferer={Bool(LocalIsOfferer(clientId))}");
         }
@@ -2569,18 +2716,6 @@ internal sealed class PeerSessionManager
             VoiceDiagnostics.Log(
                 "signaling.session.error",
                 $"local={_localClientId} operation=relay-available errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
-            return false;
-        }
-    }
-
-    private bool ForceRelay()
-    {
-        try { return _forceRelay(); }
-        catch (Exception ex)
-        {
-            VoiceDiagnostics.Log(
-                "signaling.session.error",
-                $"local={_localClientId} operation=force-relay errorType={ex.GetType().Name} error=\"{LogSafe(ex.Message)}\"");
             return false;
         }
     }
@@ -2640,10 +2775,10 @@ internal sealed class PeerSessionManager
             "transport-command",
             clientId,
             peer,
-            $"command=add-peer isOfferer={Bool(isOfferer)} relayOnly={Bool(peer.RelayOnly)} reason={reason}");
+            $"command=add-peer isOfferer={Bool(isOfferer)} policy=automatic-mixed reason={reason}");
         try
         {
-            var written = _transport.AddPeer(clientId, isOfferer, peer.RelayOnly, peer.Generation);
+            var written = _transport.AddPeer(clientId, isOfferer, peer.Generation);
             LogEvent("transport-command-returned", clientId, peer, $"command=add-peer reason={reason} written={Bool(written)} nativeAck=false");
             if (!written)
                 LogReject("transport-command", clientId, peer, "write-failed", $"command=add-peer reason={reason}");
@@ -2665,6 +2800,32 @@ internal sealed class PeerSessionManager
             random.GetBytes(bytes);
             var nonce = BitConverter.ToInt64(bytes, 0) & long.MaxValue;
             if (nonce != 0) return nonce;
+        }
+    }
+
+    private bool TransportRestartIce(int clientId, PeerEntry peer, bool createOffer, string reason)
+    {
+        LogEvent(
+            "transport-command",
+            clientId,
+            peer,
+            $"command=restart-ice createOffer={Bool(createOffer)} mixedIce=true reason={reason}");
+        try
+        {
+            var written = _transport.RestartIce(clientId, createOffer);
+            LogEvent(
+                "transport-command-returned",
+                clientId,
+                peer,
+                $"command=restart-ice createOffer={Bool(createOffer)} reason={reason} written={Bool(written)} nativeAck=false");
+            if (!written)
+                LogReject("transport-command", clientId, peer, "write-failed", $"command=restart-ice reason={reason}");
+            return written;
+        }
+        catch (Exception ex)
+        {
+            LogError("transport-command", clientId, peer, ex, $"command=restart-ice reason={reason}");
+            return false;
         }
     }
 
@@ -2781,7 +2942,7 @@ internal sealed class PeerSessionManager
     {
         if (peer == null)
             return $"local={_localClientId} peer={clientId} state=none generation=-1 negotiation=0 relayOnly=false added=false";
-        return $"local={_localClientId} peer={clientId} state={peer.State} generation={peer.Generation} negotiation={peer.NegotiationId} relayOnly={Bool(peer.RelayOnly)} added={Bool(peer.Added)} helloSent={Bool(peer.HelloSent)} helloReceived={Bool(peer.HelloReceived)} restartRequested={Bool(peer.RestartRequested)}";
+        return $"local={_localClientId} peer={clientId} state={peer.State} generation={peer.Generation} negotiation={peer.NegotiationId} policy=automatic-mixed turnCapable={Bool(peer.RelayCapable)} added={Bool(peer.Added)} helloSent={Bool(peer.HelloSent)} helloReceived={Bool(peer.HelloReceived)} restartRequested={Bool(peer.RestartRequested)}";
     }
 
     private static int Utf8Length(string? value)

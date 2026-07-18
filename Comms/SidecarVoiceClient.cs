@@ -15,13 +15,15 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 10 sends stable audio device IDs separately from display names.
+    // Protocol 12 adds coordinated logical ICE restart for network-interface changes. Protocol 11 adds
+    // selectable high/very-high WebRTC noise suppression. Protocol 10 sends
+    // stable audio device IDs separately from display names.
     // Protocol 9 adds the speech-safe native noise-gate threshold and complete receive/path
     // telemetry. Protocol 8 requires AUDIO_OUT playback injection plus lifecycle acknowledgement
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 10;
+    public const int Proto = 12;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -235,12 +237,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
     }
 
-    public void SetDsp(bool aec, bool agc, bool ns, bool hpf)
+    public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf)
     {
         SendCommand(
             "set-dsp",
-            () => SidecarProtocol.SetDspFrame(aec, agc, ns, hpf),
-            $"aec={aec} agc={agc} ns={ns} hpf={hpf}");
+            () => SidecarProtocol.SetDspFrame(aec, agc, ns, nsVeryHigh, hpf),
+            $"aec={aec} agc={agc} ns={ns} nsVeryHigh={ns && nsVeryHigh} hpf={hpf}");
     }
 
     public void SetSynthetic(bool enabled)
@@ -262,6 +264,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         bool aec,
         bool agc,
         bool ns,
+        bool nsVeryHigh,
         bool hpf,
         float gain,
         float vadThreshold,
@@ -291,8 +294,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 DescribeDeviceForDiagnostics(outputDevice))) return false;
         if (!SendCommand(
                 "set-dsp",
-                () => SidecarProtocol.SetDspFrame(aec, agc, ns, hpf),
-                $"aec={aec} agc={agc} ns={ns} hpf={hpf}")) return false;
+                () => SidecarProtocol.SetDspFrame(aec, agc, ns, nsVeryHigh, hpf),
+                $"aec={aec} agc={agc} ns={ns} nsVeryHigh={ns && nsVeryHigh} hpf={hpf}")) return false;
         var diagnosticsEnabled = VoiceDiagnostics.IsEnabled;
         if (!SendCommand(
                 "set-diagnostics",
@@ -354,7 +357,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             logSuccess: false);
     }
 
-    public bool AddPeer(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public bool AddPeer(string peerId, bool isOfferer, int generation)
     {
         if (string.IsNullOrEmpty(peerId))
         {
@@ -363,8 +366,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
         return SendCommand(
             "peer-add",
-            () => SidecarProtocol.AddPeerFrame(peerId, isOfferer, relayOnly, generation),
-            $"{DescribePeer(peerId)} generation={generation} offerer={isOfferer} relayOnly={relayOnly}");
+            () => SidecarProtocol.AddPeerFrame(peerId, isOfferer, generation),
+            $"{DescribePeer(peerId)} generation={generation} offerer={isOfferer} policy=automatic-mixed");
     }
 
     public bool RemovePeer(string peerId)
@@ -375,6 +378,19 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             return false;
         }
         return SendCommand("peer-remove", () => SidecarProtocol.RemovePeerFrame(peerId), DescribePeer(peerId));
+    }
+
+    public bool RestartIce(string peerId, bool createOffer)
+    {
+        if (string.IsNullOrEmpty(peerId))
+        {
+            LogCommand("restart-ice", "rejected", 0, "reason=missing-peer");
+            return false;
+        }
+        return SendCommand(
+            "restart-ice",
+            () => SidecarProtocol.RestartIceFrame(peerId, createOffer),
+            $"{DescribePeer(peerId)} policy=automatic-mixed createOffer={createOffer}");
     }
 
     public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
@@ -1367,9 +1383,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     private static string DescribeNativeDspInputForDiagnostics(JsonElement root)
         => $"dspConfigGeneration={FormatOptionalU64(root, "dsp_config_generation")} " +
-           $"dspRequestedAec={FormatOptionalBool(root, "dsp_requested_aec")} dspRequestedAgc={FormatOptionalBool(root, "dsp_requested_agc")} dspRequestedNs={FormatOptionalBool(root, "dsp_requested_ns")} dspRequestedHpf={FormatOptionalBool(root, "dsp_requested_hpf")} " +
+           $"dspRequestedAec={FormatOptionalBool(root, "dsp_requested_aec")} dspRequestedAgc={FormatOptionalBool(root, "dsp_requested_agc")} dspRequestedNs={FormatOptionalBool(root, "dsp_requested_ns")} dspRequestedNsVeryHigh={FormatOptionalBool(root, "dsp_requested_ns_very_high")} dspRequestedHpf={FormatOptionalBool(root, "dsp_requested_hpf")} " +
            $"dspApmLoaded={FormatOptionalBool(root, "dsp_apm_loaded")} dspConfigFullyApplied={FormatOptionalBool(root, "dsp_config_fully_applied")} " +
-           $"dspAppliedAec={FormatOptionalBool(root, "dsp_applied_aec")} dspAppliedAgc={FormatOptionalBool(root, "dsp_applied_agc")} dspAppliedNs={FormatOptionalBool(root, "dsp_applied_ns")} dspAppliedHpf={FormatOptionalBool(root, "dsp_applied_hpf")} " +
+           $"dspAppliedAec={FormatOptionalBool(root, "dsp_applied_aec")} dspAppliedAgc={FormatOptionalBool(root, "dsp_applied_agc")} dspAppliedNs={FormatOptionalBool(root, "dsp_applied_ns")} dspAppliedNsVeryHigh={FormatOptionalBool(root, "dsp_applied_ns_very_high")} dspAppliedHpf={FormatOptionalBool(root, "dsp_applied_hpf")} " +
            $"inputGain={FormatOptionalDouble(root, "input_gain", "0.#########")} vadThreshold={FormatOptionalDouble(root, "input_vad_threshold", "0.#########")} noiseGateThreshold={FormatOptionalDouble(root, "input_noise_gate_threshold", "0.#########")}";
 
     private static string DescribeNativeMediaReceiveForDiagnostics(JsonElement root)

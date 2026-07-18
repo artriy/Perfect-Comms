@@ -27,7 +27,7 @@ jobs:
           echo "tag=$tag"     >> "$GITHUB_OUTPUT"
 
       - name: Downloads badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: b09ac2c39551270e9961b92e622b0893
@@ -37,7 +37,7 @@ jobs:
           color: 24C8DB
 
       - name: Latest badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: b09ac2c39551270e9961b92e622b0893

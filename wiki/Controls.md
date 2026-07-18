@@ -15,6 +15,7 @@ The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top L
 | **Speaker Volume** | 100% | Overall Perfect Comms voice volume you hear. |
 | **Mic Mode** | Open Mic | Choose voice activation or hold-to-talk. |
 | **Noise Suppression** | On | Cleans outgoing microphone noise on Windows desktop builds. |
+| **Stronger Noise Suppression** | Off | Uses the strongest WebRTC noise suppression level on Windows desktop builds. It only applies while Noise Suppression is on and may make quiet speech sound less natural. |
 | **Echo Cancellation** | On | Reduces speaker audio feeding back into your microphone on Windows desktop builds. |
 | **Voice Falloff Softness** | 30% | Keeps voices clearer through more of the host's allowed range, then fades near the edge. It never extends that range. |
 | **Start Muted** | Off | Starts each voice session with your microphone muted. |

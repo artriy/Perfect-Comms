@@ -198,6 +198,7 @@ public sealed class FirstRunHudPresetTests
             MasterVolume = 0.6f,
             MicMode = VoiceMicMode.PushToTalk,
             NoiseSuppression = false,
+            StrongerNoiseSuppression = true,
             EchoCancellation = false,
             StartMuted = true,
             StartDeafened = true,
@@ -219,6 +220,7 @@ public sealed class FirstRunHudPresetTests
         Assert.Equal(1f, fresh.MasterVolume);
         Assert.Equal(VoiceMicMode.OpenMic, fresh.MicMode);
         Assert.True(fresh.NoiseSuppression);
+        Assert.False(fresh.StrongerNoiseSuppression);
         Assert.True(fresh.EchoCancellation);
         Assert.False(fresh.StartMuted);
         Assert.False(fresh.StartDeafened);

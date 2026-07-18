@@ -17,6 +17,8 @@ internal enum SignalMsgType : byte
     Bye = 4,
     IceMode = 5,
     Restart = 6,
+    IceRestartRequest = 7,
+    IceRestartOffer = 8,
 }
 
 internal readonly record struct SignalingSubscription(long Id)
@@ -259,7 +261,7 @@ internal static class AmongUsRpcSignaling
         }
 
         var rawType = frame[0];
-        if (rawType > (byte)SignalMsgType.Restart)
+        if (rawType > (byte)SignalMsgType.IceRestartOffer)
         {
             failureReason = $"unknown-type-{rawType}";
             return false;
@@ -290,7 +292,7 @@ internal static class AmongUsRpcSignaling
     }
 
     private static bool IsCompressed(SignalMsgType type)
-        => type == SignalMsgType.Offer || type == SignalMsgType.Answer;
+        => type is SignalMsgType.Offer or SignalMsgType.Answer or SignalMsgType.IceRestartOffer;
 
     private static string DescribePayload(SignalMsgType type, byte[]? payload)
     {
@@ -303,6 +305,7 @@ internal static class AmongUsRpcSignaling
                     : "metadata=unparseable";
             case SignalMsgType.Offer:
             case SignalMsgType.Answer:
+            case SignalMsgType.IceRestartOffer:
                 return SignalPayload.TryReadSdp(payload, out var negotiationId, out var sdpType, out var sdp)
                     ? $"negotiation={negotiationId} sdpType={LogSafe(sdpType)} sdpBytes={Encoding.UTF8.GetByteCount(sdp)}"
                     : "metadata=unparseable";
@@ -318,6 +321,7 @@ internal static class AmongUsRpcSignaling
                     : "metadata=unparseable";
             case SignalMsgType.Bye:
             case SignalMsgType.Restart:
+            case SignalMsgType.IceRestartRequest:
                 if (SignalPayload.TryReadControl(payload, out var controlSession, out var controlNegotiation))
                     return $"session={controlSession} negotiation={controlNegotiation}";
                 return payload.Length == 0 ? "metadata=empty legacy=true" : "metadata=unexpected-payload";

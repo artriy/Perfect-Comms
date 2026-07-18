@@ -57,7 +57,7 @@ impl Default for EncoderPolicySnapshot {
 /// Hysteretic policy for PerfectComms' single fan-out encoder. Degradation is immediate; quality
 /// recovery requires five consecutive two-second windows so one optimistic RTCP report cannot
 /// oscillate bitrate/FEC configuration. RTT and candidate-pair bandwidth are deliberately absent
-/// from this API: webrtc-rs 0.11 exposes the latter as an unpopulated zero-valued stats field.
+/// from this API: webrtc-rs 0.17.1 exposes the latter as an unpopulated zero-valued stats field.
 pub struct EncoderNetworkController {
     current: EncoderPolicySnapshot,
     recovery_candidate: Option<(u8, i32)>,

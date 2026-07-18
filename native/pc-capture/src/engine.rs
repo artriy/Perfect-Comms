@@ -36,6 +36,7 @@ fn android_dsp_config(_requested: DspConfig) -> DspConfig {
         aec: false,
         agc: false,
         ns: false,
+        ns_very_high: false,
         hpf: false,
     }
 }
@@ -451,11 +452,30 @@ impl Engine {
             InboundOp::AddIceCandidate { peer_id, candidate } => {
                 self.rtc.add_ice_candidate(&peer_id, &candidate)
             }
-            InboundOp::SetDsp { aec, agc, ns, hpf } => self
+            InboundOp::RestartIce {
+                peer_id,
+                relay_only,
+                create_offer,
+            } => {
+                self.rtc.restart_ice(&peer_id, relay_only, create_offer);
+            }
+            InboundOp::SetDsp {
+                aec,
+                agc,
+                ns,
+                ns_very_high,
+                hpf,
+            } => self
                 .dsp
                 .lock()
                 .unwrap()
-                .set(effective_dsp_config(DspConfig { aec, agc, ns, hpf })),
+                .set(effective_dsp_config(DspConfig {
+                    aec,
+                    agc,
+                    ns,
+                    ns_very_high: ns && ns_very_high,
+                    hpf,
+                })),
             InboundOp::SetDiagnostics { enabled } => {
                 let mut diagnostics = self.diagnostics.lock().unwrap();
                 if enabled && !diagnostics.enabled {
@@ -774,7 +794,9 @@ mod tests {
     fn runtime_input_and_synthetic_controls_emit_bounded_level_telemetry() {
         let e = Engine::new();
         e.control(r#"{"op":"start"}"#);
-        e.control(r#"{"op":"set-dsp","aec":false,"agc":false,"ns":false,"hpf":false}"#);
+        e.control(
+            r#"{"op":"set-dsp","aec":false,"agc":false,"ns":false,"ns_very_high":false,"hpf":false}"#,
+        );
         e.control(
             r#"{"op":"set-input","gain":2.0,"vad_threshold":0.0001,"noise_gate_threshold":0.003}"#,
         );
@@ -805,6 +827,7 @@ mod tests {
             aec: true,
             agc: true,
             ns: true,
+            ns_very_high: true,
             hpf: true,
         });
         assert_eq!(
@@ -813,6 +836,7 @@ mod tests {
                 aec: false,
                 agc: false,
                 ns: false,
+                ns_very_high: false,
                 hpf: false,
             }
         );

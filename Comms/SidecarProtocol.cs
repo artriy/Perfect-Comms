@@ -131,8 +131,8 @@ internal static class SidecarProtocol
         return EncodeFrame(TypeAudioOut, payload);
     }
 
-    public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool hpf)
-        => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"hpf\":{JsonBool(hpf)}}}");
+    public static byte[] SetDspFrame(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf)
+        => EncodeControl($"{{\"op\":\"set-dsp\",\"aec\":{JsonBool(aec)},\"agc\":{JsonBool(agc)},\"ns\":{JsonBool(ns)},\"ns_very_high\":{JsonBool(ns && nsVeryHigh)},\"hpf\":{JsonBool(hpf)}}}");
 
     public static byte[] SetDiagnosticsFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-diagnostics\",\"enabled\":{JsonBool(enabled)}}}");
@@ -167,14 +167,17 @@ internal static class SidecarProtocol
     internal static float NormalizePan(float pan)
         => float.IsFinite(pan) ? Math.Clamp(pan, -1f, 1f) : 0f;
 
-    public static byte[] AddPeerFrame(string peerId, bool isOfferer, bool relayOnly, int generation)
+    public static byte[] AddPeerFrame(string peerId, bool isOfferer, int generation)
     {
         if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
-        return EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{JsonBool(isOfferer)},\"relay_only\":{JsonBool(relayOnly)},\"generation\":{generation}}}");
+        return EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{JsonBool(isOfferer)},\"relay_only\":false,\"generation\":{generation}}}");
     }
 
     public static byte[] RemovePeerFrame(string peerId)
         => EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)}}}");
+
+    public static byte[] RestartIceFrame(string peerId, bool createOffer)
+        => EncodeControl($"{{\"op\":\"restart-ice\",\"peer_id\":{JsonString(peerId)},\"relay_only\":false,\"create_offer\":{JsonBool(createOffer)}}}");
 
     public static byte[] SetRemoteSdpFrame(string peerId, string sdpType, string sdp)
         => EncodeControl($"{{\"op\":\"set-remote-sdp\",\"peer_id\":{JsonString(peerId)},\"sdp_type\":{JsonString(sdpType)},\"sdp\":{JsonString(sdp)}}}");

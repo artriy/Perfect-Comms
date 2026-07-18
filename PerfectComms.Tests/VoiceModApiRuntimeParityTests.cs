@@ -459,7 +459,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
     }
 
     [Fact]
-    public void PairRouteHostPolicyPrecedenceIsExplicitAndSpeakerMutesStayAuthoritative()
+    public void PairRouteHostPolicyPrecedenceIsExplicit()
     {
         ExternalVoicePairState radioPair = ExternalVoicePairState.None with
         {
@@ -497,22 +497,6 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.False(phaseBlock.Audible);
         Assert.Equal(VoiceProximityReason.OnlyMeetingOrLobby, phaseBlock.Reason);
 
-        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
-        {
-            MuteGlitchHacked = true,
-        });
-        VoicePlayerSnapshot hacked = Player(
-            1,
-            1f,
-            external: ExternalVoiceState.None with { Pair = radioPair },
-            isGlitchHacked: true);
-        VoiceProximityResult taskSpeakerMute = Task(local, hacked);
-        VoiceProximityResult meetingSpeakerMute =
-            VoiceProximityCalculator.CalculateMeeting(local, hacked, false);
-        Assert.False(taskSpeakerMute.Audible);
-        Assert.Equal(VoiceProximityReason.GlitchHacked, taskSpeakerMute.Reason);
-        Assert.False(meetingSpeakerMute.Audible);
-        Assert.Equal(VoiceProximityReason.GlitchHacked, meetingSpeakerMute.Reason);
     }
 
     [Fact]
@@ -1270,8 +1254,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         ExternalVoiceState? external = null,
         VoiceControlHearingMode controlMode = VoiceControlHearingMode.None,
         Vector2 controlledOrigin = default,
-        float controlledLightRadius = -1f,
-        bool isGlitchHacked = false)
+        float controlledLightRadius = -1f)
         => new(
             id,
             100 + id,
@@ -1303,8 +1286,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             ControlHearingMode: controlMode,
             ControlledVictimPosition: controlledOrigin,
             ControlledVictimLightRadius: controlledLightRadius,
-            External: external ?? ExternalVoiceState.None,
-            IsGlitchHacked: isGlitchHacked);
+            External: external ?? ExternalVoiceState.None);
 
     private static VoiceRoomSettingsSnapshot BaseSettings()
         => VoiceRoomSettingsSnapshot.Defaults with

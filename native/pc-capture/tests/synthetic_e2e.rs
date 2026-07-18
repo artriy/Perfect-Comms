@@ -138,7 +138,7 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
     client.set_nodelay(true).ok();
     client
         .write_all(&encode_control(
-            r#"{"op":"hello","proto":10,"token":"e2e-token"}"#,
+            r#"{"op":"hello","proto":12,"token":"e2e-token"}"#,
         ))
         .unwrap();
 
