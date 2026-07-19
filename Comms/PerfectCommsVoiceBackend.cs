@@ -525,15 +525,31 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (raw.Length == 0) return false;
         var username = VoiceSettings.Instance?.TurnUsername.Value ?? string.Empty;
         var credential = VoiceSettings.Instance?.TurnCredential.Value ?? string.Empty;
-        if (!IsSupportedUdpTurnUrl(raw) || !HasIceEndpoint(raw) || raw.Length > 2048 ||
-            raw.Any(char.IsWhiteSpace) || raw.Any(char.IsControl) ||
-            string.IsNullOrWhiteSpace(username) || username.Length > 512 || username.Any(char.IsControl) ||
-            string.IsNullOrWhiteSpace(credential) || credential.Length > 512 || credential.Any(char.IsControl))
+        if (!TryCreateCustomTurnServer(raw, username, credential, out server))
         {
             invalid = true;
             return false;
         }
-        server = new IceServer(raw, username, credential);
+        return true;
+    }
+
+    internal static bool TryCreateCustomTurnServer(
+        string? raw,
+        string? username,
+        string? credential,
+        out IceServer server)
+    {
+        server = default;
+        var trimmed = raw?.Trim() ?? string.Empty;
+        username ??= string.Empty;
+        credential ??= string.Empty;
+        if (trimmed.Length > 2048 ||
+            !TryNormalizeSupportedTurnUrl(trimmed, out var normalizedUrl) ||
+            string.IsNullOrWhiteSpace(username) || username.Length > 512 || username.Any(char.IsControl) ||
+            string.IsNullOrWhiteSpace(credential) || credential.Length > 512 || credential.Any(char.IsControl))
+            return false;
+
+        server = new IceServer(normalizedUrl, username, credential);
         return true;
     }
 
@@ -546,51 +562,150 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     internal static bool ShouldUseManagedTurnPolicy(bool customConfigured, bool customInvalid)
         => !customConfigured && !customInvalid;
 
-    internal static bool IsSupportedUdpTurnUrl(string? url)
+    internal static bool IsSupportedTurnUrl(string? url)
+        => TryNormalizeSupportedTurnUrl(url, out _);
+
+    internal static bool TryNormalizeSupportedStunUrl(string? url, out string normalizedUrl)
     {
+        normalizedUrl = string.Empty;
         if (string.IsNullOrWhiteSpace(url)) return false;
         var trimmed = url.Trim();
-        if (!trimmed.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) || trimmed.Length <= 5)
+        const int schemeLength = 5;
+        if (trimmed.Any(char.IsWhiteSpace) || trimmed.Any(char.IsControl) ||
+            !trimmed.StartsWith("stun:", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Length <= schemeLength ||
+            trimmed.IndexOf('?') >= 0 ||
+            trimmed.IndexOf('#') >= 0 ||
+            !TryNormalizeIceEndpoint(trimmed.Substring(schemeLength), out var endpoint))
+            return false;
+
+        normalizedUrl = "stun:" + endpoint;
+        return true;
+    }
+
+    internal static bool TryNormalizeSupportedTurnUrl(string? url, out string normalizedUrl)
+    {
+        normalizedUrl = string.Empty;
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var trimmed = url.Trim();
+        if (trimmed.Any(char.IsWhiteSpace) || trimmed.Any(char.IsControl)) return false;
+        var isTls = trimmed.StartsWith("turns:", StringComparison.OrdinalIgnoreCase);
+        var schemeLength = isTls ? 6 : 5;
+        if (!isTls && !trimmed.StartsWith("turn:", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (trimmed.Length <= schemeLength)
             return false;
 
         var queryIndex = trimmed.IndexOf('?');
-        if (queryIndex < 0) return trimmed.IndexOf('#') < 0;
+        var endpointLength = (queryIndex < 0 ? trimmed.Length : queryIndex) - schemeLength;
+        if (endpointLength <= 0 ||
+            !TryNormalizeIceEndpoint(
+                trimmed.Substring(schemeLength, endpointLength),
+                out var endpoint))
+            return false;
+        if (queryIndex < 0)
+        {
+            if (trimmed.IndexOf('#') >= 0) return false;
+            normalizedUrl = (isTls ? "turns:" : "turn:") + endpoint;
+            return true;
+        }
         var query = trimmed.Substring(queryIndex + 1);
-        // webrtc-ice accepts either no query or exactly one decoded transport parameter. Parse a
+        // Pion accepts either no query or exactly one decoded transport parameter. Parse a
         // stricter raw subset here: rejecting escapes and extra delimiters prevents encoded keys,
         // duplicates, or unknown options from being classified differently by the native parser.
         if (query.Length == 0 || query.IndexOf('&') >= 0 || query.IndexOf('%') >= 0 || query.IndexOf('#') >= 0)
             return false;
         var separator = query.IndexOf('=');
-        return separator > 0
-               && query.IndexOf('=', separator + 1) < 0
-               && string.Equals(query.Substring(0, separator), "transport", StringComparison.OrdinalIgnoreCase)
-               && string.Equals(query.Substring(separator + 1), "udp", StringComparison.OrdinalIgnoreCase);
+        if (separator <= 0 || query.IndexOf('=', separator + 1) >= 0 ||
+            !string.Equals(query.Substring(0, separator), "transport", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var transport = query.Substring(separator + 1);
+        var isTcp = string.Equals(transport, "tcp", StringComparison.OrdinalIgnoreCase);
+        // Pion maps turns+udp to TURN over DTLS/UDP, while turns+tcp uses TLS/TCP.
+        var isUdp = string.Equals(transport, "udp", StringComparison.OrdinalIgnoreCase);
+        if (!isTcp && !isUdp) return false;
+
+        normalizedUrl = (isTls ? "turns:" : "turn:") +
+                        endpoint +
+                        "?transport=" + (isTcp ? "tcp" : "udp");
+        return true;
     }
 
-    private static bool HasIceEndpoint(string url)
+    private static bool TryNormalizeIceEndpoint(string rawEndpoint, out string normalizedEndpoint)
     {
-        var colon = url.IndexOf(':');
-        if (colon < 0 || colon + 1 >= url.Length) return false;
-        var endpoint = url.Substring(colon + 1);
+        normalizedEndpoint = string.Empty;
+        var endpoint = rawEndpoint;
         if (endpoint.StartsWith("//", StringComparison.Ordinal)) endpoint = endpoint.Substring(2);
-        var query = endpoint.IndexOf('?');
-        if (query >= 0) endpoint = endpoint.Substring(0, query);
-        return endpoint.Length > 0 && endpoint.IndexOf('@') < 0;
+        if (endpoint.Length == 0 ||
+            endpoint.IndexOfAny(new[] { '@', '/', '\\', '?', '#', '%' }) >= 0)
+            return false;
+
+        string host;
+        string? portText = null;
+        if (endpoint[0] == '[')
+        {
+            var closeBracket = endpoint.IndexOf(']');
+            if (closeBracket <= 1) return false;
+            host = endpoint.Substring(1, closeBracket - 1);
+            var suffix = endpoint.Substring(closeBracket + 1);
+            if (suffix.Length > 0)
+            {
+                if (suffix[0] != ':' || suffix.Length == 1) return false;
+                portText = suffix.Substring(1);
+            }
+        }
+        else
+        {
+            if (endpoint.IndexOf('[') >= 0 || endpoint.IndexOf(']') >= 0) return false;
+            var colon = endpoint.LastIndexOf(':');
+            if (colon >= 0)
+            {
+                if (endpoint.IndexOf(':') != colon || colon == 0 || colon == endpoint.Length - 1)
+                    return false;
+                host = endpoint.Substring(0, colon);
+                portText = endpoint.Substring(colon + 1);
+            }
+            else
+            {
+                host = endpoint;
+            }
+        }
+
+        if (host.Length == 0 || host.Any(char.IsWhiteSpace) || host.Any(char.IsControl))
+            return false;
+        var hostType = Uri.CheckHostName(host);
+        if (endpoint[0] == '[')
+        {
+            if (hostType != UriHostNameType.IPv6) return false;
+        }
+        else if (hostType is UriHostNameType.Unknown or UriHostNameType.IPv6)
+        {
+            return false;
+        }
+        if (portText != null &&
+            (!portText.All(char.IsDigit) ||
+             !int.TryParse(portText, out var port) ||
+             port is < 1 or > 65535))
+            return false;
+
+        normalizedEndpoint = endpoint;
+        return true;
     }
 
     private bool RelayAvailable()
     {
         if (TryGetCustomTurnServer(out _, out _)) return true;
         lock (_turnSync)
-            return _managedIceServers.Any(server => IsSupportedUdpTurnUrl(server.Urls)) &&
+            return _managedIceServers.Any(server => IsSupportedTurnUrl(server.Urls)) &&
                    !TurnCredentialClient.IsExpired(DateTime.UtcNow, TurnCredentialsUrl());
     }
 
-    private static List<IceServer> DeduplicateIceServers(IEnumerable<IceServer> servers)
+    internal static List<IceServer> DeduplicateIceServers(IEnumerable<IceServer> servers)
     {
         var result = new List<IceServer>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // TURN usernames/passwords are case-sensitive. Exact keys avoid collapsing a credential
+        // rotation whose values differ only by case.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var server in servers)
         {
             if (string.IsNullOrWhiteSpace(server.Urls)) continue;

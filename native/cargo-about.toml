@@ -23,20 +23,3 @@ targets = [
 ignore-build-dependencies = false
 ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
-
-# rkyv_derive 0.8.17 packages both its root MIT license and a second,
-# differently formatted MIT license under src/serde. Filesystem traversal order
-# can otherwise make cargo-about select only one of them on Windows or Linux.
-# Pin both notices so borrowed Serde code keeps its original attribution.
-[rkyv_derive.clarify]
-license = 'MIT'
-
-[[rkyv_derive.clarify.files]]
-path = 'LICENSE'
-license = 'MIT'
-checksum = '635111a955495b5d8d34b8052f69656e8e45f6437f9266329077b9aad5fbe8d3'
-
-[[rkyv_derive.clarify.files]]
-path = 'src/serde/LICENSE'
-license = 'MIT'
-checksum = '30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652'

@@ -131,6 +131,7 @@ internal static class SidecarLauncher
               "$launch_failed" "$helper_exited" "$launch_cancelled"
             if [ -n "$staged_helper" ]; then /bin/rm -f "$staged_helper"; fi
             if [ -n "$staged_dsp" ]; then /bin/rm -f "$staged_dsp"; fi
+            /bin/rm -f "$private_dir/libpc-pion.so"
             /bin/rmdir "$private_dir" 2>/dev/null || true
           ) >/dev/null 2>&1 &
         }
@@ -422,6 +423,9 @@ internal static class SidecarLauncher
             stage = "extract-dsp";
             EnsureDspLibsExtracted(assembly, baseDirectory, triple, helperPath, bundleVersion);
 
+            stage = "extract-pion";
+            EnsurePionLibExtracted(assembly, baseDirectory, triple, helperPath, bundleVersion);
+
             stage = "prune-stale-bundles";
             var pruned = NativeLibraryCache.PruneStaleBundles(baseDirectory, triple, bundleVersion);
             VoiceDiagnostics.Log(
@@ -451,6 +455,8 @@ internal static class SidecarLauncher
             var resources = new List<string> { helperResourceName };
             foreach (var (resource, _) in DspLibsFor(triple))
                 resources.Add(resource);
+            foreach (var (resource, _) in PionLibsFor(triple))
+                resources.Add(resource);
             var created = NativeLibraryCache.BuildContentVersion(assembly, resources);
             BundleVersions[key] = created;
             return created;
@@ -463,6 +469,15 @@ internal static class SidecarLauncher
             "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll") },
             "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll") },
             "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so") },
+            _ => Array.Empty<(string, string)>(),
+        };
+
+    public static (string Resource, string File)[] PionLibsFor(string triple)
+        => triple switch
+        {
+            "x86_64-pc-windows-msvc" => new[] { ("Lib.pc-pion.pc-pion.x64.dll", "pc-pion.x64.dll") },
+            "i686-pc-windows-msvc" => new[] { ("Lib.pc-pion.pc-pion.x86.dll", "pc-pion.x86.dll") },
+            "x86_64-unknown-linux-gnu" => new[] { ("Lib.pc-pion.libpc-pion.linux-x64.so", "libpc-pion.so") },
             _ => Array.Empty<(string, string)>(),
         };
 
@@ -517,6 +532,63 @@ internal static class SidecarLauncher
                     $"resource={NativeLibraryCache.DiagnosticValue(resource)} error={ExceptionDiagnostic(ex)}");
                 throw;
             }
+        }
+    }
+
+    public static void EnsurePionLibExtracted(
+        Assembly assembly,
+        string baseDirectory,
+        string triple,
+        string helperPath,
+        string bundleVersion)
+    {
+        var helperDir = Path.GetDirectoryName(helperPath);
+        if (string.IsNullOrEmpty(helperDir))
+            throw new InvalidOperationException("The native helper has no containing directory");
+        if (triple.EndsWith("-apple-darwin", StringComparison.Ordinal))
+        {
+            var signedPion = Path.Combine(helperDir, "libpc-pion.dylib");
+            if (!File.Exists(signedPion))
+                throw new FileNotFoundException(
+                    "The signed macOS helper app is missing its bundled Pion transport library",
+                    signedPion);
+            VoiceDiagnostics.Log(
+                "sidecar.pion",
+                $"event=preserve-signed-app-library path={NativeLibraryCache.DiagnosticValue(signedPion)}");
+            return;
+        }
+
+        var libraries = PionLibsFor(triple);
+        if (libraries.Length != 1)
+            throw new PlatformNotSupportedException($"No Pion transport library for target {triple}");
+        var (resource, file) = libraries[0];
+        using (var probe = assembly.GetManifestResourceStream(resource))
+            if (probe == null)
+                throw new FileNotFoundException($"Missing embedded Pion transport resource {resource}");
+        try
+        {
+            var extracted = NativeLibraryCache.Extract(
+                assembly,
+                resource,
+                file,
+                triple,
+                baseDirectory,
+                bundleVersion);
+            var beside = Path.Combine(helperDir, file);
+            if (!string.Equals(
+                    Path.GetFullPath(extracted),
+                    Path.GetFullPath(beside),
+                    StringComparison.OrdinalIgnoreCase))
+                PublishFileAtomically(extracted, beside);
+        }
+        catch (Exception ex)
+        {
+            var target = Path.Combine(helperDir, file);
+            VoiceDiagnostics.Log(
+                "sidecar.pion",
+                $"event=extract-failed stage=extract-or-place path={NativeLibraryCache.DiagnosticValue(target)} " +
+                $"resource={NativeLibraryCache.DiagnosticValue(resource)} error={ExceptionDiagnostic(ex)}");
+            throw;
         }
     }
 
@@ -969,11 +1041,16 @@ internal static class SidecarLauncher
         var sourceDsp = Path.Combine(helperDirectory, "libwebrtc-apm.so");
         if (!File.Exists(sourceDsp))
             throw new FileNotFoundException("The Linux helper is missing its WebRTC APM library", sourceDsp);
+        var sourcePion = Path.Combine(helperDirectory, "libpc-pion.so");
+        if (!File.Exists(sourcePion))
+            throw new FileNotFoundException("The Linux helper is missing its Pion transport library", sourcePion);
 
         var stagedHelper = Path.Combine(paths.PrivateDirectory, "PerfectCommsAudio");
         var stagedDsp = Path.Combine(paths.PrivateDirectory, "libwebrtc-apm.so");
+        var stagedPion = Path.Combine(paths.PrivateDirectory, "libpc-pion.so");
         PublishFileAtomically(helperPath, stagedHelper);
         PublishFileAtomically(sourceDsp, stagedDsp);
+        PublishFileAtomically(sourcePion, stagedPion);
         // Hardened Linux hosts commonly mark either the Steam library or /tmp noexec. The host
         // script performs a real --protocol-version execution probe and falls back between both
         // locations; chmod's executable bit alone cannot detect a noexec mount.

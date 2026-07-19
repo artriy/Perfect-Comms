@@ -25,11 +25,11 @@ public sealed class VoiceProximityRulesTests : IDisposable
     [Fact]
     public void PublicLobbyProtocolRejectsTheRetiredTransport()
     {
-        Assert.Equal(4, VoiceProtocol.ProtocolVersion);
-        Assert.Equal(4, VoiceProtocol.MinCompatibleVersion);
-        Assert.True(VoiceProtocol.IsCompatible(4, 4));
+        Assert.Equal(5, VoiceProtocol.ProtocolVersion);
+        Assert.Equal(5, VoiceProtocol.MinCompatibleVersion);
+        Assert.True(VoiceProtocol.IsCompatible(5, 5));
         Assert.False(VoiceProtocol.IsCompatible(3, 3));
-        Assert.False(VoiceProtocol.IsCompatible(5, 5));
+        Assert.False(VoiceProtocol.IsCompatible(4, 4));
     }
 
     [Fact]

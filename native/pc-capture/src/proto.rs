@@ -688,7 +688,7 @@ pub struct GameStatePeer {
     pub mode: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IceServer {
     pub urls: Vec<String>,
     #[serde(default)]

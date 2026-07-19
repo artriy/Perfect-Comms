@@ -19,10 +19,8 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 apm-sys = { path = "../apm-sys" }
+pion-sys = { path = "../pion-sys" }
 opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
-webrtc = "=0.17.1"
-tokio = { version = "1", features = ["full"] }
-bytes = "1"
 
 # cpal (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
 # Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from

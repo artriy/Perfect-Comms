@@ -212,18 +212,51 @@ public sealed class ManagedVoiceHardeningTests
     [Theory]
     [InlineData("turn:relay.example:3478", true)]
     [InlineData("TURN:relay.example:53?transport=UDP", true)]
+    [InlineData("turn:relay.example:80?transport=tcp", true)]
+    [InlineData("turns:relay.example:5349", true)]
+    [InlineData("turns:relay.example:5349?transport=tcp", true)]
+    [InlineData("turns:relay.example:5349?transport=udp", true)]
+    [InlineData("turn:[2001:db8::1]:3478?transport=udp", true)]
     [InlineData("turn:relay.example:3478?foo=bar", false)]
-    [InlineData("turn:relay.example:80?transport=tcp", false)]
     [InlineData("turn:relay.example:3478?transport=udp&transport=udp", false)]
     [InlineData("turn:relay.example:3478?transport=udp&transport=tcp", false)]
     [InlineData("turn:relay.example:3478?transport", false)]
     [InlineData("turn:relay.example:80?trans%70ort=tcp", false)]
     [InlineData("turn:relay.example:3478#fragment", false)]
-    [InlineData("turns:relay.example:5349?transport=tcp", false)]
+    [InlineData("turn:2001:db8::1:3478?transport=udp", false)]
+    [InlineData("turn:[not-an-ipv6-host]:3478?transport=udp", false)]
     [InlineData("stun:relay.example:3478", false)]
-    public void CustomTurnAcceptsOnlyTheUdpTransportSupportedByNativeIce(string url, bool expected)
+    public void CustomTurnAcceptsPionUdpTcpAndTlsTransports(string url, bool expected)
     {
-        Assert.Equal(expected, PerfectCommsVoiceBackend.IsSupportedUdpTurnUrl(url));
+        Assert.Equal(expected, PerfectCommsVoiceBackend.IsSupportedTurnUrl(url));
+    }
+
+    [Theory]
+    [InlineData("TURN:relay.example:53?TRANSPORT=UDP", "turn:relay.example:53?transport=udp")]
+    [InlineData("TURN://relay.example:3478?TRANSPORT=UDP", "turn:relay.example:3478?transport=udp")]
+    [InlineData("TuRn:Relay.Example:80?transport=TCP", "turn:Relay.Example:80?transport=tcp")]
+    [InlineData("TURNS:Relay.Example:5349", "turns:Relay.Example:5349")]
+    [InlineData("TuRnS:relay.example:5349?TrAnSpOrT=TcP", "turns:relay.example:5349?transport=tcp")]
+    [InlineData("TuRnS:[2001:db8::1]:5349?TrAnSpOrT=UdP", "turns:[2001:db8::1]:5349?transport=udp")]
+    public void CustomTurnIsCanonicalizedBeforeItReachesPion(string configuredUrl, string expectedUrl)
+    {
+        Assert.True(PerfectCommsVoiceBackend.TryCreateCustomTurnServer(
+            configuredUrl, "relay-user", "relay-secret", out var server));
+        Assert.Equal(expectedUrl, server.Urls);
+        Assert.Equal("relay-user", server.Username);
+        Assert.Equal("relay-secret", server.Credential);
+    }
+
+    [Fact]
+    public void IceDeduplicationKeepsCaseSensitiveTurnCredentialsDistinct()
+    {
+        var servers = PerfectCommsVoiceBackend.DeduplicateIceServers(new[]
+        {
+            new IceServer("turn:relay.example:3478?transport=udp", "RelayUser", "RelaySecret"),
+            new IceServer("turn:relay.example:3478?transport=udp", "relayuser", "relaysecret"),
+        });
+
+        Assert.Equal(2, servers.Count);
     }
 
     [Theory]
@@ -316,7 +349,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
         Assert.Equal(13, SidecarVoiceClient.Proto);
-        Assert.Equal(3, SidecarProtocol.MobileAbi);
+        Assert.Equal(4, SidecarProtocol.MobileAbi);
     }
 
     [Theory]

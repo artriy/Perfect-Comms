@@ -5,6 +5,15 @@ using Xunit;
 public sealed class EmbeddedManagedDependenciesTests
 {
     [Fact]
+    public void StandalonePluginCarriesNativeDependencyNotices()
+    {
+        var resources = typeof(BetterCrewLinkLobbyPublisher).Assembly.GetManifestResourceNames();
+        Assert.Contains("Licenses.THIRD_PARTY_NOTICES.md", resources);
+        Assert.Contains("Licenses.native-rust-dependencies.html", resources);
+        Assert.Contains("Licenses.pion-go-dependencies.txt", resources);
+    }
+
+    [Fact]
     public void SocketIoV4RuntimeClosureIsEmbedded()
     {
         var resources = typeof(BetterCrewLinkLobbyPublisher).Assembly.GetManifestResourceNames();

@@ -2,6 +2,7 @@ use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TYPE_CONTROL: u8 = 0x01;
@@ -89,6 +90,29 @@ fn unique_handshake_path(label: &str) -> PathBuf {
 }
 
 fn spawn_helper(exe: &str, handshake: &Path, owner_pid: Option<u32>) -> KillOnDrop {
+    static PION_STAGED: OnceLock<()> = OnceLock::new();
+    PION_STAGED.get_or_init(|| {
+        if std::env::var_os("PC_REQUIRE_PION").is_none() {
+            return;
+        }
+        let source = PathBuf::from(
+            std::env::var_os("PC_PION_LIB")
+                .expect("PC_REQUIRE_PION requires PC_PION_LIB for integration tests"),
+        );
+        let destination = Path::new(exe)
+            .parent()
+            .expect("test helper has no parent directory")
+            .join(pion_sys::platform_library_name());
+        if source != destination {
+            std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+                panic!(
+                    "stage Pion test transport {} -> {}: {error}",
+                    source.display(),
+                    destination.display()
+                )
+            });
+        }
+    });
     let mut command = Command::new(exe);
     command
         .arg("--handshake")

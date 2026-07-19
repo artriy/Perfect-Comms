@@ -22,12 +22,22 @@ rustup target add aarch64-apple-darwin >/dev/null 2>&1 || true
 cargo build --release --manifest-path "$crate/Cargo.toml" --target x86_64-apple-darwin
 cargo build --release --manifest-path "$crate/Cargo.toml" --target aarch64-apple-darwin
 
+# Pion is loaded dynamically by the shared Rust facade. Build both c-shared
+# slices with the pinned Go toolchain, then seal one universal dylib into the
+# app before signing.
+bash "$root/scripts/build-pion.sh" mac-x64
+bash "$root/scripts/build-pion.sh" mac-arm64
+bash "$root/scripts/build-pion.sh" mac-universal
+
 rm -rf "$work"
 mkdir -p "$app/Contents/MacOS"
 
 lipo -create -output "$app/Contents/MacOS/PerfectCommsAudio" "$x64" "$arm64"
 chmod +x "$app/Contents/MacOS/PerfectCommsAudio"
 lipo -info "$app/Contents/MacOS/PerfectCommsAudio"
+cp "$root/artifacts/pion/libpc-pion.dylib" "$app/Contents/MacOS/libpc-pion.dylib"
+chmod 755 "$app/Contents/MacOS/libpc-pion.dylib"
+lipo "$app/Contents/MacOS/libpc-pion.dylib" -verify_arch x86_64 arm64
 
 cat >"$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

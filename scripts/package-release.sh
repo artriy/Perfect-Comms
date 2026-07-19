@@ -69,7 +69,8 @@ copy_third_party_license_texts() {
 		dotnet-runtime.LICENSE.TXT \
 		system-text-encodings-web.THIRD-PARTY-NOTICES.TXT \
 		system-text-json.THIRD-PARTY-NOTICES.TXT \
-		native-rust-dependencies.html; do
+		native-rust-dependencies.html \
+		pion-go-dependencies.txt; do
 		require_nonempty "$root/Libs/$source"
 	done
 	cp "$root/Libs/opus.COPYING" "$destination/licenses/libopus-BSD-3-Clause.txt"
@@ -89,6 +90,8 @@ copy_third_party_license_texts() {
 		"$destination/licenses/System.Text.Json-THIRD-PARTY-NOTICES.txt"
 	cp "$root/Libs/native-rust-dependencies.html" \
 		"$destination/licenses/native-rust-dependencies.html"
+	cp "$root/Libs/pion-go-dependencies.txt" \
+		"$destination/licenses/pion-go-dependencies.txt"
 }
 
 copy_dependency_license_texts() {
@@ -129,6 +132,7 @@ copy_dependency_license_texts() {
 
 if [[ "$config" == "Android" ]]; then
 	require_nonempty "$root/Libs/pc-mobile/libpc_mobile.so"
+	require_nonempty "$root/Libs/pion/libpc-pion.android-arm64.so"
 	require_nonempty "$root/release-assets/android/AndroidManifest.xml"
 	require_nonempty "$root/release-assets/android/README.md"
 else
@@ -140,6 +144,9 @@ else
 		"Libs/dsp/webrtc-apm.x64.dll"
 		"Libs/dsp/webrtc-apm.x86.dll"
 		"Libs/dsp/libwebrtc-apm.so"
+		"Libs/pion/pc-pion.x64.dll"
+		"Libs/pion/pc-pion.x86.dll"
+		"Libs/pion/libpc-pion.linux-x64.so"
 	)
 	for asset in "${required_desktop_assets[@]}"; do
 		require_nonempty "$root/$asset"

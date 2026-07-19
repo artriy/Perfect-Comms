@@ -4,25 +4,32 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
 
-// Loads libpc_mobile.so so the PcMobileNative DllImports resolve. The .so is embedded as a
-// resource and extracted to the app-private cache, then loaded by full path; if it is not
-// embedded we fall back to the system loader (e.g. a .so placed in the APK's lib/<abi>/).
+// Loads libpc_mobile.so and prepares the Pion transport library used by its Rust voice core.
+// Both embedded libraries are extracted read-only into the app-private cache. pc-mobile can still
+// use the APK system loader, while Pion fails closed unless its signed resource can be extracted
+// and passed to Rust by an exact absolute path.
 // ponytail: arm64-v8a only (modern Among Us is 64-bit); add other ABIs here if 32-bit returns.
 internal static class PcMobileLoader
 {
-    // ABI 3 adds set-input, runtime synthetic control, and batched peer-level telemetry.
+    // ABI 4 adds the constructor that configures Pion before RtcEngine construction.
     private const int ExpectedAbi = SidecarProtocol.MobileAbi;
     private const uint ReadExecuteMode = 0x16D; // Unix 0555: executable but never writable.
-    private const string ResourceName = "Lib.pc-mobile.libpc_mobile.so";
-    private const string FilePrefix = "libpc_mobile.";
+    private const string MobileResourceName = "Lib.pc-mobile.libpc_mobile.so";
+    private const string MobileFileName = "libpc_mobile.so";
+    private const string PionResourceName = "Lib.pc-pion.libpc-pion.android-arm64.so";
+    private const string PionFileName = "libpc-pion.so";
 
-    private static bool _loaded;
+    private static volatile bool _loaded;
     private static IntPtr _nativeHandle;
+    private static byte[]? _pionTransportPath;
     private static readonly object _gate = new();
+
+    internal static byte[]? PionTransportPath => _loaded ? _pionTransportPath : null;
 
     static PcMobileLoader()
     {
@@ -43,10 +50,15 @@ internal static class PcMobileLoader
             if (_loaded) return true;
             try
             {
-                var path = ExtractIfNeeded();
-                if (path != null)
+                var pionPath = ExtractIfNeeded(PionResourceName, PionFileName, "Pion transport");
+                if (pionPath == null || !Path.IsPathRooted(pionPath))
+                    throw new FileNotFoundException("Pion transport library is unavailable", PionFileName);
+                _pionTransportPath = Encoding.UTF8.GetBytes(Path.GetFullPath(pionPath) + "\0");
+
+                var mobilePath = ExtractIfNeeded(MobileResourceName, MobileFileName, "pc-mobile");
+                if (mobilePath != null)
                 {
-                    try { _nativeHandle = NativeLibrary.Load(path); }
+                    try { _nativeHandle = NativeLibrary.Load(mobilePath); }
                     catch (Exception ex) { VoiceDiagnostics.DebugWarning($"[VC] pc-mobile load by path failed ({ex.Message}); trying system loader"); }
                 }
                 int abi = PcMobileNative.pc_abi_version();
@@ -58,27 +70,28 @@ internal static class PcMobileLoader
             {
                 VoiceDiagnostics.DebugWarning($"[VC] pc-mobile load failed: {ex}");
                 _loaded = false;
+                _pionTransportPath = null;
             }
             return _loaded;
         }
     }
 
-    private static string? ExtractIfNeeded()
+    private static string? ExtractIfNeeded(string resourceName, string fileName, string label)
     {
         var asm = typeof(PcMobileLoader).Assembly;
-        using var src = asm.GetManifestResourceStream(ResourceName);
+        using var src = asm.GetManifestResourceStream(resourceName);
         if (src == null)
         {
-            VoiceDiagnostics.DebugWarning($"[VC] pc-mobile resource '{ResourceName}' not embedded; relying on APK lib dir");
+            VoiceDiagnostics.DebugWarning($"[VC] {label} resource '{resourceName}' not embedded; checking APK lib dir");
             return null;
         }
 
         byte[] expectedHash;
         using (var sha = SHA256.Create()) expectedHash = sha.ComputeHash(src);
         var hashText = BitConverter.ToString(expectedHash, 0, 12).Replace("-", string.Empty).ToLowerInvariant();
-        var directory = Path.Combine(Application.temporaryCachePath, "PerfectComms", "native", "arm64-v8a");
+        var directory = Path.Combine(Application.temporaryCachePath, "PerfectComms", "native", "arm64-v8a", hashText);
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, FilePrefix + hashText + ".so");
+        var path = Path.GetFullPath(Path.Combine(directory, fileName));
 
         if (File.Exists(path))
         {
@@ -98,8 +111,8 @@ internal static class PcMobileLoader
         var tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
-            using var copySource = asm.GetManifestResourceStream(ResourceName)
-                ?? throw new FileNotFoundException("embedded pc-mobile resource disappeared", ResourceName);
+            using var copySource = asm.GetManifestResourceStream(resourceName)
+                ?? throw new FileNotFoundException($"embedded {label} resource disappeared", resourceName);
             using (var dst = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 // Keep the trusted descriptor open, but remove path-based write access before
@@ -133,7 +146,7 @@ internal static class PcMobileLoader
         // the same safe-DCL ordering while the trusted writer is already open also closes the
         // modification window on earlier releases. Fail closed instead of loading writable code.
         if (chmod(path, ReadExecuteMode) != 0)
-            throw new IOException($"could not mark pc-mobile read-only (errno {Marshal.GetLastWin32Error()})");
+            throw new IOException($"could not mark native library read-only (errno {Marshal.GetLastWin32Error()})");
     }
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]

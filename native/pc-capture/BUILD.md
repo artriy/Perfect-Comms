@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Capture, playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and WebRTC (webrtc-rs) peer transport with proximity mixing. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 13.
+Capture, playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 13.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -8,7 +8,7 @@ minimum two-chunk threshold and therefore spend no DRED bits. Adding an authoriz
 advances an encoder epoch only after resetting codec/DRED history, preventing pre-join speech
 from being carried to that receiver in a later packet.
 
-The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary per target as an embedded resource and extracts the correct one at runtime through `NativeLibraryCache.Extract`. Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If no helper resource is present for the running target, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged under `voice.*` diagnostics); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android intentionally captures and plays through Unity while `pc-mobile` owns Opus, WebRTC, and mixing. Desktop WebRTC APM DSP is disabled on Android by design.
+The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary and its matching Pion transport per target, then extracts the correct pair at runtime through the native-library cache. Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If either resource is absent, the Pion library cannot load, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged under `voice.*` diagnostics); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android intentionally captures and plays through Unity while `pc-mobile` owns Opus and mixing and loads the Android Pion companion for peer transport. Desktop WebRTC APM DSP is disabled on Android by design.
 
 ## Targets
 
@@ -20,13 +20,17 @@ The five Rust targets, verbatim:
 - aarch64-apple-darwin
 - x86_64-unknown-linux-gnu
 
+The Pion build additionally names its C-shared targets `win-x64`, `win-x86`,
+`linux-x64`, `mac-x64`, `mac-arm64`, `mac-universal`, and `android-arm64`.
+
 ## Local build
 
-- All non-mac targets: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Linux needs ALSA dev headers (`libasound2-dev pkg-config`).
-- macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Apple arches, `lipo`s them into a universal binary, wraps it in a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
-- Outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`.
+- All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Linux needs ALSA dev headers (`libasound2-dev pkg-config`).
+- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|win-x86|linux-x64|android-arm64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows targets need the matching MinGW C compiler, Linux needs GCC, and Android ARM64 needs the pinned NDK through `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
+- macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Rust and Pion Apple slices, `lipo`s each into a universal binary, seals `libpc-pion.dylib` into a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
+- Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll`, `pc-pion.x86.dll`, `libpc-pion.linux-x64.so`, and `libpc-pion.android-arm64.so`; the macOS dylib stays inside the signed app.
 
-These names are frozen: the managed build (`PerfectComms.csproj`), the packaging scripts, the CI workflows, and the mod's extractor all key off them. Do not rename.
+These names are frozen: the managed build (`PerfectComms.csproj`), the packaging scripts, the CI workflows, and the mod's extractor all key off them. Do not rename them.
 
 ## macOS signing: ad-hoc by default (no paid Apple program)
 
@@ -41,9 +45,9 @@ notarization branch and does not consume Apple signing secrets.
 
 ## Embedding
 
-The managed build embeds each helper as `Lib.pc-capture.<file>` (mirrors `Lib.bass.x64.dll`), one `<EmbeddedResource>` per frozen output name, each guarded by `Condition="Exists(...)"` so a missing target does not break the build. At runtime the mod extracts the right one via `NativeLibraryCache.Extract` into a per-target cache dir, exactly like `bass.dll`. On the mac the embedded resource is the zipped `.app`; the mod unzips it, `chmod +x`es the inner binary, and strips quarantine.
+The managed build embeds each helper as `Lib.pc-capture.<file>` and each standalone Pion companion as `Lib.pc-pion.<file>`, with one `<EmbeddedResource>` per frozen output name. A normal developer build may omit native resources, but release validation requires the complete platform set. At runtime the mod extracts the content-matched helper and Pion library into the per-target cache. On macOS the embedded resource is the zipped `.app`; its Pion dylib is already inside the signed bundle, so the mod preserves it while unzipping the app, setting executable permissions, and stripping quarantine. Android extracts `libpc-pion.android-arm64.so` to a content-addressed path and configures that exact path before `pc-mobile` creates its engine.
 
-`scripts/package-release.sh` also stages the same four files as **side-files** in the BepInEx plugin folder (`BepInEx/plugins/pc-capture/`) so they ship alongside the DLL in the release zip. Embedding and side-files are not mutually exclusive: the embedded copy is the runtime source of truth; the side-files make the helpers visible in the distributed package.
+`scripts/package-release.sh` also stages the same four helper files as **side-files** in the BepInEx plugin folder (`BepInEx/plugins/pc-capture/`) so they ship alongside the DLL in the release zip. The Pion libraries are embedded in `PerfectComms.dll` (or sealed inside the macOS app) and extracted next to the selected helper at runtime. The embedded, content-matched copies are the runtime source of truth.
 
 ## How it is launched
 
@@ -61,7 +65,7 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## CI
 
-- `.github/workflows/native-helpers.yml`: builds the five desktop targets on GitHub-hosted runners (`windows-latest` x64/x86, `ubuntu-latest` x64, `macos-latest` universal x64+arm64), uploads `helper-*` artifacts, and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP loading.
+- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64), plus Android ARM64 with the pinned NDK. It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
 - `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies-win-x86-steam-itch.zip`, `PerfectComms+dependencies-win-x64-epic-msstore.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility

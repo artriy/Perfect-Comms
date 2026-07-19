@@ -11,6 +11,7 @@ Libs/*.bak.*
 Libs/pc-capture/
 Libs/dsp/
 Libs/pc-mobile/
+Libs/pion/
 # The xUnit suite is part of the release gate. Keep the old, local-only console
 # harness out of source control; it targets the retired managed voice backend.
 PerfectComms.Tests/Program.cs
@@ -23,6 +24,8 @@ scripts/*
 !scripts/verify-release-assets.py
 !scripts/verify-package-layout.py
 !scripts/verify-native-license-inventory.py
+!scripts/build-pion.sh
+!scripts/verify-pion-license-inventory.py
 # Track the deployable Cloudflare worker source/config/tests, but never local
 # Wrangler state or installed npm packages. TURN credentials live in bindings,
 # not in these files.
@@ -45,6 +48,8 @@ cloudflare/**/package-lock.json
 cloudflare/**/*.log
 TouMira/
 artifacts/
+native/pc-pion/.cache/
+native/pion-sys/target/
 build-apm-*/
 PerfectComms.sln
 .superpowers/

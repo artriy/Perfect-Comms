@@ -40,6 +40,32 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: gomod
+    directory: "/native/pc-pion"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      pion-transport-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: "/native/pion-sys"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      pion-sys-dependencies:
+        patterns:
+          - "*"
+
   - package-ecosystem: cargo
     directory: "/native/pc-mobile"
     schedule:
@@ -63,19 +89,6 @@ updates:
     open-pull-requests-limit: 5
     groups:
       apm-sys-dependencies:
-        patterns:
-          - "*"
-
-  - package-ecosystem: cargo
-    directory: "/native/rtc-interop"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    groups:
-      rtc-interop-dependencies:
         patterns:
           - "*"
 
@@ -103,16 +116,3 @@ updates:
       # require deliberate compatibility testing rather than automated bumps.
       - dependency-name: "BepInEx.*"
       - dependency-name: "AmongUs.GameLibs.Steam"
-
-  - package-ecosystem: nuget
-    directory: "/native/rtc-interop/sipsorcery-answer"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    groups:
-      rtc-interop-dependencies:
-        patterns:
-          - "*"

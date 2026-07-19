@@ -24,11 +24,12 @@ jobs:
           python3 -m py_compile scripts/verify-release-assets.py
           python3 -m py_compile scripts/verify-package-layout.py
           python3 -m py_compile scripts/verify-native-license-inventory.py
+          python3 -m py_compile scripts/verify-pion-license-inventory.py
           python3 scripts/verify-release-assets.py --self-test
           python3 scripts/verify-package-layout.py --self-test
           bash scripts/fetch-bepinex.sh --self-test
           python3 scripts/verify-release-assets.py --root . --configuration Android --manifest-only
-          bash -n scripts/package-release.sh scripts/fetch-bepinex.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/ci-smoke-helper.sh
+          bash -n scripts/package-release.sh scripts/fetch-bepinex.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/build-pion.sh scripts/ci-smoke-helper.sh
           bash scripts/package-release.sh --validate-source
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -59,6 +60,10 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26.2"
+          cache-dependency-path: native/pc-pion/go.sum
       - name: Native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
       - name: Rust formatting
@@ -66,6 +71,15 @@ jobs:
           cargo fmt --manifest-path native/pc-capture/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/pc-mobile/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/apm-sys/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/pion-sys/Cargo.toml --all -- --check
+      - name: Pion formatting, vet, tests, and license inventory
+        run: |
+          unformatted="$(find native/pc-pion -type f -name '*.go' -exec gofmt -l {} +)"
+          test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+          (cd native/pc-pion && go vet -mod=readonly ./...)
+          (cd native/pc-pion && go test -buildvcs=false -mod=readonly ./...)
+          python3 scripts/verify-pion-license-inventory.py
+          bash scripts/build-pion.sh linux-x64
       - name: Lint desktop shared core
         run: cargo clippy --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
       - name: Lint mobile wrapper
@@ -78,8 +92,14 @@ jobs:
           cargo audit --file native/pc-capture/Cargo.lock
           cargo audit --no-fetch --file native/pc-mobile/Cargo.lock
           cargo audit --no-fetch --file native/apm-sys/Cargo.lock
+          cargo audit --no-fetch --file native/pion-sys/Cargo.lock
       - name: Test desktop shared core
-        run: cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets
+        env:
+          PC_PION_LIB: ${{ github.workspace }}/artifacts/pion/libpc-pion.so
+          PC_REQUIRE_PION: "1"
+        run: |
+          cargo test --locked --manifest-path native/pion-sys/Cargo.toml --all-targets
+          cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-about@0.9.1

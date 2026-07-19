@@ -13,20 +13,64 @@ from pathlib import Path
 
 PE_I386 = 0x014C
 PE_AMD64 = 0x8664
+PE_IMAGE_FILE_DLL = 0x2000
 ELF_X86_64 = 62
 ELF_AARCH64 = 183
 ELF_ET_DYN = 3
+ELF_PT_DYNAMIC = 2
+ELF_PT_INTERP = 3
 ELF_SHT_DYNSYM = 11
 ELF_STB_GLOBAL = 1
 ELF_STT_OBJECT = 1
+ELF_STT_FUNC = 2
 ELF_STV_DEFAULT = 0
 ELF_SHN_UNDEF = 0
 MACH_X86_64 = 0x01000007
 MACH_ARM64 = 0x0100000C
+MACH_MH_DYLIB = 6
+MACH_LC_SYMTAB = 0x2
+MACH_LC_DYLD_INFO = 0x22
+MACH_LC_DYLD_INFO_ONLY = 0x80000022
+MACH_LC_DYLD_EXPORTS_TRIE = 0x80000033
+MACH_N_STAB = 0xE0
+MACH_N_TYPE = 0x0E
+MACH_N_EXT = 0x01
+MACH_N_UNDF = 0x00
 ANDROID_NAME_ATTRIBUTE = "{http://schemas.android.com/apk/res/android}name"
-PC_MOBILE_ABI_EXPECTED = 3
+PC_MOBILE_ABI_EXPECTED = 4
 PC_MOBILE_ABI_MARKER_PREFIX = b"PERFECTCOMMS_PC_MOBILE_ABI="
 PC_MOBILE_ABI_MARKER_SYMBOL = b"PC_MOBILE_ABI_MARKER"
+PION_ABI_EXPECTED = 1
+PION_VERSION_EXPECTED = "4.2.17"
+PION_CONTRACT_MARKER_PREFIX = b"PERFECTCOMMS_PC_PION_ABI="
+PION_CONTRACT_MARKER = (
+    PION_CONTRACT_MARKER_PREFIX
+    + str(PION_ABI_EXPECTED).encode("ascii")
+    + b";PION="
+    + PION_VERSION_EXPECTED.encode("ascii")
+    + bytes([0])
+)
+PION_CONTRACT_MARKER_SYMBOL = "PC_PION_CONTRACT_MARKER"
+PION_REQUIRED_FUNCTION_EXPORTS = frozenset(
+    {
+        "pc_pion_abi_version",
+        "pc_pion_version",
+        "pc_pion_engine_new",
+        "pc_pion_engine_close",
+        "pc_pion_set_ice_servers",
+        "pc_pion_add_peer",
+        "pc_pion_remove_peer",
+        "pc_pion_set_remote_sdp",
+        "pc_pion_add_ice_candidate",
+        "pc_pion_restart_ice",
+        "pc_pion_send_opus",
+        "pc_pion_advance_epoch",
+        "pc_pion_poll_control",
+        "pc_pion_poll_rtp",
+        "pc_pion_get_counters",
+    }
+)
+PION_REQUIRED_EXPORTS = PION_REQUIRED_FUNCTION_EXPORTS | {PION_CONTRACT_MARKER_SYMBOL}
 
 
 def fail(message: str) -> None:
@@ -50,6 +94,175 @@ def assert_pe(path: Path, expected_machine: int) -> None:
     machine = struct.unpack_from("<H", data, pe_offset + 4)[0]
     if machine != expected_machine:
         fail(f"{path}: PE machine 0x{machine:04x}, expected 0x{expected_machine:04x}")
+
+
+def pe_layout(
+    data: bytes, label: str
+) -> tuple[int, int, list[tuple[int, int]], list[tuple[int, int, int, int]]]:
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        fail(f"{label}: expected a PE file (MZ header)")
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if pe_offset + 24 > len(data) or data[pe_offset : pe_offset + 4] != b"PE" + bytes(2):
+        fail(f"{label}: invalid PE signature")
+    coff = pe_offset + 4
+    machine, section_count = struct.unpack_from("<HH", data, coff)
+    optional_size, characteristics = struct.unpack_from("<HH", data, coff + 16)
+    optional = coff + 20
+    if optional_size < 2 or optional + optional_size > len(data):
+        fail(f"{label}: truncated PE optional header")
+    magic = struct.unpack_from("<H", data, optional)[0]
+    if magic == 0x20B:
+        directory_count_offset = 108
+        directory_offset = 112
+    elif magic == 0x10B:
+        directory_count_offset = 92
+        directory_offset = 96
+    else:
+        fail(f"{label}: unsupported PE optional-header magic 0x{magic:04x}")
+    if directory_count_offset + 4 > optional_size:
+        fail(f"{label}: truncated PE data-directory count")
+    directory_count = struct.unpack_from("<I", data, optional + directory_count_offset)[0]
+    available_directories = max(0, (optional_size - directory_offset) // 8)
+    directory_count = min(directory_count, available_directories)
+    directories = [
+        struct.unpack_from("<II", data, optional + directory_offset + index * 8)
+        for index in range(directory_count)
+    ]
+
+    section_table = optional + optional_size
+    if section_table + section_count * 40 > len(data):
+        fail(f"{label}: truncated PE section table")
+    sections: list[tuple[int, int, int, int]] = []
+    for index in range(section_count):
+        entry = section_table + index * 40
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+            "<IIII", data, entry + 8
+        )
+        sections.append((virtual_address, max(virtual_size, raw_size), raw_offset, raw_size))
+    return machine, characteristics, directories, sections
+
+
+def pe_rva_offset(
+    data: bytes,
+    label: str,
+    sections: list[tuple[int, int, int, int]],
+    rva: int,
+    size: int = 1,
+) -> int:
+    for virtual_address, virtual_span, raw_offset, raw_size in sections:
+        if virtual_address <= rva < virtual_address + virtual_span:
+            relative = rva - virtual_address
+            if relative + size > raw_size:
+                fail(f"{label}: PE RVA 0x{rva:x} points into virtual-only section data")
+            offset = raw_offset + relative
+            if offset + size > len(data):
+                fail(f"{label}: PE RVA 0x{rva:x} resolves past end of file")
+            return offset
+    fail(f"{label}: PE RVA 0x{rva:x} is outside all sections")
+    return 0
+
+
+def pe_ascii_string(
+    data: bytes,
+    label: str,
+    sections: list[tuple[int, int, int, int]],
+    rva: int,
+) -> str:
+    offset = pe_rva_offset(data, label, sections, rva)
+    end = data.find(bytes([0]), offset)
+    if end < 0:
+        fail(f"{label}: unterminated PE export name")
+    try:
+        return data[offset:end].decode("ascii", "strict")
+    except UnicodeDecodeError:
+        fail(f"{label}: PE export name is not ASCII")
+    return ""
+
+
+def assert_exact_pion_marker(data: bytes, label: str) -> int:
+    marker_count = data.count(PION_CONTRACT_MARKER_PREFIX)
+    if marker_count != 1:
+        fail(f"{label}: expected exactly one Pion contract marker, found {marker_count}")
+    marker_offset = data.find(PION_CONTRACT_MARKER_PREFIX)
+    marker_end = data.find(bytes([0]), marker_offset)
+    if marker_end < 0:
+        fail(f"{label}: unterminated Pion contract marker")
+    marker = data[marker_offset : marker_end + 1]
+    if marker != PION_CONTRACT_MARKER:
+        fail(f"{label}: Pion contract marker {marker!r}, expected {PION_CONTRACT_MARKER!r}")
+    return marker_offset
+
+
+def pe_exports(
+    data: bytes,
+    label: str,
+    directories: list[tuple[int, int]],
+    sections: list[tuple[int, int, int, int]],
+) -> tuple[dict[str, list[int]], tuple[int, int]]:
+    if not directories or directories[0] == (0, 0):
+        fail(f"{label}: PE shared library has no export directory")
+    export_rva, export_size = directories[0]
+    if export_rva == 0 or export_size < 40:
+        fail(f"{label}: PE shared library has an invalid export directory")
+    export_offset = pe_rva_offset(data, label, sections, export_rva, 40)
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        function_count,
+        name_count,
+        functions_rva,
+        names_rva,
+        ordinals_rva,
+    ) = struct.unpack_from("<IIHHIIIIIII", data, export_offset)
+    if function_count == 0 or name_count == 0:
+        fail(f"{label}: PE export directory contains no named exports")
+    function_offset = pe_rva_offset(data, label, sections, functions_rva, function_count * 4)
+    name_offset = pe_rva_offset(data, label, sections, names_rva, name_count * 4)
+    ordinal_offset = pe_rva_offset(data, label, sections, ordinals_rva, name_count * 2)
+
+    exports: dict[str, list[int]] = {}
+    for index in range(name_count):
+        symbol_name_rva = struct.unpack_from("<I", data, name_offset + index * 4)[0]
+        ordinal = struct.unpack_from("<H", data, ordinal_offset + index * 2)[0]
+        if ordinal >= function_count:
+            fail(f"{label}: PE export ordinal {ordinal} is outside the function table")
+        function_rva = struct.unpack_from("<I", data, function_offset + ordinal * 4)[0]
+        symbol_name = pe_ascii_string(data, label, sections, symbol_name_rva)
+        exports.setdefault(symbol_name, []).append(function_rva)
+    return exports, (export_rva, export_size)
+
+
+def assert_pion_pe_bytes(data: bytes, label: str, expected_machine: int) -> None:
+    machine, characteristics, directories, sections = pe_layout(data, label)
+    if machine != expected_machine:
+        fail(f"{label}: PE machine 0x{machine:04x}, expected 0x{expected_machine:04x}")
+    if characteristics & PE_IMAGE_FILE_DLL == 0:
+        fail(f"{label}: Pion PE companion is not marked as a DLL")
+    marker_offset = assert_exact_pion_marker(data, label)
+    exports, (export_rva, export_size) = pe_exports(data, label, directories, sections)
+    for symbol_name in sorted(PION_REQUIRED_EXPORTS):
+        matches = exports.get(symbol_name, [])
+        if len(matches) != 1:
+            fail(f"{label}: expected one PE export {symbol_name}, found {len(matches)}")
+        symbol_rva = matches[0]
+        if symbol_rva == 0:
+            fail(f"{label}: PE export {symbol_name} has a null RVA")
+        if export_rva <= symbol_rva < export_rva + export_size:
+            fail(f"{label}: PE export {symbol_name} is a forwarder")
+    marker_rva = exports[PION_CONTRACT_MARKER_SYMBOL][0]
+    exported_marker_offset = pe_rva_offset(
+        data, label, sections, marker_rva, len(PION_CONTRACT_MARKER)
+    )
+    if exported_marker_offset != marker_offset:
+        fail(f"{label}: exported Pion contract marker does not identify the exact marker")
+
+
+def assert_pion_pe(path: Path, expected_machine: int) -> None:
+    assert_pion_pe_bytes(path.read_bytes(), str(path), expected_machine)
 
 
 def pe_imports(path: Path) -> set[str]:
@@ -175,6 +388,26 @@ def assert_elf_bytes(
         fail(f"{label}: ELF type {elf_type}, expected {expected_type}")
 
 
+def assert_elf_shared_object_bytes(data: bytes, label: str) -> None:
+    if len(data) < 64:
+        fail(f"{label}: truncated ELF64 header")
+    program_offset = struct.unpack_from("<Q", data, 32)[0]
+    program_entry_size = struct.unpack_from("<H", data, 54)[0]
+    program_count = struct.unpack_from("<H", data, 56)[0]
+    if program_offset == 0 or program_count == 0 or program_entry_size < 56:
+        fail(f"{label}: ELF shared library has no usable program-header table")
+    if program_offset + program_entry_size * program_count > len(data):
+        fail(f"{label}: truncated ELF64 program-header table")
+    program_types = {
+        struct.unpack_from("<I", data, program_offset + index * program_entry_size)[0]
+        for index in range(program_count)
+    }
+    if ELF_PT_INTERP in program_types:
+        fail(f"{label}: ELF Pion companion contains PT_INTERP and is an executable")
+    if ELF_PT_DYNAMIC not in program_types:
+        fail(f"{label}: ELF Pion companion has no PT_DYNAMIC shared-library segment")
+
+
 def elf64_sections(data: bytes, label: str) -> list[tuple[int, ...]]:
     if len(data) < 64:
         fail(f"{label}: truncated ELF64 header")
@@ -197,6 +430,97 @@ def section_bytes(data: bytes, section: tuple[int, ...], label: str) -> bytes:
     if offset + size > len(data):
         fail(f"{label}: ELF64 section extends past end of file")
     return data[offset : offset + size]
+
+
+def elf64_dynamic_symbols(
+    data: bytes, label: str
+) -> tuple[list[tuple[int, ...]], dict[str, list[tuple[int, int, int, int, int]]]]:
+    sections = elf64_sections(data, label)
+    exported: dict[str, list[tuple[int, int, int, int, int]]] = {}
+    dynamic_symbol_tables = 0
+    for section in sections:
+        if section[1] != ELF_SHT_DYNSYM:
+            continue
+        dynamic_symbol_tables += 1
+        string_section_index = section[6]
+        if string_section_index >= len(sections):
+            fail(f"{label}: ELF64 dynamic symbol table has an invalid string-table link")
+        strings = section_bytes(data, sections[string_section_index], label)
+        symbols = section_bytes(data, section, label)
+        entry_size = section[9]
+        if entry_size < 24 or len(symbols) % entry_size != 0:
+            fail(f"{label}: malformed ELF64 dynamic symbol table")
+        for offset in range(0, len(symbols), entry_size):
+            name_offset, info, other, section_index, value, size = struct.unpack_from(
+                "<IBBHQQ", symbols, offset
+            )
+            if name_offset >= len(strings):
+                fail(f"{label}: ELF64 dynamic symbol has an invalid name offset")
+            name_end = strings.find(bytes([0]), name_offset)
+            if name_end < 0:
+                fail(f"{label}: unterminated ELF64 dynamic symbol name")
+            try:
+                name = strings[name_offset:name_end].decode("ascii", "strict")
+            except UnicodeDecodeError:
+                continue
+            if name:
+                exported.setdefault(name, []).append(
+                    (info, other, section_index, value, size)
+                )
+    if dynamic_symbol_tables == 0:
+        fail(f"{label}: ELF shared library has no dynamic symbol table")
+    return sections, exported
+
+
+def assert_pion_elf_bytes(data: bytes, label: str, expected_machine: int) -> None:
+    assert_elf_bytes(data, label, expected_machine, ELF_ET_DYN)
+    assert_elf_shared_object_bytes(data, label)
+    marker_offset = assert_exact_pion_marker(data, label)
+    sections, exports = elf64_dynamic_symbols(data, label)
+    for symbol_name in sorted(PION_REQUIRED_FUNCTION_EXPORTS):
+        matches = exports.get(symbol_name, [])
+        if len(matches) != 1:
+            fail(f"{label}: expected one ELF export {symbol_name}, found {len(matches)}")
+        info, other, section_index, _, _ = matches[0]
+        if (
+            info >> 4 != ELF_STB_GLOBAL
+            or info & 0x0F != ELF_STT_FUNC
+            or other & 0x03 != ELF_STV_DEFAULT
+            or section_index == ELF_SHN_UNDEF
+        ):
+            fail(f"{label}: ELF export {symbol_name} must be defined GLOBAL FUNC DEFAULT")
+
+    marker_matches = exports.get(PION_CONTRACT_MARKER_SYMBOL, [])
+    if len(marker_matches) != 1:
+        fail(
+            f"{label}: expected one ELF export {PION_CONTRACT_MARKER_SYMBOL}, "
+            f"found {len(marker_matches)}"
+        )
+    info, other, section_index, value, size = marker_matches[0]
+    if (
+        info >> 4 != ELF_STB_GLOBAL
+        or info & 0x0F != ELF_STT_OBJECT
+        or other & 0x03 != ELF_STV_DEFAULT
+        or section_index == ELF_SHN_UNDEF
+    ):
+        fail(f"{label}: Pion contract marker must be defined GLOBAL OBJECT DEFAULT")
+    if size != len(PION_CONTRACT_MARKER):
+        fail(f"{label}: Pion contract marker size {size}, expected {len(PION_CONTRACT_MARKER)}")
+    if section_index >= len(sections):
+        fail(f"{label}: Pion contract marker references an invalid ELF64 section")
+    marker_section = sections[section_index]
+    section_address = marker_section[3]
+    section_file_offset = marker_section[4]
+    section_size = marker_section[5]
+    if value < section_address or value - section_address + size > section_size:
+        fail(f"{label}: Pion contract marker lies outside its ELF64 section")
+    exported_marker_offset = section_file_offset + value - section_address
+    if exported_marker_offset != marker_offset:
+        fail(f"{label}: exported Pion contract marker does not identify the exact marker")
+
+
+def assert_pion_elf(path: Path, expected_machine: int) -> None:
+    assert_pion_elf_bytes(path.read_bytes(), str(path), expected_machine)
 
 
 def expected_pc_mobile_abi_marker(expected_abi: int) -> bytes:
@@ -336,7 +660,9 @@ def self_test_pc_mobile_elf(
 ) -> bytes:
     symbol_strings = b"\0" + PC_MOBILE_ABI_MARKER_SYMBOL + b"\0"
     marker_data = (marker if marker is not None else b"not-an-abi-marker\0") + extra_marker_data
-    symbol_size = len(marker) if marker is not None else len(expected_pc_mobile_abi_marker(3))
+    symbol_size = (
+        len(marker) if marker is not None else len(expected_pc_mobile_abi_marker(PC_MOBILE_ABI_EXPECTED))
+    )
 
     string_offset = 64
     symbol_offset = align_up(string_offset + len(symbol_strings), 8)
@@ -427,6 +753,424 @@ def self_test_pc_mobile_elf(
     return bytes(data)
 
 
+def self_test_pion_pe(
+    machine: int,
+    *,
+    exports: frozenset[str] = PION_REQUIRED_EXPORTS,
+    marker: bytes = PION_CONTRACT_MARKER,
+    dll: bool = True,
+) -> bytes:
+    pe_offset = 0x80
+    optional_size = 0xF0 if machine == PE_AMD64 else 0xE0
+    optional_magic = 0x20B if machine == PE_AMD64 else 0x10B
+    directory_offset = 112 if machine == PE_AMD64 else 96
+    section_virtual_address = 0x1000
+    section_raw_offset = 0x200
+    section_raw_size = 0x4000
+    data = bytearray(section_raw_offset + section_raw_size)
+
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, pe_offset)
+    data[pe_offset : pe_offset + 4] = b"PE" + bytes(2)
+    coff = pe_offset + 4
+    characteristics = 0x0022 | (PE_IMAGE_FILE_DLL if dll else 0)
+    struct.pack_into(
+        "<HHIIIHH", data, coff, machine, 1, 0, 0, 0, optional_size, characteristics
+    )
+    optional = coff + 20
+    struct.pack_into("<H", data, optional, optional_magic)
+    struct.pack_into("<I", data, optional + directory_offset - 4, 16)
+
+    section_table = optional + optional_size
+    struct.pack_into(
+        "<8sIIIIIIHHI",
+        data,
+        section_table,
+        b".rdata",
+        section_raw_size,
+        section_virtual_address,
+        section_raw_size,
+        section_raw_offset,
+        0,
+        0,
+        0,
+        0,
+        0x40000040,
+    )
+
+    names = sorted(exports)
+    count = len(names)
+    export_offset = section_raw_offset
+    functions_offset = align_up(export_offset + 40, 4)
+    names_offset = functions_offset + count * 4
+    ordinals_offset = names_offset + count * 4
+    cursor = align_up(ordinals_offset + count * 2, 4)
+    dll_name_offset = cursor
+    dll_name = b"pc-pion-self-test.dll" + bytes([0])
+    data[cursor : cursor + len(dll_name)] = dll_name
+    cursor += len(dll_name)
+    symbol_name_offsets: list[int] = []
+    for name in names:
+        encoded = name.encode("ascii") + bytes([0])
+        symbol_name_offsets.append(cursor)
+        data[cursor : cursor + len(encoded)] = encoded
+        cursor += len(encoded)
+    export_size = cursor - export_offset
+    marker_offset = align_up(cursor, 16)
+    data[marker_offset : marker_offset + len(marker)] = marker
+    function_cursor = align_up(marker_offset + len(marker), 16)
+
+    function_rvas: list[int] = []
+    for name in names:
+        if name == PION_CONTRACT_MARKER_SYMBOL:
+            target_offset = marker_offset
+        else:
+            target_offset = function_cursor
+            data[function_cursor] = 0xC3
+            function_cursor += 1
+        function_rvas.append(
+            section_virtual_address + target_offset - section_raw_offset
+        )
+    export_rva = section_virtual_address + export_offset - section_raw_offset
+    struct.pack_into("<II", data, optional + directory_offset, export_rva, export_size)
+    struct.pack_into(
+        "<IIHHIIIIIII",
+        data,
+        export_offset,
+        0,
+        0,
+        0,
+        0,
+        section_virtual_address + dll_name_offset - section_raw_offset,
+        1,
+        count,
+        count,
+        section_virtual_address + functions_offset - section_raw_offset,
+        section_virtual_address + names_offset - section_raw_offset,
+        section_virtual_address + ordinals_offset - section_raw_offset,
+    )
+    for index, (function_rva, symbol_name_offset) in enumerate(
+        zip(function_rvas, symbol_name_offsets)
+    ):
+        struct.pack_into("<I", data, functions_offset + index * 4, function_rva)
+        struct.pack_into(
+            "<I",
+            data,
+            names_offset + index * 4,
+            section_virtual_address + symbol_name_offset - section_raw_offset,
+        )
+        struct.pack_into("<H", data, ordinals_offset + index * 2, index)
+    return bytes(data)
+
+
+def self_test_pion_elf(
+    machine: int,
+    *,
+    exports: frozenset[str] = PION_REQUIRED_EXPORTS,
+    marker: bytes = PION_CONTRACT_MARKER,
+    elf_type: int = ELF_ET_DYN,
+    marker_info: int = (ELF_STB_GLOBAL << 4) | ELF_STT_OBJECT,
+    program_type: int = ELF_PT_DYNAMIC,
+) -> bytes:
+    names = sorted(exports)
+    strings = bytearray(1)
+    string_offsets: dict[str, int] = {}
+    for name in names:
+        string_offsets[name] = len(strings)
+        strings.extend(name.encode("ascii") + bytes([0]))
+
+    symbols = bytearray(24)
+    text_value = 0x1000
+    for name in names:
+        if name == PION_CONTRACT_MARKER_SYMBOL:
+            info = marker_info
+            section_index = 4
+            value = 0x2000
+            size = len(marker)
+        else:
+            info = (ELF_STB_GLOBAL << 4) | ELF_STT_FUNC
+            section_index = 3
+            value = text_value
+            size = 1
+            text_value += 1
+        symbols.extend(
+            struct.pack(
+                "<IBBHQQ",
+                string_offsets[name],
+                info,
+                ELF_STV_DEFAULT,
+                section_index,
+                value,
+                size,
+            )
+        )
+
+    program_offset = 64
+    program_entry_size = 56
+    string_offset = align_up(program_offset + program_entry_size, 8)
+    symbol_offset = align_up(string_offset + len(strings), 8)
+    text_offset = align_up(symbol_offset + len(symbols), 8)
+    text = bytes(max(1, len(names)))
+    marker_offset = align_up(text_offset + len(text), 8)
+    section_offset = align_up(marker_offset + len(marker), 8)
+    data = bytearray(section_offset + 5 * 64)
+    elf_ident = bytes.fromhex("7f454c46020101") + bytes(9)
+    struct.pack_into(
+        "<16sHHIQQQIHHHHHH",
+        data,
+        0,
+        elf_ident,
+        elf_type,
+        machine,
+        1,
+        0,
+        program_offset,
+        section_offset,
+        0,
+        64,
+        program_entry_size,
+        1,
+        64,
+        5,
+        0,
+    )
+    struct.pack_into(
+        "<IIQQQQQQ",
+        data,
+        program_offset,
+        program_type,
+        4,
+        symbol_offset,
+        0x3000,
+        0x3000,
+        len(symbols),
+        len(symbols),
+        8,
+    )
+    data[string_offset : string_offset + len(strings)] = strings
+    data[symbol_offset : symbol_offset + len(symbols)] = symbols
+    data[text_offset : text_offset + len(text)] = text
+    data[marker_offset : marker_offset + len(marker)] = marker
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 64,
+        0,
+        3,
+        0,
+        0,
+        string_offset,
+        len(strings),
+        0,
+        0,
+        1,
+        0,
+    )
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 128,
+        0,
+        ELF_SHT_DYNSYM,
+        0,
+        0,
+        symbol_offset,
+        len(symbols),
+        1,
+        1,
+        8,
+        24,
+    )
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 192,
+        0,
+        1,
+        6,
+        0x1000,
+        text_offset,
+        len(text),
+        0,
+        0,
+        1,
+        0,
+    )
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 256,
+        0,
+        1,
+        2,
+        0x2000,
+        marker_offset,
+        len(marker),
+        0,
+        0,
+        1,
+        0,
+    )
+    return bytes(data)
+
+
+def encode_uleb128(value: int) -> bytes:
+    encoded = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            encoded.append(byte | 0x80)
+        else:
+            encoded.append(byte)
+            return bytes(encoded)
+
+
+def self_test_macho_export_trie(exports: frozenset[str]) -> bytes:
+    edges = [b"_" + name.encode("ascii") for name in sorted(exports)]
+    child = bytes((1, 0, 0))
+    root = b""
+    for _ in range(8):
+        child_offset = len(root)
+        candidate = bytearray((0, len(edges)))
+        for edge in edges:
+            candidate.extend(edge + bytes([0]))
+            candidate.extend(encode_uleb128(child_offset))
+            child_offset += len(child)
+        if len(candidate) == len(root):
+            root = bytes(candidate)
+            break
+        root = bytes(candidate)
+    child_offset = len(root)
+    root_data = bytearray((0, len(edges)))
+    children = bytearray()
+    for edge in edges:
+        root_data.extend(edge + bytes([0]))
+        root_data.extend(encode_uleb128(child_offset + len(children)))
+        children.extend(child)
+    return bytes(root_data + children)
+
+
+def self_test_pion_macho_slice(
+    architecture: int,
+    *,
+    exports: frozenset[str] = PION_REQUIRED_EXPORTS,
+    marker: bytes = PION_CONTRACT_MARKER,
+    file_type: int = MACH_MH_DYLIB,
+    use_export_trie: bool = False,
+) -> bytes:
+    if use_export_trie:
+        trie = self_test_macho_export_trie(exports)
+        command_size = 16
+        marker_offset = align_up(32 + command_size, 8)
+        trie_offset = align_up(marker_offset + len(marker), 8)
+        data = bytearray(trie_offset + len(trie))
+        struct.pack_into(
+            "<IIIIIIII",
+            data,
+            0,
+            0xFEEDFACF,
+            architecture,
+            0,
+            file_type,
+            1,
+            command_size,
+            0,
+            0,
+        )
+        struct.pack_into(
+            "<IIII",
+            data,
+            32,
+            MACH_LC_DYLD_EXPORTS_TRIE,
+            command_size,
+            trie_offset,
+            len(trie),
+        )
+        data[marker_offset : marker_offset + len(marker)] = marker
+        data[trie_offset : trie_offset + len(trie)] = trie
+        return bytes(data)
+
+    names = sorted(exports)
+    strings = bytearray(1)
+    string_offsets: list[int] = []
+    for name in names:
+        string_offsets.append(len(strings))
+        strings.extend(b"_" + name.encode("ascii") + bytes([0]))
+    command_size = 24
+    marker_offset = align_up(32 + command_size, 8)
+    symbol_offset = align_up(marker_offset + len(marker), 8)
+    string_offset = symbol_offset + len(names) * 16
+    data = bytearray(string_offset + len(strings))
+    struct.pack_into(
+        "<IIIIIIII",
+        data,
+        0,
+        0xFEEDFACF,
+        architecture,
+        0,
+        file_type,
+        1,
+        command_size,
+        0,
+        0,
+    )
+    struct.pack_into(
+        "<IIIIII",
+        data,
+        32,
+        MACH_LC_SYMTAB,
+        command_size,
+        symbol_offset,
+        len(names),
+        string_offset,
+        len(strings),
+    )
+    data[marker_offset : marker_offset + len(marker)] = marker
+    data[string_offset : string_offset + len(strings)] = strings
+    for index, string_index in enumerate(string_offsets):
+        struct.pack_into(
+            "<IBBHQ",
+            data,
+            symbol_offset + index * 16,
+            string_index,
+            MACH_N_EXT | 0x0E,
+            1,
+            0,
+            marker_offset if names[index] == PION_CONTRACT_MARKER_SYMBOL else 0x1000 + index,
+        )
+    return bytes(data)
+
+
+def self_test_pion_fat_macho(x86_64: bytes, arm64: bytes) -> bytes:
+    x86_offset = 0x1000
+    arm_offset = align_up(x86_offset + len(x86_64), 0x1000)
+    data = bytearray(arm_offset + len(arm64))
+    data[:4] = bytes.fromhex("cafebabe")
+    struct.pack_into(">I", data, 4, 2)
+    struct.pack_into(
+        ">IIIII", data, 8, MACH_X86_64, 0, x86_offset, len(x86_64), 12
+    )
+    struct.pack_into(
+        ">IIIII", data, 28, MACH_ARM64, 0, arm_offset, len(arm64), 12
+    )
+    data[x86_offset : x86_offset + len(x86_64)] = x86_64
+    data[arm_offset : arm_offset + len(arm64)] = arm64
+    return bytes(data)
+
+
+def expect_self_test_failure(
+    check: object, data: bytes, label: str, expected_error: str, *args: object
+) -> None:
+    try:
+        check(data, label, *args)  # type: ignore[operator]
+    except ValueError as error:
+        if expected_error not in str(error):
+            fail(f"{label} returned unexpected error: {error}")
+    else:
+        fail(f"{label} unexpectedly passed")
+
+
 def run_self_tests() -> None:
     expected_marker = expected_pc_mobile_abi_marker(PC_MOBILE_ABI_EXPECTED)
     valid = self_test_pc_mobile_elf(expected_marker)
@@ -439,7 +1183,7 @@ def run_self_tests() -> None:
             "expected exactly one pc-mobile ABI marker",
         ),
         (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"4\0"),
+            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"3\0"),
             "pc-mobile ABI marker",
         ),
         (
@@ -455,7 +1199,7 @@ def run_self_tests() -> None:
             "pc-mobile ABI marker size",
         ),
         (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"3"),
+            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"4"),
             "pc-mobile ABI marker size",
         ),
         (
@@ -541,8 +1285,131 @@ def run_self_tests() -> None:
                 fail(f"Additional PE runtime policy self-test returned unexpected error: {error}")
         else:
             fail(f"Additional PE runtime policy self-test accepted {runtime_name}")
+
+    for machine in (PE_AMD64, PE_I386):
+        assert_pion_pe_bytes(
+            self_test_pion_pe(machine), f"pion-pe-valid-{machine:04x}", machine
+        )
+    missing_restart = frozenset(PION_REQUIRED_EXPORTS - {"pc_pion_restart_ice"})
+    expect_self_test_failure(
+        assert_pion_pe_bytes,
+        self_test_pion_pe(PE_AMD64, dll=False),
+        "pion-pe-not-dll",
+        "not marked as a DLL",
+        PE_AMD64,
+    )
+    expect_self_test_failure(
+        assert_pion_pe_bytes,
+        self_test_pion_pe(PE_AMD64, exports=missing_restart),
+        "pion-pe-missing-export",
+        "expected one PE export pc_pion_restart_ice",
+        PE_AMD64,
+    )
+    expect_self_test_failure(
+        assert_pion_pe_bytes,
+        self_test_pion_pe(
+            PE_AMD64,
+            marker=PION_CONTRACT_MARKER_PREFIX + b"1;PION=4.2.16" + bytes([0]),
+        ),
+        "pion-pe-wrong-marker",
+        "Pion contract marker",
+        PE_AMD64,
+    )
+
+    for machine in (ELF_X86_64, ELF_AARCH64):
+        assert_pion_elf_bytes(
+            self_test_pion_elf(machine), f"pion-elf-valid-{machine}", machine
+        )
+    expect_self_test_failure(
+        assert_pion_elf_bytes,
+        self_test_pion_elf(ELF_X86_64, elf_type=2),
+        "pion-elf-not-shared",
+        "ELF type 2",
+        ELF_X86_64,
+    )
+    expect_self_test_failure(
+        assert_pion_elf_bytes,
+        self_test_pion_elf(ELF_X86_64, program_type=ELF_PT_INTERP),
+        "pion-elf-executable-interpreter",
+        "contains PT_INTERP",
+        ELF_X86_64,
+    )
+    expect_self_test_failure(
+        assert_pion_elf_bytes,
+        self_test_pion_elf(ELF_X86_64, exports=missing_restart),
+        "pion-elf-missing-export",
+        "expected one ELF export pc_pion_restart_ice",
+        ELF_X86_64,
+    )
+    expect_self_test_failure(
+        assert_pion_elf_bytes,
+        self_test_pion_elf(
+            ELF_X86_64,
+            marker=PION_CONTRACT_MARKER_PREFIX + b"1;PION=4.2.18" + bytes([0]),
+        ),
+        "pion-elf-wrong-marker",
+        "Pion contract marker",
+        ELF_X86_64,
+    )
+    expect_self_test_failure(
+        assert_pion_elf_bytes,
+        self_test_pion_elf(
+            ELF_X86_64,
+            marker_info=(ELF_STB_GLOBAL << 4) | ELF_STT_FUNC,
+        ),
+        "pion-elf-marker-not-object",
+        "must be defined GLOBAL OBJECT DEFAULT",
+        ELF_X86_64,
+    )
+
+    valid_x86_macho = self_test_pion_macho_slice(MACH_X86_64)
+    valid_arm_macho = self_test_pion_macho_slice(MACH_ARM64, use_export_trie=True)
+    assert_pion_macho_bytes(
+        self_test_pion_fat_macho(valid_x86_macho, valid_arm_macho),
+        "pion-macho-valid",
+    )
+    expect_self_test_failure(
+        assert_pion_macho_bytes,
+        self_test_pion_fat_macho(
+            self_test_pion_macho_slice(MACH_X86_64, file_type=2),
+            valid_arm_macho,
+        ),
+        "pion-macho-not-dylib",
+        "not a dylib",
+    )
+    expect_self_test_failure(
+        assert_pion_macho_bytes,
+        self_test_pion_fat_macho(
+            valid_x86_macho,
+            self_test_pion_macho_slice(
+                MACH_ARM64, exports=missing_restart, use_export_trie=True
+            ),
+        ),
+        "pion-macho-missing-arm-export",
+        "missing Mach-O exports: pc_pion_restart_ice",
+    )
+    expect_self_test_failure(
+        assert_pion_macho_bytes,
+        self_test_pion_fat_macho(
+            valid_x86_macho,
+            self_test_pion_macho_slice(
+                MACH_ARM64,
+                marker=PION_CONTRACT_MARKER_PREFIX + b"2;PION=4.2.17" + bytes([0]),
+                use_export_trie=True,
+            ),
+        ),
+        "pion-macho-wrong-arm-marker",
+        "Pion contract marker",
+    )
+    expect_self_test_failure(
+        assert_pion_macho_bytes,
+        valid_x86_macho,
+        "pion-macho-not-universal",
+        "expected exactly x86_64+arm64",
+    )
     print("release.asset.selftest.ok check=pc-mobile-abi-marker")
     print("release.asset.selftest.ok check=windows-pe-import-parser-and-self-contained-runtime")
+    print("release.asset.selftest.ok check=pion-shared-library-contract")
 
 
 def macho_architectures(data: bytes, label: str) -> set[int]:
@@ -563,6 +1430,236 @@ def macho_architectures(data: bytes, label: str) -> set[int]:
     return set()
 
 
+def macho_thin_header(data: bytes, label: str) -> tuple[str, int, int, int, int]:
+    if len(data) < 32:
+        fail(f"{label}: truncated 64-bit Mach-O header")
+    if data[:4] == bytes.fromhex("cffaedfe"):
+        endian = "<"
+    elif data[:4] == bytes.fromhex("feedfacf"):
+        endian = ">"
+    else:
+        fail(f"{label}: expected a 64-bit Mach-O slice")
+    _, architecture, _, file_type, command_count, command_size, _, _ = struct.unpack_from(
+        f"{endian}IIIIIIII", data, 0
+    )
+    if 32 + command_size > len(data):
+        fail(f"{label}: Mach-O load commands extend past end of slice")
+    return endian, architecture, file_type, command_count, command_size
+
+
+def macho_slices(data: bytes, label: str) -> list[tuple[int, bytes, str]]:
+    if len(data) < 8:
+        fail(f"{label}: truncated Mach-O file")
+    magic = data[:4]
+    if magic not in (bytes.fromhex("cafebabe"), bytes.fromhex("cafebabf")):
+        _, architecture, _, _, _ = macho_thin_header(data, label)
+        return [(architecture, data, label)]
+
+    architecture_count = struct.unpack_from(">I", data, 4)[0]
+    is_64_bit_fat = magic == bytes.fromhex("cafebabf")
+    entry_size = 32 if is_64_bit_fat else 20
+    if architecture_count == 0 or 8 + architecture_count * entry_size > len(data):
+        fail(f"{label}: invalid universal Mach-O header")
+    slices: list[tuple[int, bytes, str]] = []
+    architectures: set[int] = set()
+    ranges: list[tuple[int, int]] = []
+    for index in range(architecture_count):
+        entry_offset = 8 + index * entry_size
+        if is_64_bit_fat:
+            architecture, _, slice_offset, slice_size, _, _ = struct.unpack_from(
+                ">IIQQII", data, entry_offset
+            )
+        else:
+            architecture, _, slice_offset, slice_size, _ = struct.unpack_from(
+                ">IIIII", data, entry_offset
+            )
+        if architecture in architectures:
+            fail(f"{label}: duplicate Mach-O architecture 0x{architecture:08x}")
+        if slice_size == 0 or slice_offset + slice_size > len(data):
+            fail(f"{label}: Mach-O slice {index} extends past end of file")
+        for previous_start, previous_end in ranges:
+            if slice_offset < previous_end and previous_start < slice_offset + slice_size:
+                fail(f"{label}: overlapping Mach-O slices")
+        slice_data = data[slice_offset : slice_offset + slice_size]
+        slice_label = f"{label}[arch=0x{architecture:08x}]"
+        _, thin_architecture, _, _, _ = macho_thin_header(slice_data, slice_label)
+        if thin_architecture != architecture:
+            fail(
+                f"{slice_label}: fat architecture does not match thin header "
+                f"0x{thin_architecture:08x}"
+            )
+        architectures.add(architecture)
+        ranges.append((slice_offset, slice_offset + slice_size))
+        slices.append((architecture, slice_data, slice_label))
+    return slices
+
+
+def read_uleb128(data: bytes, offset: int, end: int, label: str) -> tuple[int, int]:
+    result = 0
+    shift = 0
+    for _ in range(10):
+        if offset >= end:
+            fail(f"{label}: truncated ULEB128 in Mach-O export trie")
+        byte = data[offset]
+        offset += 1
+        result |= (byte & 0x7F) << shift
+        if byte & 0x80 == 0:
+            return result, offset
+        shift += 7
+    fail(f"{label}: oversized ULEB128 in Mach-O export trie")
+    return 0, offset
+
+
+def macho_export_trie_symbols(data: bytes, offset: int, size: int, label: str) -> set[str]:
+    if size == 0 or offset + size > len(data):
+        fail(f"{label}: invalid Mach-O export trie range")
+    trie_end = offset + size
+    exports: set[str] = set()
+    active_nodes: set[int] = set()
+    visited_nodes = 0
+
+    def visit(node_relative_offset: int, prefix: bytes) -> None:
+        nonlocal visited_nodes
+        if node_relative_offset >= size:
+            fail(f"{label}: Mach-O export trie child offset is out of range")
+        if node_relative_offset in active_nodes:
+            fail(f"{label}: Mach-O export trie contains a cycle")
+        visited_nodes += 1
+        if visited_nodes > size:
+            fail(f"{label}: Mach-O export trie node count is invalid")
+        active_nodes.add(node_relative_offset)
+        cursor = offset + node_relative_offset
+        terminal_size, cursor = read_uleb128(data, cursor, trie_end, label)
+        terminal_end = cursor + terminal_size
+        if terminal_end > trie_end:
+            fail(f"{label}: Mach-O export trie terminal extends past trie")
+        if terminal_size:
+            try:
+                symbol_name = prefix.decode("ascii", "strict")
+            except UnicodeDecodeError:
+                symbol_name = ""
+            if symbol_name:
+                exports.add(symbol_name[1:] if symbol_name.startswith("_") else symbol_name)
+        cursor = terminal_end
+        if cursor >= trie_end:
+            fail(f"{label}: Mach-O export trie node has no child count")
+        child_count = data[cursor]
+        cursor += 1
+        for _ in range(child_count):
+            edge_end = data.find(bytes([0]), cursor, trie_end)
+            if edge_end < 0:
+                fail(f"{label}: unterminated Mach-O export trie edge")
+            edge = data[cursor:edge_end]
+            cursor = edge_end + 1
+            child_offset, cursor = read_uleb128(data, cursor, trie_end, label)
+            visit(child_offset, prefix + edge)
+        active_nodes.remove(node_relative_offset)
+
+    visit(0, b"")
+    return exports
+
+
+def macho_exported_symbols(data: bytes, label: str) -> tuple[int, int, set[str]]:
+    endian, architecture, file_type, command_count, command_size = macho_thin_header(
+        data, label
+    )
+    command_end = 32 + command_size
+    command_offset = 32
+    symtab: tuple[int, int, int, int] | None = None
+    export_tries: list[tuple[int, int]] = []
+    for _ in range(command_count):
+        if command_offset + 8 > command_end:
+            fail(f"{label}: truncated Mach-O load command")
+        command, size = struct.unpack_from(f"{endian}II", data, command_offset)
+        if size < 8 or command_offset + size > command_end:
+            fail(f"{label}: invalid Mach-O load command size")
+        if command == MACH_LC_SYMTAB:
+            if size < 24:
+                fail(f"{label}: truncated Mach-O LC_SYMTAB")
+            if symtab is not None:
+                fail(f"{label}: duplicate Mach-O LC_SYMTAB")
+            symtab = struct.unpack_from(f"{endian}IIII", data, command_offset + 8)
+        elif command in (MACH_LC_DYLD_INFO, MACH_LC_DYLD_INFO_ONLY):
+            if size < 48:
+                fail(f"{label}: truncated Mach-O LC_DYLD_INFO")
+            export_offset, export_size = struct.unpack_from(
+                f"{endian}II", data, command_offset + 40
+            )
+            if export_size:
+                export_tries.append((export_offset, export_size))
+        elif command == MACH_LC_DYLD_EXPORTS_TRIE:
+            if size < 16:
+                fail(f"{label}: truncated Mach-O LC_DYLD_EXPORTS_TRIE")
+            export_offset, export_size = struct.unpack_from(
+                f"{endian}II", data, command_offset + 8
+            )
+            if export_size:
+                export_tries.append((export_offset, export_size))
+        command_offset += size
+    if command_offset != command_end:
+        fail(f"{label}: Mach-O load-command sizes do not match header")
+
+    exports: set[str] = set()
+    found_symbol_source = False
+    if symtab is not None:
+        symbol_offset, symbol_count, string_offset, string_size = symtab
+        if symbol_offset + symbol_count * 16 > len(data):
+            fail(f"{label}: Mach-O symbol table extends past end of slice")
+        if string_size == 0 or string_offset + string_size > len(data):
+            fail(f"{label}: Mach-O string table extends past end of slice")
+        found_symbol_source = True
+        string_end = string_offset + string_size
+        for index in range(symbol_count):
+            name_offset, symbol_type, _, _, _ = struct.unpack_from(
+                f"{endian}IBBHQ", data, symbol_offset + index * 16
+            )
+            if (
+                symbol_type & MACH_N_STAB
+                or symbol_type & MACH_N_EXT == 0
+                or symbol_type & MACH_N_TYPE == MACH_N_UNDF
+            ):
+                continue
+            if name_offset >= string_size:
+                fail(f"{label}: Mach-O symbol name offset is outside string table")
+            name_start = string_offset + name_offset
+            name_end = data.find(bytes([0]), name_start, string_end)
+            if name_end < 0:
+                fail(f"{label}: unterminated Mach-O symbol name")
+            try:
+                name = data[name_start:name_end].decode("ascii", "strict")
+            except UnicodeDecodeError:
+                continue
+            if name:
+                exports.add(name[1:] if name.startswith("_") else name)
+    for export_offset, export_size in set(export_tries):
+        found_symbol_source = True
+        exports.update(macho_export_trie_symbols(data, export_offset, export_size, label))
+    if not found_symbol_source:
+        fail(f"{label}: Mach-O dylib has no symbol table or export trie")
+    return architecture, file_type, exports
+
+
+def assert_pion_macho_bytes(data: bytes, label: str) -> None:
+    slices = macho_slices(data, label)
+    architectures = {architecture for architecture, _, _ in slices}
+    required_architectures = {MACH_X86_64, MACH_ARM64}
+    if architectures != required_architectures:
+        formatted = ",".join(f"0x{value:08x}" for value in sorted(architectures))
+        fail(f"{label}: expected exactly x86_64+arm64 Mach-O slices, found [{formatted}]")
+    for architecture, slice_data, slice_label in slices:
+        assert_exact_pion_marker(slice_data, slice_label)
+        parsed_architecture, file_type, exports = macho_exported_symbols(
+            slice_data, slice_label
+        )
+        if parsed_architecture != architecture:
+            fail(f"{slice_label}: inconsistent Mach-O architecture")
+        if file_type != MACH_MH_DYLIB:
+            fail(f"{slice_label}: Pion Mach-O companion is not a dylib")
+        missing = sorted(PION_REQUIRED_EXPORTS - exports)
+        if missing:
+            fail(f"{slice_label}: missing Mach-O exports: {', '.join(missing)}")
+
+
 def assert_universal_macho_bytes(data: bytes, label: str) -> None:
     architectures = macho_architectures(data, label)
     required = {MACH_X86_64, MACH_ARM64}
@@ -580,6 +1677,7 @@ def assert_mac_bundle(path: Path) -> None:
         "PerfectCommsAudio.app/Contents/Info.plist",
         "PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio",
         "PerfectCommsAudio.app/Contents/MacOS/libwebrtc-apm.dylib",
+        "PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib",
     )
     try:
         with zipfile.ZipFile(path) as archive:
@@ -587,9 +1685,13 @@ def assert_mac_bundle(path: Path) -> None:
             missing = [name for name in required_entries if name not in entries]
             if missing:
                 fail(f"{path}: mac bundle is missing: {', '.join(missing)}")
-            for relative in required_entries[1:]:
+            for relative in required_entries[1:3]:
                 data = archive.read(entries[relative])
                 assert_universal_macho_bytes(data, f"{path}!{relative}")
+            pion_relative = required_entries[3]
+            assert_pion_macho_bytes(
+                archive.read(entries[pion_relative]), f"{path}!{pion_relative}"
+            )
     except zipfile.BadZipFile as error:
         fail(f"{path}: invalid zip archive: {error}")
 
@@ -621,6 +1723,13 @@ def verify_android(root: Path) -> None:
         "release.asset.ok target=android-arm64 format=elf64-aarch64-shared "
         f"abi={PC_MOBILE_ABI_EXPECTED} path=Libs/pc-mobile/libpc_mobile.so"
     )
+    pion_path = require_file(root, "Libs/pion/libpc-pion.android-arm64.so")
+    assert_pion_elf(pion_path, ELF_AARCH64)
+    print(
+        "release.asset.ok target=android-arm64 format=elf64-aarch64-shared "
+        f"transport=pion abi={PION_ABI_EXPECTED} pion={PION_VERSION_EXPECTED} "
+        "path=Libs/pion/libpc-pion.android-arm64.so"
+    )
 
 
 def verify_desktop(root: Path) -> None:
@@ -642,9 +1751,33 @@ def verify_desktop(root: Path) -> None:
     for relative in elf_assets:
         assert_elf(require_file(root, relative), ELF_X86_64)
         print(f"release.asset.ok format=elf64 machine=x86_64 path={relative}")
+    pion_pe_assets = (
+        ("Libs/pion/pc-pion.x64.dll", PE_AMD64),
+        ("Libs/pion/pc-pion.x86.dll", PE_I386),
+    )
+    for relative, machine in pion_pe_assets:
+        path = require_file(root, relative)
+        assert_pion_pe(path, machine)
+        assert_no_private_windows_runtime(path)
+        print(
+            f"release.asset.ok format=pe-dll machine=0x{machine:04x} "
+            f"transport=pion abi={PION_ABI_EXPECTED} pion={PION_VERSION_EXPECTED} "
+            f"path={relative}"
+        )
+    pion_elf_relative = "Libs/pion/libpc-pion.linux-x64.so"
+    assert_pion_elf(require_file(root, pion_elf_relative), ELF_X86_64)
+    print(
+        "release.asset.ok format=elf64-shared machine=x86_64 "
+        f"transport=pion abi={PION_ABI_EXPECTED} pion={PION_VERSION_EXPECTED} "
+        f"path={pion_elf_relative}"
+    )
     mac_zip = require_file(root, "Libs/pc-capture/pc-capture-mac.zip")
     assert_mac_bundle(mac_zip)
-    print("release.asset.ok target=macos format=app-zip architectures=x86_64,arm64 path=Libs/pc-capture/pc-capture-mac.zip")
+    print(
+        "release.asset.ok target=macos format=app-zip architectures=x86_64,arm64 "
+        f"transport=pion abi={PION_ABI_EXPECTED} pion={PION_VERSION_EXPECTED} "
+        "path=Libs/pc-capture/pc-capture-mac.zip"
+    )
 
 
 def main() -> int:

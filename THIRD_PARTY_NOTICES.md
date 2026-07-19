@@ -31,6 +31,19 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
   `Libs/webrtc-spl-sqrt-floor.LICENSE`, `Libs/webrtc-fft.LICENSE`, `Libs/webrtc-pffft.LICENSE`,
   and `Libs/webrtc-rnnoise.COPYING`; release bundles copy each one under `licenses/`.
 
+## Pion WebRTC v4.2.17 (peer-to-peer transport)
+
+- Release files: `Libs/pion/pc-pion.x64.dll`, `Libs/pion/pc-pion.x86.dll`,
+  `Libs/pion/libpc-pion.linux-x64.so`, the signed
+  `PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib` inside `pc-capture-mac.zip`, and
+  `Libs/pion/libpc-pion.android-arm64.so` in the Android build.
+- Upstream: https://github.com/pion/webrtc, pinned to v4.2.17 together with the exact module graph
+  in `native/pc-pion/go.mod` and `native/pc-pion/go.sum`.
+- License: MIT for Pion; the c-shared binary also incorporates the BSD-licensed Go runtime and
+  its locked Go module dependencies. Exact module versions and reproduced license texts are in
+  source at `Libs/pion-go-dependencies.txt` and in release bundles at
+  `licenses/pion-go-dependencies.txt`.
+
 ## Bundled managed dependencies
 
 The plugin embeds these managed assemblies as resources and resolves them at runtime.
@@ -44,8 +57,8 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 ## Native Rust dependencies
 
 The native desktop and Android media engines statically link their locked Rust dependency graphs,
-including the WebRTC transport, ICE/TURN, DTLS/SRTP, async runtime, cryptography, serialization,
-audio I/O, and platform support crates. A deterministic cargo-about inventory covering every shipped
+including the Pion dynamic-loading facade, serialization, audio I/O, codec, DSP integration, and
+platform support crates. A deterministic cargo-about inventory covering every shipped
 desktop target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` at
 `Libs/native-rust-dependencies.html` and shipped as `licenses/native-rust-dependencies.html`.
 CI regenerates this file from the locked graph and rejects drift.

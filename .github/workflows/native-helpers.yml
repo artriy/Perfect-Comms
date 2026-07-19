@@ -12,15 +12,20 @@ on:
       - "native/cmake/**"
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/pc-pion/**"
+      - "native/pion-sys/**"
       - "native/apm-sys/**"
       - "native/third_party/webrtc-audio-processing/**"
       - "scripts/build-apm.sh"
       - "scripts/build-helpers.sh"
       - "scripts/build-mac.sh"
+      - "scripts/build-pion.sh"
       - "scripts/ci-smoke-helper.sh"
       - "scripts/package-release.ps1"
       - "scripts/package-release.sh"
       - "scripts/verify-release-assets.py"
+      - "scripts/verify-pion-license-inventory.py"
+      - "Libs/pion-go-dependencies.txt"
       - ".github/workflows/native-helpers.yml"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -30,6 +35,63 @@ permissions:
   contents: read
 
 jobs:
+  pion-windows:
+    name: Pion v4.2.17 (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win-x64
+            package: gcc-mingw-w64-x86-64
+            cc: x86_64-w64-mingw32-gcc
+            artifact: pion-win-x64
+            file: pc-pion.x64.dll
+          - target: win-x86
+            package: gcc-mingw-w64-i686
+            cc: i686-w64-mingw32-gcc
+            artifact: pion-win-x86
+            file: pc-pion.x86.dll
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26.2"
+          cache-dependency-path: native/pc-pion/go.sum
+      - name: MinGW cgo compiler
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.package }}
+      - name: Build Pion c-shared library
+        env:
+          CC: ${{ matrix.cc }}
+        run: bash scripts/build-pion.sh ${{ matrix.target }}
+      - name: Verify architecture and self-contained compiler runtime
+        run: python3 scripts/verify-release-assets.py --pe-no-private-runtime artifacts/pion/${{ matrix.file }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/pion/${{ matrix.file }}
+          if-no-files-found: error
+
+  pion-linux:
+    name: Pion v4.2.17 (linux-x64, glibc 2.31)
+    runs-on: ubuntu-latest
+    container: golang:1.26.2-bullseye
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Test locked Pion module and license inventory
+        run: |
+          apt-get update
+          apt-get install -y python3
+          (cd native/pc-pion && go test -buildvcs=false -mod=readonly ./...)
+          python3 scripts/verify-pion-license-inventory.py
+      - name: Build Pion c-shared library
+        run: bash scripts/build-pion.sh linux-x64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pion-linux-x64
+          path: artifacts/pion/libpc-pion.so
+          if-no-files-found: error
+
   windows:
     name: windows (${{ matrix.target }}, ${{ matrix.dest }}, ${{ matrix.artifact }})
     runs-on: ${{ matrix.runner }}
@@ -70,7 +132,7 @@ jobs:
 
   # pc-mobile is a cdylib over pc-capture's lib (the shared voice core for Android). The host
   # clippy job catches "one shared core" API drift fast; the android job proves the cdylib
-  # actually cross-compiles for the device target (Opus/ring/webrtc all build under the NDK).
+  # actually cross-compiles for the device target (Opus and the Pion facade build under the NDK).
   pc-mobile:
     runs-on: windows-latest
     env:
@@ -101,10 +163,19 @@ jobs:
         id: ndk
         with:
           ndk-version: r27d
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26.2"
+          cache-dependency-path: native/pc-pion/go.sum
       - name: ninja-build
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: cargo-ndk
         run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build Pion transport (Android ARM64)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/build-pion.sh android-arm64
       - name: cross-compile pc-mobile (arm64-v8a)
         working-directory: native/pc-mobile
         env:
@@ -114,12 +185,19 @@ jobs:
       - name: Verify pc-mobile release ABI
         run: |
           mkdir -p Libs/pc-mobile
+          mkdir -p Libs/pion
           cp native/pc-mobile/jniLibs/arm64-v8a/libpc_mobile.so Libs/pc-mobile/
+          cp artifacts/pion/android-arm64/libpc-pion.so Libs/pion/libpc-pion.android-arm64.so
           python3 scripts/verify-release-assets.py --root . --configuration Android
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-android-arm64
           path: native/pc-mobile/jniLibs/arm64-v8a/libpc_mobile.so
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pion-android-arm64
+          path: artifacts/pion/android-arm64/libpc-pion.so
           if-no-files-found: error
 
   linux:
@@ -151,6 +229,10 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26.2"
+          cache-dependency-path: native/pc-pion/go.sum
       - name: Build ad-hoc universal helper
         run: bash scripts/build-mac.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -162,7 +244,7 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    needs: [windows, linux, mac-bundle, apm-build-linux]
+    needs: [windows, linux, mac-bundle, apm-build-linux, pion-windows, pion-linux]
     strategy:
       matrix:
         include:
@@ -170,23 +252,33 @@ jobs:
             os: windows-latest
             bin: pc-capture-win-x64.exe
             apm_artifact: apm-win-x64
+            pion_artifact: pion-win-x64
+            pion_file: pc-pion.x64.dll
           - artifact: helper-win-x86
             os: windows-latest
             bin: pc-capture-win-x86.exe
             apm_artifact: apm-win-x86
+            pion_artifact: pion-win-x86
+            pion_file: pc-pion.x86.dll
           - artifact: helper-linux-x64
             os: ubuntu-latest
             bin: pc-capture-linux-x64
             apm_artifact: apm-linux-x64
+            pion_artifact: pion-linux-x64
+            pion_file: libpc-pion.so
           - artifact: helper-mac
             # Smoke both slices of the final signed universal app on native runners.
             os: macos-15-intel
             bin: pc-capture-mac.zip
             apm_artifact: ""
+            pion_artifact: ""
+            pion_file: ""
           - artifact: helper-mac
             os: macos-latest
             bin: pc-capture-mac.zip
             apm_artifact: ""
+            pion_artifact: ""
+            pion_file: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -199,9 +291,22 @@ jobs:
         with:
           name: ${{ matrix.apm_artifact }}
           path: dl
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.pion_artifact != ''
+        with:
+          name: ${{ matrix.pion_artifact }}
+          path: dl
       - name: Smoke
         shell: bash
         run: |
+          if [[ -n "${{ matrix.pion_file }}" ]]; then
+            pion_path="$PWD/dl/${{ matrix.pion_file }}"
+            if command -v cygpath >/dev/null 2>&1; then
+              pion_path="$(cygpath -w "$pion_path")"
+            fi
+            export PC_PION_LIB="$pion_path"
+            export PC_REQUIRE_PION=1
+          fi
           if [[ "${{ matrix.bin }}" == *.zip ]]; then
             cd dl && unzip -o "${{ matrix.bin }}" && cd ..
             chmod +x dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
@@ -380,7 +485,8 @@ jobs:
           if-no-files-found: error
 
   # Assemble exactly what SidecarLauncher extracts at runtime, then apply the
-  # final ad-hoc signature. Copying dylibs into an already-signed .app changes
+  # final ad-hoc signature. Pion is already in the base app; this stage adds APM.
+  # Copying dylibs into an already-signed .app changes
   # the signed bundle and can make macOS reject libloading.
   mac-bundle:
     needs: [macos, apm-mac-universal]
@@ -404,6 +510,7 @@ jobs:
           ditto -x -k dl/helper/pc-capture-mac.zip bundle
           app="$PWD/bundle/PerfectCommsAudio.app"
           test -x "$app/Contents/MacOS/PerfectCommsAudio"
+          test -s "$app/Contents/MacOS/libpc-pion.dylib"
           cp dl/apm/libwebrtc-apm.dylib "$app/Contents/MacOS/"
           chmod 755 "$app/Contents/MacOS/"*.dylib
           codesign --force --deep --sign - "$app"
@@ -417,25 +524,33 @@ jobs:
           path: Libs/pc-capture/pc-capture-mac.zip
           if-no-files-found: error
 
-  # ---- helper-to-helper webrtc loopback (Phase 3 RtcEngine gate) ----
+  # ---- helper-to-helper Pion WebRTC loopback (RtcEngine gate) ----
   # Two in-process RtcEngines cross-feed offer/answer/ICE over their LocalSignal
   # channels, then one sends an Opus packet and the other's recv() must yield it.
-  # This proves the helper's webrtc-rs peer table end to end without the mod.
+  # This proves the helper's Pion peer table and c-shared boundary end to end without the mod.
   helper-rtc-loopback-linux:
+    needs: pion-linux
     runs-on: ubuntu-latest
     container: rust:1-bullseye
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pion-linux-x64
+          path: dl
       - name: ALSA dev headers, cmake, nasm
         run: |
           apt-get update
           apt-get install -y libasound2-dev pkg-config cmake nasm
-      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
-        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+      - name: Pion helper-to-helper loopback (offer/answer/candidates + Opus)
+        run: |
+          PC_PION_LIB="$PWD/dl/libpc-pion.so" PC_REQUIRE_PION=1 \
+            cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
 
   helper-rtc-loopback-win:
+    needs: pion-windows
     runs-on: windows-latest
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
@@ -445,5 +560,12 @@ jobs:
         with:
           toolchain: stable
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
-      - name: webrtc helper-to-helper loopback (offer/answer/candidates + opus)
-        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pion-win-x64
+          path: dl
+      - name: Pion helper-to-helper loopback (offer/answer/candidates + Opus)
+        shell: bash
+        run: |
+          PC_PION_LIB="$(cd dl && pwd -W)/pc-pion.x64.dll" PC_REQUIRE_PION=1 \
+            cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture

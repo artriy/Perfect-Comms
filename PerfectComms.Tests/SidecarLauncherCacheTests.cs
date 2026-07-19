@@ -262,7 +262,7 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
-    public void LinuxWineLaunchStagesHelperAndDspInsidePrivateExecLocation()
+    public void LinuxWineLaunchStagesHelperDspAndPionInsidePrivateExecLocation()
     {
         var root = NewTemporaryDirectory();
         var source = Path.Combine(root, "source");
@@ -272,6 +272,7 @@ public sealed class SidecarLauncherCacheTests
         var helper = Path.Combine(source, "PerfectCommsAudio");
         File.WriteAllText(helper, "linux-helper");
         File.WriteAllText(Path.Combine(source, "libwebrtc-apm.so"), "linux-apm");
+        File.WriteAllText(Path.Combine(source, "libpc-pion.so"), "linux-pion");
         var paths = new SidecarTemporaryPaths(
             Path.Combine(privateDirectory, "handshake.json"),
             privateDirectory,
@@ -286,6 +287,7 @@ public sealed class SidecarLauncherCacheTests
             Assert.Equal(Path.Combine(privateDirectory, "libwebrtc-apm.so"), staged.StagedDspPath);
             Assert.Equal("linux-helper", File.ReadAllText(staged.PrimaryPath));
             Assert.Equal("linux-apm", File.ReadAllText(Path.Combine(privateDirectory, "libwebrtc-apm.so")));
+            Assert.Equal("linux-pion", File.ReadAllText(Path.Combine(privateDirectory, "libpc-pion.so")));
         }
         finally
         {
@@ -400,15 +402,17 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
-    public void MacDspInsideSignedAppIsNeverReplacedByStandaloneResource()
+    public void MacNativeLibrariesInsideSignedAppAreNeverReplacedByStandaloneResources()
     {
         var root = NewTemporaryDirectory();
         var macDirectory = Path.Combine(root, "PerfectCommsAudio.app", "Contents", "MacOS");
         Directory.CreateDirectory(macDirectory);
         var helper = Path.Combine(macDirectory, "PerfectCommsAudio");
         var signedDsp = Path.Combine(macDirectory, "libwebrtc-apm.dylib");
+        var signedPion = Path.Combine(macDirectory, "libpc-pion.dylib");
         File.WriteAllText(helper, "signed-helper");
         File.WriteAllText(signedDsp, "signed-in-app-apm");
+        File.WriteAllText(signedPion, "signed-in-app-pion");
         try
         {
             SidecarLauncher.EnsureDspLibsExtracted(
@@ -417,9 +421,17 @@ public sealed class SidecarLauncherCacheTests
                 "x86_64-apple-darwin",
                 helper,
                 "bundle-v1-test");
+            SidecarLauncher.EnsurePionLibExtracted(
+                typeof(SidecarLauncher).Assembly,
+                root,
+                "x86_64-apple-darwin",
+                helper,
+                "bundle-v1-test");
 
             Assert.Equal("signed-in-app-apm", File.ReadAllText(signedDsp));
+            Assert.Equal("signed-in-app-pion", File.ReadAllText(signedPion));
             Assert.Empty(SidecarLauncher.DspLibsFor("x86_64-apple-darwin"));
+            Assert.Empty(SidecarLauncher.PionLibsFor("x86_64-apple-darwin"));
         }
         finally
         {

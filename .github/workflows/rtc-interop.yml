@@ -1,20 +1,25 @@
-name: RTC shared-core gate
+name: Pion RTC shared-core gate
 
-# Desktop and Android now use the same webrtc-rs RtcEngine. This gate exercises
-# the production offer/answer/ICE/Opus path directly instead of the retired
-# desktop-webrtc-rs-to-Android-SIPSorcery bridge.
+# Desktop and Android use the same Rust media core and Pion v4.2.17 transport.
+# This gate exercises the production Go C ABI, offer/answer/ICE, and Opus path.
 on:
   push:
     branches: [main]
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/pc-pion/**"
+      - "native/pion-sys/**"
+      - "scripts/build-pion.sh"
       - "scripts/live-turn-smoke.py"
       - ".github/workflows/rtc-interop.yml"
   pull_request:
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/pc-pion/**"
+      - "native/pion-sys/**"
+      - "scripts/build-pion.sh"
       - "scripts/live-turn-smoke.py"
       - ".github/workflows/rtc-interop.yml"
   workflow_dispatch:
@@ -25,7 +30,7 @@ permissions:
 
 jobs:
   shared-core-loopback:
-    name: WebRTC/Opus loopback (${{ matrix.os }})
+    name: Pion WebRTC/Opus loopback (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -39,16 +44,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26.2"
+          cache-dependency-path: native/pc-pion/go.sum
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         if: runner.os == 'Windows'
       - name: Linux audio build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Windows cgo compiler
+        if: runner.os == 'Windows'
+        run: choco install mingw -y --no-progress
+      - name: Build and require Pion transport
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            CC=gcc bash scripts/build-pion.sh win-x64 --stage
+            echo "PC_PION_LIB=$(cygpath -w "$PWD/Libs/pion/pc-pion.x64.dll")" >> "$GITHUB_ENV"
+          else
+            bash scripts/build-pion.sh linux-x64 --stage
+            echo "PC_PION_LIB=$PWD/Libs/pion/libpc-pion.linux-x64.so" >> "$GITHUB_ENV"
+          fi
+          echo "PC_REQUIRE_PION=1" >> "$GITHUB_ENV"
       - name: Offer/answer/ICE and Opus RTP loopback
         run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
       - name: Build helper for live TURN gate
         if: runner.os == 'Linux'
-        run: cargo build --release --manifest-path native/pc-capture/Cargo.toml
+        run: |
+          cargo build --release --manifest-path native/pc-capture/Cargo.toml
+          cp Libs/pion/libpc-pion.linux-x64.so native/pc-capture/target/release/libpc-pion.so
       - name: Two-helper Cloudflare TURN relay and voice gate
         if: runner.os == 'Linux'
         run: python3 scripts/live-turn-smoke.py native/pc-capture/target/release/pc-capture --timeout 45

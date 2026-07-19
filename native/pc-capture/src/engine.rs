@@ -150,6 +150,14 @@ impl Engine {
         })
     }
 
+    pub fn transport_ready(&self) -> bool {
+        self.rtc.transport_ready()
+    }
+
+    pub fn transport_error(&self) -> Option<&str> {
+        self.rtc.transport_error()
+    }
+
     fn reset_encoder_history(&self) -> u64 {
         let _pipeline = self.capture_pipeline.lock().unwrap();
         let mut encoder = self.enc.lock().unwrap();

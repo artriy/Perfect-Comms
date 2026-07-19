@@ -91,10 +91,19 @@ jobs:
           cp dl/apm-win-x86/webrtc-apm.x86.dll Libs/dsp/
           cp dl/apm-linux-x64/libwebrtc-apm.so Libs/dsp/
           # macOS APM is sealed inside the signed app; never stage a second pre-sign copy.
+      - name: Stage Pion desktop transports into Libs
+        run: |
+          mkdir -p Libs/pion
+          cp dl/pion-win-x64/pc-pion.x64.dll Libs/pion/
+          cp dl/pion-win-x86/pc-pion.x86.dll Libs/pion/
+          cp dl/pion-linux-x64/libpc-pion.so Libs/pion/libpc-pion.linux-x64.so
+          # The universal macOS Pion dylib is sealed inside the signed helper app.
       - name: Stage Android voice engine into Libs
         run: |
           mkdir -p Libs/pc-mobile
+          mkdir -p Libs/pion
           cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
+          cp dl/pion-android-arm64/libpc-pion.so Libs/pion/libpc-pion.android-arm64.so
           # Android intentionally uses the platform audio path without desktop DSP sidecars.
       - name: Assemble BepInEx sources (Steam/itch.io x86 + Epic Games Store/Microsoft Store x64)
         run: |

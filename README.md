@@ -126,6 +126,7 @@ Perfect Comms is fully standalone. It installs in the same `BepInEx/plugins` fol
 
 - Original repo: [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
 - BetterCrewLink: [OhMyGuus/BetterCrewLink](https://github.com/OhMyGuus/BetterCrewLink)
+- Peer transport: [Pion WebRTC](https://github.com/pion/webrtc)
 - Special thanks to [idkimneil](https://github.com/idkimneil), the reason I made this.
 
 <div align="center">

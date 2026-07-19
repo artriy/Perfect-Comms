@@ -24,6 +24,7 @@ LICENSE_FILES = {
     "licenses/System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt",
     "licenses/System.Text.Json-THIRD-PARTY-NOTICES.txt",
     "licenses/native-rust-dependencies.html",
+    "licenses/pion-go-dependencies.txt",
 }
 
 DEPENDENCY_LICENSE_FILES = {

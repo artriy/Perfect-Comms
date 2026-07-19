@@ -1523,6 +1523,25 @@ fn run_authenticated_session(
         std::io::Error::other(format!("opus encoder init failed: {error}"))
     })?;
 
+    // The transport is as fundamental as the codec: do not publish `ready` and accept a voice
+    // session that can never establish a peer connection.
+    let counters = Arc::new(NativeCounters::default());
+    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
+    let rtc = Arc::new(RtcEngine::new_with_counters(
+        local_signal_tx,
+        counters.clone(),
+    ));
+    if !rtc.transport_ready() {
+        let detail = rtc
+            .transport_error()
+            .unwrap_or("Pion transport unavailable")
+            .to_string();
+        eprintln!("pc-capture: Pion transport init failed before ready: {detail}");
+        return Err(std::io::Error::other(format!(
+            "Pion transport init failed: {detail}"
+        )));
+    }
+
     let devices = session_devices(cfg.synthetic);
     let output_devices = session_devices(cfg.synthetic);
     write_frame(
@@ -1585,13 +1604,6 @@ fn run_authenticated_session(
     let input = Arc::new(Mutex::new(InputConfig::default()));
     let telemetry = Arc::new(TelemetryMailbox::default());
     let telemetry_stop = Arc::new(AtomicBool::new(false));
-    let counters = Arc::new(NativeCounters::default());
-    let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
-
-    let rtc = Arc::new(RtcEngine::new_with_counters(
-        local_signal_tx,
-        counters.clone(),
-    ));
     let telemetry_handle = spawn_telemetry_writer(
         telemetry.clone(),
         media_event_rx,

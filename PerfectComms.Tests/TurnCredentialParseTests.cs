@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
@@ -35,7 +36,7 @@ public sealed class TurnCredentialParseTests
     }
 
     private const string LiveJson =
-        "{\"iceServers\":[{\"urls\":[\"stun:stun.cloudflare.com:3478\",\"stun:stun.cloudflare.com:53\"]}," +
+        "{\"iceServers\":[{\"urls\":[\"STUN://stun.cloudflare.com:3478\",\"stun:stun.cloudflare.com:53\"]}," +
         "{\"urls\":[\"turn:turnv2.realtime.cloudflare.com:3478?transport=udp\"," +
         "\"turn:turn.cloudflare.com:3478?transport=tcp\"," +
         "\"turns:turn.cloudflare.com:5349?transport=tcp\"]," +
@@ -80,12 +81,33 @@ public sealed class TurnCredentialParseTests
         const string json = "{\"iceServers\":[" +
                             "{\"urls\":[\"turn:relay.example:3478\",\"https://not-ice.example\"]}," +
                             "{\"urls\":\"turn:?transport=udp\",\"username\":\"u\",\"credential\":\"c\"}," +
+                            "{\"urls\":\"STUN:stun.example:3478?transport=udp\"}," +
+                            "{\"urls\":\"TURN:relay.example:3478?FOO=bar\",\"username\":\"u\",\"credential\":\"c\"}," +
                             "{\"urls\":\"turns:relay.example:5349\",\"username\":\"u\",\"credential\":\"c\"}]}";
 
         var servers = TurnCredentialClient.ParseIceServers(json);
 
         var relay = Xunit.Assert.Single(servers);
         Xunit.Assert.Equal("turns:relay.example:5349", relay.Urls);
+        Xunit.Assert.Equal("u", relay.Username);
+        Xunit.Assert.Equal("c", relay.Credential);
+    }
+
+    [Fact]
+    public void RejectsManagedTurnCredentialsContainingControlCharacters()
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            iceServers = new[]
+            {
+                new { urls = "turn:relay.example:3478", username = "bad" + (char)10 + "user", credential = "c" },
+                new { urls = "turns:relay.example:5349?transport=udp", username = "u", credential = "bad" + (char)0 + "secret" },
+                new { urls = "turns:[2001:db8::1]:5349?transport=udp", username = "u", credential = "c" },
+            },
+        });
+
+        var relay = Xunit.Assert.Single(TurnCredentialClient.ParseIceServers(json));
+        Xunit.Assert.Equal("turns:[2001:db8::1]:5349?transport=udp", relay.Urls);
         Xunit.Assert.Equal("u", relay.Username);
         Xunit.Assert.Equal("c", relay.Credential);
     }
@@ -107,7 +129,10 @@ public sealed class TurnCredentialParseTests
         var handler = new RecordingHandler();
         using var http = new HttpClient(handler);
 
-        var servers = await TurnCredentialClient.FetchAsync(http, "https://worker.example/turn-credentials");
+        var servers = await TurnCredentialClient.FetchAsync(
+            http,
+            "https://worker.example/turn-credentials",
+            TestContext.Current.CancellationToken);
 
         Xunit.Assert.Equal(1, handler.Calls);
         Xunit.Assert.Equal(HttpMethod.Post, handler.Method);
@@ -115,15 +140,38 @@ public sealed class TurnCredentialParseTests
     }
 
     [Fact]
-    public async Task CredentialFetchRejectsTcpOrTlsOnlyRelayResponses()
+    public async Task CredentialFetchAcceptsTcpOrTlsOnlyRelayResponses()
     {
         var handler = new RecordingHandler(
             "{\"ttl\":3600,\"iceServers\":[{\"urls\":[\"turn:relay.example:80?transport=tcp\",\"turns:relay.example:5349?transport=tcp\"],\"username\":\"u\",\"credential\":\"c\"}]}");
         using var http = new HttpClient(handler);
 
-        var error = await Xunit.Assert.ThrowsAsync<InvalidDataException>(() =>
-            TurnCredentialClient.FetchAsync(http, "https://worker.example/turn-credentials-tcp-only"));
+        var servers = await TurnCredentialClient.FetchAsync(
+            http,
+            "https://worker.example/turn-credentials-tcp-only",
+            TestContext.Current.CancellationToken);
 
-        Xunit.Assert.Contains("TURN-over-UDP", error.Message);
+        Xunit.Assert.Equal(2, servers.Count);
+        Xunit.Assert.Contains(servers, server => server.Urls == "turn:relay.example:80?transport=tcp");
+        Xunit.Assert.Contains(servers, server => server.Urls == "turns:relay.example:5349?transport=tcp");
+    }
+
+    [Fact]
+    public async Task CredentialFetchCanonicalizesTurnSyntaxBeforeItReachesPion()
+    {
+        var handler = new RecordingHandler(
+            "{\"ttl\":3600,\"iceServers\":[{\"urls\":[\"TURN:Relay.Example:53?TRANSPORT=UDP\",\"TuRnS:Relay.Example:5349?TrAnSpOrT=TcP\"],\"username\":\"u\",\"credential\":\"c\"}]}");
+        using var http = new HttpClient(handler);
+
+        var servers = await TurnCredentialClient.FetchAsync(
+            http,
+            "https://worker.example/turn-credentials-uppercase",
+            TestContext.Current.CancellationToken);
+
+        Xunit.Assert.Equal(2, servers.Count);
+        Xunit.Assert.Contains(servers, server => server.Urls == "turn:Relay.Example:53?transport=udp");
+        Xunit.Assert.Contains(servers, server => server.Urls == "turns:Relay.Example:5349?transport=tcp");
+        Xunit.Assert.All(servers, server => Xunit.Assert.Equal("u", server.Username));
+        Xunit.Assert.All(servers, server => Xunit.Assert.Equal("c", server.Credential));
     }
 }

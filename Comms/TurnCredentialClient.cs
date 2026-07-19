@@ -79,7 +79,7 @@ internal static class TurnCredentialClient
         var json = await ReadBoundedUtf8Async(response.Content, cancellationToken).ConfigureAwait(false);
         var servers = ParseIceServers(json);
         if (!ContainsSupportedTurnServer(servers))
-            throw new InvalidDataException("TURN credential response contained no supported TURN-over-UDP URLs");
+            throw new InvalidDataException("TURN credential response contained no supported TURN URLs");
 
         var ttl = ParseCredentialTtl(json);
         var fetchedAt = DateTime.UtcNow;
@@ -181,14 +181,22 @@ internal static class TurnCredentialClient
         url = url.Trim();
         if (url.Length > MaxUrlLength || url.Any(char.IsWhiteSpace) || url.Any(char.IsControl)) return;
 
-        var isStun = url.StartsWith("stun:", StringComparison.OrdinalIgnoreCase) && HasIceEndpoint(url);
-        var isTurn = (url.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) ||
-                      url.StartsWith("turns:", StringComparison.OrdinalIgnoreCase)) && HasIceEndpoint(url);
+        var hasStunScheme = url.StartsWith("stun:", StringComparison.OrdinalIgnoreCase);
+        var isStun = PerfectCommsVoiceBackend.TryNormalizeSupportedStunUrl(url, out var normalizedStunUrl);
+        var hasTurnScheme = url.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) ||
+                            url.StartsWith("turns:", StringComparison.OrdinalIgnoreCase);
+        var isTurn = PerfectCommsVoiceBackend.TryNormalizeSupportedTurnUrl(url, out var normalizedTurnUrl);
+        // Do not retain an ICE-looking URL that passed the broad JSON parser but would be rejected
+        // by Pion. A single malformed URL can make the complete PeerConnection config fail.
+        if ((hasStunScheme && !isStun) || (hasTurnScheme && !isTurn)) return;
         if (!isStun && !isTurn) return;
+
+        url = isTurn ? normalizedTurnUrl : normalizedStunUrl;
 
         username ??= string.Empty;
         credential ??= string.Empty;
-        if (username.Length > MaxUsernameLength || credential.Length > MaxCredentialLength) return;
+        if (username.Length > MaxUsernameLength || credential.Length > MaxCredentialLength ||
+            username.Any(char.IsControl) || credential.Any(char.IsControl)) return;
         if (isTurn && (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(credential)))
             return;
 
@@ -196,18 +204,7 @@ internal static class TurnCredentialClient
     }
 
     private static bool ContainsSupportedTurnServer(IEnumerable<IceServer> servers)
-        => servers.Any(server => PerfectCommsVoiceBackend.IsSupportedUdpTurnUrl(server.Urls));
-
-    private static bool HasIceEndpoint(string url)
-    {
-        var colon = url.IndexOf(':');
-        if (colon < 0 || colon + 1 >= url.Length) return false;
-        var endpoint = url.Substring(colon + 1);
-        if (endpoint.StartsWith("//", StringComparison.Ordinal)) endpoint = endpoint.Substring(2);
-        var query = endpoint.IndexOf('?');
-        if (query >= 0) endpoint = endpoint.Substring(0, query);
-        return endpoint.Length > 0 && endpoint.IndexOf('@') < 0;
-    }
+        => servers.Any(server => PerfectCommsVoiceBackend.IsSupportedTurnUrl(server.Urls));
 
     private static bool SourceMatches(string? sourceUrl)
         => string.IsNullOrEmpty(sourceUrl) ||

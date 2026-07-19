@@ -6,7 +6,7 @@ description = "PerfectComms Android C-ABI shim over the shared voice core (pc_ca
 license = "LGPL-2.1-only"
 
 # cdylib: built as libpc_mobile.so for Android (via cargo-ndk) and P/Invoked from the C#
-# IL2CPP plugin. Reuses the exact desktop core so there is one WebRTC/Opus/DSP/mixer stack.
+# IL2CPP plugin. Reuses the exact desktop core so there is one Pion/Opus/DSP/mixer stack.
 [lib]
 name = "pc_mobile"
 crate-type = ["cdylib"]

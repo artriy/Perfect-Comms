@@ -109,9 +109,38 @@
 		     the app bundle, so macOS deliberately has no standalone DSP resource. -->
 	</ItemGroup>
 
+	<!-- Standalone DLL release assets carry the same native dependency notices as the ZIPs. -->
+	<ItemGroup>
+		<EmbeddedResource Include="THIRD_PARTY_NOTICES.md">
+			<LogicalName>Licenses.THIRD_PARTY_NOTICES.md</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs/native-rust-dependencies.html">
+			<LogicalName>Licenses.native-rust-dependencies.html</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs/pion-go-dependencies.txt">
+			<LogicalName>Licenses.pion-go-dependencies.txt</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
+	<!-- Pion WebRTC v4 is loaded dynamically by the Rust transport facade. -->
+	<ItemGroup Condition="'$(Configuration)' != 'Android'">
+		<EmbeddedResource Include="Libs\pion\pc-pion.x64.dll" Condition="Exists('Libs\pion\pc-pion.x64.dll')">
+			<LogicalName>Lib.pc-pion.pc-pion.x64.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pion\pc-pion.x86.dll" Condition="Exists('Libs\pion\pc-pion.x86.dll')">
+			<LogicalName>Lib.pc-pion.pc-pion.x86.dll</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pion\libpc-pion.linux-x64.so" Condition="Exists('Libs\pion\libpc-pion.linux-x64.so')">
+			<LogicalName>Lib.pc-pion.libpc-pion.linux-x64.so</LogicalName>
+		</EmbeddedResource>
+	</ItemGroup>
+
 	<ItemGroup Condition="'$(Configuration)' == 'Android'">
 		<EmbeddedResource Include="Libs\pc-mobile\libpc_mobile.so" Condition="'$(Configuration)' == 'Android' And Exists('Libs\pc-mobile\libpc_mobile.so')">
 			<LogicalName>Lib.pc-mobile.libpc_mobile.so</LogicalName>
+		</EmbeddedResource>
+		<EmbeddedResource Include="Libs\pion\libpc-pion.android-arm64.so" Condition="Exists('Libs\pion\libpc-pion.android-arm64.so')">
+			<LogicalName>Lib.pc-pion.libpc-pion.android-arm64.so</LogicalName>
 		</EmbeddedResource>
 	</ItemGroup>
 
@@ -127,12 +156,17 @@
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x64.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x64.dll" />
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
 		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
+		<Error Condition="!Exists('Libs\pion\pc-pion.x64.dll')" Text="Missing release Pion transport: Libs\pion\pc-pion.x64.dll" />
+		<Error Condition="!Exists('Libs\pion\pc-pion.x86.dll')" Text="Missing release Pion transport: Libs\pion\pc-pion.x86.dll" />
+		<Error Condition="!Exists('Libs\pion\libpc-pion.linux-x64.so')" Text="Missing release Pion transport: Libs\pion\libpc-pion.linux-x64.so" />
 	</Target>
 
 	<Target Name="AssertAndroidEngineEmbedded" BeforeTargets="PrepareResources"
 		Condition="'$(ValidateReleaseAssets)' == 'true' And '$(Configuration)' == 'Android'">
 		<Error Condition="!Exists('Libs\pc-mobile\libpc_mobile.so')"
 			Text="Missing Android release engine: Libs\pc-mobile\libpc_mobile.so. Build it with cargo-ndk for arm64-v8a before packaging." />
+		<Error Condition="!Exists('Libs\pion\libpc-pion.android-arm64.so')"
+			Text="Missing Android Pion transport: Libs\pion\libpc-pion.android-arm64.so. Build it with scripts/build-pion.sh android-arm64 --stage." />
 		<Error Condition="!Exists('release-assets\android\AndroidManifest.xml')"
 			Text="Missing Android RECORD_AUDIO manifest fragment: release-assets\android\AndroidManifest.xml" />
 	</Target>

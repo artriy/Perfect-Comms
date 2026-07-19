@@ -3,17 +3,24 @@
 use pc_capture::engine::Engine;
 use std::ffi::{c_char, c_float, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::{ptr, slice};
 
-// ABI 3 adds protocol-7 input/synthetic controls and bounded peer-level telemetry.
-pub const PC_ABI_VERSION: c_int = 3;
+// ABI 4 adds the Pion transport-path constructor. Android must provide the extracted
+// libpc-pion.so path before the shared voice engine constructs its RtcEngine.
+pub const PC_ABI_VERSION: c_int = 4;
 
 // Release packaging reads this exported, NUL-terminated marker directly from the ELF file.
 // Keep its decimal value in sync with PC_ABI_VERSION and scripts/verify-release-assets.py.
 #[used]
 #[no_mangle]
-pub static PC_MOBILE_ABI_MARKER: [u8; 29] = *b"PERFECTCOMMS_PC_MOBILE_ABI=3\0";
+pub static PC_MOBILE_ABI_MARKER: [u8; 29] = *b"PERFECTCOMMS_PC_MOBILE_ABI=4\0";
+
+// Serializes the global transport-path update with engine construction. The Pion loader copies
+// the path, so the managed UTF-8 buffer only needs to remain valid for the FFI call itself.
+static ENGINE_CREATE_GATE: Mutex<()> = Mutex::new(());
 
 const _: fn() = || {
     fn assert_sync_send<T: Sync + Send>() {}
@@ -27,19 +34,55 @@ pub struct MobileEngine {
 
 impl MobileEngine {
     fn try_new() -> Option<Self> {
+        let engine = Engine::try_new().ok()?;
+        if !engine.transport_ready() {
+            eprintln!(
+                "pc-mobile: Pion transport initialization failed: {}",
+                engine.transport_error().unwrap_or("transport-unavailable")
+            );
+            return None;
+        }
         Some(Self {
-            engine: Engine::try_new().ok()?,
+            engine,
             healthy: AtomicBool::new(true),
         })
     }
 
     fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+        self.healthy.load(Ordering::Acquire) && self.engine.transport_ready()
     }
 
     fn mark_unhealthy(&self) {
         self.healthy.store(false, Ordering::Release);
     }
+}
+
+fn create_engine(transport_path: Option<&Path>) -> *mut MobileEngine {
+    // Construction panics are caught at the ABI boundary. Recover this narrow path/configuration
+    // gate as well so a transient thread-spawn failure cannot disable every later retry.
+    let _gate = ENGINE_CREATE_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = transport_path {
+        pc_capture::rtc::set_transport_library_path(Some(path));
+    }
+    MobileEngine::try_new()
+        .map(|engine| Box::into_raw(Box::new(engine)))
+        .unwrap_or(ptr::null_mut())
+}
+
+unsafe fn parse_transport_path(path: *const c_char) -> Option<PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    let text = CStr::from_ptr(path).to_str().ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(text);
+    // Android passes either the content-addressed cache extraction or the APK native-library
+    // directory. Requiring an absolute path prevents cwd/search-path hijacking.
+    path.is_absolute().then_some(path)
 }
 
 #[no_mangle]
@@ -49,11 +92,19 @@ pub extern "C" fn pc_abi_version() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn pc_engine_new() -> *mut MobileEngine {
-    catch_unwind(|| {
-        MobileEngine::try_new()
-            .map(|engine| Box::into_raw(Box::new(engine)))
-            .unwrap_or(ptr::null_mut())
-    })
+    catch_unwind(|| create_engine(None)).unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pc_engine_new_with_transport(
+    transport_path: *const c_char,
+) -> *mut MobileEngine {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(path) = parse_transport_path(transport_path) else {
+            return ptr::null_mut();
+        };
+        create_engine(Some(&path))
+    }))
     .unwrap_or(ptr::null_mut())
 }
 
@@ -190,7 +241,7 @@ pub unsafe extern "C" fn pc_poll_signal(
 unsafe fn copy_signal_to_buffer(json: &str, out: *mut c_char, cap: c_int) -> c_int {
     let bytes = json.as_bytes();
     if bytes.len() + 1 > cap as usize {
-        // ABI 3 contract: -1 means the caller must grow its buffer and poll again. The signal
+        // ABI 4 contract: -1 means the caller must grow its buffer and poll again. The signal
         // remains pending because pc_poll_signal acknowledges only after a successful copy.
         return -1;
     }
@@ -205,8 +256,8 @@ mod tests {
 
     #[test]
     fn abi_version_matches_contract() {
-        assert_eq!(PC_ABI_VERSION, 3);
-        assert_eq!(pc_abi_version(), 3);
+        assert_eq!(PC_ABI_VERSION, 4);
+        assert_eq!(pc_abi_version(), 4);
         assert_eq!(
             PC_MOBILE_ABI_MARKER.as_slice(),
             format!("PERFECTCOMMS_PC_MOBILE_ABI={PC_ABI_VERSION}\0").as_bytes()
@@ -239,8 +290,29 @@ mod tests {
     }
 
     #[test]
+    fn transport_constructor_rejects_null_relative_and_non_utf8_paths() {
+        unsafe {
+            assert!(pc_engine_new_with_transport(ptr::null()).is_null());
+
+            let relative = b"libpc-pion.so\0";
+            assert!(pc_engine_new_with_transport(relative.as_ptr().cast()).is_null());
+
+            let non_utf8 = [0xff_u8, 0];
+            assert!(pc_engine_new_with_transport(non_utf8.as_ptr().cast()).is_null());
+        }
+    }
+
+    #[test]
     fn engine_creation_requires_a_working_opus_codec() {
-        let handle = pc_engine_new();
+        let configured = std::env::var_os("PC_PION_LIB");
+        let transport = configured.as_ref().map(|path| {
+            std::ffi::CString::new(path.to_string_lossy().as_bytes())
+                .expect("Pion test path contains NUL")
+        });
+        let handle = match transport {
+            Some(path) => unsafe { pc_engine_new_with_transport(path.as_ptr()) },
+            None => pc_engine_new(),
+        };
         assert!(!handle.is_null());
         unsafe { pc_engine_free(handle) };
     }

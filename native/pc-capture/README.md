@@ -7,11 +7,14 @@ Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
 control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
 stdin token auth) to the PerfectComms BepInEx mod.
 
-Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus
-1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the WebRTC
-(webrtc-rs) peer transport with proximity mixing, so mic, peer audio, and
-playback all live in this helper. Android uses the same DRED-capable codec while
-intentionally leaving the desktop WebRTC-APM DSP path disabled. Protocol version 13.
+Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled
+libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the
+Pion WebRTC v4.2.17 peer transport with proximity mixing, so mic, peer audio,
+and playback all live in this helper. The Rust media core loads Pion through
+the companion C-shared library built from `native/pc-pion`; transport startup
+fails closed if the matching library is missing. Android uses the same
+DRED-capable media core while intentionally leaving the desktop WebRTC-APM DSP
+path disabled. Protocol version 13.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -67,12 +70,21 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+The transport loopback is required in CI. Set `PC_PION_LIB` to a built Pion
+library and `PC_REQUIRE_PION=1` to require it in a local test run instead of
+skipping when the companion library is absent.
+
 ## Build
 
 ```
 cargo build --release              # host target
 cargo check --all-targets          # fast gate the CI matrix reuses per target
 ```
+
+`cargo build` produces the Rust helper only. From the repository root, use
+`scripts/build-pion.sh` with Go 1.26.2 to produce its required Pion companion,
+for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64/x86,
+Linux x64, macOS x64/arm64/universal, and Android ARM64 targets are supported.
 
 ## CI build targets
 
@@ -100,9 +112,13 @@ crate.
 
 macOS ships universal (`lipo x86_64 + aarch64`) inside a minimal `.app` bundle
 with `Info.plist` `NSMicrophoneUsageDescription`, ad-hoc codesigned (`codesign
---sign -`, free, no Apple Developer account or notarization). The mod strips the
+--sign -`, free, no Apple Developer account or notarization). Its universal
+`libpc-pion.dylib` is sealed into the app before signing. The mod strips the
 Gatekeeper quarantine attribute and sets the exec bit on the extracted bundle,
 so the ad-hoc-signed helper launches and prompts for microphone access via TCC.
 
-Per-target binaries ship as side-files in the BepInEx plugin folder; the mod
-extracts them via the `NativeLibraryCache` pattern.
+Per-target helper binaries ship as side-files in the BepInEx plugin folder and
+as embedded resources. On Windows and Linux, the mod extracts the embedded,
+content-matched Pion library beside the helper; macOS uses the copy already
+inside the signed app. Android extracts its Pion resource and passes the exact
+absolute path to `pc-mobile` before creating the transport.

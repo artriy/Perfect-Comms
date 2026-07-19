@@ -76,6 +76,7 @@ function Copy-ThirdPartyLicenseTexts([string]$DestinationRoot) {
         "System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt" = "Libs\system-text-encodings-web.THIRD-PARTY-NOTICES.TXT"
         "System.Text.Json-THIRD-PARTY-NOTICES.txt" = "Libs\system-text-json.THIRD-PARTY-NOTICES.TXT"
         "native-rust-dependencies.html" = "Libs\native-rust-dependencies.html"
+        "pion-go-dependencies.txt" = "Libs\pion-go-dependencies.txt"
     }
     foreach ($entry in $licenses.GetEnumerator()) {
         Assert-ReleaseAsset $entry.Value
@@ -176,6 +177,7 @@ Write-Host "release.package.protocol network=$networkProtocol sidecar=$managedSi
 
 if ($Configuration -eq "Android") {
     Assert-ReleaseAsset "Libs\pc-mobile\libpc_mobile.so"
+    Assert-ReleaseAsset "Libs\pion\libpc-pion.android-arm64.so"
     Assert-ReleaseAsset "release-assets\android\AndroidManifest.xml"
     Assert-ReleaseAsset "release-assets\android\README.md"
 } else {
@@ -186,7 +188,10 @@ if ($Configuration -eq "Android") {
         "Libs\pc-capture\pc-capture-mac.zip",
         "Libs\dsp\webrtc-apm.x64.dll",
         "Libs\dsp\webrtc-apm.x86.dll",
-        "Libs\dsp\libwebrtc-apm.so"
+        "Libs\dsp\libwebrtc-apm.so",
+        "Libs\pion\pc-pion.x64.dll",
+        "Libs\pion\pc-pion.x86.dll",
+        "Libs\pion\libpc-pion.linux-x64.so"
     ) | ForEach-Object { Assert-ReleaseAsset $_ }
     Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
     Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol

@@ -1,0 +1,11 @@
+[package]
+name = "pion-sys"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libloading = "0.9"
