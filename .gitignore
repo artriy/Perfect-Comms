@@ -20,6 +20,7 @@ scripts/
 !scripts/
 scripts/*
 !scripts/live-turn-smoke.py
+!scripts/p2p-mesh-smoke.py
 !scripts/fetch-bepinex.sh
 !scripts/verify-release-assets.py
 !scripts/verify-package-layout.py

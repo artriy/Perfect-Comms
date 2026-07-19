@@ -152,7 +152,9 @@ func newEngine() (*engine, error) {
 	settings.SetRelayAcceptanceMinWait(relayAcceptanceMinWait)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryAndGather)
 	settings.SetICEUseCandidateCheckPriority(true)
-	// One shared mux per engine keeps socket count independent of peer count.
+	// One shared mux per engine keeps host ICE traffic on one port per usable
+	// network family. Each ICE agent still owns its mDNS sockets, and Pion
+	// WebRTC v4.2.17 normal srflx gathering uses one socket per STUN URL.
 	// Prefer dual stack, while retaining an IPv4 fallback for hosts without a
 	// usable IPv6 interface. Active ICE-TCP and TURN TCP/TLS stay enabled.
 	muxClosing := &atomic.Bool{}

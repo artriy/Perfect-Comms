@@ -115,10 +115,18 @@ class Helper:
         handshake = work / f"{name}-handshake.json"
         token = secrets.token_urlsafe(24)
         self.process = subprocess.Popen(
-            [str(executable), "--synthetic-tone", "--handshake", str(handshake)],
+            [
+                str(executable),
+                "--synthetic-tone",
+                "--handshake",
+                str(handshake),
+                "--owner-pid",
+                str(os.getpid()),
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=self._stderr,
+            cwd=executable.parent,
         )
         assert self.process.stdin is not None
         self.process.stdin.write((token + "\n").encode("utf-8"))
@@ -226,7 +234,8 @@ def configure(helper: Helper, remote_id: str, servers: list[dict[str, Any]]) -> 
         {
             "op": "game-state",
             "deaf": False,
-            "master": 1.0,
+            # Peer levels are measured before route gain. Keep real playback silent.
+            "master": 0.0,
             "peers": [{"id": remote_id, "gain": 1.0, "pan": 0.0, "mode": 0}],
         }
     )
@@ -279,6 +288,8 @@ def main() -> int:
     helpers: list[Helper] = []
     connected: set[str] = set()
     heard: set[str] = set()
+    pongs: set[str] = set()
+    relay_paths: set[str] = set()
     errors: list[str] = []
     states: dict[str, list[str]] = {"a": [], "b": []}
     relay_candidates: dict[str, int] = {"a": 0, "b": 0}
@@ -297,7 +308,22 @@ def main() -> int:
             a.send({"op": "peer-add", "peer_id": "b", "offerer": True, "relay_only": relay_only, "generation": 1})
 
             deadline = time.monotonic() + args.timeout
-            while time.monotonic() < deadline and (len(connected) < 2 or len(heard) < 2):
+            last_ping = 0.0
+            success_since: float | None = None
+            required_relay_paths = 2 if relay_only else 0
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now - last_ping >= 1.0:
+                    a.send({"op": "ping"})
+                    b.send({"op": "ping"})
+                    last_ping = now
+                for helper in helpers:
+                    if helper.process.poll() is not None:
+                        errors.append(f"{helper.name}:helper-exited")
+                    elif helper._reader_error is not None:
+                        errors.append(f"{helper.name}:reader-{helper._reader_error}")
+                if errors:
+                    break
                 for source, target, target_peer in ((a, b, "a"), (b, a, "b")):
                     for message in source.drain():
                         route_signal(source, target, target_peer, message)
@@ -313,7 +339,10 @@ def main() -> int:
                             if state == "connected":
                                 connected.add(source.name)
                             elif state in {"failed", "closed"}:
+                                connected.discard(source.name)
                                 errors.append(f"{source.name}:{state}")
+                            elif state == "disconnected":
+                                connected.discard(source.name)
                         elif operation == "peer-levels":
                             levels = message.get("levels", [])
                             if any(
@@ -324,13 +353,70 @@ def main() -> int:
                                 for level in levels
                             ):
                                 heard.add(source.name)
+                        elif operation == "pong":
+                            pongs.add(source.name)
+                        elif operation == "stats":
+                            expected_peer = "b" if source is a else "a"
+                            paths = message.get("network_paths", [])
+                            has_healthy_relay = any(
+                                isinstance(path, dict)
+                                and path.get("peer_id") == expected_peer
+                                and path.get("generation") == 1
+                                and bool(path.get("relay"))
+                                and str(path.get("candidate_state", "")).lower() == "succeeded"
+                                for path in paths
+                            )
+                            if has_healthy_relay:
+                                relay_paths.add(source.name)
+                            else:
+                                relay_paths.discard(source.name)
                         elif operation == "error":
                             errors.append(f"{source.name}:{message.get('code', 'error')}")
+                healthy_helpers = all(
+                    helper.process.poll() is None and helper._reader_error is None
+                    for helper in helpers
+                )
+                success = (
+                    not errors
+                    and healthy_helpers
+                    and len(connected) == 2
+                    and len(heard) == 2
+                    and len(pongs) == 2
+                    and len(relay_paths) == required_relay_paths
+                )
+                if errors or not healthy_helpers:
+                    break
+                if success:
+                    if success_since is None:
+                        success_since = now
+                    elif now - success_since >= 0.5:
+                        break
+                else:
+                    success_since = None
                 time.sleep(0.01)
 
-            if len(connected) != 2 or len(heard) != 2:
-                reader_errors = [f"{helper.name}:{helper._reader_error}" for helper in helpers if helper._reader_error]
-                detail = ",".join(errors + reader_errors) or "timeout"
+            reader_errors = [
+                f"{helper.name}:{helper._reader_error}"
+                for helper in helpers
+                if helper._reader_error
+            ]
+            process_errors = [
+                f"{helper.name}:helper-exited"
+                for helper in helpers
+                if helper.process.poll() is not None
+            ]
+            if (
+                errors
+                or reader_errors
+                or process_errors
+                or success_since is None
+                or time.monotonic() - success_since < 0.5
+                or len(connected) != 2
+                or len(heard) != 2
+                or len(pongs) != 2
+                or len(relay_paths) != required_relay_paths
+            ):
+                detail = ",".join(errors + reader_errors + process_errors) or "timeout"
                 redactions = [
                     value
                     for server in servers
@@ -340,7 +426,9 @@ def main() -> int:
                 native = [f"{helper.name}:{helper.diagnostics(redactions)}" for helper in helpers]
                 raise RuntimeError(
                     "relay smoke failed "
-                    f"(connected={len(connected)}/2 heard={len(heard)}/2 detail={detail} "
+                    f"(connected={len(connected)}/2 heard={len(heard)}/2 "
+                    f"pongs={len(pongs)}/2 relay_paths={len(relay_paths)}/{required_relay_paths} "
+                    f"detail={detail} "
                     f"states={states} relay_candidates={relay_candidates} native={native})"
                 )
     finally:
@@ -348,7 +436,10 @@ def main() -> int:
             helper.close()
 
     mode = "TURN_RELAY" if relay_only else "DIRECT"
-    print(f"{mode}_SMOKE_OK helpers=2 relay_only={str(relay_only).lower()} connected=2 remote_levels=2")
+    print(
+        f"{mode}_SMOKE_OK helpers=2 relay_only={str(relay_only).lower()} "
+        f"connected=2 remote_levels=2 heartbeats=2 selected_relay_paths={len(relay_paths)}"
+    )
     return 0
 
 

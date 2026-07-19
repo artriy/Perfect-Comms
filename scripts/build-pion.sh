@@ -12,6 +12,7 @@ go_version="1.26.2"
 pion_version="v4.2.17"
 target="${1:-}"
 stage=0
+linker_flags="-s -w -buildid="
 
 if [[ "${2:-}" == "--stage" ]]; then
   stage=1
@@ -110,6 +111,9 @@ case "$target" in
     android_api="${PC_ANDROID_API:-21}"
     export GOOS=android GOARCH=arm64 CGO_ENABLED=1
     export CC="${CC:-$ndk_root/toolchains/llvm/prebuilt/$ndk_host/bin/aarch64-linux-android${android_api}-clang}"
+    # Pion's Android interface enumeration uses wlynxg/anet, whose documented
+    # Go 1.23+ build contract requires this linker opt-in for net.zoneCache.
+    linker_flags="$linker_flags -checklinkname=0"
     output="$artifact_root/android-arm64/libpc-pion.so"
     stage_path="$root/Libs/pion/libpc-pion.android-arm64.so"
     mkdir -p "$(dirname "$output")"
@@ -129,7 +133,7 @@ if [[ "$target" != "mac-universal" ]]; then
       -buildvcs=false \
       -buildmode=c-shared \
       -trimpath \
-      -ldflags='-s -w -buildid=' \
+      -ldflags="$linker_flags" \
       -o "$output" \
       .
   )
