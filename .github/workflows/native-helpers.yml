@@ -54,7 +54,7 @@ jobs:
             file: pc-pion.x86.dll
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
@@ -82,7 +82,7 @@ jobs:
           apt-get update
           apt-get install -y build-essential ca-certificates git python3
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
@@ -169,7 +169,7 @@ jobs:
         id: ndk
         with:
           ndk-version: r27d
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
@@ -235,7 +235,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-apple-darwin,aarch64-apple-darwin
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
