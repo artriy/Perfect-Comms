@@ -48,8 +48,13 @@ public sealed class VoiceCompactStatusPolicyTests
     public void MuteAndDeafenWarningsCanBeDisabledWithoutHidingExistingWarnings()
     {
         Assert.Equal(
-            "<color=#FFCC66>voice connecting</color>",
-            VoiceCompactStatusPolicy.Compose(null, "voice connecting", true, true, false));
+            "<color=#FFCC66>Connecting voice... 1/3 players connected</color>",
+            VoiceCompactStatusPolicy.Compose(
+                null,
+                "Connecting voice... 1/3 players connected",
+                true,
+                true,
+                false));
         Assert.Equal(string.Empty, VoiceCompactStatusPolicy.Compose(null, null, true, true, false));
     }
 

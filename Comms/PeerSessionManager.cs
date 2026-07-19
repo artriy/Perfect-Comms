@@ -480,6 +480,9 @@ internal sealed class PeerSessionManager
     internal bool IsCompatiblePeer(int clientId)
         => _peers.TryGetValue(clientId, out var peer) && peer.HelloReceived;
 
+    internal bool IsPeerIncompatible(int clientId)
+        => _peers.TryGetValue(clientId, out var peer) && peer.Incompatible;
+
     internal bool IsPeerEstablished(int clientId)
         => _peers.TryGetValue(clientId, out var peer) && peer.State == PeerState.Established;
 

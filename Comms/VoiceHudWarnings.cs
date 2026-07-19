@@ -35,8 +35,14 @@ internal static class VoiceHudWarnings
             return $"caller has the floor ({secs}s)";
         }
 
-        if (room.VoiceTransportInitializing)
-            return "voice connecting";
+        var connection = room.ConnectionProgress;
+        if (connection.IsConnecting)
+        {
+            // Two animation frames per second keeps the status visibly alive without making the
+            // compact text jitter rapidly beside the voice buttons.
+            int animationFrame = (int)(Time.unscaledTime * 2f);
+            return VoiceConnectionStatusPolicy.BuildText(connection, animationFrame);
+        }
 
         if (!room.UsingMicrophone && !room.Mute)
             return "mic unavailable";

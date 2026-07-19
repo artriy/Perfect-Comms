@@ -127,12 +127,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
 #if ANDROID || WINDOWS
     private AndroidMicrophone? _androidMicrophone;
+    private int _voiceUnavailableRetrying;
 #endif
 #if ANDROID
     private MobileVoiceClient? _mobileVoice;
     private AndroidEnginePcmSpeaker? _mobileSpeaker;
     private readonly AndroidMicrophoneMonitor _androidMicrophoneMonitor = new();
     private long _mobileVoiceStartRetryAtMs;
+    private int _mobileVoiceStartFailures;
     private int _mobileVoiceGeneration;
     private int _mobileSpeakerRetryAttempts;
     private long _mobileSpeakerRetryAtMs;
@@ -761,6 +763,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
         }
     }
+    internal bool IsUnavailableRetrying
+    {
+        get
+        {
+#if WINDOWS || ANDROID
+            return !_disposed && Volatile.Read(ref _voiceUnavailableRetrying) != 0;
+#else
+            return false;
+#endif
+        }
+    }
     private volatile bool _mute;
     public bool Mute => _mute;
     public float LocalLevel => _localLevel;
@@ -876,6 +889,24 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
 #if WINDOWS || ANDROID
         return _peerSession?.IsCompatiblePeer(clientId) == true;
+#else
+        return false;
+#endif
+    }
+
+    internal bool IsIncompatibleRemoteClient(int clientId)
+    {
+#if WINDOWS || ANDROID
+        return _peerSession?.IsPeerIncompatible(clientId) == true;
+#else
+        return false;
+#endif
+    }
+
+    internal bool IsRemoteClientEstablished(int clientId)
+    {
+#if WINDOWS || ANDROID
+        return _peerSession?.IsPeerEstablished(clientId) == true;
 #else
         return false;
 #endif
@@ -1400,6 +1431,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     // on-screen banner, so a terminal failure is never silent.
     private void EnterVoiceUnavailable(string detail)
     {
+        Interlocked.Exchange(ref _voiceUnavailableRetrying, 1);
         VoiceChatPluginMain.Logger.LogWarning(
             $"[VC] Voice unavailable: {detail}. No desktop fallback (BASS removed in 4.0). " +
             $"slot={_activeCaptureSlot} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} wine={WineEnvironment.IsWine} " +
@@ -1513,7 +1545,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 _microphoneReady = false;
                 VoiceDiagnostics.Log("voice.sidecar", $"ready=false reason={reason} error=\"sidecar host lease rejected: {failure}\"");
-                ScheduleVoiceRecovery("lease-rejected");
+                HandleVoiceStartFailure("lease-rejected", reason);
                 return;
             }
             _voiceReady = false;
@@ -1837,6 +1869,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 && health == CaptureHealth.Healthy)
             {
                 _voiceReady = true;
+                Interlocked.Exchange(ref _voiceUnavailableRetrying, 0);
                 _speakerReady = true;
                 // A fresh native GameState starts empty. Force the first mixer snapshot through
                 // even if the previous helper sent the same fingerprint less than one second ago.
@@ -1857,7 +1890,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             var detachedCurrent = TryDetachCurrentVoiceSession(voice, sessionGeneration);
             try { voice.Dispose(); } catch { }
             if (detachedCurrent)
-                ScheduleVoiceRecovery("post-configuration-health");
+                HandleVoiceStartFailure("post-configuration-health", reason);
             return;
         }
 
@@ -2563,11 +2596,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _mobileVoiceStartRetryAtMs = nowMs + retryAfterMs;
             mv.Dispose();
             if (!deferred)
+            {
+                _mobileVoiceStartFailures = Math.Min(_mobileVoiceStartFailures + 1, 30);
+                if (_mobileVoiceStartFailures >= 3)
+                    Interlocked.Exchange(ref _voiceUnavailableRetrying, 1);
                 VoiceDiagnostics.Log("voice.mobile",
-                    $"state=start-failed retryAfterMs={retryAfterMs}");
+                    $"state=start-failed attempt={_mobileVoiceStartFailures} retryAfterMs={retryAfterMs}");
+            }
             return;
         }
         _mobileVoiceStartRetryAtMs = 0;
+        _mobileVoiceStartFailures = 0;
         if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
         mv.SetDiagnostics(VoiceDiagnostics.IsEnabled);
         mv.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
@@ -2631,12 +2670,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _speakerReady = _mobileSpeaker.IsPlaying;
             _mobileSpeakerRetryAttempts = 0;
             _mobileSpeakerRetryAtMs = 0;
+            Interlocked.Exchange(ref _voiceUnavailableRetrying, _speakerReady ? 0 : 1);
         }
         catch (Exception ex)
         {
             _mobileSpeaker = null;
             _speakerReady = false;
             _mobileSpeakerRetryAttempts = Math.Min(_mobileSpeakerRetryAttempts + 1, 30);
+            if (_mobileSpeakerRetryAttempts >= 3)
+                Interlocked.Exchange(ref _voiceUnavailableRetrying, 1);
             var retryMs = AndroidMicrophone.RecoveryDelayMilliseconds(
                 _mobileSpeakerRetryAttempts, 250, 30_000);
             _mobileSpeakerRetryAtMs = nowMs + retryMs;
@@ -3078,7 +3120,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         var mobileSpeaker = _mobileSpeaker;
         if (mobileSpeaker != null)
+        {
             _speakerReady = mobileSpeaker.Tick();
+            Interlocked.Exchange(ref _voiceUnavailableRetrying, _speakerReady ? 0 : 1);
+        }
 #elif WINDOWS
         _androidMicrophone?.Tick();
         RefreshVoiceRecoveryBudgetAfterStableUptime();

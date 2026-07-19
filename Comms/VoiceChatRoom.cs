@@ -30,6 +30,7 @@ public class VoiceChatRoom
     private const double RadioStateRpcHeartbeatSeconds = 1.0;
     private const float TransitionTraceSeconds = 45f;
     private const float TransitionRosterRetentionMaxSeconds = 3f;
+    private const float ConnectionStatusRefreshInterval = 0.10f;
     private const float TransitionTraceStateInterval = 0.25f;
     private const int TransitionTraceAudioFrames = 64;
     private const int TransitionTracePerfEvents = 48;
@@ -99,10 +100,14 @@ public class VoiceChatRoom
     public bool Mute  { get; private set; } = true;
     public int  SampleRate => AudioHelpers.ClockRate;
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
+    private bool _voiceRoutingPolicyReady;
+    private VoiceConnectionProgress _voiceConnectionProgress = VoiceConnectionProgress.Starting;
+    private float _voiceConnectionStatusRefreshTimer;
+    private float _lastVoiceConnectionReadySnapshotTime = -999f;
+    internal VoiceConnectionProgress ConnectionProgress => _voiceConnectionProgress;
 
     // ── Speaker ────────────────────────────────────────────────────────────────
     public bool UsingSpeaker => _voiceBackend?.UsingSpeaker == true;
-    internal bool VoiceTransportInitializing => _perfectCommsVoice?.IsInitializing == true;
 
     // ── Misc ───────────────────────────────────────────────────────────────────
     private bool  _commsSabActive;
@@ -667,6 +672,7 @@ public class VoiceChatRoom
             // Negotiate ICE immediately, but do not apply untrusted local rule defaults while a
             // client is still waiting for its host's authenticated policy snapshot.
             var policyReady = IsHostPolicyReady();
+            _voiceRoutingPolicyReady = policyReady;
             var routedSnapshot = policyReady ? snapshot : null;
             long __backendTicks = VoiceFrameProfiler.Begin();
             _voiceBackend.Update(routedSnapshot, speakerCache, _virtualMics, localInVent, _commsSabActive);
@@ -677,6 +683,12 @@ public class VoiceChatRoom
             TryRecoverMissingBackendPeers(routedSnapshot);
             VoiceFrameProfiler.End("room.recovery", __recoveryTicks);
         }
+        else
+        {
+            _voiceRoutingPolicyReady = false;
+        }
+
+        RefreshVoiceConnectionProgress(snapshot);
 
         updateStep = "diagnostics";
         MaybeLogTransitionTraceState(snapshot);
@@ -1422,6 +1434,100 @@ public class VoiceChatRoom
         => !player.IsLocal && !player.Disconnected && !player.IsDummy && player.ClientId >= 0 &&
            (_perfectCommsVoice == null || _perfectCommsVoice.IsCompatibleRemoteClient(player.ClientId));
 
+    private static bool SnapshotContainsConnectionClient(
+        VoiceGameStateSnapshot snapshot,
+        int clientId)
+    {
+        var players = snapshot.Players;
+        for (int i = 0; i < players.Count; i++)
+        {
+            var player = players[i];
+            if (player.ClientId == clientId && !player.Disconnected && !player.IsDummy)
+                return true;
+        }
+        return false;
+    }
+
+    private bool TryCollectConnectionStatusRoster(
+        VoiceGameStateSnapshot? snapshot,
+        out int expectedPlayers,
+        out int connectedPlayers,
+        out bool snapshotContainsEveryRemote)
+    {
+        expectedPlayers = 0;
+        connectedPlayers = 0;
+        snapshotContainsEveryRemote = false;
+        if (snapshot == null
+            || CollectAuthenticatedSnapshotClientIds() != AuthenticatedRosterCollectionState.Populated)
+            return false;
+
+        int localClientId = ResolveLocalClientId(snapshot);
+        if (localClientId < 0)
+            return false;
+
+        snapshotContainsEveryRemote = true;
+        var backend = _perfectCommsVoice;
+        foreach (int clientId in _authenticatedSnapshotClientIds)
+        {
+            if (clientId == localClientId)
+                continue;
+
+            // Unlike recovery's compatibility-filtered count, unknown peers must be included before
+            // their Hello arrives or a fresh lobby can briefly claim Ready. Only an explicitly
+            // terminal protocol mismatch is excluded so it cannot leave the status stuck forever.
+            if (backend?.IsIncompatibleRemoteClient(clientId) == true)
+                continue;
+
+            expectedPlayers++;
+            if (backend?.IsRemoteClientEstablished(clientId) == true)
+                connectedPlayers++;
+            if (snapshot.Phase != VoiceGamePhase.EndGame
+                && !SnapshotContainsConnectionClient(snapshot, clientId))
+                snapshotContainsEveryRemote = false;
+        }
+        return true;
+    }
+
+    private void RefreshVoiceConnectionProgress(VoiceGameStateSnapshot? snapshot)
+    {
+        _voiceConnectionStatusRefreshTimer -= Time.unscaledDeltaTime;
+        if (_voiceConnectionStatusRefreshTimer > 0f)
+            return;
+        _voiceConnectionStatusRefreshTimer = ConnectionStatusRefreshInterval;
+
+        bool rosterAvailable = TryCollectConnectionStatusRoster(
+            snapshot,
+            out int expectedPlayers,
+            out int connectedPlayers,
+            out bool snapshotContainsEveryRemote);
+        bool snapshotReady = VoiceConnectionStatusPolicy.IsSnapshotReady(
+            snapshot,
+            rosterAvailable,
+            snapshotContainsEveryRemote);
+        float now = Time.realtimeSinceStartup;
+        bool retainReadyDuringSnapshotGap = !snapshotReady
+                                            && _lastVoiceConnectionReadySnapshotTime >= 0f
+                                            && now >= _lastVoiceConnectionReadySnapshotTime
+                                            && now - _lastVoiceConnectionReadySnapshotTime
+                                            < TransitionRosterRetentionMaxSeconds;
+
+        var next = VoiceConnectionStatusPolicy.Evaluate(
+            backendAvailable: _perfectCommsVoice != null,
+            transportInitializing: _perfectCommsVoice?.IsInitializing == true,
+            retryingAfterFailure: _perfectCommsVoice?.IsUnavailableRetrying == true,
+            snapshotReady,
+            routingPolicyReady: _voiceRoutingPolicyReady,
+            connectedPlayers,
+            expectedPlayers,
+            retainReadyDuringSnapshotGap);
+
+        if (snapshotReady && next.Stage == VoiceConnectionStage.Ready)
+            _lastVoiceConnectionReadySnapshotTime = now;
+        else if (next.Stage != VoiceConnectionStage.Ready)
+            _lastVoiceConnectionReadySnapshotTime = -999f;
+        _voiceConnectionProgress = next;
+    }
+
     private int CountExpectedRemotePlayers(VoiceGameStateSnapshot snapshot)
     {
         // Indexed loop over IReadOnlyList instead of LINQ .Count(predicate): the latter boxes a heap
@@ -1718,6 +1824,10 @@ public class VoiceChatRoom
         {
             var backend = Interlocked.Exchange(ref _voiceBackend, null);
             _perfectCommsVoice = null;
+            _voiceRoutingPolicyReady = false;
+            _voiceConnectionProgress = VoiceConnectionProgress.Starting;
+            _voiceConnectionStatusRefreshTimer = 0f;
+            _lastVoiceConnectionReadySnapshotTime = -999f;
             if (backend == null) return;
             RunCleanupStep("backend-dispose", backend.Dispose);
         }

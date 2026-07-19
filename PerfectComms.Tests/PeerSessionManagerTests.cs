@@ -270,11 +270,13 @@ public sealed class PeerSessionManagerTests
 
         Xunit.Assert.Equal(1, HelloCount(sender));
         Xunit.Assert.Empty(transport.Added);
+        Xunit.Assert.True(manager.IsPeerIncompatible(7));
 
         manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 100_100);
 
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
         Xunit.Assert.Equal(new[] { 7 }, transport.Added);
+        Xunit.Assert.False(manager.IsPeerIncompatible(7));
     }
 
     [Fact]
