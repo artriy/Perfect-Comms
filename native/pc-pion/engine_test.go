@@ -5,7 +5,24 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/pion/ice/v4"
 )
+
+func TestMulticastDNSModeRequiresExplicitTestOverride(t *testing.T) {
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "")
+	if got := multicastDNSMode(); got != ice.MulticastDNSModeQueryAndGather {
+		t.Fatalf("default mDNS mode = %v, want query-and-gather", got)
+	}
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "0")
+	if got := multicastDNSMode(); got != ice.MulticastDNSModeQueryAndGather {
+		t.Fatalf("zero override mDNS mode = %v, want query-and-gather", got)
+	}
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
+	if got := multicastDNSMode(); got != ice.MulticastDNSModeDisabled {
+		t.Fatalf("test override mDNS mode = %v, want disabled", got)
+	}
+}
 
 func queueOnlyEngineAndPeer(peerID string, generation uint32) (*engine, *peer) {
 	e := &engine{peers: make(map[string]*peer), rtp: newRTPQueue()}

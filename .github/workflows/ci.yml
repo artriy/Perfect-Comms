@@ -97,6 +97,7 @@ jobs:
         env:
           PC_PION_LIB: ${{ github.workspace }}/artifacts/pion/libpc-pion.so
           PC_REQUIRE_PION: "1"
+          PC_PION_TEST_DISABLE_MDNS: "1"
         run: |
           cargo test --locked --manifest-path native/pion-sys/Cargo.toml --all-targets
           cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets

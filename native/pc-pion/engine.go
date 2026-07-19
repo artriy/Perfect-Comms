@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -150,7 +151,7 @@ func newEngine() (*engine, error) {
 	settings := webrtc.SettingEngine{}
 	settings.SetICETimeouts(8*time.Second, 15*time.Second, 2*time.Second)
 	settings.SetRelayAcceptanceMinWait(relayAcceptanceMinWait)
-	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryAndGather)
+	settings.SetICEMulticastDNSMode(multicastDNSMode())
 	settings.SetICEUseCandidateCheckPriority(true)
 	// One shared mux per engine keeps host ICE traffic on one port per usable
 	// network family. Each ICE agent still owns its mDNS sockets, and Pion
@@ -178,6 +179,15 @@ func newEngine() (*engine, error) {
 		muxClosing: muxClosing,
 		rtp:        newRTPQueue(),
 	}, nil
+}
+
+func multicastDNSMode() ice.MulticastDNSMode {
+	if os.Getenv("PC_PION_TEST_DISABLE_MDNS") == "1" {
+		// Hermetic same-host tests must not depend on runner multicast policy.
+		// The shared mux already includes loopback; production keeps mDNS privacy.
+		return ice.MulticastDNSModeDisabled
+	}
+	return ice.MulticastDNSModeQueryAndGather
 }
 
 func newSharedUDPMux(closing *atomic.Bool) (ice.UDPMux, []webrtc.NetworkType, error) {

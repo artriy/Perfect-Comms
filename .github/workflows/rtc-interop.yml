@@ -68,6 +68,8 @@ jobs:
           fi
           echo "PC_REQUIRE_PION=1" >> "$GITHUB_ENV"
       - name: Offer/answer/ICE and Opus RTP loopback
+        env:
+          PC_PION_TEST_DISABLE_MDNS: "1"
         run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
       - name: Build helper for live TURN gate
         if: runner.os == 'Linux'
