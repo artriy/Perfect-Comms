@@ -2,8 +2,6 @@
 
 ## Perfect Comms v4.1.1
 
-> **Update together:** v4.1.1 introduces a new voice compatibility version for the rebuilt connection engine. Everyone in a lobby must update to v4.1.1; v4.1.0 and v4.1.1 cannot be mixed.
-
 Perfect Comms v4.1.1 makes voice connections easier to understand and more flexible across different networks. A new live status shows exactly what voice is waiting for, while the rebuilt cross-platform connection engine adds more relay options and stronger handling for busy lobbies.
 
 <p align="center">
