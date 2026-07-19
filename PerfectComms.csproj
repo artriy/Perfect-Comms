@@ -8,10 +8,10 @@
 		<Product>Perfect Comms</Product>
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
-		<Version>4.1.0</Version>
-		<AssemblyVersion>4.1.0.0</AssemblyVersion>
-		<FileVersion>4.1.0.0</FileVersion>
-		<InformationalVersion>4.1.0</InformationalVersion>
+		<Version>4.1.1</Version>
+		<AssemblyVersion>4.1.1.0</AssemblyVersion>
+		<FileVersion>4.1.1.0</FileVersion>
+		<InformationalVersion>4.1.1</InformationalVersion>
 		<LangVersion>preview</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>

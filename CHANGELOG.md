@@ -1,5 +1,36 @@
 # Changelog
 
+## Perfect Comms v4.1.1
+
+> **Update together:** v4.1.1 introduces a new voice compatibility version for the rebuilt connection engine. Everyone in a lobby must update to v4.1.1; v4.1.0 and v4.1.1 cannot be mixed.
+
+Perfect Comms v4.1.1 makes voice connections easier to understand and more flexible across different networks. A new live status shows exactly what voice is waiting for, while the rebuilt cross-platform connection engine adds more relay options and stronger handling for busy lobbies.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.1/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Know When Voice Is Ready
+
+- **See exactly what voice is waiting for.**
+  > <sub>The compact voice HUD now shows whether audio is starting, the lobby session is syncing, how many players are connected, or Perfect Comms is retrying after an audio failure. The message disappears once voice is ready and remains stable through brief scene transitions.</sub>
+
+### Stronger Cross-Platform Connections
+
+- **The peer-to-peer connection engine has been rebuilt.**
+  > <sub>Windows, Steam Proton and Linux, CrossOver on Intel and Apple Silicon Macs, and Android now use Pion WebRTC for voice connections. Direct peer-to-peer voice remains preferred, while existing proximity effects, controls, and audio processing remain unchanged.</sub>
+
+- **More ways through restrictive networks.**
+  > <sub>Automatic and custom relay fallback can now use TURN over UDP or TCP, including secure TLS and DTLS options. This gives voice more connection routes to try when a firewall, VPN, or network blocks ordinary UDP.</sub>
+
+- **Busy lobbies and reconnects are better protected.**
+  > <sub>The connection layer has been hardened for several players joining together, connection restarts, network-path changes, and players leaving or rejoining without needlessly disturbing healthy voice links.</sub>
+
+### Maintenance and Validation
+
+- **Broader connection and release checks.**
+  > <sub>Automated coverage now exercises direct voice, live relay fallback, repeated connection restarts, mixed 32-bit and 64-bit helpers, platform packaging, and a complete ten-player voice mesh.</sub>
+
 ## Perfect Comms v4.1.0
 
 Perfect Comms v4.1.0 makes the new v4 voice engine far more dependable. Steam Proton voice now starts properly, connections repair themselves when networks change, voice remains active between matches, and a new microphone playback test lets you hear how you sound before playing. This release also adds stronger optional noise cleanup, more stable HUD behavior, and completed support for compatible mods.
