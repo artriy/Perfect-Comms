@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -28,6 +30,12 @@ REQUIRED_VENDOR_LOCKS = (
     "native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs/Cargo.lock",
     "native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs/coreaudio-sys-utils/Cargo.lock",
     "native/vendor/cubeb-sys/libcubeb/src/cubeb-pulse-rs/Cargo.lock",
+)
+
+NESTED_TEMPLATE_CRATES = (
+    "native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs",
+    "native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs/coreaudio-sys-utils",
+    "native/vendor/cubeb-sys/libcubeb/src/cubeb-pulse-rs",
 )
 
 
@@ -71,6 +79,19 @@ def metadata(root: Path, manifest: Path) -> dict:
     return {}
 
 
+def assert_template_lock_current(root: Path, relative: str) -> None:
+    source = root / relative
+    with tempfile.TemporaryDirectory(prefix="perfect-comms-cubeb-lock-") as temporary:
+        working = Path(temporary) / source.name
+        shutil.copytree(source, working, ignore=shutil.ignore_patterns("target"))
+        templates = list(working.rglob("Cargo.toml.in"))
+        if not templates:
+            fail(f"{relative}: no Cargo.toml.in template found")
+        for template in templates:
+            template.rename(template.with_name("Cargo.toml"))
+        metadata(root, working / "Cargo.toml")
+
+
 def assert_local_package(
     packages: list[dict], name: str, expected_manifest: Path, graph: str
 ) -> None:
@@ -103,6 +124,9 @@ def verify(root: Path) -> None:
         path = root / relative
         if not path.is_file() or path.stat().st_size == 0:
             fail(f"required vendored Cargo lock is missing or empty: {relative}")
+
+    for relative in NESTED_TEMPLATE_CRATES:
+        assert_template_lock_current(root, relative)
 
     for relative in MANIFESTS:
         manifest = (root / relative).resolve()
@@ -166,7 +190,7 @@ def verify(root: Path) -> None:
 
     print(
         "Cubeb provenance verified: local cubeb + cubeb-sys 0.36.0, "
-        "all nested backend locks present, MSVC CRT aligned, no CPAL lock entries."
+        "all nested backend locks current, MSVC CRT aligned, no CPAL lock entries."
     )
 
 
