@@ -519,7 +519,9 @@ public sealed class SidecarDiagnosticsSafetyTests
             """;
         const string playbackError = """
             {"op":"media-state","direction":"playback","state":"error",
-             "stream_generation":2,"running":false,"command_seq":0,"elapsed_ms":0}
+             "stream_generation":2,"running":false,"command_seq":0,"elapsed_ms":0,
+             "requested_device":"headset-id","requested_default":false,
+             "error_code":"open-failed","error":"build output stream: device unavailable"}
             """;
         const string playbackStopped = """
             {"op":"media-state","direction":"playback","state":"stopped",
@@ -541,6 +543,8 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.DoesNotContain("extensionFieldsIgnored", errorDetails);
         Assert.DoesNotContain("commandSeq=", errorDetails);
         Assert.DoesNotContain("elapsedMs=", errorDetails);
+        Assert.Contains("errorCode=open-failed", errorDetails);
+        Assert.Contains("error=build output stream: device unavailable", errorDetails);
         Assert.DoesNotContain("commandSeq=", stoppedDetails);
         Assert.DoesNotContain("elapsedMs=", stoppedDetails);
     }
@@ -559,6 +563,12 @@ public sealed class SidecarDiagnosticsSafetyTests
              "resolved_device":"Default Speakers","requested_default":false,
              "requested_matched":false,"fell_back_to_default":true}
             """;
+        const string failed = """
+            {"op":"media-state","direction":"playback","state":"error",
+             "stream_generation":9,"running":false,"requested_device":"Headphones",
+             "requested_default":false,"error_code":"open-failed",
+             "error":"output stream play: device unavailable"}
+            """;
 
         Assert.True(SidecarVoiceClient.TryReadPlaybackState(accepted, out var acknowledgement));
         Assert.Equal("command-accepted", acknowledgement.State);
@@ -570,6 +580,10 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.Equal("Default Speakers", playback.ResolvedDevice);
         Assert.True(playback.FellBackToDefault);
         Assert.False(playback.RequestedMatched);
+
+        Assert.True(SidecarVoiceClient.TryReadPlaybackState(failed, out var error));
+        Assert.Equal("open-failed", error.ErrorCode);
+        Assert.Equal("output stream play: device unavailable", error.Error);
 
         Assert.False(SidecarVoiceClient.TryReadPlaybackState(
             "{\"direction\":\"capture\",\"state\":\"stream-started\",\"stream_generation\":1}",

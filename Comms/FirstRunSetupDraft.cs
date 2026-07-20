@@ -286,6 +286,12 @@ internal sealed class FirstRunSetupDraft
 
     internal void SetMicrophoneIndex(int index)
     {
+        if (!CanSelectDeviceIndex(index, VoiceChatLocalSettings.MicDevices))
+        {
+            MicrophoneDevice = string.Empty;
+            MicrophoneDeviceName = string.Empty;
+            return;
+        }
         var device = DeviceAt(index, VoiceChatLocalSettings.MicDevices);
         MicrophoneDevice = device.Id ?? string.Empty;
         MicrophoneDeviceName = device.Name ?? string.Empty;
@@ -294,6 +300,12 @@ internal sealed class FirstRunSetupDraft
 #if WINDOWS
     internal void SetSpeakerIndex(int index)
     {
+        if (!CanSelectDeviceIndex(index, VoiceChatLocalSettings.SpkDevices))
+        {
+            SpeakerDevice = string.Empty;
+            SpeakerDeviceName = string.Empty;
+            return;
+        }
         var device = DeviceAt(index, VoiceChatLocalSettings.SpkDevices);
         SpeakerDevice = device.Id ?? string.Empty;
         SpeakerDeviceName = device.Name ?? string.Empty;
@@ -358,10 +370,18 @@ internal sealed class FirstRunSetupDraft
     {
         if (string.IsNullOrEmpty(savedId)) return devices.Count > 0 ? 0 : -1;
         for (int i = 1; i < devices.Count; i++)
-            if (string.Equals(savedId, devices[i].Id, StringComparison.Ordinal))
+            if (devices[i].IsAvailable &&
+                string.Equals(savedId, devices[i].Id, StringComparison.Ordinal))
                 return i;
         return -1;
     }
+
+    internal static bool CanSelectDeviceIndex(
+        int index,
+        IReadOnlyList<VoiceDeviceInfo> devices)
+        => index == 0
+            ? devices.Count > 0 && devices[0].IsAvailable
+            : index > 0 && index < devices.Count && devices[index].IsAvailable;
 
     private static VoiceDeviceInfo DeviceAt(int index, IReadOnlyList<VoiceDeviceInfo> devices)
         => index > 0 && index < devices.Count ? devices[index] : default;

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import struct
+import subprocess
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -20,6 +22,8 @@ ELF_ET_DYN = 3
 ELF_PT_DYNAMIC = 2
 ELF_PT_INTERP = 3
 ELF_SHT_DYNSYM = 11
+ELF_SHT_DYNAMIC = 6
+ELF_DT_NEEDED = 1
 ELF_STB_GLOBAL = 1
 ELF_STT_OBJECT = 1
 ELF_STT_FUNC = 2
@@ -32,6 +36,9 @@ MACH_LC_SYMTAB = 0x2
 MACH_LC_DYLD_INFO = 0x22
 MACH_LC_DYLD_INFO_ONLY = 0x80000022
 MACH_LC_DYLD_EXPORTS_TRIE = 0x80000033
+MACH_DYLIB_LOAD_COMMANDS = frozenset(
+    (0xC, 0x20, 0x80000018, 0x8000001F, 0x80000023)
+)
 MACH_N_STAB = 0xE0
 MACH_N_TYPE = 0x0E
 MACH_N_EXT = 0x01
@@ -71,6 +78,13 @@ PION_REQUIRED_FUNCTION_EXPORTS = frozenset(
     }
 )
 PION_REQUIRED_EXPORTS = PION_REQUIRED_FUNCTION_EXPORTS | {PION_CONTRACT_MARKER_SYMBOL}
+AUDIO_ENGINE_EXPECTED = "cubeb"
+CUBEB_VERSION_EXPECTED = "0.36.0"
+AUDIO_CONTRACT_PREFIX = b"PERFECTCOMMS_AUDIO_CONTRACT="
+AUDIO_CONTRACT = b"PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;"
+AUDIO_BACKENDS_WINDOWS = frozenset(("wasapi", "winmm"))
+AUDIO_BACKENDS_LINUX = frozenset(("pulse", "alsa"))
+AUDIO_BACKENDS_MACOS = frozenset(("audiounit", "audiounit-rust"))
 
 
 def fail(message: str) -> None:
@@ -82,6 +96,101 @@ def require_file(root: Path, relative: str) -> Path:
     if not path.is_file() or path.stat().st_size == 0:
         fail(f"missing or empty release asset: {relative}")
     return path
+
+
+def assert_audio_contract_bytes(data: bytes, label: str) -> None:
+    marker_count = data.count(AUDIO_CONTRACT_PREFIX)
+    if marker_count != 1:
+        fail(
+            f"{label}: expected exactly one PerfectComms audio contract marker, "
+            f"found {marker_count}"
+        )
+    marker_offset = data.find(AUDIO_CONTRACT_PREFIX)
+    marker = data[marker_offset : marker_offset + len(AUDIO_CONTRACT)]
+    if marker != AUDIO_CONTRACT:
+        fail(f"{label}: audio contract marker {marker!r}, expected {AUDIO_CONTRACT!r}")
+
+
+def assert_audio_contract_executable_bytes(data: bytes, label: str) -> None:
+    if len(data) >= 4 and data[:4] in (
+        bytes.fromhex("cffaedfe"),
+        bytes.fromhex("feedfacf"),
+        bytes.fromhex("cafebabe"),
+        bytes.fromhex("bebafeca"),
+        bytes.fromhex("cafebabf"),
+        bytes.fromhex("bfbafeca"),
+    ):
+        for _, slice_data, slice_label in macho_slices(data, label):
+            assert_audio_contract_bytes(slice_data, slice_label)
+        return
+    assert_audio_contract_bytes(data, label)
+
+
+def expected_audio_backends(data: bytes, label: str) -> frozenset[str]:
+    if data.startswith(b"MZ"):
+        return AUDIO_BACKENDS_WINDOWS
+    if data.startswith(bytes((0x7F,)) + b"ELF"):
+        return AUDIO_BACKENDS_LINUX
+    if len(data) >= 4 and data[:4] in (
+        bytes.fromhex("cffaedfe"),
+        bytes.fromhex("feedfacf"),
+        bytes.fromhex("cafebabe"),
+        bytes.fromhex("bebafeca"),
+        bytes.fromhex("cafebabf"),
+        bytes.fromhex("bfbafeca"),
+    ):
+        return AUDIO_BACKENDS_MACOS
+    fail(f"{label}: cannot infer helper platform from executable header")
+    return frozenset()
+
+
+def verify_helper_build_info(path: Path, expected_protocol: int) -> None:
+    data = path.read_bytes()
+    assert_audio_contract_executable_bytes(data, str(path))
+    expected_backends = expected_audio_backends(data, str(path))
+    try:
+        completed = subprocess.run(
+            [str(path), "--build-info"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        fail(f"{path}: cannot execute --build-info: {error}")
+    if completed.returncode != 0:
+        fail(
+            f"{path}: --build-info exited {completed.returncode}: "
+            f"{completed.stderr.strip()[:300]}"
+        )
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"{path}: --build-info did not return one JSON object: {error}")
+    if not isinstance(value, dict):
+        fail(f"{path}: --build-info root is not an object")
+    expected_fields = {
+        "schema": 1,
+        "protocol": expected_protocol,
+        "audio_engine": AUDIO_ENGINE_EXPECTED,
+        "cubeb_version": CUBEB_VERSION_EXPECTED,
+        "contract": AUDIO_CONTRACT.decode("ascii"),
+    }
+    for field, expected in expected_fields.items():
+        if value.get(field) != expected:
+            fail(
+                f"{path}: --build-info {field}={value.get(field)!r}, expected {expected!r}"
+            )
+    backends = value.get("compiled_backends")
+    if not isinstance(backends, list) or any(not isinstance(item, str) for item in backends):
+        fail(f"{path}: --build-info compiled_backends is not a string array")
+    if len(backends) != len(set(backends)):
+        fail(f"{path}: --build-info contains duplicate compiled backends")
+    if frozenset(backends) != expected_backends:
+        fail(
+            f"{path}: compiled Cubeb backends {sorted(backends)!r}, "
+            f"expected {sorted(expected_backends)!r}"
+        )
 
 
 def assert_pe(path: Path, expected_machine: int) -> None:
@@ -365,8 +474,23 @@ def assert_no_private_windows_runtime_imports(imports: set[str], label: str) -> 
         )
 
 
+def assert_no_external_audio_windows(imports: set[str], label: str) -> None:
+    external = sorted(
+        name
+        for name in imports
+        if "CUBEB" in name.upper() or "SPEEXDSP" in name.upper()
+    )
+    if external:
+        fail(
+            f"{label}: Windows helper requires an unshipped audio DLL: "
+            f"{', '.join(external)}; build vendored Cubeb and its Speex resampler"
+        )
+
+
 def assert_no_private_windows_runtime(path: Path) -> None:
-    assert_no_private_windows_runtime_imports(pe_imports(path), str(path))
+    imports = pe_imports(path)
+    assert_no_private_windows_runtime_imports(imports, str(path))
+    assert_no_external_audio_windows(imports, str(path))
 
 
 def assert_elf(path: Path, expected_machine: int, expected_type: int | None = None) -> None:
@@ -430,6 +554,58 @@ def section_bytes(data: bytes, section: tuple[int, ...], label: str) -> bytes:
     if offset + size > len(data):
         fail(f"{label}: ELF64 section extends past end of file")
     return data[offset : offset + size]
+
+
+def elf64_needed_libraries(data: bytes, label: str) -> set[str]:
+    sections = elf64_sections(data, label)
+    needed: set[str] = set()
+    dynamic_tables = 0
+    for section in sections:
+        if section[1] != ELF_SHT_DYNAMIC:
+            continue
+        dynamic_tables += 1
+        string_section_index = section[6]
+        if string_section_index >= len(sections):
+            fail(f"{label}: ELF64 dynamic table has an invalid string-table link")
+        strings = section_bytes(data, sections[string_section_index], label)
+        entries = section_bytes(data, section, label)
+        entry_size = section[9]
+        if entry_size < 16 or len(entries) % entry_size != 0:
+            fail(f"{label}: malformed ELF64 dynamic table")
+        for offset in range(0, len(entries), entry_size):
+            tag, value = struct.unpack_from("<QQ", entries, offset)
+            if tag != ELF_DT_NEEDED:
+                continue
+            if value >= len(strings):
+                fail(f"{label}: ELF64 DT_NEEDED has an invalid string offset")
+            name_end = strings.find(bytes([0]), value)
+            if name_end < 0:
+                fail(f"{label}: unterminated ELF64 DT_NEEDED name")
+            try:
+                needed.add(strings[value:name_end].decode("ascii", "strict"))
+            except UnicodeDecodeError:
+                fail(f"{label}: ELF64 DT_NEEDED name is not ASCII")
+    if dynamic_tables == 0:
+        fail(f"{label}: ELF executable has no dynamic dependency table")
+    return needed
+
+
+def assert_linux_cubeb_runtime_bytes(data: bytes, label: str) -> None:
+    needed = elf64_needed_libraries(data, label)
+    forbidden = sorted(
+        name
+        for name in needed
+        if name.lower().startswith("libpulse")
+        or name.lower().startswith("libasound.so")
+        or name.lower().startswith("libcubeb.so")
+        or name.lower().startswith("libspeexdsp.so")
+    )
+    if forbidden:
+        fail(
+            f"{label}: Linux helper has a forbidden direct audio dependency: "
+            f"{', '.join(forbidden)}; build vendored Cubeb with its C PulseAudio/ALSA "
+            "backends, lazy library loading, and the vendored Speex resampler"
+        )
 
 
 def elf64_dynamic_symbols(
@@ -646,6 +822,75 @@ def self_test_pe(imports: tuple[str, ...], machine: int) -> bytes:
         )
         data[name_offset : name_offset + len(encoded)] = encoded
         name_offset += len(encoded)
+    return bytes(data)
+
+
+def self_test_elf_needed(libraries: tuple[str, ...]) -> bytes:
+    strings = bytearray(1)
+    offsets: list[int] = []
+    for library in libraries:
+        offsets.append(len(strings))
+        strings.extend(library.encode("ascii") + bytes([0]))
+    dynamic = bytearray()
+    for offset in offsets:
+        dynamic.extend(struct.pack("<QQ", ELF_DT_NEEDED, offset))
+    dynamic.extend(struct.pack("<QQ", 0, 0))
+
+    dynamic_offset = 0x80
+    strings_offset = align_up(dynamic_offset + len(dynamic), 8)
+    section_offset = align_up(strings_offset + len(strings), 8)
+    data = bytearray(section_offset + 3 * 64)
+    data[:16] = bytes((0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    struct.pack_into(
+        "<HHIQQQIHHHHHH",
+        data,
+        16,
+        ELF_ET_DYN,
+        ELF_X86_64,
+        1,
+        0,
+        0,
+        section_offset,
+        0,
+        64,
+        0,
+        0,
+        64,
+        3,
+        0,
+    )
+    data[dynamic_offset : dynamic_offset + len(dynamic)] = dynamic
+    data[strings_offset : strings_offset + len(strings)] = strings
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 64,
+        0,
+        ELF_SHT_DYNAMIC,
+        0,
+        0,
+        dynamic_offset,
+        len(dynamic),
+        2,
+        0,
+        8,
+        16,
+    )
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_offset + 128,
+        0,
+        3,
+        0,
+        0,
+        strings_offset,
+        len(strings),
+        0,
+        0,
+        1,
+        0,
+    )
     return bytes(data)
 
 
@@ -1026,6 +1271,33 @@ def encode_uleb128(value: int) -> bytes:
             return bytes(encoded)
 
 
+def self_test_macho_loads(libraries: tuple[str, ...]) -> bytes:
+    commands = bytearray()
+    for library in libraries:
+        name = library.encode("utf-8") + bytes([0])
+        command_size = align_up(24 + len(name), 8)
+        command = bytearray(command_size)
+        struct.pack_into("<IIIIII", command, 0, 0xC, command_size, 24, 0, 0, 0)
+        command[24 : 24 + len(name)] = name
+        commands.extend(command)
+    data = bytearray(32 + len(commands))
+    struct.pack_into(
+        "<IIIIIIII",
+        data,
+        0,
+        0xFEEDFACF,
+        MACH_X86_64,
+        0,
+        2,
+        len(libraries),
+        len(commands),
+        0,
+        0,
+    )
+    data[32:] = commands
+    return bytes(data)
+
+
 def self_test_macho_export_trie(exports: frozenset[str]) -> bytes:
     edges = [b"_" + name.encode("ascii") for name in sorted(exports)]
     child = bytes((1, 0, 0))
@@ -1172,6 +1444,26 @@ def expect_self_test_failure(
 
 
 def run_self_tests() -> None:
+    assert_audio_contract_bytes(b"prefix" + AUDIO_CONTRACT + b"suffix", "audio-contract-valid")
+    expect_self_test_failure(
+        assert_audio_contract_bytes,
+        b"no marker",
+        "audio-contract-missing",
+        "expected exactly one PerfectComms audio contract marker",
+    )
+    expect_self_test_failure(
+        assert_audio_contract_bytes,
+        AUDIO_CONTRACT + b"padding" + AUDIO_CONTRACT,
+        "audio-contract-duplicate",
+        "expected exactly one PerfectComms audio contract marker",
+    )
+    expect_self_test_failure(
+        assert_audio_contract_bytes,
+        b"PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CPAL;CPAL=0.15.3;",
+        "audio-contract-retired-cpal",
+        "audio contract marker",
+    )
+
     expected_marker = expected_pc_mobile_abi_marker(PC_MOBILE_ABI_EXPECTED)
     valid = self_test_pc_mobile_elf(expected_marker)
     assert_pc_mobile_abi_bytes(valid, "self-test-valid", PC_MOBILE_ABI_EXPECTED)
@@ -1240,6 +1532,16 @@ def run_self_tests() -> None:
     if clean_imports != {"KERNEL32.DLL", "WS2_32.DLL", "MSVCRT.DLL"}:
         fail(f"PE import parser self-test returned {sorted(clean_imports)!r}")
     assert_no_private_windows_runtime_imports(clean_imports, "pe-self-test")
+    assert_no_external_audio_windows(clean_imports, "pe-self-test")
+    try:
+        assert_no_external_audio_windows(
+            {"KERNEL32.DLL", "CUBEB.DLL"}, "pe-cubeb-self-test-invalid"
+        )
+    except ValueError as error:
+        if "unshipped audio DLL" not in str(error):
+            fail(f"Windows Cubeb import self-test returned unexpected error: {error}")
+    else:
+        fail("Windows Cubeb import self-test unexpectedly passed")
     try:
         assert_no_private_windows_runtime_imports(
             pe_imports_bytes(
@@ -1253,6 +1555,50 @@ def run_self_tests() -> None:
             fail(f"PE import policy self-test returned unexpected error: {error}")
     else:
         fail("PE import policy self-test unexpectedly passed")
+
+    cubeb_linux = self_test_elf_needed(("libstdc++.so.6", "libc.so.6", "libdl.so.2"))
+    assert_linux_cubeb_runtime_bytes(cubeb_linux, "elf-cubeb-self-test")
+    expect_self_test_failure(
+        assert_linux_cubeb_runtime_bytes,
+        self_test_elf_needed(("libpulse.so.0", "libc.so.6")),
+        "elf-cubeb-self-test-pulse-linked",
+        "forbidden direct audio dependency: libpulse.so.0",
+    )
+    expect_self_test_failure(
+        assert_linux_cubeb_runtime_bytes,
+        self_test_elf_needed(("libasound.so.2", "libc.so.6")),
+        "elf-cubeb-self-test-alsa-linked",
+        "forbidden direct audio dependency: libasound.so.2",
+    )
+    expect_self_test_failure(
+        assert_linux_cubeb_runtime_bytes,
+        self_test_elf_needed(("libcubeb.so.0", "libc.so.6")),
+        "elf-cubeb-self-test-shared",
+        "forbidden direct audio dependency: libcubeb.so.0",
+    )
+    expect_self_test_failure(
+        assert_linux_cubeb_runtime_bytes,
+        self_test_elf_needed(("libspeexdsp.so.1", "libc.so.6")),
+        "elf-cubeb-self-test-system-speex",
+        "forbidden direct audio dependency: libspeexdsp.so.1",
+    )
+
+    mac_system_libraries = (
+        "/System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit",
+        "/usr/lib/libc++.1.dylib",
+    )
+    mac_loads = self_test_macho_loads(mac_system_libraries)
+    if macho_needed_libraries(mac_loads, "macho-load-self-test") != set(
+        mac_system_libraries
+    ):
+        fail("Mach-O dependency parser self-test returned the wrong libraries")
+    assert_no_external_audio_macho_bytes(mac_loads, "macho-load-self-test")
+    expect_self_test_failure(
+        assert_no_external_audio_macho_bytes,
+        self_test_macho_loads(("@rpath/libcubeb.dylib",)),
+        "macho-cubeb-self-test-invalid",
+        "unshipped audio dylib",
+    )
     try:
         assert_no_private_windows_runtime_imports(
             pe_imports_bytes(
@@ -1494,6 +1840,59 @@ def macho_slices(data: bytes, label: str) -> list[tuple[int, bytes, str]]:
     return slices
 
 
+def macho_needed_libraries(data: bytes, label: str) -> set[str]:
+    libraries: set[str] = set()
+    for _, slice_data, slice_label in macho_slices(data, label):
+        endian, _, _, command_count, command_size = macho_thin_header(
+            slice_data, slice_label
+        )
+        command_end = 32 + command_size
+        command_offset = 32
+        for _ in range(command_count):
+            if command_offset + 8 > command_end:
+                fail(f"{slice_label}: truncated Mach-O load command")
+            command, size = struct.unpack_from(
+                f"{endian}II", slice_data, command_offset
+            )
+            if size < 8 or command_offset + size > command_end:
+                fail(f"{slice_label}: invalid Mach-O load command size")
+            if command in MACH_DYLIB_LOAD_COMMANDS:
+                if size < 24:
+                    fail(f"{slice_label}: truncated Mach-O dylib load command")
+                name_offset = struct.unpack_from(
+                    f"{endian}I", slice_data, command_offset + 8
+                )[0]
+                if name_offset < 24 or name_offset >= size:
+                    fail(f"{slice_label}: invalid Mach-O dylib name offset")
+                name_start = command_offset + name_offset
+                name_end = slice_data.find(
+                    bytes([0]), name_start, command_offset + size
+                )
+                if name_end < 0:
+                    fail(f"{slice_label}: unterminated Mach-O dylib name")
+                try:
+                    libraries.add(slice_data[name_start:name_end].decode("utf-8", "strict"))
+                except UnicodeDecodeError:
+                    fail(f"{slice_label}: Mach-O dylib name is not UTF-8")
+            command_offset += size
+        if command_offset != command_end:
+            fail(f"{slice_label}: Mach-O load-command sizes do not match header")
+    return libraries
+
+
+def assert_no_external_audio_macho_bytes(data: bytes, label: str) -> None:
+    external = sorted(
+        library
+        for library in macho_needed_libraries(data, label)
+        if "libcubeb" in library.lower() or "libspeexdsp" in library.lower()
+    )
+    if external:
+        fail(
+            f"{label}: macOS helper requires an unshipped audio dylib: "
+            f"{', '.join(external)}; build vendored Cubeb and its Speex resampler"
+        )
+
+
 def read_uleb128(data: bytes, offset: int, end: int, label: str) -> tuple[int, int]:
     result = 0
     shift = 0
@@ -1688,6 +2087,11 @@ def assert_mac_bundle(path: Path) -> None:
             for relative in required_entries[1:3]:
                 data = archive.read(entries[relative])
                 assert_universal_macho_bytes(data, f"{path}!{relative}")
+                if relative.endswith("/PerfectCommsAudio"):
+                    assert_audio_contract_executable_bytes(data, f"{path}!{relative}")
+                    assert_no_external_audio_macho_bytes(
+                        data, f"{path}!{relative}"
+                    )
             pion_relative = required_entries[3]
             assert_pion_macho_bytes(
                 archive.read(entries[pion_relative]), f"{path}!{pion_relative}"
@@ -1747,9 +2151,15 @@ def verify_desktop(root: Path) -> None:
         path = require_file(root, relative)
         assert_pe(path, machine)
         assert_no_private_windows_runtime(path)
+        if relative.startswith("Libs/pc-capture/"):
+            assert_audio_contract_executable_bytes(path.read_bytes(), str(path))
         print(f"release.asset.ok format=pe machine=0x{machine:04x} path={relative}")
     for relative in elf_assets:
-        assert_elf(require_file(root, relative), ELF_X86_64)
+        path = require_file(root, relative)
+        assert_elf(path, ELF_X86_64)
+        if relative == "Libs/pc-capture/pc-capture-linux-x64":
+            assert_linux_cubeb_runtime_bytes(path.read_bytes(), str(path))
+            assert_audio_contract_executable_bytes(path.read_bytes(), str(path))
         print(f"release.asset.ok format=elf64 machine=x86_64 path={relative}")
     pion_pe_assets = (
         ("Libs/pion/pc-pion.x64.dll", PE_AMD64),
@@ -1799,21 +2209,104 @@ def main() -> int:
         type=Path,
         help="verify one Windows PE asset has no unbundled MSVC or MinGW runtime dependency",
     )
+    parser.add_argument(
+        "--elf-cubeb-runtime",
+        type=Path,
+        help=(
+            "verify one Linux helper uses lazy system-audio loading and has no "
+            "external Cubeb or SpeexDSP dependency"
+        ),
+    )
+    parser.add_argument(
+        "--mac-bundle",
+        type=Path,
+        help="verify one final universal macOS helper bundle and its static audio contract",
+    )
+    parser.add_argument(
+        "--helper-build-info",
+        type=Path,
+        help="execute one host-native helper and verify its linked Cubeb backend inventory",
+    )
+    parser.add_argument(
+        "--expected-protocol",
+        type=int,
+        default=13,
+        help="protocol expected from --helper-build-info (default: 13)",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     try:
         if args.self_test:
-            if args.configuration is not None or args.manifest_only or args.pe_no_private_runtime:
+            if (
+                args.configuration is not None
+                or args.manifest_only
+                or args.pe_no_private_runtime
+                or args.elf_cubeb_runtime
+                or args.mac_bundle
+                or args.helper_build_info
+            ):
                 fail("--self-test cannot be combined with other verification modes")
             run_self_tests()
         elif args.pe_no_private_runtime is not None:
-            if args.configuration is not None or args.manifest_only:
+            if (
+                args.configuration is not None
+                or args.manifest_only
+                or args.elf_cubeb_runtime
+                or args.mac_bundle
+                or args.helper_build_info
+            ):
                 fail("--pe-no-private-runtime cannot be combined with other verification modes")
             helper = args.pe_no_private_runtime.resolve()
             if not helper.is_file() or helper.stat().st_size == 0:
                 fail(f"missing or empty Windows PE asset: {helper}")
             assert_no_private_windows_runtime(helper)
             print(f"release.asset.ok target=windows compiler_runtime=self-contained path={helper}")
+        elif args.elf_cubeb_runtime is not None:
+            if (
+                args.configuration is not None
+                or args.manifest_only
+                or args.mac_bundle
+                or args.helper_build_info
+            ):
+                fail("--elf-cubeb-runtime cannot be combined with other verification modes")
+            helper = args.elf_cubeb_runtime.resolve()
+            if not helper.is_file() or helper.stat().st_size == 0:
+                fail(f"missing or empty Linux helper asset: {helper}")
+            data = helper.read_bytes()
+            assert_elf_bytes(data, str(helper), ELF_X86_64)
+            assert_linux_cubeb_runtime_bytes(data, str(helper))
+            assert_audio_contract_executable_bytes(data, str(helper))
+            print(
+                "release.asset.ok target=linux cubeb=static "
+                "system_audio=runtime-dlopen "
+                f"path={helper}"
+            )
+        elif args.mac_bundle is not None:
+            if (
+                args.configuration is not None
+                or args.manifest_only
+                or args.helper_build_info
+            ):
+                fail("--mac-bundle cannot be combined with other verification modes")
+            bundle = args.mac_bundle.resolve()
+            if not bundle.is_file() or bundle.stat().st_size == 0:
+                fail(f"missing or empty macOS helper bundle: {bundle}")
+            assert_mac_bundle(bundle)
+            print(
+                "release.asset.ok target=macos architectures=x86_64,arm64 "
+                f"cubeb=static path={bundle}"
+            )
+        elif args.helper_build_info is not None:
+            if args.configuration is not None or args.manifest_only:
+                fail("--helper-build-info cannot be combined with other verification modes")
+            helper = args.helper_build_info.resolve()
+            if not helper.is_file() or helper.stat().st_size == 0:
+                fail(f"missing or empty native helper asset: {helper}")
+            verify_helper_build_info(helper, args.expected_protocol)
+            print(
+                "release.asset.ok audio_engine=cubeb "
+                f"cubeb={CUBEB_VERSION_EXPECTED} protocol={args.expected_protocol} path={helper}"
+            )
         elif args.configuration is None:
             fail("--configuration is required unless --self-test is used")
         elif args.manifest_only:

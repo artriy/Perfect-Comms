@@ -1,7 +1,8 @@
-# cargo-about preserves upstream license-file line endings inside this generated
-# document. Preserve those bytes so checkout-specific newline conversion cannot
+# cargo-about preserves upstream license-file line endings inside these generated
+# documents. Preserve those bytes so checkout-specific newline conversion cannot
 # alter the license text that CI parses and compares by canonical dependency identity.
 Libs/native-rust-dependencies.html -text -diff
+Libs/cubeb-coreaudio-rust-dependencies.html -text -diff
 Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT -text -diff -whitespace
 Libs/system-text-json.THIRD-PARTY-NOTICES.TXT -text -diff -whitespace
 native/cargo-about.hbs text eol=lf

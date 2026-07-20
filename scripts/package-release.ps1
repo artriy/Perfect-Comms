@@ -62,6 +62,10 @@ function Copy-ThirdPartyLicenseTexts([string]$DestinationRoot) {
     $licenseDirectory = Join-Path $DestinationRoot "licenses"
     New-Item -ItemType Directory -Force -Path $licenseDirectory | Out-Null
     $licenses = @{
+        "libcubeb-ISC.txt" = "Libs\libcubeb.LICENSE"
+        "cubeb-rs-ISC.txt" = "Libs\cubeb-rs.LICENSE"
+        "cubeb-speex-resampler-BSD-3-Clause.txt" = "Libs\cubeb-speex-resampler.LICENSE"
+        "cubeb-coreaudio-rust-dependencies.html" = "Libs\cubeb-coreaudio-rust-dependencies.html"
         "libopus-BSD-3-Clause.txt" = "Libs\opus.COPYING"
         "opusic-c-BSD-3-Clause.txt" = "Libs\opusic-c.COPYING"
         "webrtc-audio-processing-BSD-3-Clause.txt" = "Libs\webrtc-apm.COPYING"
@@ -130,6 +134,14 @@ function Assert-HelperProtocol([string]$RelativePath, [string]$ExpectedProtocol)
     $actual = (($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
     if ($exitCode -ne 0 -or $actual -ne $ExpectedProtocol) {
         throw "stale or incompatible release helper: $RelativePath (expected protocol $ExpectedProtocol, got '$actual', exit $exitCode). Rebuild and restage native helpers before packaging."
+    }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $python) { throw "Python 3 is required to verify the helper Cubeb build contract." }
+    & $python.Source (Join-Path $root "scripts\verify-release-assets.py") `
+        --helper-build-info $path --expected-protocol $ExpectedProtocol
+    if ($LASTEXITCODE -ne 0) {
+        throw "stale or non-Cubeb release helper: $RelativePath"
     }
     Write-Host "release.package.helper_protocol path=$RelativePath protocol=$actual"
 }
@@ -221,12 +233,24 @@ if ($csprojVersion -and $pluginVersion -ne $csprojVersion) {
     Write-Host "release.package.version_ok VoiceChatPluginMain.cs=$pluginVersion"
 }
 
-$buildOutput = & dotnet build $project -c $Configuration --nologo -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
+$buildOutput = & dotnet build $project -c $Configuration --nologo --no-incremental -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
 $buildExit = $LASTEXITCODE
 $buildOutput | ForEach-Object { Write-Host $_ }
 if ($buildExit -ne 0) { throw "dotnet build failed with exit code $buildExit" }
 $warningCount = @($buildOutput | Select-String -Pattern "warning ").Count
 Write-Host "release.package.build_ok configuration=$Configuration warnings=$warningCount"
+
+if ($Configuration -ne "Android") {
+    $helperResourceTest = & dotnet test (Join-Path $root "PerfectComms.Tests\PerfectComms.Tests.csproj") `
+        -c $Configuration --nologo --filter "FullyQualifiedName~EmbeddedDesktopHelpersMatchStagedFiles" `
+        -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
+    $helperResourceTestExit = $LASTEXITCODE
+    $helperResourceTest | ForEach-Object { Write-Host $_ }
+    if ($helperResourceTestExit -ne 0) {
+        throw "embedded native helper verification failed with exit code $helperResourceTestExit"
+    }
+    Write-Host "release.package.embedded_helpers_match configuration=$Configuration"
+}
 
 if (Test-Path $output) { Remove-Item $output -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $output "BepInEx\plugins") | Out-Null

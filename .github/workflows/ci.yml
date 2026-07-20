@@ -25,6 +25,8 @@ jobs:
           python3 -m py_compile scripts/verify-package-layout.py
           python3 -m py_compile scripts/verify-native-license-inventory.py
           python3 -m py_compile scripts/verify-pion-license-inventory.py
+          python3 -m py_compile scripts/generate-cubeb-license-inventories.py
+          python3 -m py_compile scripts/verify-cubeb-provenance.py
           python3 scripts/verify-release-assets.py --self-test
           python3 scripts/verify-package-layout.py --self-test
           bash scripts/fetch-bepinex.sh --self-test
@@ -64,14 +66,34 @@ jobs:
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
-      - name: Native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Native build dependencies (Cubeb PulseAudio + ALSA)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config cmake nasm
       - name: Rust formatting
         run: |
           cargo fmt --manifest-path native/pc-capture/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/pc-mobile/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/vendor/cubeb/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/vendor/cubeb-sys/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/apm-sys/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/pion-sys/Cargo.toml --all -- --check
+      - name: Verify Cubeb backend feature isolation
+        shell: bash
+        run: |
+          python3 scripts/verify-cubeb-provenance.py --root .
+          ! grep -q '^name = "cpal"$' native/pc-capture/Cargo.lock native/pc-mobile/Cargo.lock
+          linux_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i cubeb-sys)"
+          mac_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-apple-darwin -e features -i cubeb-sys)"
+          windows_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-pc-windows-msvc -e features -i cubeb-sys)"
+          android_tree="$(cargo tree --locked --manifest-path native/pc-mobile/Cargo.toml --target aarch64-linux-android)"
+          [[ "$linux_features" == *'cubeb-sys feature "unittest-build"'* ]]
+          [[ "$mac_features" != *'cubeb-sys feature "unittest-build"'* ]]
+          [[ "$windows_features" != *'cubeb-sys feature "unittest-build"'* ]]
+          [[ "$android_tree" != *'cubeb v0.36.0'* ]]
+          [[ "$android_tree" != *'cubeb-sys v0.36.0'* ]]
+      - name: Test patched Cubeb callback ownership and libcubeb binding
+        run: |
+          cargo check --locked --manifest-path native/vendor/cubeb-sys/Cargo.toml --features unittest-build
+          cargo test --locked --manifest-path native/vendor/cubeb/Cargo.toml --lib
       - name: Pion formatting, vet, tests, and license inventory
         run: |
           unformatted="$(find native/pc-pion -type f -name '*.go' -exec gofmt -l {} +)"
@@ -81,9 +103,9 @@ jobs:
           python3 scripts/verify-pion-license-inventory.py
           bash scripts/build-pion.sh linux-x64
       - name: Lint desktop shared core
-        run: cargo clippy --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
       - name: Lint mobile wrapper
-        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-audit@0.22.2
@@ -91,6 +113,8 @@ jobs:
         run: |
           cargo audit --file native/pc-capture/Cargo.lock
           cargo audit --no-fetch --file native/pc-mobile/Cargo.lock
+          cargo audit --no-fetch --file native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs/Cargo.lock
+          cargo audit --no-fetch --file native/vendor/cubeb-sys/libcubeb/src/cubeb-pulse-rs/Cargo.lock
           cargo audit --no-fetch --file native/apm-sys/Cargo.lock
           cargo audit --no-fetch --file native/pion-sys/Cargo.lock
       - name: Test desktop shared core
@@ -100,13 +124,16 @@ jobs:
           PC_PION_TEST_DISABLE_MDNS: "1"
         run: |
           cargo test --locked --manifest-path native/pion-sys/Cargo.toml --all-targets
-          cargo test --manifest-path native/pc-capture/Cargo.toml --all-targets
+          cargo test --locked --manifest-path native/pc-capture/Cargo.toml --all-targets
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-about@0.9.1
       - name: Verify native dependency license inventory
         run: |
           python3 scripts/verify-native-license-inventory.py --self-test
+          python3 scripts/verify-native-license-inventory.py \
+            --subset-lock native/pc-capture/Cargo.lock \
+            --superset-lock native/pc-mobile/Cargo.lock
           cargo fetch --locked --manifest-path native/pc-mobile/Cargo.toml
           cargo about generate \
             --manifest-path native/pc-mobile/Cargo.toml \
@@ -117,6 +144,12 @@ jobs:
           python3 scripts/verify-native-license-inventory.py \
             Libs/native-rust-dependencies.html \
             "$RUNNER_TEMP/native-rust-dependencies.html"
+          python3 scripts/generate-cubeb-license-inventories.py \
+            --root . \
+            --output-dir "$RUNNER_TEMP/cubeb-license-inventories"
+          python3 scripts/verify-native-license-inventory.py \
+            Libs/cubeb-coreaudio-rust-dependencies.html \
+            "$RUNNER_TEMP/cubeb-license-inventories/cubeb-coreaudio-rust-dependencies.html"
 
   worker:
     name: Cloudflare worker tests and dry run

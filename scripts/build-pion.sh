@@ -102,15 +102,26 @@ case "$target" in
       echo "ANDROID_NDK_HOME or ANDROID_NDK_ROOT is required for android-arm64." >&2
       exit 1
     }
+    ndk_cc_suffix=""
     case "$(uname -s)-$(uname -m)" in
       Linux-x86_64) ndk_host=linux-x86_64 ;;
       Darwin-x86_64) ndk_host=darwin-x86_64 ;;
       Darwin-arm64) ndk_host=darwin-x86_64 ;;
+      MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64)
+        ndk_host=windows-x86_64
+        ndk_cc_suffix=".cmd"
+        ndk_root="$(cygpath -u "$ndk_root")"
+        ;;
       *) echo "Unsupported Android NDK build host: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
     esac
     android_api="${PC_ANDROID_API:-21}"
     export GOOS=android GOARCH=arm64 CGO_ENABLED=1
-    export CC="${CC:-$ndk_root/toolchains/llvm/prebuilt/$ndk_host/bin/aarch64-linux-android${android_api}-clang}"
+    default_cc="$ndk_root/toolchains/llvm/prebuilt/$ndk_host/bin/aarch64-linux-android${android_api}-clang${ndk_cc_suffix}"
+    if [[ -n "$ndk_cc_suffix" ]]; then
+      # Go is a native Windows executable under Git Bash, so hand it a Windows-compatible path.
+      default_cc="$(cygpath -m "$default_cc")"
+    fi
+    export CC="${CC:-$default_cc}"
     # Pion's Android interface enumeration uses wlynxg/anet, whose documented
     # Go 1.23+ build contract requires this linker opt-in for net.zoneCache.
     linker_flags="$linker_flags -checklinkname=0"
@@ -121,7 +132,7 @@ case "$target" in
 esac
 
 if [[ "$target" != "mac-universal" ]]; then
-  command -v "$CC" >/dev/null 2>&1 || {
+  [[ -f "$CC" ]] || command -v "$CC" >/dev/null 2>&1 || {
     echo "C compiler not found for $target: $CC" >&2
     exit 1
   }

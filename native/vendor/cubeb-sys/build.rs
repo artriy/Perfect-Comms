@@ -1,0 +1,236 @@
+// Copyright © 2018 Mozilla Foundation
+//
+// This program is made available under an ISC-style license.  See the
+// accompanying file LICENSE for details.
+
+#[cfg(not(feature = "gecko-in-tree"))]
+extern crate cmake;
+#[cfg(not(feature = "gecko-in-tree"))]
+extern crate pkg_config;
+
+use std::env;
+use std::fs;
+use std::path::Path;
+
+macro_rules! t {
+    ($e:expr) => {
+        match $e {
+            Ok(e) => e,
+            Err(e) => panic!("{} failed with {}", stringify!($e), e),
+        }
+    };
+}
+
+#[cfg(feature = "gecko-in-tree")]
+fn main() {}
+
+#[cfg(not(feature = "gecko-in-tree"))]
+fn main() {
+    if env::var("LIBCUBEB_SYS_USE_PKG_CONFIG").is_ok()
+        && pkg_config::find_library("libcubeb").is_ok()
+    {
+        return;
+    }
+
+    if !Path::new("libcubeb/CMakeLists.txt").exists() {
+        panic!(
+            "cubeb-sys/libcubeb/CMakeLists.txt is missing. The libcubeb git submodule \
+             does not appear to be checked out. Run `git submodule update --init --recursive` \
+             in the cubeb-rs checkout and try again."
+        );
+    }
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let _ = fs::remove_dir_all(&out_dir);
+
+    env::remove_var("DESTDIR");
+
+    // When this build script runs under `cargo clippy`, these variables leak
+    // into the nested cargo invocation that builds the vendored rust backends
+    // (via cmake), running clippy over code we don't control. Scrub them so
+    // the nested build is a plain `cargo build`.
+    env::remove_var("RUSTC_WRAPPER");
+    env::remove_var("RUSTC_WORKSPACE_WRAPPER");
+    env::remove_var("CLIPPY_ARGS");
+
+    // Copy libcubeb to the output directory.
+    let libcubeb_path = format!("{out_dir}/libcubeb");
+
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let child_dst = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_all(&entry.path(), &child_dst)?;
+            } else {
+                fs::copy(entry.path(), &child_dst)?;
+            }
+        }
+        Ok(())
+    }
+
+    t!(copy_dir_all(
+        Path::new("libcubeb"),
+        Path::new(&libcubeb_path)
+    ));
+
+    fn visit_dirs(dir: &Path, cb: &dyn Fn(&fs::DirEntry)) -> std::io::Result<()> {
+        if dir.is_dir() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    visit_dirs(&path, cb)?;
+                } else {
+                    cb(&entry);
+                }
+            }
+        }
+        Ok(())
+    }
+    // For packaged build: rename libcubeb Cargo.toml.in files to Cargo.toml.
+    t!(visit_dirs(Path::new(&libcubeb_path), &|entry| {
+        let path = entry.path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("Cargo.toml.in")
+        {
+            let new_path = path.with_file_name("Cargo.toml");
+            fs::rename(&path, &new_path).unwrap();
+        }
+    }));
+
+    let target = env::var("TARGET").unwrap();
+    let windows = target.contains("windows");
+    let darwin = target.contains("darwin");
+    let freebsd = target.contains("freebsd");
+    let android = target.contains("android");
+    let static_msvc_runtime = windows
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && env::var("CARGO_CFG_TARGET_FEATURE")
+            .map(|features| features.split(',').any(|feature| feature == "crt-static"))
+            .unwrap_or(false);
+    let mut cfg = cmake::Config::new(&libcubeb_path);
+
+    // Pin the nested Rust backend cargo builds (cubeb-pulse-rs / cubeb-coreaudio-rs,
+    // invoked by CMake ExternalProject as plain `cargo build`) to a target dir we
+    // control. Without this they inherit an ambient CARGO_TARGET_DIR or a
+    // `target-dir` set in the user's cargo config, which relocates the produced
+    // static libs away from the rustc-link-search paths emitted below and breaks
+    // linking with "could not find native static library `cubeb_pulse`".
+    let rust_target_dir = format!("{out_dir}/rust-backend-target");
+
+    if darwin {
+        let cmake_osx_arch = if target.contains("aarch64") {
+            // Apple Silicon
+            "arm64"
+        } else {
+            // Assuming Intel (x86_64)
+            "x86_64"
+        };
+        cfg.define("CMAKE_OSX_ARCHITECTURES", cmake_osx_arch);
+    }
+
+    let no_private_apis_in_coreaudio = cfg!(feature = "no-private-apis-in-coreaudio");
+
+    // Do not build the rust backends for tests: doing so causes duplicate
+    // symbol definitions.
+    let build_rust_libs = cfg!(not(feature = "unittest-build")) && env::var("DOCS_RS").is_err();
+    let dst = cfg
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("BUILD_TESTS", "OFF")
+        .define("BUILD_TOOLS", "OFF")
+        .define(
+            "BUILD_RUST_LIBS",
+            if build_rust_libs { "ON" } else { "OFF" },
+        )
+        // Rust's MSVC targets use the release CRT in every Cargo profile. Do not
+        // let CMake's Debug configuration silently select /MDd or /MTd: that mixes
+        // incompatible heaps with Rust and either warns or fails at final link.
+        .define("USE_STATIC_MSVC_RUNTIME", "OFF")
+        .define(
+            "CMAKE_MSVC_RUNTIME_LIBRARY",
+            if static_msvc_runtime {
+                "MultiThreaded"
+            } else {
+                "MultiThreadedDLL"
+            },
+        )
+        .define(
+            "NO_PRIVATE_APIS_IN_COREAUDIO",
+            if no_private_apis_in_coreaudio {
+                "ON"
+            } else {
+                "OFF"
+            },
+        )
+        // Force rust libs to include target triple when outputting,
+        // for easier linking when cross-compiling.
+        .env("CARGO_BUILD_TARGET", &target)
+        .env("CARGO_TARGET_DIR", &rust_target_dir)
+        .build();
+
+    println!("cargo:rustc-link-lib=static=cubeb");
+    if windows {
+        println!("cargo:rustc-link-lib=dylib=avrt");
+        println!("cargo:rustc-link-lib=dylib=ksuser");
+        println!("cargo:rustc-link-lib=dylib=ole32");
+        println!("cargo:rustc-link-lib=dylib=user32");
+        println!("cargo:rustc-link-lib=dylib=winmm");
+        println!("cargo:rustc-link-search=native={}/lib", dst.display());
+    } else if darwin {
+        println!("cargo:rustc-link-lib=framework=AudioUnit");
+        println!("cargo:rustc-link-lib=framework=CoreAudio");
+        println!("cargo:rustc-link-lib=framework=CoreServices");
+        println!("cargo:rustc-link-lib=dylib=c++");
+
+        // Do not link the rust backends for tests: doing so causes duplicate
+        // symbol definitions.
+        if build_rust_libs {
+            println!("cargo:rustc-link-lib=static=cubeb_coreaudio");
+            // The nested build's profile subdir (debug vs release) follows the
+            // CMake build type, which is derived from opt-level and can differ
+            // from this crate's PROFILE; search both so either one lands the lib.
+            for profile in ["debug", "release"] {
+                println!("cargo:rustc-link-search=native={rust_target_dir}/{target}/{profile}");
+            }
+        }
+
+        println!("cargo:rustc-link-search=native={}/lib", dst.display());
+    } else {
+        if freebsd || android {
+            println!("cargo:rustc-link-lib=dylib=c++");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
+        println!("cargo:rustc-link-search=native={}/lib", dst.display());
+        println!("cargo:rustc-link-search=native={}/lib64", dst.display());
+
+        // Ignore the result of find_library. We don't care if the
+        // libraries are missing.
+        let _ = pkg_config::find_library("alsa");
+        if pkg_config::find_library("libpulse").is_ok() {
+            // Do not link the rust backends for tests: doing so causes duplicate
+            // symbol definitions.
+            if build_rust_libs {
+                println!("cargo:rustc-link-lib=static=cubeb_pulse");
+                // The nested build's profile subdir (debug vs release) follows the
+                // CMake build type, which is derived from opt-level and can differ
+                // from this crate's PROFILE; search both so either one lands the lib.
+                for profile in ["debug", "release"] {
+                    println!("cargo:rustc-link-search=native={rust_target_dir}/{target}/{profile}");
+                }
+            }
+        }
+        let _ = pkg_config::find_library("jack");
+        let _ = pkg_config::find_library("speexdsp");
+        if android {
+            println!("cargo:rustc-link-lib=dylib=OpenSLES");
+        }
+    }
+}

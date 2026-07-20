@@ -24,6 +24,10 @@ else
   exit 1
 fi
 
+"$python_cmd" "$root/scripts/verify-release-assets.py" \
+  --helper-build-info "$helper" \
+  --expected-protocol "$managed_proto"
+
 "$python_cmd" - "$helper" "$hs" "$name" "$require_dsp" "$managed_proto" <<'PY'
 import json, socket, struct, subprocess, sys, time, os
 

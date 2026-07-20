@@ -14,7 +14,9 @@ internal readonly record struct SidecarPlaybackState(
     bool RequestedDefault,
     bool RequestedMatched,
     bool FellBackToDefault,
-    bool Running);
+    bool Running,
+    string Error = "",
+    string ErrorCode = "");
 
 /// <summary>
 /// The narrow surface the process-lifetime host needs from the desktop helper client. Keeping
@@ -55,7 +57,7 @@ internal interface ISidecarVoiceClient : IDisposable
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
     void SelectMicDevice(string deviceId);
-    void SelectOutputDevice(string deviceId);
+    bool SelectOutputDevice(string deviceId);
     void SendOutputTestFrame(float[] interleavedStereo);
     bool AddPeer(string peerId, bool isOfferer, int generation);
     bool RemovePeer(string peerId);
@@ -220,8 +222,11 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client => client.SetMicActive(active));
     public void SelectMicDevice(string deviceId)
         => _host.Use(this, client => client.SelectMicDevice(deviceId));
-    public void SelectOutputDevice(string deviceId)
-        => _host.Use(this, client => client.SelectOutputDevice(deviceId));
+    public bool SelectOutputDevice(string deviceId)
+        => _host.Use(this, client => client.SelectOutputDevice(deviceId), false);
+    public bool TrySelectOutputDeviceIf(string deviceId, Func<bool> stillCurrent)
+        => _host.Use(this, client =>
+            stillCurrent() && client.SelectOutputDevice(deviceId), false);
     public void SendOutputTestFrame(float[] interleavedStereo)
         => _host.Use(this, client => client.SendOutputTestFrame(interleavedStereo));
     public bool AddPeer(string peerId, bool isOfferer, int generation)

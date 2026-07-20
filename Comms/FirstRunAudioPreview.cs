@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -14,6 +15,120 @@ using Il2CppInterop.Runtime.InteropTypes.Arrays;
 #endif
 
 namespace VoiceChatPlugin.VoiceChat;
+
+/// <summary>Pure decisions shared by the runtime preview and deterministic tests.</summary>
+internal static class FirstRunOutputPreviewPolicy
+{
+    internal static bool ShouldTryDefaultFallback(string? requestedDevice, bool alreadyAttempted)
+        => !alreadyAttempted && !string.IsNullOrEmpty(requestedDevice);
+
+    internal static bool IsTonePlaybackTerminal(string? state)
+        => string.Equals(state, "error", StringComparison.Ordinal) ||
+           string.Equals(state, "stopped", StringComparison.Ordinal);
+
+    internal static bool ShouldApplyTonePlaybackTerminal(
+        long activeGeneration,
+        ulong eventGeneration,
+        string? state,
+        bool correlatedTerminalPending = false,
+        long correlatedTerminalGeneration = 0)
+        => IsTonePlaybackTerminal(state) &&
+           ((activeGeneration != 0 &&
+             eventGeneration == unchecked((ulong)activeGeneration)) ||
+            (correlatedTerminalPending &&
+             correlatedTerminalGeneration != 0 &&
+             eventGeneration == unchecked((ulong)correlatedTerminalGeneration)));
+
+    internal static bool RequestedOutputMatches(
+        string? pendingDevice,
+        string? eventDevice,
+        bool eventRequestedDefault)
+        => string.IsNullOrEmpty(pendingDevice)
+            ? eventRequestedDefault || string.IsNullOrEmpty(eventDevice)
+            : string.Equals(pendingDevice, eventDevice, StringComparison.Ordinal);
+
+    internal static string DescribeNativeOutputFailure(
+        string? reason,
+        string? errorCode = null,
+        bool duringPlayback = false)
+    {
+        string detail = SanitizeNativeReason(reason);
+        string code = (errorCode ?? string.Empty).Trim().ToLowerInvariant();
+        if (code == "device-unavailable")
+            return "That speaker is no longer available. Reconnect it, select it again, or use Default.";
+        if (code == "device-busy")
+            return "That speaker is busy in another app. Close the other audio session or use Default.";
+        if (code == "permission-denied")
+            return "The system denied access to that speaker. Check audio permissions or use Default.";
+        if (code == "unsupported-config")
+            return detail.Length == 0
+                ? "That speaker rejected every compatible playback format."
+                : "That speaker rejected the playback format: " + detail;
+        if (code == "timeout")
+            return "The speaker did not respond in time. Reconnect it or use Default.";
+        if (code == "stream-error")
+            return duringPlayback
+                ? "The selected speaker stopped responding during the test. Reconnect it or use Default."
+                : "The selected speaker stopped responding. Reconnect it or use Default.";
+        if (detail.Length == 0)
+            return duringPlayback
+                ? "The selected speaker stopped during the test"
+                : "Could not open the selected speaker";
+
+        string lower = detail.ToLowerInvariant();
+        if (lower.Contains("device unavailable", StringComparison.Ordinal) ||
+            lower.Contains("device is unavailable", StringComparison.Ordinal) ||
+            lower.Contains("selected output device is unavailable", StringComparison.Ordinal) ||
+            lower.Contains("no output device", StringComparison.Ordinal))
+            return "That speaker is no longer available. Reconnect it, select it again, or use Default.";
+        if (lower.Contains("unsupported default output sample format", StringComparison.Ordinal) ||
+            lower.Contains("default output config", StringComparison.Ordinal))
+            return "That speaker does not expose a compatible playback format: " + detail;
+        if (lower.Contains("build output stream", StringComparison.Ordinal))
+            return "The system could not open that speaker: " + TrimKnownPrefix(detail, "build output stream:");
+        if (lower.Contains("output stream play", StringComparison.Ordinal))
+            return "The speaker opened, but playback could not start: " + TrimKnownPrefix(detail, "output stream play:");
+        if (lower.Contains("output device callback failed", StringComparison.Ordinal))
+            return "The speaker stopped responding after playback began. Reconnect it or use Default.";
+        return duringPlayback
+            ? "The selected speaker stopped during the test: " + detail
+            : "Could not open the selected speaker: " + detail;
+    }
+
+    private static string TrimKnownPrefix(string value, string prefix)
+    {
+        int index = value.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return value;
+        string trimmed = value[(index + prefix.Length)..].Trim();
+        return trimmed.Length == 0 ? value : trimmed;
+    }
+
+    private static string SanitizeNativeReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) return string.Empty;
+        const string stderrPrefix = "pc-capture: playback error:";
+        string source = reason.Trim();
+        if (source.StartsWith(stderrPrefix, StringComparison.OrdinalIgnoreCase))
+            source = source[stderrPrefix.Length..].Trim();
+
+        var builder = new StringBuilder(Math.Min(source.Length, 180));
+        bool previousSpace = false;
+        for (int i = 0; i < source.Length && builder.Length < 180; i++)
+        {
+            char c = source[i];
+            bool space = char.IsWhiteSpace(c) || char.IsControl(c);
+            if (space)
+            {
+                if (!previousSpace && builder.Length > 0) builder.Append(' ');
+                previousSpace = true;
+                continue;
+            }
+            builder.Append(c == '"' ? '\'' : c);
+            previousSpace = false;
+        }
+        return builder.ToString().Trim();
+    }
+}
 
 /// <summary>
 /// Local-only setup probe. Desktop capture owns a peerless sidecar lease and never adds ICE or
@@ -75,7 +190,10 @@ internal sealed class FirstRunAudioPreview : IDisposable
     private long _outputReadyDeadlineTick;
     private int _waitingForOutput;
     private bool _outputSelectionAccepted;
-    private ulong _activeTonePlaybackGeneration;
+    private bool _outputFallbackAttempted;
+    private long _activeTonePlaybackGeneration;
+    private long _desktopToneTerminalGeneration;
+    private int _desktopTonePlaybackTerminated;
 #endif
 #if ANDROID
     private AndroidMicrophone? _androidMicrophone;
@@ -544,10 +662,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
         SetOutputStatus(message, legacyMilliseconds);
     }
 
-    private void CompleteOutputTest()
+    private void CompleteOutputTest(bool usedDefaultFallback = false)
     {
         Interlocked.Exchange(ref _outputTestCompleted, 1);
-        SetOutputStatus("Test sound completed - did you hear it?", 6000);
+        SetOutputStatus(usedDefaultFallback
+            ? "Default speaker test completed - did you hear it?"
+            : "Test sound completed - did you hear it?", 6000);
     }
 
     private void PauseMicrophoneForTone()
@@ -624,13 +744,21 @@ internal sealed class FirstRunAudioPreview : IDisposable
         _pendingOutputDevice = draft.SpeakerDevice ?? string.Empty;
         _pendingPlaybackGeneration = 0;
         _outputSelectionAccepted = false;
+        _outputFallbackAttempted = false;
+        Volatile.Write(ref _activeTonePlaybackGeneration, 0);
+        Volatile.Write(ref _desktopToneTerminalGeneration, 0);
+        Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
         _outputReadyDeadlineTick = Environment.TickCount64 + 5000;
         Volatile.Write(ref _waitingForOutput, 1);
         Interlocked.Exchange(ref _outputTestCompleted, 0);
         SetOutputStatus("Opening the selected speaker...");
         try
         {
-            _lease?.SelectOutputDevice(_pendingOutputDevice);
+            if (_lease?.SelectOutputDevice(_pendingOutputDevice) != true)
+            {
+                CancelDesktopOutputWait();
+                FailOutput("Could not send the selected speaker to the audio helper", 5000);
+            }
         }
         catch (Exception ex)
         {
@@ -640,7 +768,16 @@ internal sealed class FirstRunAudioPreview : IDisposable
     }
 
     private void OnPlaybackState(SidecarPlaybackState state)
-        => _playbackStates.Enqueue(state);
+    {
+        long activeGeneration = Volatile.Read(ref _activeTonePlaybackGeneration);
+        if (FirstRunOutputPreviewPolicy.ShouldApplyTonePlaybackTerminal(
+                activeGeneration, state.StreamGeneration, state.State))
+        {
+            Volatile.Write(ref _desktopToneTerminalGeneration, activeGeneration);
+            Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 1);
+        }
+        _playbackStates.Enqueue(state);
+    }
 
     private void TickDesktopOutputReadiness()
     {
@@ -648,13 +785,22 @@ internal sealed class FirstRunAudioPreview : IDisposable
         {
             if (Volatile.Read(ref _waitingForOutput) == 0)
             {
-                if (IsPlayingTone && state.State == "error" &&
-                    _activeTonePlaybackGeneration != 0 &&
-                    state.StreamGeneration == _activeTonePlaybackGeneration)
+                long activeGeneration = Volatile.Read(ref _activeTonePlaybackGeneration);
+                bool terminalPending = Volatile.Read(ref _desktopTonePlaybackTerminated) != 0;
+                long terminalGeneration = Volatile.Read(ref _desktopToneTerminalGeneration);
+                if (FirstRunOutputPreviewPolicy.ShouldApplyTonePlaybackTerminal(
+                        activeGeneration,
+                        state.StreamGeneration,
+                        state.State,
+                        terminalPending,
+                        terminalGeneration))
                 {
                     CancelTone();
-                    _activeTonePlaybackGeneration = 0;
-                    FailOutput("The selected speaker stopped during the test");
+                    Volatile.Write(ref _activeTonePlaybackGeneration, 0);
+                    FailOutput(FirstRunOutputPreviewPolicy.DescribeNativeOutputFailure(
+                        state.Error, state.ErrorCode, duringPlayback: true));
+                    Volatile.Write(ref _desktopToneTerminalGeneration, 0);
+                    Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
                 }
                 continue;
             }
@@ -669,10 +815,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
             }
             if (!_outputSelectionAccepted) continue;
 
-            if (state.State == "error")
+            if (state.State == "error" && RequestedOutputMatches(state))
             {
+                if (TryFallbackToDefault(state)) continue;
                 CancelDesktopOutputWait();
-                FailOutput("Could not open the selected speaker", 5000);
+                FailOutput(FirstRunOutputPreviewPolicy.DescribeNativeOutputFailure(
+                    state.Error, state.ErrorCode), 6500);
                 continue;
             }
             if (state.State == "stream-started" && RequestedOutputMatches(state))
@@ -681,14 +829,13 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 {
                     if (_pendingSpeakerDraft != null) _pendingSpeakerDraft.SpeakerDevice = string.Empty;
                     Interlocked.Exchange(ref _uiRefreshPending, 1);
-                    CancelDesktopOutputWait();
-                    FailOutput(
-                        "That speaker is no longer available - switched to Default. Press Play Test Sound again.",
-                        6500);
-                    continue;
+                    _pendingOutputDevice = string.Empty;
+                    _outputFallbackAttempted = true;
+                    SetOutputStatus("That speaker was unavailable - testing Default instead...");
                 }
                 _pendingPlaybackGeneration = state.StreamGeneration;
-                SetOutputStatus("Speaker is ready - starting the chime...");
+                if (!_outputFallbackAttempted)
+                    SetOutputStatus("Speaker is ready - starting the chime...");
                 continue;
             }
             if (state.State == "first-callback" &&
@@ -696,11 +843,15 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 state.StreamGeneration == _pendingPlaybackGeneration)
             {
                 var draft = _pendingSpeakerDraft;
-                _activeTonePlaybackGeneration = _pendingPlaybackGeneration;
+                bool usedDefaultFallback = _outputFallbackAttempted;
+                long playbackGeneration = unchecked((long)_pendingPlaybackGeneration);
                 CancelDesktopOutputWait();
                 if (draft == null) continue;
+                Volatile.Write(ref _desktopToneTerminalGeneration, 0);
+                Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
+                Volatile.Write(ref _activeTonePlaybackGeneration, playbackGeneration);
                 PauseMicrophoneForTone();
-                StartDesktopTone(draft.MasterVolume);
+                StartDesktopTone(draft.MasterVolume, usedDefaultFallback);
             }
         }
 
@@ -712,10 +863,44 @@ internal sealed class FirstRunAudioPreview : IDisposable
         }
     }
 
+    private bool TryFallbackToDefault(SidecarPlaybackState state)
+    {
+        if (!FirstRunOutputPreviewPolicy.ShouldTryDefaultFallback(
+                _pendingOutputDevice, _outputFallbackAttempted))
+            return false;
+
+        _outputFallbackAttempted = true;
+        if (_pendingSpeakerDraft != null) _pendingSpeakerDraft.SpeakerDevice = string.Empty;
+        Interlocked.Exchange(ref _uiRefreshPending, 1);
+        _pendingOutputDevice = string.Empty;
+        _pendingPlaybackGeneration = 0;
+        _outputSelectionAccepted = false;
+        _outputReadyDeadlineTick = Environment.TickCount64 + 5000;
+        string reason = FirstRunOutputPreviewPolicy.DescribeNativeOutputFailure(
+            state.Error, state.ErrorCode);
+        SetOutputStatus(reason + " Trying Default...");
+        try
+        {
+            if (_lease?.SelectOutputDevice(string.Empty) != true)
+            {
+                CancelDesktopOutputWait();
+                FailOutput("Could not send Default to the audio helper", 6500);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            CancelDesktopOutputWait();
+            FailOutput("Could not switch the speaker test to Default: " + ex.Message, 6500);
+            return true;
+        }
+    }
+
     private bool RequestedOutputMatches(SidecarPlaybackState state)
-        => string.IsNullOrEmpty(_pendingOutputDevice)
-            ? state.RequestedDefault || string.IsNullOrEmpty(state.RequestedDevice)
-            : string.Equals(_pendingOutputDevice, state.RequestedDevice, StringComparison.OrdinalIgnoreCase);
+        => FirstRunOutputPreviewPolicy.RequestedOutputMatches(
+            _pendingOutputDevice,
+            state.RequestedDevice,
+            state.RequestedDefault);
 
     private void CancelDesktopOutputWait()
     {
@@ -726,7 +911,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
         _pendingOutputDevice = string.Empty;
     }
 
-    private void StartDesktopTone(float volume)
+    private void StartDesktopTone(float volume, bool usedDefaultFallback)
     {
         CancelTone();
         var toneLease = _lease;
@@ -757,7 +942,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 }
                 await Task.Delay(220, token).ConfigureAwait(false);
                 if (DesktopToneIsCurrent(toneLease, leaseGeneration, toneGeneration, cancellation))
-                    CompleteOutputTest();
+                    CompleteOutputTest(usedDefaultFallback);
             }
             catch (OperationCanceledException) { }
             catch (Exception)
@@ -770,7 +955,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 if (toneGeneration == Volatile.Read(ref _toneGeneration))
                 {
                     Volatile.Write(ref _playingTone, 0);
-                    _activeTonePlaybackGeneration = 0;
+                    Volatile.Write(ref _activeTonePlaybackGeneration, 0);
                 }
                 Interlocked.CompareExchange(ref _toneCancellation, null, cancellation);
                 cancellation.Dispose();
@@ -787,6 +972,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
            toneGeneration == Volatile.Read(ref _toneGeneration) &&
            leaseGeneration == Volatile.Read(ref _desktopLeaseGeneration) &&
            Volatile.Read(ref _desktopFailurePending) == 0 &&
+           Volatile.Read(ref _desktopTonePlaybackTerminated) == 0 &&
            ReferenceEquals(_lease, toneLease);
 
     private void StopDesktopLease()
@@ -797,7 +983,9 @@ internal sealed class FirstRunAudioPreview : IDisposable
         Volatile.Write(ref _desktopFailureChannel, 0);
         Volatile.Write(ref _desktopFailureAffectedOutput, 0);
         CancelDesktopOutputWait();
-        _activeTonePlaybackGeneration = 0;
+        Volatile.Write(ref _activeTonePlaybackGeneration, 0);
+        Volatile.Write(ref _desktopToneTerminalGeneration, 0);
+        Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
         Volatile.Write(ref _listening, 0);
         var lease = _lease;
         _lease = null;

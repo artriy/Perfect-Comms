@@ -3,6 +3,23 @@
 Perfect Comms embeds native platform engines and DSP libraries as assembly resources and extracts them at
 runtime for the applicable platform. Their licenses are reproduced or referenced below.
 
+## Mozilla Cubeb (desktop audio input/output)
+
+- Files: compiled from the pinned `cubeb` / `cubeb-sys` Rust crates and their vendored Cubeb source,
+  then statically linked into each Windows, Linux, and macOS `pc-capture` helper. No standalone
+  Cubeb shared library is distributed. Android uses Unity audio and does not link Cubeb.
+- Upstream: https://github.com/mozilla/cubeb and https://github.com/mozilla/cubeb-rs.
+- License: ISC. The exact C library and Rust binding texts are in source at `Libs/libcubeb.LICENSE`
+  and `Libs/cubeb-rs.LICENSE`, and in release bundles at `licenses/libcubeb-ISC.txt` and
+  `licenses/cubeb-rs-ISC.txt`. Cubeb's macOS build invokes a separately locked Rust AudioUnit
+  dependency graph, reproduced at `Libs/cubeb-coreaudio-rust-dependencies.html`; release bundles
+  preserve it under `licenses/`. Linux intentionally uses Cubeb's vendored C PulseAudio/ALSA
+  backends and therefore does not compile the nested Rust PulseAudio project.
+- Cubeb also compiles its vendored Speex resampler because release builders do not supply a system
+  `speexdsp`. That file is BSD 3-Clause; its exact notice is in source at
+  `Libs/cubeb-speex-resampler.LICENSE` and in release bundles at
+  `licenses/cubeb-speex-resampler-BSD-3-Clause.txt`.
+
 ## libopus (voice codec inside native media engines)
 
 - Files: statically linked inside the platform `pc-capture` and `pc-mobile` binaries; there is no
@@ -56,12 +73,13 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 
 ## Native Rust dependencies
 
-The native desktop and Android media engines statically link their locked Rust dependency graphs,
+The native desktop and Android media engines statically link locked Rust dependency graphs,
 including the Pion dynamic-loading facade, serialization, audio I/O, codec, DSP integration, and
-platform support crates. A deterministic cargo-about inventory covering every shipped
-desktop target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` at
-`Libs/native-rust-dependencies.html` and shipped as `licenses/native-rust-dependencies.html`.
-CI regenerates this file from the locked graph and rejects drift.
+platform support crates. A deterministic cargo-about inventory covering every shipped desktop
+target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` at
+`Libs/native-rust-dependencies.html`. Cubeb's macOS build invokes its separately locked Rust
+AudioUnit backend project, whose inventory is listed in the Cubeb section above. Both reports are
+shipped under `licenses/`; CI regenerates them from their locks and rejects drift.
 
 ## Optional Windows dependency bundles
 

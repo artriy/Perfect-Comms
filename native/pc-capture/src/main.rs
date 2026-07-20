@@ -1,5 +1,5 @@
 use pc_capture::ipc::ServerConfig;
-use pc_capture::{audio, ipc, proto};
+use pc_capture::{audio, build_info, ipc, proto};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
@@ -77,6 +77,7 @@ pub struct Args {
     pub synthetic: bool,
     pub enumerate: bool,
     pub protocol_version: bool,
+    pub build_info: bool,
     pub owner_pid: Option<u32>,
     pub cancel_file: Option<PathBuf>,
     pub cancel_nonce: Option<String>,
@@ -88,6 +89,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut synthetic = false;
     let mut enumerate = false;
     let mut protocol_version = false;
+    let mut build_info = false;
     let mut owner_pid = None;
     let mut cancel_file = None;
     let mut cancel_nonce = None;
@@ -107,6 +109,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--synthetic-tone" => synthetic = true,
             "--enumerate" => enumerate = true,
             "--protocol-version" => protocol_version = true,
+            "--build-info" => build_info = true,
             "--owner-pid" => {
                 i += 1;
                 let value = argv.get(i).ok_or("--owner-pid requires a PID")?;
@@ -140,7 +143,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
-    if handshake_path.is_none() && !protocol_version {
+    if handshake_path.is_none() && !protocol_version && !build_info {
         return Err("--handshake <path> is required".to_string());
     }
     if cancel_file.is_some() != cancel_nonce.is_some() {
@@ -152,6 +155,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         synthetic,
         enumerate,
         protocol_version,
+        build_info,
         owner_pid,
         cancel_file,
         cancel_nonce,
@@ -172,6 +176,16 @@ fn main() {
         println!("{}", proto::PROTO_VERSION);
         return;
     }
+    if args.build_info {
+        match build_info::build_info_json() {
+            Ok(info) => println!("{info}"),
+            Err(error) => {
+                eprintln!("pc-capture: cannot report build info: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if let (Some(path), Some(nonce)) = (&args.cancel_file, &args.cancel_nonce) {
         if let Err(error) = spawn_cancellation_guard(path.clone(), nonce.clone()) {
@@ -182,11 +196,15 @@ fn main() {
 
     if args.enumerate {
         let json = match run_with_hard_deadline(ENUMERATION_HARD_TIMEOUT, || {
-            let devices = audio::enumerate_devices();
-            let output_devices = audio::enumerate_output_devices();
-            proto::devices_json(&devices, &output_devices)
+            let devices = audio::enumerate_devices()?;
+            let output_devices = audio::enumerate_output_devices()?;
+            Ok::<String, String>(proto::devices_json(&devices, &output_devices))
         }) {
-            Ok(json) => json,
+            Ok(Ok(json)) => json,
+            Ok(Err(error)) => {
+                eprintln!("pc-capture: device enumeration failed: {error}");
+                std::process::exit(1);
+            }
             Err(EnumerationError::Deadline) => {
                 eprintln!(
                     "pc-capture: device enumeration exceeded hard deadline ({} ms); terminating",
@@ -348,6 +366,13 @@ mod tests {
         let args =
             parse_args(&["pc-capture".to_string(), "--protocol-version".to_string()]).unwrap();
         assert!(args.protocol_version);
+        assert!(args.handshake_path.is_none());
+    }
+
+    #[test]
+    fn build_info_does_not_require_handshake() {
+        let args = parse_args(&["pc-capture".to_string(), "--build-info".to_string()]).unwrap();
+        assert!(args.build_info);
         assert!(args.handshake_path.is_none());
     }
 

@@ -84,6 +84,22 @@ public sealed class SidecarVoiceHostTests
     }
 
     [Fact]
+    public void ConditionalOutputSelectionDoesNotSendWhenSuperseded()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+
+        Assert.False(lease.TrySelectOutputDeviceIf("stale", () => false));
+        Assert.Empty(fake.OutputSelectionCalls);
+
+        Assert.True(lease.TrySelectOutputDeviceIf("current", () => true));
+        Assert.Equal(new[] { "current" }, fake.OutputSelectionCalls);
+        lease.Dispose();
+    }
+
+    [Fact]
     public async Task ConcurrentEnsureStartedIsSingleFlight()
     {
         using var startEntered = new ManualResetEventSlim();
@@ -218,6 +234,7 @@ public sealed class SidecarVoiceHostTests
         public List<bool> MicActiveCalls { get; } = new();
         public List<bool> SyntheticCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
+        public List<string> OutputSelectionCalls { get; } = new();
         public int RemoveFailuresRemaining { get; set; }
         public List<(bool Deaf, float Master, int Peers)> GameStates { get; } = new();
 
@@ -243,7 +260,11 @@ public sealed class SidecarVoiceHostTests
         public void SetInput(float gain, float vadThreshold, float noiseGateThreshold) { }
         public void SetMicActive(bool active) => MicActiveCalls.Add(active);
         public void SelectMicDevice(string deviceId) { }
-        public void SelectOutputDevice(string deviceId) { }
+        public bool SelectOutputDevice(string deviceId)
+        {
+            OutputSelectionCalls.Add(deviceId);
+            return true;
+        }
         public void SendOutputTestFrame(float[] interleavedStereo) { }
         public bool AddPeer(string peerId, bool isOfferer, int generation) => true;
         public bool RemovePeer(string peerId)

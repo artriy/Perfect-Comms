@@ -338,6 +338,10 @@ pub struct CaptureDiagnosticsSnapshot {
     pub accumulator_pending_samples: u64,
     pub invalid_timestamps: u64,
     pub timestamp_discontinuities: u64,
+    pub backend_preroll_callbacks: u64,
+    pub backend_preroll_frames: u64,
+    pub preroll_pending_samples_discarded: u64,
+    pub egress_stale_frames: u64,
     pub capture_clock_delta_seen: bool,
     pub capture_clock_delta_last_us: u64,
     pub capture_clock_expected_delta_us: u64,
@@ -396,6 +400,10 @@ pub struct CaptureDiagnostics {
     accumulator_pending_samples: AtomicU64,
     invalid_timestamps: AtomicU64,
     timestamp_discontinuities: AtomicU64,
+    backend_preroll_callbacks: AtomicU64,
+    backend_preroll_frames: AtomicU64,
+    preroll_pending_samples_discarded: AtomicU64,
+    egress_stale_frames: AtomicU64,
     capture_clock_delta_seen: AtomicBool,
     capture_clock_delta_last_ns: AtomicU64,
     capture_clock_expected_delta_ns: AtomicU64,
@@ -440,6 +448,10 @@ impl Default for CaptureDiagnostics {
             accumulator_pending_samples: AtomicU64::new(0),
             invalid_timestamps: AtomicU64::new(0),
             timestamp_discontinuities: AtomicU64::new(0),
+            backend_preroll_callbacks: AtomicU64::new(0),
+            backend_preroll_frames: AtomicU64::new(0),
+            preroll_pending_samples_discarded: AtomicU64::new(0),
+            egress_stale_frames: AtomicU64::new(0),
             capture_clock_delta_seen: AtomicBool::new(false),
             capture_clock_delta_last_ns: AtomicU64::new(0),
             capture_clock_expected_delta_ns: AtomicU64::new(0),
@@ -721,6 +733,22 @@ impl CaptureDiagnostics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn note_backend_preroll(&self, discarded_frames: usize) {
+        self.backend_preroll_callbacks
+            .fetch_add(1, Ordering::Relaxed);
+        self.backend_preroll_frames
+            .fetch_add(discarded_frames as u64, Ordering::Relaxed);
+    }
+
+    pub fn note_preroll_pending_samples_discarded(&self, samples: usize) {
+        self.preroll_pending_samples_discarded
+            .fetch_add(samples as u64, Ordering::Relaxed);
+    }
+
+    pub fn note_egress_stale_frame(&self) {
+        self.egress_stale_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn observe_ring_len(&self, len: usize) {
         observe_max(&self.ring_high_water, len as u64);
     }
@@ -813,6 +841,12 @@ impl CaptureDiagnostics {
             accumulator_pending_samples: self.accumulator_pending_samples.load(Ordering::Relaxed),
             invalid_timestamps: self.invalid_timestamps.load(Ordering::Relaxed),
             timestamp_discontinuities: self.timestamp_discontinuities.load(Ordering::Relaxed),
+            backend_preroll_callbacks: self.backend_preroll_callbacks.load(Ordering::Relaxed),
+            backend_preroll_frames: self.backend_preroll_frames.load(Ordering::Relaxed),
+            preroll_pending_samples_discarded: self
+                .preroll_pending_samples_discarded
+                .load(Ordering::Relaxed),
+            egress_stale_frames: self.egress_stale_frames.load(Ordering::Relaxed),
             capture_clock_delta_seen: self.capture_clock_delta_seen.load(Ordering::Acquire),
             capture_clock_delta_last_us: self.capture_clock_delta_last_ns.load(Ordering::Relaxed)
                 / 1_000,
@@ -1127,6 +1161,10 @@ pub struct MediaStateEvent {
     pub state: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub action: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error_code: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error: String,
     pub command_seq: u64,
     pub stream_generation: u64,
     pub open_attempt: u64,
@@ -1380,5 +1418,21 @@ mod tests {
         assert_eq!(value["schema"], MEDIA_DIAGNOSTICS_SCHEMA);
         assert_eq!(value["direction"], "capture");
         assert_eq!(value["command_seq"], 4);
+    }
+
+    #[test]
+    fn media_state_json_includes_optional_playback_error_details() {
+        let event = MediaStateEvent {
+            direction: "playback".to_string(),
+            state: "error".to_string(),
+            error_code: "unsupported-config".to_string(),
+            error: "the selected format could not be opened".to_string(),
+            stream_generation: 7,
+            ..Default::default()
+        };
+        let value: serde_json::Value = serde_json::from_str(&media_state_json(&event)).unwrap();
+        assert_eq!(value["error_code"], "unsupported-config");
+        assert_eq!(value["error"], "the selected format could not be opened");
+        assert_eq!(value["stream_generation"], 7);
     }
 }

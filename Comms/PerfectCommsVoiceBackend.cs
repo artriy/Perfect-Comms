@@ -147,6 +147,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private int _supervisorActiveIndex;
     private SidecarVoiceLease? _voice;
     private volatile bool _voiceReady;
+    private string _speakerPlaybackRequestedDevice = string.Empty;
+    private ulong _speakerPlaybackGeneration;
+    private bool _speakerDefaultFallbackPending;
+    private long _speakerSelectionRevision;
+    private string _speakerFallbackRetryPendingDevice = string.Empty;
+    private string _speakerFallbackRetriedDevice = string.Empty;
+    private int _speakerFallbackRetryEpoch;
     private volatile List<IceServer>? _pendingIceServers;
     private Task _voiceStartTask = Task.CompletedTask;
     private int _voiceColdStartRetries;
@@ -1205,6 +1212,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             Interlocked.Increment(ref _voiceSessionGeneration);
             _voiceReady = false;
             _speakerReady = false;
+            _speakerPlaybackRequestedDevice = string.Empty;
+            _speakerPlaybackGeneration = 0;
+            _speakerDefaultFallbackPending = false;
+            ResetSpeakerFallbackRetryLocked();
             _microphoneReady = false;
             _voice = null;
             _gameStateSendGate.Reset();
@@ -1350,7 +1361,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
 
         // The supervisor already attempted bounded in-place stop/start recovery. At this point a
-        // previously-working CPAL callback may be wedged while helper pongs remain healthy, so a full
+        // previously-working native audio callback may be wedged while helper pongs remain healthy, so a full
         // helper/media rebuild is the only reliable recovery boundary. A never-present/denied mic is
         // explicitly excluded above and stays in quiet listen-only mode without restart churn.
         _microphoneReady = false;
@@ -1539,7 +1550,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 OnHelperPeerState,
                 (peak, speaking) => OnSidecarLevel(sessionGeneration, peak, speaking),
                 OnSidecarPeerLevels,
-                _ => { });
+                state => OnSidecarPlaybackState(sessionGeneration, state));
             var voice = SidecarVoiceHost.TryAcquire(callbacks, out var failure);
             if (voice == null)
             {
@@ -1550,6 +1561,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             _voiceReady = false;
             _speakerReady = false;
+            _speakerPlaybackRequestedDevice = _lastSpeakerDeviceName;
+            _speakerPlaybackGeneration = 0;
+            _speakerDefaultFallbackPending = false;
+            ResetSpeakerFallbackRetryLocked();
             BeginSidecarCaptureSourceGenerationLocked(awaitingFirstLevel: false);
             _voice = voice;
             _voiceStartTask = Task.Run(() => RunVoiceStart(voice, sessionGeneration, reason));
@@ -1594,6 +1609,333 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 $"code={code} requested={_microphoneRequested} helperReady={_voiceReady} action=native-retry");
             try { VoiceChatHudState.ShowToastThreadSafe("Microphone unavailable - retrying device"); } catch { }
         });
+    }
+
+    internal static bool SpeakerPlaybackStateMatchesRequest(
+        string requestedDevice,
+        SidecarPlaybackState state)
+    {
+        if (!string.IsNullOrEmpty(state.RequestedDevice))
+            return !string.IsNullOrEmpty(requestedDevice) &&
+                   string.Equals(requestedDevice, state.RequestedDevice, StringComparison.Ordinal);
+        if (state.RequestedDefault)
+            return string.IsNullOrEmpty(requestedDevice);
+        return true; // Older helpers emitted sparse terminal events.
+    }
+
+    internal static bool SpeakerPlaybackGenerationMatches(
+        ulong confirmedGeneration,
+        SidecarPlaybackState state)
+        => confirmedGeneration == 0 || state.StreamGeneration == 0 ||
+           confirmedGeneration == state.StreamGeneration;
+
+    internal static bool IsConfirmedSpeakerPlaybackState(SidecarPlaybackState state)
+        => state.Running && state.State == "first-callback";
+
+    internal static bool ShouldFallbackSpeakerToDefault(
+        string requestedDevice,
+        bool fallbackPending,
+        SidecarPlaybackState state)
+        => state.State == "error" &&
+           !fallbackPending &&
+           !state.RequestedDefault &&
+           !string.IsNullOrEmpty(
+               string.IsNullOrEmpty(state.RequestedDevice)
+                   ? requestedDevice
+                   : state.RequestedDevice);
+
+    internal static bool ShouldRetrySpeakerAfterFallback(SidecarPlaybackState state)
+    {
+        if (state.State != "error" || state.RequestedDefault) return false;
+        string code = (state.ErrorCode ?? string.Empty).Trim().ToLowerInvariant();
+        if (code is "device-unavailable" or "unsupported-config" or "permission-denied")
+            return false;
+        if (!string.IsNullOrEmpty(code)) return true;
+
+        string error = state.Error ?? string.Empty;
+        return !error.Contains("unavailable", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("not available", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("permission", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("access denied", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("unsupported", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("not supported", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("notsupported", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("invalidformat", StringComparison.OrdinalIgnoreCase) &&
+               !error.Contains("invalid format", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string DescribeSpeakerPlaybackFailure(SidecarPlaybackState state)
+    {
+        static string Clean(string? value, int maxLength)
+        {
+            string clean = (value ?? string.Empty)
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+            return clean.Length <= maxLength ? clean : clean.Substring(0, maxLength) + "...";
+        }
+
+        string code = Clean(state.ErrorCode, 48);
+        string error = Clean(state.Error, 160);
+        if (string.IsNullOrEmpty(code))
+            return string.IsNullOrEmpty(error) ? "native playback open failed" : error;
+        return string.IsNullOrEmpty(error) ? code : $"{code}: {error}";
+    }
+
+    private void ResetSpeakerFallbackRetryLocked()
+    {
+        _speakerFallbackRetryPendingDevice = string.Empty;
+        _speakerFallbackRetriedDevice = string.Empty;
+        unchecked { _speakerFallbackRetryEpoch++; }
+    }
+
+    private void ScheduleSpeakerFallbackRetry(
+        long sessionGeneration,
+        string deviceId,
+        int retryEpoch)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(SpeakerRetryInterval).ConfigureAwait(false); }
+            catch { return; }
+            if (_disposed) return;
+
+            _mainThreadActions.Enqueue(() =>
+            {
+                bool retry;
+                long selectionRevision;
+                lock (_voiceSync)
+                {
+                    retry = !_disposed &&
+                            sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                            retryEpoch == _speakerFallbackRetryEpoch &&
+                            _voice != null &&
+                            _speakerReady &&
+                            string.IsNullOrEmpty(_speakerPlaybackRequestedDevice) &&
+                            string.Equals(_speakerFallbackRetriedDevice, deviceId, StringComparison.Ordinal) &&
+                            string.Equals(_lastSpeakerDeviceName, deviceId, StringComparison.Ordinal);
+                    selectionRevision = Volatile.Read(ref _speakerSelectionRevision);
+                }
+                if (!retry) return;
+
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state=retry-explicit requested={VoiceDiagnostics.DescribeDevice(deviceId)} delayMs={(long)SpeakerRetryInterval.TotalMilliseconds}");
+                SetSpeakerSidecar(deviceId, selectionRevision, recoveryRetry: true);
+            });
+        });
+    }
+
+    private void OnSidecarPlaybackState(long sessionGeneration, SidecarPlaybackState state)
+    {
+        SidecarVoiceLease? fallbackVoice = null;
+        string failureDetail = string.Empty;
+        string retryDevice = string.Empty;
+        int retryEpoch = 0;
+        long fallbackRevision = 0;
+        long notificationRevision = 0;
+        bool fallbackRequested = false;
+        bool retryPlanned = false;
+        bool notifyFailure = false;
+
+        lock (_voiceSync)
+        {
+            if (_disposed ||
+                sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
+                _voice == null)
+                return;
+
+            if (!SpeakerPlaybackStateMatchesRequest(_speakerPlaybackRequestedDevice, state))
+            {
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"ignored=true reason=request-mismatch state={state.State} current={VoiceDiagnostics.DescribeDevice(_speakerPlaybackRequestedDevice)} event={VoiceDiagnostics.DescribeDevice(state.RequestedDevice)}");
+                return;
+            }
+
+            if (state.State == "command-accepted" &&
+                state.Action == "select-output-device")
+            {
+                _speakerPlaybackRequestedDevice = state.RequestedDefault
+                    ? string.Empty
+                    : state.RequestedDevice ?? string.Empty;
+                _speakerPlaybackGeneration = 0;
+                _speakerReady = false;
+                if (!string.IsNullOrEmpty(_speakerPlaybackRequestedDevice))
+                    _speakerDefaultFallbackPending = false;
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state=command-accepted ready=false requested={VoiceDiagnostics.DescribeDevice(_speakerPlaybackRequestedDevice)}");
+                return;
+            }
+
+            if (state.State == "stream-started")
+            {
+                if (state.FellBackToDefault &&
+                    !string.IsNullOrEmpty(_speakerPlaybackRequestedDevice))
+                {
+                    _speakerPlaybackRequestedDevice = string.Empty;
+                }
+                else if (state.RequestedDefault)
+                {
+                    _speakerPlaybackRequestedDevice = string.Empty;
+                }
+                else if (!string.IsNullOrEmpty(state.RequestedDevice))
+                {
+                    _speakerPlaybackRequestedDevice = state.RequestedDevice;
+                }
+
+                _speakerPlaybackGeneration = state.StreamGeneration;
+                _speakerReady = IsConfirmedSpeakerPlaybackState(state);
+                if (string.IsNullOrEmpty(_speakerPlaybackRequestedDevice))
+                    _speakerDefaultFallbackPending = false;
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state=stream-started ready={_speakerReady.ToString().ToLowerInvariant()} generation={state.StreamGeneration} requested={VoiceDiagnostics.DescribeDevice(_speakerPlaybackRequestedDevice)} resolved={VoiceDiagnostics.DescribeDevice(state.ResolvedDevice)} fallback={state.FellBackToDefault.ToString().ToLowerInvariant()}");
+            }
+            else if (state.State == "first-callback")
+            {
+                if (!SpeakerPlaybackGenerationMatches(_speakerPlaybackGeneration, state))
+                    return;
+                _speakerPlaybackGeneration = state.StreamGeneration;
+                _speakerReady = IsConfirmedSpeakerPlaybackState(state);
+                if (_speakerReady && string.IsNullOrEmpty(_speakerPlaybackRequestedDevice) &&
+                    !string.IsNullOrEmpty(_speakerFallbackRetryPendingDevice) &&
+                    !string.Equals(
+                        _speakerFallbackRetriedDevice,
+                        _speakerFallbackRetryPendingDevice,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        _lastSpeakerDeviceName,
+                        _speakerFallbackRetryPendingDevice,
+                        StringComparison.Ordinal))
+                {
+                    retryDevice = _speakerFallbackRetryPendingDevice;
+                    _speakerFallbackRetryPendingDevice = string.Empty;
+                    _speakerFallbackRetriedDevice = retryDevice;
+                    retryEpoch = _speakerFallbackRetryEpoch;
+                }
+                else if (_speakerReady && !string.IsNullOrEmpty(_speakerPlaybackRequestedDevice))
+                {
+                    _speakerFallbackRetryPendingDevice = string.Empty;
+                    _speakerFallbackRetriedDevice = string.Empty;
+                }
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state=first-callback ready={_speakerReady.ToString().ToLowerInvariant()} generation={state.StreamGeneration}");
+            }
+            else if (state.State is "stopped" or "error")
+            {
+                if (!SpeakerPlaybackGenerationMatches(_speakerPlaybackGeneration, state))
+                    return;
+
+                _speakerReady = false;
+                if (state.State == "error")
+                {
+                    failureDetail = DescribeSpeakerPlaybackFailure(state);
+                    notifyFailure = true;
+                    notificationRevision = Volatile.Read(ref _speakerSelectionRevision);
+                    if (ShouldFallbackSpeakerToDefault(
+                            _speakerPlaybackRequestedDevice,
+                            _speakerDefaultFallbackPending,
+                            state))
+                    {
+                        string failedDevice = string.IsNullOrEmpty(state.RequestedDevice)
+                            ? _speakerPlaybackRequestedDevice
+                            : state.RequestedDevice;
+                        fallbackRequested = true;
+                        if (ShouldRetrySpeakerAfterFallback(state) &&
+                            !string.IsNullOrEmpty(failedDevice) &&
+                            !string.Equals(
+                                _speakerFallbackRetriedDevice,
+                                failedDevice,
+                                StringComparison.Ordinal))
+                        {
+                            _speakerFallbackRetryPendingDevice = failedDevice;
+                            retryPlanned = true;
+                        }
+                        _speakerDefaultFallbackPending = true;
+                        _speakerPlaybackRequestedDevice = string.Empty;
+                        _speakerPlaybackGeneration = 0;
+                        fallbackVoice = _voice;
+                        fallbackRevision = notificationRevision;
+                    }
+                }
+
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state={state.State} ready=false generation={state.StreamGeneration} fallbackPending={_speakerDefaultFallbackPending.ToString().ToLowerInvariant()} errorCode={state.ErrorCode ?? string.Empty} error=\"{failureDetail.Replace('"', '\'')}\"");
+            }
+        }
+
+        if (!string.IsNullOrEmpty(retryDevice))
+            ScheduleSpeakerFallbackRetry(sessionGeneration, retryDevice, retryEpoch);
+
+        bool fallbackSent = true;
+        if (fallbackVoice != null)
+        {
+            try
+            {
+                fallbackSent = fallbackVoice.TrySelectOutputDeviceIf(
+                    string.Empty,
+                    () => !_disposed &&
+                        sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision));
+            }
+            catch (Exception ex)
+            {
+                fallbackSent = false;
+                VoiceDiagnostics.Log(
+                    "voice.speaker.state",
+                    $"state=fallback-send-failed error=\"{ex.Message.Replace('"', '\'')}\"");
+            }
+
+            bool fallbackStillCurrent = !_disposed &&
+                sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                fallbackRevision == Volatile.Read(ref _speakerSelectionRevision);
+            if (!fallbackStillCurrent)
+            {
+                // A newer user selection or voice session won the race. Its serialized command
+                // must remain last, so suppress this obsolete fallback and its toast.
+                fallbackRequested = false;
+                notifyFailure = false;
+                retryPlanned = false;
+            }
+            else if (!fallbackSent)
+            {
+                lock (_voiceSync)
+                {
+                    if (sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision))
+                    {
+                        _speakerPlaybackRequestedDevice = _lastSpeakerDeviceName;
+                        _speakerPlaybackGeneration = 0;
+                        _speakerDefaultFallbackPending = false;
+                        _speakerFallbackRetryPendingDevice = string.Empty;
+                        retryPlanned = false;
+                    }
+                }
+            }
+        }
+
+        if (fallbackRequested || notifyFailure)
+        {
+            _mainThreadActions.Enqueue(() =>
+            {
+                if (_disposed ||
+                    sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
+                    notificationRevision != Volatile.Read(ref _speakerSelectionRevision))
+                    return;
+                string message = fallbackRequested
+                    ? fallbackSent
+                        ? retryPlanned
+                            ? $"Selected speaker could not be opened - using System Default and retrying once ({failureDetail})"
+                            : $"Selected speaker could not be opened - using System Default; your selection was kept ({failureDetail})"
+                        : $"Selected speaker could not be opened and fallback could not be sent ({failureDetail})"
+                    : $"System Default speaker could not be opened ({failureDetail})";
+                try { VoiceChatHudState.ShowToastThreadSafe(message); } catch { }
+            });
+        }
     }
 
     internal static bool IsRecoverableSidecarMicError(string? code)
@@ -1769,10 +2111,23 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             return;
         }
 
+        string startupMic;
+        string startupSpk;
+        lock (_voiceSync)
+        {
+            if (!IsCurrentVoiceSessionLocked(voice, sessionGeneration))
+            {
+                try { voice.Dispose(); } catch { }
+                return;
+            }
+            startupMic = _lastMicDeviceName;
+            startupSpk = _lastSpeakerDeviceName;
+        }
+
         bool started;
         try
         {
-            started = voice.EnsureStarted(_lastMicDeviceName, _lastSpeakerDeviceName);
+            started = voice.EnsureStarted(startupMic, startupSpk);
         }
         catch (Exception ex)
         {
@@ -1796,6 +2151,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         List<IceServer>? pendingIce;
         string currentMic;
         string currentSpk;
+        long configuredSpeakerRevision;
         bool micActive;
         long sourceGeneration;
         var staleBeforeConfiguration = false;
@@ -1811,6 +2167,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 pendingIce = _pendingIceServers;
                 currentMic = _lastMicDeviceName;
                 currentSpk = _lastSpeakerDeviceName;
+                configuredSpeakerRevision = Volatile.Read(ref _speakerSelectionRevision);
                 micActive = !Mute && _microphoneRequested;
                 sourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
                 // Initial configuration is a stop/select/synthetic/start command group. Disarm before
@@ -1822,6 +2179,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 pendingIce = null;
                 currentMic = string.Empty;
                 currentSpk = string.Empty;
+                configuredSpeakerRevision = 0;
                 micActive = false;
                 sourceGeneration = 0;
             }
@@ -1846,6 +2204,55 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _captureOptions.SyntheticMicToneEnabled,
             micActive,
             pendingIce);
+
+        if (configured)
+        {
+            string latestSpeaker = string.Empty;
+            long latestSpeakerRevision = 0;
+            bool sessionStillCurrent;
+            lock (_voiceSync)
+            {
+                sessionStillCurrent = IsCurrentVoiceSessionLocked(voice, sessionGeneration);
+                if (sessionStillCurrent)
+                {
+                    latestSpeaker = _lastSpeakerDeviceName;
+                    latestSpeakerRevision = Volatile.Read(ref _speakerSelectionRevision);
+                }
+            }
+
+            if (!sessionStillCurrent)
+            {
+                configured = false;
+            }
+            else if (latestSpeakerRevision != configuredSpeakerRevision)
+            {
+                bool corrected;
+                try
+                {
+                    corrected = voice.TrySelectOutputDeviceIf(
+                        latestSpeaker,
+                        () => !_disposed &&
+                            sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                            latestSpeakerRevision == Volatile.Read(ref _speakerSelectionRevision));
+                }
+                catch
+                {
+                    corrected = false;
+                }
+
+                bool correctionStillCurrent = !_disposed &&
+                    sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                    latestSpeakerRevision == Volatile.Read(ref _speakerSelectionRevision);
+                if (!corrected && correctionStillCurrent)
+                {
+                    VoiceDiagnostics.Log(
+                        "voice.sidecar",
+                        $"ready=false reason={reason} error=\"latest speaker selection could not be applied during startup\"");
+                    configured = false;
+                }
+            }
+        }
+
         if (!configured)
         {
             var detachedCurrent = TryDetachCurrentVoiceSession(voice, sessionGeneration);
@@ -1870,7 +2277,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 _voiceReady = true;
                 Interlocked.Exchange(ref _voiceUnavailableRetrying, 0);
-                _speakerReady = true;
                 // A fresh native GameState starts empty. Force the first mixer snapshot through
                 // even if the previous helper sent the same fingerprint less than one second ago.
                 _gameStateSendGate.Reset();
@@ -1896,7 +2302,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         VoiceDiagnostics.Log(
             "voice.sidecar",
-            $"ready=true reason={reason} sessionGeneration={sessionGeneration} micRequested={_microphoneRequested} micReady={_microphoneReady} micAwaitingLevel={_sidecarCaptureAwaitingFirstLevel} output={VoiceDiagnostics.DescribeDevice(currentSpk)} outputs={outputDevices.Length}");
+            $"helperReady=true speakerReady={_speakerReady.ToString().ToLowerInvariant()} reason={reason} sessionGeneration={sessionGeneration} micRequested={_microphoneRequested} micReady={_microphoneReady} micAwaitingLevel={_sidecarCaptureAwaitingFirstLevel} output={VoiceDiagnostics.DescribeDevice(currentSpk)} outputs={outputDevices.Length}");
     }
 
     private void HandleVoiceStartFailure(string stage, string reason)
@@ -1923,6 +2329,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             Interlocked.Increment(ref _voiceSessionGeneration);
             _voiceReady = false;
             _speakerReady = false;
+            _speakerPlaybackRequestedDevice = string.Empty;
+            _speakerPlaybackGeneration = 0;
+            _speakerDefaultFallbackPending = false;
+            ResetSpeakerFallbackRetryLocked();
             _microphoneReady = false;
             BeginSidecarCaptureSourceGenerationLocked(awaitingFirstLevel: false);
             voice = _voice;
@@ -2975,10 +3385,17 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
         try
         {
-            if (!string.Equals(_lastSpeakerDeviceName, deviceName ?? string.Empty, StringComparison.Ordinal))
-                _btProfileConflict = false;
-            _lastSpeakerDeviceName = deviceName ?? string.Empty;
-            SetSpeakerSidecar(deviceName ?? string.Empty);
+            string selectedDevice = deviceName ?? string.Empty;
+            long selectionRevision;
+            lock (_voiceSync)
+            {
+                if (!string.Equals(_lastSpeakerDeviceName, selectedDevice, StringComparison.Ordinal))
+                    _btProfileConflict = false;
+                _lastSpeakerDeviceName = selectedDevice;
+                selectionRevision = Interlocked.Increment(ref _speakerSelectionRevision);
+                ResetSpeakerFallbackRetryLocked();
+            }
+            SetSpeakerSidecar(selectedDevice, selectionRevision, recoveryRetry: false);
         }
         catch (Exception ex)
         {
@@ -3004,14 +3421,150 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     }
 
 #if WINDOWS
-    private void SetSpeakerSidecar(string deviceName)
+    private void SetSpeakerSidecar(
+        string deviceName,
+        long expectedSelectionRevision,
+        bool recoveryRetry)
     {
-        var voice = _voice;
+        SidecarVoiceLease? voice;
+        long sessionGeneration;
+        lock (_voiceSync)
+        {
+            if (_disposed ||
+                expectedSelectionRevision != Volatile.Read(ref _speakerSelectionRevision) ||
+                !string.Equals(_lastSpeakerDeviceName, deviceName, StringComparison.Ordinal))
+                return;
+
+            voice = _voice;
+            sessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
+            _speakerReady = false;
+            _speakerPlaybackRequestedDevice = deviceName;
+            _speakerPlaybackGeneration = 0;
+            _speakerDefaultFallbackPending = false;
+        }
         if (voice != null)
         {
-            voice.SelectOutputDevice(deviceName);
-            _speakerReady = true;
-            VoiceDiagnostics.Log("voice.speaker", $"ready=true device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=sidecar reused=true");
+            bool sent;
+            try
+            {
+                sent = voice.TrySelectOutputDeviceIf(
+                    deviceName,
+                    () => !_disposed &&
+                        sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                        expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision));
+            }
+            catch
+            {
+                sent = false;
+            }
+
+            bool commandStillCurrent = !_disposed &&
+                sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision);
+            if (!commandStillCurrent)
+            {
+                VoiceDiagnostics.Log(
+                    "voice.speaker",
+                    $"ignored=true reason=selection-superseded device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=sidecar");
+                return;
+            }
+
+            bool fallbackSent = false;
+            if (!sent && !string.IsNullOrEmpty(deviceName))
+            {
+                bool fallbackPrepared = false;
+                lock (_voiceSync)
+                {
+                    if (ReferenceEquals(_voice, voice) &&
+                        sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                        expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                        string.Equals(_speakerPlaybackRequestedDevice, deviceName, StringComparison.Ordinal) &&
+                        _speakerPlaybackGeneration == 0 &&
+                        !_speakerReady)
+                    {
+                        if (!recoveryRetry)
+                            _speakerFallbackRetryPendingDevice = deviceName;
+                        _speakerDefaultFallbackPending = true;
+                        _speakerPlaybackRequestedDevice = string.Empty;
+                        _speakerPlaybackGeneration = 0;
+                        fallbackPrepared = true;
+                    }
+                }
+
+                if (!fallbackPrepared)
+                {
+                    VoiceDiagnostics.Log(
+                        "voice.speaker",
+                        $"ignored=true reason=command-result-superseded device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=sidecar");
+                    return;
+                }
+
+                try
+                {
+                    fallbackSent = voice.TrySelectOutputDeviceIf(
+                        string.Empty,
+                        () => !_disposed &&
+                            sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision));
+                }
+                catch { fallbackSent = false; }
+
+                commandStillCurrent = !_disposed &&
+                    sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                    expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision);
+                if (!commandStillCurrent) return;
+
+                if (!fallbackSent)
+                {
+                    lock (_voiceSync)
+                    {
+                        if (ReferenceEquals(_voice, voice) &&
+                            sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
+                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision))
+                        {
+                            // The native worker may still recover the explicit endpoint. Keep its
+                            // events matchable when the fallback command itself was not accepted.
+                            _speakerPlaybackRequestedDevice = deviceName;
+                            _speakerPlaybackGeneration = 0;
+                            _speakerDefaultFallbackPending = false;
+                            _speakerFallbackRetryPendingDevice = string.Empty;
+                        }
+                    }
+                }
+
+                bool retryPlanned = fallbackSent && !recoveryRetry;
+                _mainThreadActions.Enqueue(() =>
+                {
+                    if (_disposed ||
+                        sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
+                        expectedSelectionRevision != Volatile.Read(ref _speakerSelectionRevision))
+                        return;
+                    try
+                    {
+                        VoiceChatHudState.ShowToastThreadSafe(fallbackSent
+                            ? retryPlanned
+                                ? "Selected speaker command failed - using System Default and retrying once; your selection was kept"
+                                : "Selected speaker retry failed - continuing with System Default; your selection was kept"
+                            : "Could not change speaker or request System Default; your selection was kept");
+                    }
+                    catch { }
+                });
+            }
+            else if (!sent)
+            {
+                _mainThreadActions.Enqueue(() =>
+                {
+                    if (_disposed ||
+                        sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
+                        expectedSelectionRevision != Volatile.Read(ref _speakerSelectionRevision))
+                        return;
+                    try { VoiceChatHudState.ShowToastThreadSafe("Could not request the System Default speaker"); }
+                    catch { }
+                });
+            }
+            VoiceDiagnostics.Log(
+                "voice.speaker",
+                $"ready=false pendingConfirmation={sent.ToString().ToLowerInvariant()} fallbackSent={fallbackSent.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=sidecar reused=true");
         }
         else
         {
@@ -4050,7 +4603,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("voice.unity",
                 $"active=true mode={DescribeCaptureMode()} micReady={_microphoneReady} micCallbacks={Volatile.Read(ref _micCallbacks)} micSamples={Volatile.Read(ref _micSamples)} micPeak={micPeak:0.000000} micRms={micRms:0.000000} micSilentCallbacks={micSilentCallbacks} micProcessingFailures={Volatile.Read(ref _micProcessingFailures)} micMutedDrops={Volatile.Read(ref _micMutedDrops)} speakerReady={_speakerReady}");
         VoiceDiagnostics.Log("voice.playout.state",
-            $"backend=engine configured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} requestedDevice={DescribeRequestedSpeakerDevice()} confirmed=unknown confirmationSource=native.media.stats-and-stderr");
+            $"backend=engine configured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} requestedDevice={DescribeRequestedSpeakerDevice()} confirmed={_speakerReady.ToString().ToLowerInvariant()} confirmationSource=native.media-state");
     }
 
     private static long DiagnosticAgeMs(long eventUtcTicks, long nowUtcTicks)

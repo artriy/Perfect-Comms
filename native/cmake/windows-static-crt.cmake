@@ -7,7 +7,7 @@ endif()
 
 set(
   CMAKE_MSVC_RUNTIME_LIBRARY
-  "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+  "MultiThreaded"
   CACHE STRING "Use the static MSVC runtime for native helper dependencies" FORCE
 )
 
@@ -15,3 +15,7 @@ set(
 # unless this project option is enabled. Keep it aligned with Cargo's static
 # runtime selection.
 set(OPUS_STATIC_RUNTIME ON CACHE BOOL "Build bundled Opus with the static MSVC runtime" FORCE)
+
+# cubeb-sys already forces Cubeb's static MSVC runtime. This additional option
+# prevents CMake from discovering and linking a machine-local SpeexDSP build.
+set(BUNDLE_SPEEX ON CACHE BOOL "Build Cubeb's vendored Speex resampler" FORCE)

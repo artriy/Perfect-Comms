@@ -12,6 +12,7 @@ on:
       - "native/cmake/**"
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
       - "native/apm-sys/**"
@@ -130,6 +131,8 @@ jobs:
         run: bash scripts/build-helpers.sh ${{ matrix.target }}
       - name: Verify helper has no private MSVC runtime dependency
         run: python scripts/verify-release-assets.py --pe-no-private-runtime Libs/pc-capture/${{ matrix.dest }}
+      - name: Verify linked Cubeb backend inventory
+        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 13
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -152,7 +155,7 @@ jobs:
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       - name: clippy pc-mobile (host)
         shell: bash
-        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
 
   pc-mobile-android:
     runs-on: ubuntu-latest
@@ -187,7 +190,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-        run: cargo ndk -t arm64-v8a -o ./jniLibs build --release
+        run: cargo ndk -t arm64-v8a -o ./jniLibs build --locked --release
       - name: Verify pc-mobile release ABI
         run: |
           mkdir -p Libs/pc-mobile
@@ -213,12 +216,19 @@ jobs:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: ALSA dev headers, cmake, nasm
+      - name: Cubeb PulseAudio/ALSA headers, C/C++, cmake, nasm
         run: |
           apt-get update
-          apt-get install -y libasound2-dev pkg-config cmake nasm
+          apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config nasm python3-pip
+          # Debian Bullseye ships CMake 3.18; Cubeb requires 3.19 or newer.
+          python3 -m pip install --no-cache-dir cmake==3.31.6
+          cmake --version
       - name: Build helper
         run: bash scripts/build-helpers.sh x86_64-unknown-linux-gnu
+      - name: Verify static Cubeb and Linux audio runtime contract
+        run: python3 scripts/verify-release-assets.py --elf-cubeb-runtime Libs/pc-capture/pc-capture-linux-x64
+      - name: Verify linked Cubeb backend inventory
+        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 13
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-linux-x64
@@ -229,6 +239,7 @@ jobs:
     runs-on: macos-latest
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -355,7 +366,7 @@ jobs:
       - name: Smoke linux-x64 (apm-sys load + process a frame)
         run: |
           APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.so" \
-            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
             -- --ignored loads_and_processes_a_frame
       - name: Build win-x64 (.dll, x86_64-w64-mingw32)
         run: bash scripts/build-apm.sh win-x64
@@ -395,7 +406,7 @@ jobs:
         shell: bash
         run: |
           APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x64.dll" \
-            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
             -- --ignored loads_and_processes_a_frame
 
   apm-smoke-win-x86:
@@ -417,7 +428,7 @@ jobs:
         shell: bash
         run: |
           APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x86.dll" \
-            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
             --target i686-pc-windows-msvc \
             -- --ignored loads_and_processes_a_frame
 
@@ -455,7 +466,7 @@ jobs:
       - name: Smoke native macOS slice (apm-sys load + process a frame)
         run: |
           APM_LIB="$PWD/artifacts/apm/${{ matrix.file }}" \
-            cargo test --manifest-path native/apm-sys/Cargo.toml --release \
+            cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
             -- --ignored loads_and_processes_a_frame
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -524,6 +535,7 @@ jobs:
           bash scripts/ci-smoke-helper.sh \
             "$app/Contents/MacOS/PerfectCommsAudio" --require-dsp
           ditto -c -k --keepParent "$app" Libs/pc-capture/pc-capture-mac.zip
+          python3 scripts/verify-release-assets.py --mac-bundle Libs/pc-capture/pc-capture-mac.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-mac
@@ -546,16 +558,19 @@ jobs:
         with:
           name: pion-linux-x64
           path: dl
-      - name: ALSA dev headers, cmake, nasm
+      - name: Cubeb PulseAudio/ALSA headers, C/C++, cmake, nasm
         run: |
           apt-get update
-          apt-get install -y libasound2-dev pkg-config cmake nasm
+          apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config nasm python3-pip
+          # Debian Bullseye ships CMake 3.18; Cubeb requires 3.19 or newer.
+          python3 -m pip install --no-cache-dir cmake==3.31.6
+          cmake --version
       - name: Pion helper-to-helper loopback (offer/answer/candidates + Opus)
         env:
           PC_PION_TEST_DISABLE_MDNS: "1"
         run: |
           PC_PION_LIB="$PWD/dl/libpc-pion.so" PC_REQUIRE_PION=1 \
-            cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+            cargo test --locked --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
 
   helper-rtc-loopback-win:
     needs: pion-windows
@@ -578,4 +593,4 @@ jobs:
         shell: bash
         run: |
           PC_PION_LIB="$(cd dl && pwd -W)/pc-pion.x64.dll" PC_REQUIRE_PION=1 \
-            cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+            cargo test --locked --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture

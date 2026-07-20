@@ -348,9 +348,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             DescribeDeviceForDiagnostics(deviceId));
     }
 
-    public void SelectOutputDevice(string deviceId)
+    public bool SelectOutputDevice(string deviceId)
     {
-        SendCommand(
+        return SendCommand(
             "select-output-device",
             () => SidecarProtocol.SelectOutputDeviceFrame(deviceId ?? string.Empty),
             DescribeDeviceForDiagnostics(deviceId));
@@ -1249,7 +1249,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 ReadBool(root, "requested_default"),
                 ReadBool(root, "requested_matched"),
                 ReadBool(root, "fell_back_to_default"),
-                ReadBool(root, "running"));
+                ReadBool(root, "running"),
+                ReadString(root, "error"),
+                ReadString(root, "error_code"));
             return true;
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
@@ -1349,6 +1351,10 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     builder.Append(" elapsedMs=").Append(FormatOptionalU64(root, "elapsed_ms"));
                     break;
                 case "error" when direction == "playback":
+                    builder.Append(" requested=").Append(DescribeOptionalRequestedDevice(root));
+                    builder.Append(" requestedDefault=").Append(FormatOptionalBool(root, "requested_default"));
+                    builder.Append(" errorCode=").Append(FormatOptionalText(root, "error_code", 48));
+                    builder.Append(" error=").Append(FormatOptionalText(root, "error", 160));
                     break;
                 default:
                     builder.Append(" extensionFieldsIgnored=true");
@@ -1542,7 +1548,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"rate={FormatOptionalU64(capture, "sample_rate")} channels={FormatOptionalU64(capture, "channels")} sampleFormat={FormatOptionalText(capture, "sample_format", 24)} bufferMode={FormatOptionalText(capture, "buffer_mode", 48)} bufferMinFrames={FormatOptionalU64(capture, "buffer_min_frames")} bufferMaxFrames={FormatOptionalU64(capture, "buffer_max_frames")} " +
                 $"openAttempts={FormatOptionalU64(capture, "open_attempts")} streamErrors={FormatOptionalU64(capture, "stream_errors")} retryAttempt={FormatOptionalU64(capture, "retry_attempt")} startToOpenMs={FormatOptionalU64WhenPresent(capture, "start_to_open_ms", "stream_started")} openToFirstCallbackMs={FormatOptionalU64WhenPresent(capture, "open_to_first_callback_ms", "first_callback_seen")} streamAgeMs={FormatOptionalU64WhenPresent(capture, "stream_age_ms", "stream_started")} " +
                 $"callbacksTotal={FormatOptionalU64(capture, "callbacks_total")} callbacksWindow={FormatOptionalU64(capture, "callbacks_window")} callbackAgeMs={FormatOptionalU64WhenPresent(capture, "callback_age_ms", "callback_seen")} callbackFramesLast={FormatOptionalU64WhenPresent(capture, "callback_frames_last", "callback_seen")} callbackFramesMin={FormatOptionalU64WhenPresent(capture, "callback_frames_min", "callback_window_seen")} callbackFramesMax={FormatOptionalU64WhenPresent(capture, "callback_frames_max", "callback_window_seen")} callbackIntervalLastUs={FormatOptionalU64WhenPresent(capture, "callback_interval_last_us", "callback_interval_seen")} callbackIntervalMaxUs={FormatOptionalU64WhenPresent(capture, "callback_interval_max_us", "callback_interval_window_seen")} lateCallbacks={FormatOptionalU64(capture, "late_callbacks")} " +
-                $"inputFramesTotal={FormatOptionalU64(capture, "input_samples_total")} resampledSamplesTotal={FormatOptionalU64(capture, "resampled_samples_total")} framesProducedTotal={FormatOptionalU64(capture, "frames_produced_total")} accumulatorPending={FormatOptionalU64(capture, "accumulator_pending_samples")} invalidTimestamps={FormatOptionalU64(capture, "invalid_timestamps")} timestampDiscontinuities={FormatOptionalU64(capture, "timestamp_discontinuities")} " +
+                $"inputFramesTotal={FormatOptionalU64(capture, "input_samples_total")} resampledSamplesTotal={FormatOptionalU64(capture, "resampled_samples_total")} framesProducedTotal={FormatOptionalU64(capture, "frames_produced_total")} accumulatorPending={FormatOptionalU64(capture, "accumulator_pending_samples")} invalidTimestamps={FormatOptionalU64(capture, "invalid_timestamps")} timestampDiscontinuities={FormatOptionalU64(capture, "timestamp_discontinuities")} backendPrerollCallbacks={FormatOptionalU64(capture, "backend_preroll_callbacks")} backendPrerollFrames={FormatOptionalU64(capture, "backend_preroll_frames")} prerollPendingDiscarded={FormatOptionalU64(capture, "preroll_pending_samples_discarded")} egressStaleFrames={FormatOptionalU64(capture, "egress_stale_frames")} " +
                 $"captureClockDeltaSeen={FormatOptionalBool(capture, "capture_clock_delta_seen")} captureClockDeltaLastUs={FormatOptionalU64WhenPresent(capture, "capture_clock_delta_last_us", "capture_clock_delta_seen")} captureClockExpectedDeltaUs={FormatOptionalU64WhenPresent(capture, "capture_clock_expected_delta_us", "capture_clock_delta_seen")} captureClockDeltaErrorUs={FormatOptionalI64WhenPresent(capture, "capture_clock_delta_error_us", "capture_clock_delta_seen")} captureClockBridgeResidualSeen={FormatOptionalBool(capture, "capture_clock_bridge_residual_seen")} captureClockBridgeResidualUs={FormatOptionalI64WhenPresent(capture, "capture_clock_bridge_residual_us", "capture_clock_bridge_residual_seen")} captureClockStatus={FormatOptionalText(capture, "capture_clock_status", 64)} lastTimestampDiscontinuityReason={FormatOptionalText(capture, "last_timestamp_discontinuity_reason", 64)} " +
                 $"ringLen={FormatOptionalU64(capture, "ring_len")} ringCapacity={FormatOptionalU64(capture, "ring_capacity")} ringHighWater={FormatOptionalU64(capture, "ring_high_water")} ringDropped={FormatOptionalU64(capture, "ring_dropped")} ringOldestAgeMs={FormatOptionalU64WhenPresent(capture, "ring_oldest_frame_age_ms", "ring_has_frames")} encoderPopAgeLastMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_last_ms", "encoder_frame_seen")} encoderPopAgeMaxMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_max_ms", "encoder_window_seen")} payloadBytes={payloadBytes}"));
 

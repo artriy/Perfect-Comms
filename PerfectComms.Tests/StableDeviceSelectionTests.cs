@@ -79,7 +79,7 @@ public sealed class StableDeviceSelectionTests
     }
 
     [Fact]
-    public void MissingStableIdBecomesExplicitUnavailableSelectionInsteadOfStaleIndex()
+    public void MissingStableIdRecoversToUniqueAvailableEndpointWithSameName()
     {
         var available = new[]
         {
@@ -90,14 +90,153 @@ public sealed class StableDeviceSelectionTests
         var published = VoiceChatLocalSettings.WithUnavailableSelection(
             available, "saved-id", "Same Display Name", "Saved microphone");
         int index = VoiceChatLocalSettings.ResolveDeviceIndex(
-            "saved-id", "Same Display Name", published, 1, out var resolved);
+            "saved-id", "Same Display Name", published, 1,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: true,
+            out var resolved);
 
         Assert.Equal(3, published.Length);
+        Assert.Equal(1, index);
+        Assert.Equal("different-id", resolved?.Id);
+        Assert.True(resolved?.IsAvailable);
+    }
+
+    [Fact]
+    public void MissingMicrophoneStableIdDoesNotRetargetByName()
+    {
+        var devices = new[]
+        {
+            Default,
+            new VoiceDeviceInfo("replacement-id", "USB Audio", false),
+            VoiceDeviceInfo.Unavailable("saved-id", "USB Audio", "Saved microphone"),
+        };
+
+        int index = VoiceChatLocalSettings.ResolveDeviceIndex(
+            "saved-id", "USB Audio", devices, 2,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: false,
+            out var resolved);
+
         Assert.Equal(2, index);
         Assert.Equal("saved-id", resolved?.Id);
         Assert.False(resolved?.IsAvailable);
-        Assert.Equal("different-id", published[1].Id);
     }
+
+#if WINDOWS
+    [Fact]
+    public void LegacyDesktopMicrophoneIdPrefersExactRawCubebEndpoint()
+    {
+        var unique = new[]
+        {
+            Default,
+            new VoiceDeviceInfo("cubeb-v2:776173617069:656e64706f696e742d3432", "USB Microphone", false),
+            new VoiceDeviceInfo("cubeb-v2:776173617069:6f74686572", "USB Microphone", false),
+            VoiceDeviceInfo.Unavailable("wasapi:endpoint-42", "USB Microphone", "Saved microphone"),
+        };
+
+        Assert.True(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId("wasapi:endpoint-42"));
+        Assert.True(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId("cubeb-v1:0102"));
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId("legacy-backend-id"));
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(string.Empty));
+        Assert.True(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            "wasapi:endpoint-42", "cubeb-v2:776173617069:656e64706f696e742d3432"));
+        Assert.True(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            "cubeb-v1:656e64706f696e742d3432",
+            "cubeb-v2:776173617069:656e64706f696e742d3432"));
+        Assert.False(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            "wasapi:endpoint-42", "cubeb-v1:zz"));
+
+        int index = VoiceChatLocalSettings.ResolveDeviceIndex(
+            "wasapi:endpoint-42", "USB Microphone", unique, 3,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
+                "wasapi:endpoint-42"),
+            out var resolved);
+
+        Assert.Equal(1, index);
+        Assert.Equal("cubeb-v2:776173617069:656e64706f696e742d3432", resolved?.Id);
+        Assert.True(resolved?.IsAvailable);
+    }
+
+    [Theory]
+    [InlineData("wasapi", "wasapi")]
+    [InlineData("coreaudio", "coreaudio")]
+    [InlineData("pulseaudio", "pulse")]
+    [InlineData("alsa", "alsa")]
+    public void LegacyCpalIdsMigrateOnlyToCompatibleCubebBackendFamily(
+        string legacyHost,
+        string cubebFamily)
+    {
+        const string rawId = "device:with:colons";
+        string savedId = legacyHost + ":" + rawId;
+        string compatible = CubebV2(cubebFamily, rawId);
+        string incompatible = CubebV2(
+            string.Equals(cubebFamily, "alsa", StringComparison.Ordinal) ? "pulse" : "alsa",
+            rawId);
+
+        Assert.True(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            savedId, compatible));
+        Assert.False(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            savedId, incompatible));
+    }
+
+    [Fact]
+    public void LegacyLinuxIdCannotRetargetAcrossPulseAndAlsaWithSameRawId()
+    {
+        const string rawId = "default";
+        var devices = new[]
+        {
+            Default,
+            new VoiceDeviceInfo(CubebV2("pulse", rawId), "Linux Audio", true),
+            new VoiceDeviceInfo(CubebV2("alsa", rawId), "Linux Audio", false),
+            VoiceDeviceInfo.Unavailable("alsa:default", "Linux Audio", "Saved speaker"),
+        };
+
+        int index = VoiceChatLocalSettings.ResolveDeviceIndex(
+            "alsa:default", "Linux Audio", devices, 3,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: true,
+            out var resolved);
+
+        Assert.Equal(2, index);
+        Assert.Equal(CubebV2("alsa", rawId), resolved?.Id);
+    }
+
+    [Fact]
+    public void CubebV1MigratesByRawIdButV2RemainsBackendScoped()
+    {
+        const string rawId = "shared-id";
+        string v1 = CubebV1(rawId);
+        string pulse = CubebV2("pulse", rawId);
+        string alsa = CubebV2("alsa", rawId);
+
+        Assert.True(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(v1, pulse));
+        Assert.True(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(v1, alsa));
+        Assert.False(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(pulse, alsa));
+    }
+
+    [Fact]
+    public void MalformedOrOversizedLegacyIdsAreNotMigrationCandidates()
+    {
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId("cubeb-v1:"));
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId("cubeb-v1:zz"));
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
+            "wasapi:" + new string('x', 4_097)));
+        Assert.False(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
+            "cubeb-v2::00", CubebV2("wasapi", "\0")));
+    }
+#endif
+
+#if ANDROID
+    [Fact]
+    public void AndroidDoesNotTreatDesktopDeviceIdsAsMigrationCandidates()
+    {
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
+            "wasapi:endpoint"));
+        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
+            CubebV1("endpoint")));
+    }
+#endif
 
     [Fact]
     public void OpaqueStableIdsAreCaseSensitive()
@@ -109,10 +248,126 @@ public sealed class StableDeviceSelectionTests
         };
 
         int index = VoiceChatLocalSettings.ResolveDeviceIndex(
-            "CASE-SENSITIVE", "Mic", devices, 1, out var resolved);
+            "CASE-SENSITIVE", "Different legacy name", devices, 1, out var resolved);
 
         Assert.Equal(0, index);
         Assert.Null(resolved);
+    }
+
+    [Fact]
+    public void FirstAuthoritativeDeviceListEstablishesBaselineOnlyOnce()
+    {
+        bool established = false;
+        Assert.False(VoiceChatLocalSettings.MarkAndDetectFirstAuthoritativeList(
+            authoritative: false, ref established));
+        Assert.False(established);
+
+        Assert.True(VoiceChatLocalSettings.MarkAndDetectFirstAuthoritativeList(
+            authoritative: true, ref established));
+        Assert.True(established);
+        Assert.False(VoiceChatLocalSettings.MarkAndDetectFirstAuthoritativeList(
+            authoritative: true, ref established));
+    }
+
+    [Fact]
+    public void FirstAuthoritativeListAppliesIdentityChangingLegacyMigration()
+    {
+        var migrated = new VoiceDeviceInfo(
+            CubebV2("wasapi", "endpoint-42"), "USB Microphone", false);
+
+        Assert.True(VoiceChatLocalSettings.ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList: true,
+            previousId: "wasapi:endpoint-42",
+            previousAvailable: false,
+            resolvedDevice: migrated));
+        Assert.False(VoiceChatLocalSettings.ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList: true,
+            previousId: migrated.Id,
+            previousAvailable: false,
+            resolvedDevice: migrated));
+        Assert.True(VoiceChatLocalSettings.ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList: false,
+            previousId: migrated.Id,
+            previousAvailable: false,
+            resolvedDevice: migrated));
+    }
+
+    [Fact]
+    public void FirstAuthoritativeListUsesPersistedIdentityWhenRuntimeBaselineIsEmpty()
+    {
+        var current = new VoiceDeviceInfo(
+            CubebV2("wasapi", "endpoint-42"), "USB Microphone", false);
+
+        Assert.False(VoiceChatLocalSettings.ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList: true,
+            previousId: string.Empty,
+            previousAvailable: false,
+            persistedSavedId: current.Id,
+            resolvedDevice: current));
+        Assert.True(VoiceChatLocalSettings.ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList: true,
+            previousId: string.Empty,
+            previousAvailable: false,
+            persistedSavedId: "wasapi:endpoint-42",
+            resolvedDevice: current));
+    }
+
+    [Fact]
+    public void AmbiguousNameRecoveryPreservesUnavailablePreference()
+    {
+        var devices = new[]
+        {
+            Default,
+            new VoiceDeviceInfo("new-id-a", "USB Audio", false),
+            new VoiceDeviceInfo("new-id-b", "USB Audio", true),
+            VoiceDeviceInfo.Unavailable("old-id", "USB Audio", "Saved speaker"),
+        };
+
+        int index = VoiceChatLocalSettings.ResolveDeviceIndex(
+            "old-id", "USB Audio", devices, 3,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: true,
+            out var resolved);
+
+        Assert.Equal(3, index);
+        Assert.Equal("old-id", resolved?.Id);
+        Assert.False(resolved?.IsAvailable);
+    }
+
+    [Fact]
+    public void NonAuthoritativeStartupListPreservesPlaceholderUntilProbeCompletes()
+    {
+        var devices = new[]
+        {
+            Default,
+            VoiceDeviceInfo.Unavailable("saved-id", "USB Headset", "Saved speaker"),
+        };
+
+        int index = VoiceChatLocalSettings.ResolveDeviceIndex(
+            "saved-id", "USB Headset", devices, 1,
+            authoritativeDeviceList: false,
+            recoverMissingStableId: true,
+            out var resolved);
+
+        Assert.Equal(1, index);
+        Assert.Equal("saved-id", resolved?.Id);
+        Assert.False(resolved?.IsAvailable);
+    }
+
+    [Fact]
+    public void SetupCannotSelectUnavailableEndpoint()
+    {
+        var devices = new[]
+        {
+            Default,
+            new VoiceDeviceInfo("available", "Speakers", false),
+            VoiceDeviceInfo.Unavailable("missing", "Headphones", "Saved speaker"),
+        };
+
+        Assert.True(FirstRunSetupDraft.CanSelectDeviceIndex(0, devices));
+        Assert.True(FirstRunSetupDraft.CanSelectDeviceIndex(1, devices));
+        Assert.False(FirstRunSetupDraft.CanSelectDeviceIndex(2, devices));
+        Assert.False(FirstRunSetupDraft.CanSelectDeviceIndex(3, devices));
     }
 
     [Fact]
@@ -276,4 +531,13 @@ public sealed class StableDeviceSelectionTests
         Assert.True(VoiceChatLocalSettings.ShouldReapplyDefaultDevice(
             reselectedDefault, "old-default", "new-default"));
     }
+
+    private static string CubebV1(string rawId)
+        => "cubeb-v1:" + Hex(rawId);
+
+    private static string CubebV2(string family, string rawId)
+        => "cubeb-v2:" + Hex(family) + ":" + Hex(rawId);
+
+    private static string Hex(string value)
+        => Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(value)).ToLowerInvariant();
 }

@@ -2,6 +2,7 @@
 name = "pc-capture"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 description = "PerfectComms native host-side microphone capture helper (loopback TCP sidecar)."
 license = "LGPL-2.1-only"
 
@@ -10,7 +11,7 @@ name = "pc-capture"
 path = "src/main.rs"
 
 # The processing core (codec/dsp/mix/gamestate/proto/rtc) is a library so the Android
-# cdylib (native/pc-mobile) can reuse it without the desktop-only IPC server + cpal.
+# cdylib (native/pc-mobile) can reuse it without the desktop-only IPC server + Cubeb.
 [lib]
 name = "pc_capture"
 path = "src/lib.rs"
@@ -22,12 +23,18 @@ apm-sys = { path = "../apm-sys" }
 pion-sys = { path = "../pion-sys" }
 opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
 
-# cpal (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
+# Cubeb (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
 # Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from
-# the Android build keeps the cross-compile free of the oboe/JNI backend.
+# the Android build keeps the cross-compile free of desktop audio backends.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-cpal = "=0.18.1"
+cubeb = "=0.36.0"
 crossbeam-channel = "0.5"
+
+# On Linux, prefer Cubeb's C Pulse/ALSA backends, which dynamically load the host audio
+# libraries. Disabling the nested Rust Pulse backend avoids making libpulse a hard runtime
+# dependency and preserves native-Linux ALSA-only compatibility.
+[target.'cfg(target_os = "linux")'.dependencies]
+cubeb-sys = { version = "=0.36.0", features = ["unittest-build"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -44,3 +51,10 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[patch.crates-io]
+# cubeb-rs 0.36.0 moves callback ownership before stream_init and leaks it on an error return.
+# Keep the exact released API/source locally with a minimal RAII fix for failed device opens.
+cubeb = { path = "../vendor/cubeb" }
+# Keep libcubeb's nested Rust backend builds locked and expose its compiled-backend inventory.
+cubeb-sys = { path = "../vendor/cubeb-sys" }

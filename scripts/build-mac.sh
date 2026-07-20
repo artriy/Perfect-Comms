@@ -2,14 +2,24 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export MACOSX_DEPLOYMENT_TARGET=11.0
 crate="$root/native/pc-capture"
 out="$root/Libs/pc-capture"
 work="$crate/target/mac-bundle"
 app="$work/PerfectCommsAudio.app"
+# Keep the app self-contained: Cubeb is part of the helper executable, not a
+# Homebrew/system dylib selected through an ambient build variable.
+unset LIBCUBEB_SYS_USE_PKG_CONFIG
 dry=0
 [[ "${1:-}" == "--dry-run" ]] && dry=1
 
 mkdir -p "$out"
+# Do not let a Homebrew pkg-config entry swap Cubeb's vendored resampler for
+# an external speexdsp dylib. The release bundle must remain self-contained.
+cubeb_empty_pkgconfig="$crate/target/.pc-empty-pkgconfig"
+mkdir -p "$cubeb_empty_pkgconfig"
+unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
+export PKG_CONFIG_LIBDIR="$cubeb_empty_pkgconfig"
 
 x64="$crate/target/x86_64-apple-darwin/release/pc-capture"
 arm64="$crate/target/aarch64-apple-darwin/release/pc-capture"
@@ -19,8 +29,8 @@ echo "build x86_64-apple-darwin + aarch64-apple-darwin -> universal -> $app -> $
 
 rustup target add x86_64-apple-darwin >/dev/null 2>&1 || true
 rustup target add aarch64-apple-darwin >/dev/null 2>&1 || true
-cargo build --release --manifest-path "$crate/Cargo.toml" --target x86_64-apple-darwin
-cargo build --release --manifest-path "$crate/Cargo.toml" --target aarch64-apple-darwin
+cargo build --locked --release --manifest-path "$crate/Cargo.toml" --target x86_64-apple-darwin
+cargo build --locked --release --manifest-path "$crate/Cargo.toml" --target aarch64-apple-darwin
 
 # Pion is loaded dynamically by the shared Rust facade. Build both c-shared
 # slices with the pinned Go toolchain, then seal one universal dylib into the

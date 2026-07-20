@@ -25,6 +25,8 @@ scripts/*
 !scripts/verify-release-assets.py
 !scripts/verify-package-layout.py
 !scripts/verify-native-license-inventory.py
+!scripts/generate-cubeb-license-inventories.py
+!scripts/verify-cubeb-provenance.py
 !scripts/build-pion.sh
 !scripts/verify-pion-license-inventory.py
 # Track the deployable Cloudflare worker source/config/tests, but never local
@@ -51,6 +53,12 @@ TouMira/
 artifacts/
 native/pc-pion/.cache/
 native/pion-sys/target/
+native/vendor/**/target/
+native/vendor/**/Cargo.lock
+# The patched Cubeb crates and libcubeb's nested Rust backends are validated
+# with --locked. These locks must survive a clean checkout.
+!native/vendor/cubeb/Cargo.lock
+!native/vendor/cubeb-sys/**/Cargo.lock
 build-apm-*/
 PerfectComms.sln
 .superpowers/

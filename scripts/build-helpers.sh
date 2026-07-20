@@ -12,6 +12,10 @@ cargo_target_root="$target_root"
 if command -v cygpath >/dev/null 2>&1; then
   cargo_target_root="$(cygpath -w "$target_root")"
 fi
+# Always compile the vendored, statically linked Cubeb copy from cubeb-sys.
+# A developer's ambient opt-in must not turn release helpers into consumers of
+# an unshipped system libcubeb shared library.
+unset LIBCUBEB_SYS_USE_PKG_CONFIG
 dry=0
 only=""
 for arg in "$@"; do
@@ -29,6 +33,14 @@ declare -a targets=(
 
 mkdir -p "$out"
 mkdir -p "$target_root"
+# Cubeb otherwise auto-detects speexdsp through pkg-config. Isolate package
+# discovery for these self-contained helpers so it deterministically compiles
+# the vendored resampler and keeps PulseAudio/ALSA on their lazy-load path.
+# (The Rust `cmake` crate does not consume an ambient CMAKE_ARGS variable.)
+cubeb_empty_pkgconfig="$target_root/.pc-empty-pkgconfig"
+mkdir -p "$cubeb_empty_pkgconfig"
+unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
+export PKG_CONFIG_LIBDIR="$cubeb_empty_pkgconfig"
 for entry in "${targets[@]}"; do
   IFS=":" read -r triple binname destname <<<"$entry"
   [[ -n "$only" && "$only" != "$triple" ]] && continue
@@ -51,10 +63,10 @@ for entry in "${targets[@]}"; do
     fi
     CARGO_TARGET_DIR="$cargo_target_root" RUSTFLAGS="$static_crt_flags" \
       CMAKE_TOOLCHAIN_FILE="$static_crt_toolchain" \
-      cargo build --release --manifest-path "$crate/Cargo.toml" --target "$triple"
+      cargo build --locked --release --manifest-path "$crate/Cargo.toml" --target "$triple"
   else
     CARGO_TARGET_DIR="$cargo_target_root" \
-      cargo build --release --manifest-path "$crate/Cargo.toml" --target "$triple"
+      cargo build --locked --release --manifest-path "$crate/Cargo.toml" --target "$triple"
   fi
   cp "$src" "$dest"
   [[ "$destname" == *.exe ]] || chmod +x "$dest"

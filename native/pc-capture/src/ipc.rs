@@ -1,5 +1,5 @@
 use crate::audio::{
-    monotonic_ns, now_ns, peak, spawn_cpal_capture, spawn_cpal_playback, AecTiming,
+    monotonic_ns, now_ns, peak, spawn_cubeb_capture, spawn_cubeb_playback, AecTiming,
     MicrophoneMonitorConfigChange, MicrophoneMonitorState, PlaybackProgress, ToneSource,
 };
 use crate::codec::{
@@ -45,9 +45,75 @@ const PLAYBACK_WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
 const CRITICAL_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MONITOR_RING_CAPACITY_PAIRS: usize = proto::SAMPLE_RATE as usize * 2;
 const MAX_MONITOR_DELAY_MS: u32 = 1500;
+const MAX_PLAYBACK_ERROR_CHARS: usize = 512;
+const CAPTURE_EGRESS_INTERVAL: Duration = Duration::from_millis(20);
+const CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS: u64 = 100_000_000;
 
 fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn playback_error_code(error: &str) -> &'static str {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("permission")
+        || normalized.contains("access denied")
+        || normalized.contains("access is denied")
+    {
+        "permission-denied"
+    } else if normalized.contains("device busy")
+        || normalized.contains("devicebusy")
+        || normalized.contains("in use")
+    {
+        "device-busy"
+    } else if normalized.contains("unavailable")
+        || normalized.contains("not available")
+        || normalized.contains("no output device")
+        || normalized.contains("disconnected")
+        || normalized.contains("invalidated")
+    {
+        "device-unavailable"
+    } else if normalized.contains("unsupported")
+        || normalized.contains("not supported")
+        || normalized.contains("notsupported")
+        || normalized.contains("invalidformat")
+        || normalized.contains("invalid format")
+        || normalized.contains("invalidparameter")
+        || normalized.contains("invalid parameter")
+        || normalized.contains("sample format")
+        || normalized.contains("sample rate")
+        || normalized.contains("stream configuration")
+    {
+        "unsupported-config"
+    } else if normalized.contains("timed out") || normalized.contains("timeout") {
+        "timeout"
+    } else if normalized.contains("callback") {
+        "stream-error"
+    } else {
+        "open-failed"
+    }
+}
+
+fn compact_playback_error(error: &str) -> String {
+    let mut compact = String::with_capacity(error.len().min(MAX_PLAYBACK_ERROR_CHARS));
+    let mut previous_space = false;
+    for character in error.chars().take(MAX_PLAYBACK_ERROR_CHARS) {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if character.is_whitespace() {
+            if previous_space {
+                continue;
+            }
+            compact.push(' ');
+            previous_space = true;
+        } else {
+            compact.push(character);
+            previous_space = false;
+        }
+    }
+    compact.trim().to_string()
 }
 
 #[derive(Clone)]
@@ -1078,7 +1144,7 @@ fn spawn_real_producer(
         let mut retry_attempt = 0u32;
         while !stop.load(Ordering::Relaxed) {
             healthy.store(false, Ordering::Relaxed);
-            match spawn_cpal_capture(
+            match spawn_cubeb_capture(
                 device_id.clone(),
                 ring_producer.clone(),
                 encoder_epoch.clone(),
@@ -1273,6 +1339,8 @@ fn ensure_playback(
         }
         last_spawn_ns.store(now, Ordering::Release);
         let dev = out_selected.lock().unwrap().clone();
+        let requested_device = dev.clone().unwrap_or_default();
+        let requested_default = requested_device.is_empty();
         let pb = playback.clone();
         let monitor_pb = monitor_playback.clone();
         let monitor = monitor_state.clone();
@@ -1303,7 +1371,7 @@ fn ensure_playback(
             .fetch_add(1, Ordering::Relaxed);
         *guard = Some(std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                spawn_cpal_playback(
+                spawn_cubeb_playback(
                     dev,
                     pb,
                     monitor_pb,
@@ -1322,13 +1390,19 @@ fn ensure_playback(
                 Ok(Err(error)) => {
                     stats.playback_errors.fetch_add(1, Ordering::Relaxed);
                     playback_diagnostics.mark_error();
+                    let error_code = playback_error_code(&error).to_string();
+                    let error = compact_playback_error(&error);
                     send_media_state(
                         &media_events,
                         MediaStateEvent {
                             direction: "playback".to_string(),
                             state: "error".to_string(),
+                            error_code,
+                            error: error.clone(),
                             stream_generation,
                             running: false,
+                            requested_device: requested_device.clone(),
+                            requested_default,
                             ..Default::default()
                         },
                     );
@@ -1336,13 +1410,21 @@ fn ensure_playback(
                 }
                 Err(payload) => {
                     playback_diagnostics.mark_error();
+                    let error = format!(
+                        "playback worker panicked: {}",
+                        panic_detail(payload.as_ref())
+                    );
                     send_media_state(
                         &media_events,
                         MediaStateEvent {
                             direction: "playback".to_string(),
                             state: "error".to_string(),
+                            error_code: "worker-panic".to_string(),
+                            error: compact_playback_error(&error),
                             stream_generation,
                             running: false,
+                            requested_device: requested_device.clone(),
+                            requested_default,
                             ..Default::default()
                         },
                     );
@@ -1471,6 +1553,38 @@ impl EncoderPrivacyEpoch {
 
 fn capture_frame_authorized(frame_epoch: u64, active_epoch: u64, requested_epoch: u64) -> bool {
     frame_epoch == active_epoch && requested_epoch == active_epoch
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CapturePacerKey {
+    encoder_epoch: u64,
+    capture_generation: u64,
+    capture_open_attempt: u64,
+}
+
+#[derive(Default)]
+struct CaptureFramePacer {
+    key: Option<CapturePacerKey>,
+    next_deadline: Option<Instant>,
+}
+
+impl CaptureFramePacer {
+    fn reset(&mut self) {
+        self.key = None;
+        self.next_deadline = None;
+    }
+
+    fn deadline(&mut self, key: CapturePacerKey, now: Instant) -> Instant {
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.next_deadline = None;
+        }
+        // Rebase on lateness. A stalled encoder must never catch up by emitting multiple RTP
+        // packets back-to-back; keeping the old deadline would recreate the Cubeb startup burst.
+        let deadline = self.next_deadline.map_or(now, |old| old.max(now));
+        self.next_deadline = Some(deadline + CAPTURE_EGRESS_INTERVAL);
+        deadline
+    }
 }
 
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
@@ -1676,6 +1790,8 @@ fn run_authenticated_session(
         let mut noise_gate = NoiseGate::default();
         let mut applied_encoder_policy_generation = 0u64;
         let mut active_encoder_epoch = 0u64;
+        let mut pacer = CaptureFramePacer::default();
+        let mut was_transmit_enabled = false;
         let mut monitor_stereo = vec![0.0f32; proto::AUDIO_OUT_SAMPLES];
         let mut frame = AudioFrame {
             encoder_epoch: 0,
@@ -1686,7 +1802,7 @@ fn run_authenticated_session(
             capture_timestamp_valid: false,
             samples: vec![0.0; proto::FRAME_SAMPLES],
         };
-        while !writer_stop.load(Ordering::Relaxed) {
+        'encoder: while !writer_stop.load(Ordering::Relaxed) {
             let requested_epoch = writer_privacy.requested();
             if requested_epoch > active_encoder_epoch {
                 writer_ring.discard_all();
@@ -1704,6 +1820,7 @@ fn run_authenticated_session(
                 }
                 noise_gate.reset();
                 last_capture_stream = None;
+                pacer.reset();
                 applied_encoder_policy_generation = 0;
                 active_encoder_epoch = requested_epoch;
                 writer_privacy.publish_applied(active_encoder_epoch);
@@ -1712,7 +1829,12 @@ fn run_authenticated_session(
             if writer_ring.pop_into(&mut frame) {
                 let transmit_enabled = writer_transmit_enabled.load(Ordering::Acquire);
                 let monitor_enabled = writer_monitor_state.enabled();
+                if transmit_enabled && !was_transmit_enabled {
+                    pacer.reset();
+                }
+                was_transmit_enabled = transmit_enabled;
                 if !transmit_enabled && !monitor_enabled {
+                    pacer.reset();
                     continue;
                 }
                 let f = &mut frame;
@@ -1731,13 +1853,53 @@ fn run_authenticated_session(
                     writer_capture_diagnostics.note_stale_generation_frame();
                     continue;
                 }
+                let callback_age_ns = monotonic_ns().saturating_sub(f.capture_callback_ts_ns);
+                if f.capture_callback_ts_ns != 0
+                    && callback_age_ns > CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS
+                {
+                    writer_capture_diagnostics.note_egress_stale_frame();
+                    continue;
+                }
+                let capture_stream = (f.capture_generation, f.capture_open_attempt);
+                let pacer_key = CapturePacerKey {
+                    encoder_epoch: active_encoder_epoch,
+                    capture_generation: f.capture_generation,
+                    capture_open_attempt: f.capture_open_attempt,
+                };
+                let deadline = pacer.deadline(pacer_key, Instant::now());
+                while Instant::now() < deadline {
+                    if writer_stop.load(Ordering::Acquire)
+                        || !capture_frame_authorized(
+                            f.encoder_epoch,
+                            active_encoder_epoch,
+                            writer_privacy.requested(),
+                        )
+                        || !writer_capture_diagnostics
+                            .is_active_stream(f.capture_generation, f.capture_open_attempt)
+                    {
+                        continue 'encoder;
+                    }
+                    if !writer_transmit_enabled.load(Ordering::Acquire)
+                        && !writer_monitor_state.enabled()
+                    {
+                        pacer.reset();
+                        continue 'encoder;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                }
+                let transmit_enabled = writer_transmit_enabled.load(Ordering::Acquire);
+                let monitor_enabled = writer_monitor_state.enabled();
+                if !transmit_enabled && !monitor_enabled {
+                    pacer.reset();
+                    continue;
+                }
                 writer_counters
                     .capture_frames
                     .fetch_add(1, Ordering::Relaxed);
                 if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.pre_dsp.record(&f.samples);
                 }
-                let capture_stream = (f.capture_generation, f.capture_open_attempt);
                 let capture_stream_changed = last_capture_stream != Some(capture_stream);
                 if capture_stream_changed && writer_monitor_state.enabled() {
                     writer_monitor_state.reset_playout(|| {
@@ -2113,7 +2275,7 @@ fn run_authenticated_session(
                     &playback_supervision,
                 );
                 // Managed setup playback uses the already-versioned AUDIO_OUT frame to test the
-                // exact CPAL output selected in Perfect Comms. Pace is controlled by managed code;
+                // exact Cubeb output selected in Perfect Comms. Pace is controlled by managed code;
                 // this bounded ring still drops oldest samples if a broken caller floods it.
                 dsp.lock().unwrap().far_end(&frame.samples);
                 let queued_pairs_before_frame = enqueue_audio_out(&playback, &frame.samples);
@@ -2630,6 +2792,40 @@ mod tests {
     }
 
     #[test]
+    fn playback_errors_are_classified_for_managed_fallback() {
+        assert_eq!(
+            playback_error_code("Stream configuration is not supported in shared mode"),
+            "unsupported-config"
+        );
+        assert_eq!(playback_error_code("InvalidFormat"), "unsupported-config");
+        assert_eq!(playback_error_code("NotSupported"), "unsupported-config");
+        assert_eq!(
+            playback_error_code("InvalidParameter"),
+            "unsupported-config"
+        );
+        assert_eq!(
+            playback_error_code("selected output device is unavailable"),
+            "device-unavailable"
+        );
+        assert_eq!(playback_error_code("DeviceBusy"), "device-busy");
+        assert_eq!(playback_error_code("operation timed out"), "timeout");
+        assert_eq!(
+            playback_error_code("output device callback failed"),
+            "stream-error"
+        );
+    }
+
+    #[test]
+    fn playback_error_payload_is_single_line_and_bounded() {
+        let compact = compact_playback_error(&format!("first\r\nsecond\t{}", "x".repeat(700)));
+        assert!(compact.starts_with("first second "));
+        assert!(compact.chars().count() <= MAX_PLAYBACK_ERROR_CHARS);
+        assert!(!compact.contains('\n'));
+        assert!(!compact.contains('\r'));
+        assert!(!compact.contains('\t'));
+    }
+
+    #[test]
     fn encoder_privacy_epochs_are_monotonic_and_coalescible() {
         let privacy = EncoderPrivacyEpoch::default();
         let first = privacy.request().unwrap();
@@ -2716,6 +2912,48 @@ mod tests {
             epoch,
             privacy.requested()
         ));
+    }
+
+    #[test]
+    fn capture_pacer_never_catches_up_or_crosses_stream_identity() {
+        let mut pacer = CaptureFramePacer::default();
+        let base = Instant::now();
+        let first_key = CapturePacerKey {
+            encoder_epoch: 1,
+            capture_generation: 2,
+            capture_open_attempt: 3,
+        };
+        let first = pacer.deadline(first_key, base);
+        let second = pacer.deadline(first_key, base);
+        assert_eq!(first, base);
+        assert_eq!(second.duration_since(first), CAPTURE_EGRESS_INTERVAL);
+
+        let late_now = base + Duration::from_millis(125);
+        let late = pacer.deadline(first_key, late_now);
+        assert_eq!(
+            late, late_now,
+            "late audio must rebase instead of catching up"
+        );
+        let after_late = pacer.deadline(first_key, late_now);
+        assert_eq!(after_late.duration_since(late), CAPTURE_EGRESS_INTERVAL);
+
+        let next_generation = CapturePacerKey {
+            capture_generation: 4,
+            ..first_key
+        };
+        assert_eq!(pacer.deadline(next_generation, late_now), late_now);
+        let next_epoch = CapturePacerKey {
+            encoder_epoch: 5,
+            ..next_generation
+        };
+        assert_eq!(pacer.deadline(next_epoch, late_now), late_now);
+    }
+
+    #[test]
+    fn callback_age_guard_allows_two_frame_callbacks_but_rejects_backlog() {
+        assert!(Duration::from_millis(20).as_nanos() as u64 <= CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
+        assert!(Duration::from_millis(40).as_nanos() as u64 <= CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
+        assert!(Duration::from_millis(120).as_nanos() as u64 > CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
     }
 
     #[test]

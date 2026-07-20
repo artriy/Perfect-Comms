@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+import tomllib
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
 Relation = tuple[str, str, str, str]
+LockedPackage = tuple[str, str, str, str]
 
 
 class _InventoryParser(HTMLParser):
@@ -99,6 +101,32 @@ def _read_inventory(path: Path) -> Counter[Relation]:
     return _parse_inventory(path.read_text(encoding="utf-8"), str(path))
 
 
+def _parse_lock(contents: str, source: str) -> Counter[LockedPackage]:
+    try:
+        document = tomllib.loads(contents)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"{source} is not valid TOML: {error}") from error
+    packages: Counter[LockedPackage] = Counter()
+    for package in document.get("package", []):
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise ValueError(f"{source} contains an invalid package entry")
+        packages[(
+            name,
+            version,
+            str(package.get("source", "path")),
+            str(package.get("checksum", "")),
+        )] += 1
+    if not packages:
+        raise ValueError(f"{source} contains no locked packages")
+    return packages
+
+
+def _read_lock(path: Path) -> Counter[LockedPackage]:
+    return _parse_lock(path.read_text(encoding="utf-8"), str(path))
+
+
 def _dependencies(relations: Counter[Relation]) -> set[str]:
     return {relation[3] for relation in relations}
 
@@ -136,6 +164,22 @@ def _run_self_test() -> None:
     assert expected != _parse_inventory(changed_text, "text fixture")
     assert expected != _parse_inventory(removed_relation, "relationship fixture")
 
+    subset = _parse_lock(
+        'version = 4\n[[package]]\nname = "alpha"\nversion = "1.0.0"\n',
+        "subset lock fixture",
+    )
+    superset = _parse_lock(
+        'version = 4\n[[package]]\nname = "alpha"\nversion = "1.0.0"\n'
+        '[[package]]\nname = "beta"\nversion = "2.0.0"\n',
+        "superset lock fixture",
+    )
+    changed = _parse_lock(
+        'version = 4\n[[package]]\nname = "alpha"\nversion = "1.0.1"\n',
+        "changed lock fixture",
+    )
+    assert not subset - superset
+    assert subset - changed
+
     print("Native license inventory verifier self-test passed.")
 
 
@@ -149,10 +193,39 @@ def main() -> int:
     parser.add_argument("committed", nargs="?", type=Path)
     parser.add_argument("generated", nargs="?", type=Path)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--subset-lock", type=Path)
+    parser.add_argument("--superset-lock", type=Path)
     args = parser.parse_args()
 
     if args.self_test:
         _run_self_test()
+        return 0
+    if args.subset_lock is not None or args.superset_lock is not None:
+        if args.subset_lock is None or args.superset_lock is None:
+            parser.error("--subset-lock and --superset-lock are required together")
+        if args.committed is not None or args.generated is not None:
+            parser.error("lock comparison cannot be combined with HTML inventory comparison")
+        try:
+            subset = _read_lock(args.subset_lock)
+            superset = _read_lock(args.superset_lock)
+        except (OSError, UnicodeError, ValueError) as error:
+            print(f"Native dependency lock validation failed: {error}", file=sys.stderr)
+            return 1
+        missing = subset - superset
+        if missing:
+            print(
+                f"{args.superset_lock} does not cover every package in {args.subset_lock}:",
+                file=sys.stderr,
+            )
+            for name, version, source, checksum in sorted(missing.elements())[:25]:
+                identity = source if source != "path" else "path dependency"
+                if checksum:
+                    identity += f", checksum={checksum[:12]}"
+                print(f"  {name} {version} ({identity})", file=sys.stderr)
+            return 1
+        print(
+            f"Native release lock covers all {sum(subset.values())} desktop locked packages."
+        )
         return 0
     if args.committed is None or args.generated is None:
         parser.error("committed and generated HTML paths are required")

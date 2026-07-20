@@ -3,6 +3,7 @@ accepted = [
     "MIT",
     "BSD-3-Clause",
     "ISC",
+    "MPL-2.0",
     "Unicode-3.0",
     "LGPL-2.1-only",
     "Zlib",

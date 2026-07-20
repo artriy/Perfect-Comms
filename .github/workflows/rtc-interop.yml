@@ -8,6 +8,7 @@ on:
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
       - "scripts/build-pion.sh"
@@ -17,6 +18,7 @@ on:
     paths:
       - "native/pc-capture/**"
       - "native/pc-mobile/**"
+      - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
       - "scripts/build-pion.sh"
@@ -50,9 +52,9 @@ jobs:
           cache-dependency-path: native/pc-pion/go.sum
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         if: runner.os == 'Windows'
-      - name: Linux audio build dependencies
+      - name: Linux Cubeb build dependencies (PulseAudio + ALSA)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+        run: sudo apt-get update && sudo apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config cmake nasm
       - name: Windows cgo compiler
         if: runner.os == 'Windows'
         run: choco install mingw -y --no-progress
@@ -70,11 +72,11 @@ jobs:
       - name: Offer/answer/ICE and Opus RTP loopback
         env:
           PC_PION_TEST_DISABLE_MDNS: "1"
-        run: cargo test --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+        run: cargo test --locked --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
       - name: Build helper for live TURN gate
         if: runner.os == 'Linux'
         run: |
-          cargo build --release --manifest-path native/pc-capture/Cargo.toml
+          cargo build --locked --release --manifest-path native/pc-capture/Cargo.toml
           cp Libs/pion/libpc-pion.linux-x64.so native/pc-capture/target/release/libpc-pion.so
       - name: Two-helper Cloudflare TURN relay and voice gate
         if: runner.os == 'Linux'
@@ -92,7 +94,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - name: Linux audio build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+      - name: Linux Cubeb build dependencies (PulseAudio + ALSA)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config cmake nasm
       - name: Lint host build of pc-mobile
-        run: cargo clippy --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings

@@ -7,8 +7,17 @@ use crate::proto::{
     PlaybackRing, FRAME_SAMPLES, SAMPLE_RATE,
 };
 use crate::rtc::NativeCounters;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cubeb::{
+    ChannelLayout, DeviceCollection, DeviceId, DeviceState, DeviceType, MonoFrame, SampleFormat,
+    State, StereoFrame, StreamBuilder, StreamParamsBuilder, StreamPrefs,
+};
+use std::cell::UnsafeCell;
 use std::collections::VecDeque;
+#[cfg(target_os = "linux")]
+use std::ffi::CStr;
+use std::ffi::CString;
+use std::mem::MaybeUninit;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,6 +25,57 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use crate::input::SyntheticTone as ToneSource;
 pub use crate::input::SYNTHETIC_TONE_HZ as TONE_HZ;
+
+/// Single-owner state installed after Cubeb successfully creates a stream and consumed only by
+/// that stream's serialized realtime callback. Keeping the heavy state outside StreamBuilder also
+/// keeps its DSP and audio buffers out of Cubeb's callback allocation during stream initialization.
+struct RealtimeCallbackState<T> {
+    initialized: AtomicBool,
+    value: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> RealtimeCallbackState<T> {
+    fn new() -> Self {
+        Self {
+            initialized: AtomicBool::new(false),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn initialize(&self, value: T) -> Result<(), T> {
+        if self.initialized.load(Ordering::Acquire) {
+            return Err(value);
+        }
+        // SAFETY: the stream owner installs the value exactly once, before the successful stream
+        // is started and before the callback gate is published.
+        unsafe { (*self.value.get()).write(value) };
+        self.initialized.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn with_callback_mut<R>(&self, action: impl FnOnce(&mut T) -> R) -> Option<R> {
+        if !self.initialized.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: Cubeb serializes data callbacks for one stream. The control thread never reads
+        // or mutates this value after initialization and stops the stream before its final drop.
+        let value = unsafe { &mut *(*self.value.get()).as_mut_ptr() };
+        Some(action(value))
+    }
+}
+
+// SAFETY: access is published with release/acquire ordering and mutable access is restricted to
+// Cubeb's single serialized data callback as described above.
+unsafe impl<T: Send> Sync for RealtimeCallbackState<T> {}
+
+impl<T> Drop for RealtimeCallbackState<T> {
+    fn drop(&mut self) {
+        if self.initialized.load(Ordering::Acquire) {
+            // SAFETY: an initialized value is written exactly once and has not been dropped yet.
+            unsafe { self.value.get_mut().assume_init_drop() };
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrophoneMonitorConfigChange {
@@ -216,6 +276,12 @@ impl AdaptiveDownmixer {
             self.scratch.push(sample);
         }
         &self.scratch
+    }
+
+    fn reset(&mut self) {
+        self.dominant_channel = 0;
+        self.scratch.clear();
+        self.energy.fill(0.0);
     }
 }
 
@@ -610,7 +676,7 @@ pub fn now_ns() -> u64 {
 /// extend or prematurely fire the output watchdog.
 pub fn monotonic_ns() -> u64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    // Leave one second of headroom so a first-sample timestamp can safely subtract the CPAL
+    // Leave one second of headroom so a first-sample timestamp can safely subtract the audio
     // hardware latency even when the first callback arrives immediately after process startup.
     (EPOCH
         .get_or_init(Instant::now)
@@ -860,38 +926,45 @@ impl CaptureClockBridge {
 
 #[derive(Default)]
 struct CaptureClockMapper {
-    previous_capture: Option<cpal::StreamInstant>,
     bridge: CaptureClockBridge,
 }
 
 impl CaptureClockMapper {
-    fn duration_ns(duration: Duration) -> u64 {
-        duration.as_nanos().min(u64::MAX as u128) as u64
-    }
-
     fn observe(
         &mut self,
-        info: &cpal::InputCallbackInfo,
         callback_mono_ns: u64,
+        input_latency_frames: Option<u32>,
         frames: usize,
         sample_rate: u32,
     ) -> InputTimingObservation {
-        let timestamp = info.timestamp();
-        let step = match self.previous_capture {
-            None => BackendCaptureStep::First,
-            Some(previous) => timestamp
-                .capture
-                .checked_duration_since(previous)
-                .map_or(BackendCaptureStep::Reversed, |duration| {
-                    BackendCaptureStep::Forward(Self::duration_ns(duration))
-                }),
-        };
-        self.previous_capture = Some(timestamp.capture);
-        let capture_to_callback_ns = timestamp
-            .callback
-            .checked_duration_since(timestamp.capture)
-            .map(Self::duration_ns)
+        // Cubeb exposes stream latency in frames on the control thread, but intentionally does
+        // not expose backend timestamps to its realtime data callback. Advance by the prior
+        // callback's duration while the fresh callback-minus-latency anchor agrees. A scheduler
+        // stall, dropped callback, or abrupt latency change must re-anchor instead of making the
+        // capture clock look falsely continuous to the echo canceller.
+        let capture_to_callback_ns = input_latency_frames
+            .map(|latency| {
+                u64::from(latency).saturating_mul(1_000_000_000) / u64::from(sample_rate.max(1))
+            })
             .filter(|latency_ns| *latency_ns <= MAX_AEC_COMPONENT_US.saturating_mul(1_000));
+        let expected_delta_ns = self.bridge.expected_delta_ns();
+        let step = match (
+            expected_delta_ns,
+            self.bridge.last_mapped_capture_ns,
+            capture_to_callback_ns.and_then(|latency| callback_mono_ns.checked_sub(latency)),
+        ) {
+            (Some(expected), Some(previous), Some(fresh)) => {
+                let predicted = previous.saturating_add(expected);
+                if fresh.abs_diff(predicted) <= CAPTURE_CLOCK_DISCONTINUITY_TOLERANCE_NS {
+                    BackendCaptureStep::Forward(expected)
+                } else if fresh >= previous {
+                    BackendCaptureStep::Forward(fresh - previous)
+                } else {
+                    BackendCaptureStep::Reversed
+                }
+            }
+            _ => BackendCaptureStep::First,
+        };
         self.bridge.observe(
             callback_mono_ns,
             capture_to_callback_ns,
@@ -906,8 +979,9 @@ impl CaptureClockMapper {
 ///
 /// WebRTC defines its stream delay as:
 ///   (hardware render - reverse analysis) + (capture processing - hardware capture).
-/// CPAL exposes the hardware-side input/output latency in callback timestamps. The remaining
-/// render queue and capture scheduling components are measured inside the helper.
+/// Cubeb exposes hardware-side input/output latency in frames on the stream control thread. The
+/// callbacks consume lock-free atomic snapshots of those values; the remaining render queue and
+/// capture scheduling components are measured inside the helper.
 pub struct AecTiming {
     input_latency_us: AtomicU64,
     output_latency_us: AtomicU64,
@@ -977,12 +1051,13 @@ impl AecTiming {
     fn observe_input_callback(
         &self,
         mapper: &mut CaptureClockMapper,
-        info: &cpal::InputCallbackInfo,
+        input_latency_frames: Option<u32>,
         frames: usize,
         sample_rate: u32,
     ) -> InputTimingObservation {
         let callback_mono_ns = monotonic_ns();
-        let observation = mapper.observe(info, callback_mono_ns, frames, sample_rate);
+        let observation =
+            mapper.observe(callback_mono_ns, input_latency_frames, frames, sample_rate);
         if observation.valid {
             self.input_latency_us
                 .store(observation.input_latency_us, Ordering::Release);
@@ -995,13 +1070,15 @@ impl AecTiming {
         observation
     }
 
-    pub fn observe_output_callback(&self, info: &cpal::OutputCallbackInfo) {
-        let timestamp = info.timestamp();
+    pub fn observe_output_latency_frames(&self, frames: Option<u32>, sample_rate: u32) {
         Self::observe_latency(
             &self.output_latency_us,
-            timestamp
-                .playback
-                .checked_duration_since(timestamp.callback),
+            frames.map(|latency| {
+                Duration::from_nanos(
+                    u64::from(latency).saturating_mul(1_000_000_000)
+                        / u64::from(sample_rate.max(1)),
+                )
+            }),
             &self.invalid_timestamp_samples,
         );
     }
@@ -1338,77 +1415,502 @@ pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
 }
 
-fn choose_device_display_name(
-    primary_name: &str,
-    extended: &[String],
-    prefer_extended_friendly_name: bool,
-) -> Option<String> {
-    // CPAL's WASAPI backend exposes DEVPKEY_Device_DeviceDesc as `name()`
-    // (usually just "Microphone", "Speakers", or "Headphones") and preserves the
-    // Windows endpoint FriendlyName as the first extended line. Other backends use
-    // `name()` as their actual user-facing label, so only Windows opts into extended.
-    if prefer_extended_friendly_name {
-        if let Some(friendly_name) = extended
-            .iter()
-            .map(|line| line.trim())
-            .find(|line| !line.is_empty())
-        {
-            return Some(friendly_name.to_string());
+const CUBEB_DEVICE_ID_V1_PREFIX: &str = "cubeb-v1:";
+const CUBEB_DEVICE_ID_V2_PREFIX: &str = "cubeb-v2:";
+const MAX_DEVICE_ID_BYTES: usize = 4_096;
+const UNKNOWN_CUBEB_LATENCY_FRAMES: u32 = u32::MAX;
+const CUBEB_MAX_LATENCY_FRAMES: u32 = 96_000;
+const CUBEB_LATENCY_REFRESH: Duration = Duration::from_millis(250);
+const CUBEB_FAST_LATENCY_REFRESH: Duration = Duration::from_millis(20);
+const CUBEB_FAST_LATENCY_PROBE_WINDOW: Duration = Duration::from_millis(80);
+
+#[cfg(windows)]
+const COM_S_OK: i32 = 0;
+#[cfg(windows)]
+const COM_S_FALSE: i32 = 1;
+#[cfg(windows)]
+const COM_RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32 as i32;
+
+#[cfg(windows)]
+fn com_initialization_needs_uninitialize(result: i32) -> Result<bool, i32> {
+    match result {
+        COM_S_OK | COM_S_FALSE => Ok(true),
+        // The thread already owns a different COM apartment. COM is still initialized and
+        // endpoint APIs are usable, but this call did not add a reference to balance.
+        COM_RPC_E_CHANGED_MODE => Ok(false),
+        failure => Err(failure),
+    }
+}
+
+#[cfg(windows)]
+struct WindowsComApartment {
+    uninitialize: bool,
+}
+
+#[cfg(windows)]
+impl WindowsComApartment {
+    fn initialize() -> Result<Self, String> {
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
+        }
+
+        // COINIT_MULTITHREADED is zero. Cubeb's WASAPI backend queries the default endpoint
+        // during context initialization and requires this worker thread to own a COM apartment.
+        let result = unsafe { CoInitializeEx(std::ptr::null_mut(), 0) };
+        com_initialization_needs_uninitialize(result)
+            .map(|uninitialize| Self { uninitialize })
+            .map_err(|failure| format!("HRESULT 0x{:08x}", failure as u32))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsComApartment {
+    fn drop(&mut self) {
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoUninitialize();
+        }
+
+        if self.uninitialize {
+            unsafe { CoUninitialize() };
         }
     }
-
-    let primary_name = primary_name.trim();
-    (!primary_name.is_empty()).then(|| primary_name.to_string())
 }
 
-fn device_display_name(description: &cpal::DeviceDescription) -> Option<String> {
-    let extended = description
-        .extended()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    choose_device_display_name(description.name(), &extended, cfg!(target_os = "windows"))
+fn allowed_cubeb_backend(configured: Option<&str>, is_linux: bool) -> Option<&str> {
+    if !is_linux {
+        return None;
+    }
+    configured.filter(|backend| matches!(*backend, "pulse" | "alsa"))
 }
 
-pub fn enumerate_devices() -> Vec<DeviceInfo> {
-    let host = cpal::default_host();
-    let default_id = host
-        .default_input_device()
-        .and_then(|device| device.id().ok())
-        .map(|id| id.to_string());
-    let mut out = Vec::new();
-    if let Ok(devices) = host.input_devices() {
-        for device in devices {
-            // Only publish devices with a stable identifier and a stream format the helper can
-            // actually process. A picker entry that can never be opened is worse than omitting it.
-            let id = match device.id() {
-                Ok(id) => id.to_string(),
-                Err(_) => continue,
-            };
-            let name = match device
-                .description()
-                .ok()
-                .and_then(|description| device_display_name(&description))
-            {
-                Some(name) => name,
-                _ => continue,
-            };
-            if pick_input_config(&device).is_err() {
-                continue;
+fn init_cubeb_context(name: &str) -> cubeb::Result<cubeb::Context> {
+    let name = CString::new(name)?;
+    let configured = std::env::var("PC_CUBEB_BACKEND").ok();
+    let backend = allowed_cubeb_backend(configured.as_deref(), cfg!(target_os = "linux"))
+        .map(CString::new)
+        .transpose()?;
+    cubeb::Context::init(Some(name.as_c_str()), backend.as_deref())
+}
+
+fn cubeb_buffer_mode(context: &cubeb::Context) -> String {
+    let backend = String::from_utf8_lossy(context.backend_id_bytes());
+    let backend = backend.trim();
+    let backend = if backend.is_empty() {
+        "unknown"
+    } else {
+        backend
+    };
+    format!("cubeb-{backend}-min-latency")
+}
+
+fn append_hex(encoded: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty() || value.len() > MAX_DEVICE_ID_BYTES * 2 || value.len() & 1 != 0 {
+        return None;
+    }
+    fn nibble(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        }
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .collect()
+}
+
+fn normalized_cubeb_backend_family(backend_id: &[u8]) -> String {
+    let backend = String::from_utf8_lossy(backend_id)
+        .trim()
+        .to_ascii_lowercase();
+    match backend.as_str() {
+        "audiounit" | "audiounit-rust" => "coreaudio".to_string(),
+        "pulse" | "pulse-rust" => "pulse".to_string(),
+        _ => backend,
+    }
+}
+
+fn cubeb_backend_supports_device_change_callback(backend_id: &[u8]) -> bool {
+    normalized_cubeb_backend_family(backend_id) == "coreaudio"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CubebDeviceChangeAction {
+    None,
+    ResetDefaultStream,
+    ReopenExplicitStream,
+}
+
+#[derive(Default)]
+struct CubebDeviceChangeSignal {
+    pending: AtomicBool,
+    epoch: AtomicU64,
+}
+
+impl CubebDeviceChangeSignal {
+    fn notify(&self) {
+        // Publish the epoch first so both the control thread and the realtime capture callback
+        // observe the new path after acquiring the pending notification.
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    fn clear_pending(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn update_observed_epoch(&self, observed: &mut u64) -> bool {
+        let current = self.epoch();
+        if current == *observed {
+            return false;
+        }
+        *observed = current;
+        true
+    }
+
+    fn take_action(&self, requested_default: bool) -> CubebDeviceChangeAction {
+        if !self.pending.swap(false, Ordering::AcqRel) {
+            return CubebDeviceChangeAction::None;
+        }
+        if requested_default {
+            CubebDeviceChangeAction::ResetDefaultStream
+        } else {
+            CubebDeviceChangeAction::ReopenExplicitStream
+        }
+    }
+}
+
+fn encode_device_id(backend_id: &[u8], bytes: &[u8]) -> String {
+    let family = normalized_cubeb_backend_family(backend_id);
+    let mut encoded = String::with_capacity(
+        CUBEB_DEVICE_ID_V2_PREFIX.len() + family.len() * 2 + 1 + bytes.len() * 2,
+    );
+    encoded.push_str(CUBEB_DEVICE_ID_V2_PREFIX);
+    append_hex(&mut encoded, family.as_bytes());
+    encoded.push(':');
+    append_hex(&mut encoded, bytes);
+    encoded
+}
+
+fn parse_cubeb_device_id(value: &str) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    if let Some(raw) = value.strip_prefix(CUBEB_DEVICE_ID_V1_PREFIX) {
+        return decode_hex(raw).map(|bytes| (None, bytes));
+    }
+    let value = value.strip_prefix(CUBEB_DEVICE_ID_V2_PREFIX)?;
+    let (family, raw) = value.split_once(':')?;
+    Some((Some(decode_hex(family)?), decode_hex(raw)?))
+}
+
+fn legacy_backend_device_id<'a>(requested: &'a str, backend_id: &[u8]) -> Option<&'a [u8]> {
+    let (legacy_host, raw) = requested.split_once(':')?;
+    if raw.is_empty() || raw.len() > MAX_DEVICE_ID_BYTES {
+        return None;
+    }
+    let family = normalized_cubeb_backend_family(backend_id);
+    let compatible = matches!(
+        (legacy_host, family.as_str()),
+        ("wasapi", "wasapi")
+            | ("coreaudio", "coreaudio")
+            | ("pulseaudio", "pulse")
+            | ("alsa", "alsa")
+    );
+    compatible.then_some(raw.as_bytes())
+}
+
+fn requested_device_matches(requested: &str, backend_id: &[u8], raw_id: &[u8]) -> bool {
+    if let Some((requested_family, requested_raw)) = parse_cubeb_device_id(requested) {
+        let family_matches = requested_family
+            .is_none_or(|family| family == normalized_cubeb_backend_family(backend_id).as_bytes());
+        return family_matches && requested_raw == raw_id;
+    }
+    legacy_backend_device_id(requested, backend_id) == Some(raw_id)
+}
+
+fn friendly_device_name(info: &cubeb::DeviceInfoRef, stable_id: &str) -> String {
+    let friendly = info
+        .friendly_name_bytes()
+        .map(String::from_utf8_lossy)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    friendly.unwrap_or_else(|| stable_id.to_string())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlsaHintDevice {
+    pcm_name: Vec<u8>,
+    friendly_name: String,
+    supports_input: bool,
+    supports_output: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_hint_directions(ioid: Option<&[u8]>) -> (bool, bool) {
+    match ioid {
+        Some(value) if value.eq_ignore_ascii_case(b"input") => (true, false),
+        Some(value) if value.eq_ignore_ascii_case(b"output") => (false, true),
+        // ALSA documents a missing IOID as a duplex-capable hint. Unknown values are not safe to
+        // advertise because selecting the wrong direction can block some hardware plugins.
+        None => (true, true),
+        Some(_) => (false, false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct AlsaHintApi {
+    handle: *mut libc::c_void,
+    device_name_hint: unsafe extern "C" fn(
+        libc::c_int,
+        *const libc::c_char,
+        *mut *mut *mut libc::c_void,
+    ) -> libc::c_int,
+    device_name_get_hint:
+        unsafe extern "C" fn(*const libc::c_void, *const libc::c_char) -> *mut libc::c_char,
+    device_name_free_hint: unsafe extern "C" fn(*mut *mut libc::c_void) -> libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl AlsaHintApi {
+    fn load() -> Result<Self, String> {
+        unsafe fn symbol<T: Copy>(
+            handle: *mut libc::c_void,
+            name: &'static [u8],
+        ) -> Result<T, String> {
+            // SAFETY: `name` is NUL-terminated and the caller supplies the exact ALSA function
+            // signature. Function pointers and dlsym pointers have the same representation on
+            // supported Unix targets.
+            let address = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
+            if address.is_null() {
+                return Err(format!(
+                    "libasound is missing {}",
+                    String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
+                ));
             }
-            let is_default = Some(&id) == default_id.as_ref();
-            out.push(DeviceInfo {
-                id,
-                name,
-                default: is_default,
-            });
+            // SAFETY: validated non-null symbol with the exact function type declared above.
+            Ok(unsafe { std::mem::transmute_copy(&address) })
+        }
+
+        // SAFETY: constant NUL-terminated soname and standard dlopen flags.
+        let handle = unsafe {
+            libc::dlopen(
+                b"libasound.so.2\0".as_ptr().cast(),
+                libc::RTLD_LAZY | libc::RTLD_LOCAL,
+            )
+        };
+        if handle.is_null() {
+            return Err("load libasound.so.2 for device hints".to_string());
+        }
+        // Close the handle if any required symbol is absent.
+        let loaded = unsafe {
+            Ok::<Self, String>(Self {
+                handle,
+                device_name_hint: symbol(handle, b"snd_device_name_hint\0")?,
+                device_name_get_hint: symbol(handle, b"snd_device_name_get_hint\0")?,
+                device_name_free_hint: symbol(handle, b"snd_device_name_free_hint\0")?,
+            })
+        };
+        if loaded.is_err() {
+            // SAFETY: `handle` was returned by dlopen and has not been closed.
+            unsafe { libc::dlclose(handle) };
+        }
+        loaded
+    }
+
+    unsafe fn value(&self, hint: *const libc::c_void, key: &'static [u8]) -> Option<Vec<u8>> {
+        // SAFETY: `hint` belongs to the live ALSA hint array and `key` is NUL-terminated.
+        let value = unsafe { (self.device_name_get_hint)(hint, key.as_ptr().cast()) };
+        if value.is_null() {
+            return None;
+        }
+        // SAFETY: ALSA returns a NUL-terminated malloc allocation for this accessor.
+        let bytes = unsafe { CStr::from_ptr(value) }.to_bytes().to_vec();
+        // SAFETY: snd_device_name_get_hint documents that callers release the value with free().
+        unsafe { libc::free(value.cast()) };
+        Some(bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for AlsaHintApi {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned by this value and all hint allocations are already freed.
+        unsafe { libc::dlclose(self.handle) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enumerate_alsa_hint_devices() -> Result<Vec<AlsaHintDevice>, String> {
+    const MAX_ALSA_HINTS: usize = 4_096;
+    let api = AlsaHintApi::load()?;
+    let mut hints: *mut *mut libc::c_void = ptr::null_mut();
+    // SAFETY: output pointer is valid and ALSA owns the returned null-terminated hint array.
+    let result =
+        unsafe { (api.device_name_hint)(-1, b"pcm\0".as_ptr().cast(), &mut hints as *mut _) };
+    if result < 0 || hints.is_null() {
+        return Err(format!("enumerate ALSA PCM hints: error {result}"));
+    }
+
+    let mut devices = Vec::new();
+    for index in 0..MAX_ALSA_HINTS {
+        // SAFETY: ALSA returns a null-terminated pointer array; the explicit cap also bounds a
+        // malformed implementation before any dereference beyond a reasonable device count.
+        let hint = unsafe { *hints.add(index) };
+        if hint.is_null() {
+            break;
+        }
+        // SAFETY: the hint remains live until snd_device_name_free_hint below.
+        let Some(pcm_name) = (unsafe { api.value(hint, b"NAME\0") }) else {
+            continue;
+        };
+        if pcm_name.is_empty() || pcm_name.len() > MAX_DEVICE_ID_BYTES || pcm_name.contains(&0) {
+            continue;
+        }
+        // SAFETY: same live hint as above.
+        let ioid = unsafe { api.value(hint, b"IOID\0") };
+        let (supports_input, supports_output) = alsa_hint_directions(ioid.as_deref());
+        if !supports_input && !supports_output {
+            continue;
+        }
+        // SAFETY: same live hint as above.
+        let description = unsafe { api.value(hint, b"DESC\0") };
+        let friendly_name = description
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .and_then(|description| {
+                description
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&pcm_name).into_owned());
+        devices.push(AlsaHintDevice {
+            pcm_name,
+            friendly_name,
+            supports_input,
+            supports_output,
+        });
+    }
+    // SAFETY: releases the complete array returned by snd_device_name_hint.
+    let free_result = unsafe { (api.device_name_free_hint)(hints) };
+    if free_result < 0 {
+        return Err(format!("free ALSA PCM hints: error {free_result}"));
+    }
+    devices.sort_by(|left, right| {
+        left.pcm_name
+            .cmp(&right.pcm_name)
+            .then_with(|| left.friendly_name.cmp(&right.friendly_name))
+    });
+    devices.dedup_by(|left, right| left.pcm_name == right.pcm_name);
+    Ok(devices)
+}
+
+fn cubeb_preference_is_default(preferred_bits: u32) -> bool {
+    preferred_bits & cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA as u32 != 0
+}
+
+fn enumerate_cubeb_devices(direction: DeviceType) -> Result<Vec<DeviceInfo>, String> {
+    #[cfg(windows)]
+    let _com = WindowsComApartment::initialize()
+        .map_err(|error| format!("initialize COM for Cubeb device enumeration: {error}"))?;
+    let mut out = Vec::new();
+    let context = init_cubeb_context("PerfectComms device enumeration")
+        .map_err(|error| format!("initialize Cubeb device enumeration: {error}"))?;
+    let backend_id = context.backend_id_bytes();
+    #[cfg(target_os = "linux")]
+    if normalized_cubeb_backend_family(backend_id) == "alsa" {
+        match enumerate_alsa_hint_devices() {
+            Ok(hints) => {
+                for hint in hints {
+                    let direction_supported = (direction.intersects(DeviceType::INPUT)
+                        && hint.supports_input)
+                        || (direction.intersects(DeviceType::OUTPUT) && hint.supports_output);
+                    if !direction_supported {
+                        continue;
+                    }
+                    out.push(DeviceInfo {
+                        id: encode_device_id(backend_id, &hint.pcm_name),
+                        name: hint.friendly_name,
+                        default: hint.pcm_name == b"default",
+                    });
+                }
+                if !out.is_empty() {
+                    out.sort_by(|left, right| {
+                        right
+                            .default
+                            .cmp(&left.default)
+                            .then_with(|| left.name.cmp(&right.name))
+                            .then_with(|| left.id.cmp(&right.id))
+                    });
+                    out.dedup_by(|left, right| left.id == right.id);
+                    return Ok(out);
+                }
+            }
+            Err(error) => {
+                eprintln!("pc-capture: ALSA hint enumeration unavailable: {error}");
+            }
         }
     }
-    out.sort_by_key(|d| std::cmp::Reverse(d.default));
-    out
+    let devices = context
+        .enumerate_devices(direction)
+        .map_err(|error| format!("enumerate Cubeb devices: {error}"))?;
+    for info in devices.iter() {
+        if info.state() != DeviceState::Enabled || !info.device_type().intersects(direction) {
+            continue;
+        }
+        let Some(id_bytes) = info.device_id_bytes().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let id = encode_device_id(backend_id, id_bytes);
+        out.push(DeviceInfo {
+            name: friendly_device_name(info, &id),
+            id,
+            // Cubeb does not expose a separate default-device query. Preferred endpoints are
+            // its authoritative enumeration marker for the current platform defaults.
+            // A default stream with StreamPrefs::NONE follows the multimedia/console route.
+            // WASAPI can separately mark the communications endpoint as VOICE; that endpoint
+            // must not replace the actual default in the managed device picker.
+            default: cubeb_preference_is_default(info.preferred().bits() as u32),
+        });
+    }
+    out.sort_by(|left, right| {
+        right
+            .default
+            .cmp(&left.default)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    out.dedup_by(|left, right| left.id == right.id);
+    Ok(out)
+}
+
+pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, String> {
+    enumerate_cubeb_devices(DeviceType::INPUT)
 }
 
 struct SelectedDevice {
-    device: cpal::Device,
+    device: DeviceId,
+    // Some backends (currently ALSA) can open raw device names that their Cubeb enumerator does
+    // not publish. Keep that C string alive for as long as the stream may retain its pointer.
+    _owned_device_id: Option<CString>,
+    preferred_rate: u32,
     requested_device: String,
     resolved_device: String,
     requested_default: bool,
@@ -1428,21 +1930,88 @@ fn selected_or_default<T>(
     default_device().ok_or_else(|| format!("no {direction} device"))
 }
 
-fn pick_device(device_id: &Option<String>) -> Result<SelectedDevice, String> {
-    let host = cpal::default_host();
+fn find_cubeb_device(
+    devices: &DeviceCollection<'_>,
+    requested_id: &str,
+    backend_id: &[u8],
+) -> Option<(DeviceId, u32, String, Option<CString>)> {
+    devices.iter().find_map(|info| {
+        (info.state() == DeviceState::Enabled)
+            .then(|| info.device_id_bytes())
+            .flatten()
+            .filter(|bytes| requested_device_matches(requested_id, backend_id, bytes))
+            .map(|bytes| {
+                (
+                    info.devid(),
+                    info.default_rate(),
+                    encode_device_id(backend_id, bytes),
+                    None,
+                )
+            })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn find_alsa_hint_device(
+    requested_id: &str,
+    backend_id: &[u8],
+    default_rate: u32,
+    direction: DeviceType,
+) -> Option<(DeviceId, u32, String, Option<CString>)> {
+    if normalized_cubeb_backend_family(backend_id) != "alsa" {
+        return None;
+    }
+    enumerate_alsa_hint_devices()
+        .ok()?
+        .into_iter()
+        .find_map(|hint| {
+            let direction_supported = (direction.intersects(DeviceType::INPUT)
+                && hint.supports_input)
+                || (direction.intersects(DeviceType::OUTPUT) && hint.supports_output);
+            if !direction_supported
+                || !requested_device_matches(requested_id, backend_id, &hint.pcm_name)
+            {
+                return None;
+            }
+            let owned = CString::new(hint.pcm_name).ok()?;
+            let device = owned.as_ptr().cast();
+            Some((
+                device,
+                default_rate,
+                encode_device_id(backend_id, owned.as_bytes()),
+                Some(owned),
+            ))
+        })
+}
+
+fn pick_device(
+    devices: Option<&DeviceCollection<'_>>,
+    device_id: &Option<String>,
+    default_rate: u32,
+    direction: &str,
+    direction_type: DeviceType,
+    backend_id: &[u8],
+) -> Result<SelectedDevice, String> {
     let requested_id = device_id.as_deref().filter(|id| !id.is_empty());
     let selected = requested_id
-        .and_then(|id| id.parse::<cpal::DeviceId>().ok())
-        .and_then(|id| host.device_by_id(&id));
-    let device = selected_or_default(
+        .and_then(|id| devices.and_then(|items| find_cubeb_device(items, id, backend_id)));
+    #[cfg(target_os = "linux")]
+    let selected = selected.or_else(|| {
+        requested_id
+            .and_then(|id| find_alsa_hint_device(id, backend_id, default_rate, direction_type))
+    });
+    #[cfg(not(target_os = "linux"))]
+    let _ = direction_type;
+    let (device, preferred_rate, resolved_device, owned_device_id) = selected_or_default(
         device_id.as_deref(),
         selected,
-        || host.default_input_device(),
-        "input",
+        || Some((ptr::null(), default_rate, String::new(), None)),
+        direction,
     )?;
-    let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
     Ok(SelectedDevice {
         device,
+        _owned_device_id: owned_device_id,
+        preferred_rate: normalize_device_rate(preferred_rate),
         requested_device: device_id.clone().unwrap_or_default(),
         resolved_device,
         requested_default: requested_id.is_none(),
@@ -1451,102 +2020,1033 @@ fn pick_device(device_id: &Option<String>) -> Result<SelectedDevice, String> {
     })
 }
 
-fn supported_sample_format(format: cpal::SampleFormat) -> bool {
-    matches!(
-        format,
-        cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16
-    )
-}
-
-fn input_config_score(
-    channels: u16,
-    format: cpal::SampleFormat,
-    sample_rate: u32,
-) -> (u8, u8, u32, u16) {
-    let channel_rank = match channels {
-        1 => 0,
-        2 => 1,
-        _ => 2,
-    };
-    let format_rank = match format {
-        cpal::SampleFormat::F32 => 0,
-        cpal::SampleFormat::I16 => 1,
-        cpal::SampleFormat::U16 => 2,
-        _ => u8::MAX,
-    };
-    (
-        channel_rank,
-        format_rank,
-        sample_rate.abs_diff(SAMPLE_RATE),
-        channels,
-    )
-}
-
-fn pick_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    if let Ok(default) = device.default_input_config() {
-        let rate = default.sample_rate();
-        if supported_sample_format(default.sample_format())
-            && (MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_CAPTURE_RATE).contains(&rate)
-        {
-            return Ok(default);
-        }
-    }
-
-    let ranges = device
-        .supported_input_configs()
-        .map_err(|e| format!("supported input configs: {e}"))?;
-    let mut best: Option<(cpal::SupportedStreamConfigRange, u32)> = None;
-    for range in ranges {
-        if !supported_sample_format(range.sample_format()) {
-            continue;
-        }
-        let min_rate = range.min_sample_rate().max(MIN_REALTIME_CAPTURE_RATE);
-        let max_rate = range.max_sample_rate().min(MAX_REALTIME_CAPTURE_RATE);
-        if min_rate > max_rate {
-            continue;
-        }
-        let rate = SAMPLE_RATE.clamp(min_rate, max_rate);
-        let better = best.as_ref().is_none_or(|(current, current_rate)| {
-            input_config_score(range.channels(), range.sample_format(), rate)
-                < input_config_score(current.channels(), current.sample_format(), *current_rate)
-        });
-        if better {
-            best = Some((range, rate));
-        }
-    }
-    best.map(|(range, rate)| range.with_sample_rate(rate))
-        .ok_or_else(|| "no supported input stream format".to_string())
-}
-
-fn supported_buffer_details(config: &cpal::SupportedStreamConfig) -> (String, u32, u32) {
-    match config.buffer_size() {
-        cpal::SupportedBufferSize::Range { min, max } => ("default-range".to_string(), *min, *max),
-        cpal::SupportedBufferSize::Unknown => ("default-unknown".to_string(), 0, 0),
-    }
-}
-
 const MIN_REALTIME_CAPTURE_RATE: u32 = 8_000;
-const MAX_REALTIME_CAPTURE_RATE: u32 = 384_000;
+const MAX_REALTIME_DEVICE_RATE: u32 = 384_000;
 const CAPTURE_PROCESS_CHUNK_FRAMES: usize = 256;
-const UNKNOWN_CALLBACK_MAX_FRAMES: usize = 65_536;
 const MAX_RESAMPLED_CHUNK_SAMPLES: usize =
     CAPTURE_PROCESS_CHUNK_FRAMES * SAMPLE_RATE as usize / MIN_REALTIME_CAPTURE_RATE as usize + 2;
 const REALTIME_ACCUMULATOR_SAMPLES: usize = FRAME_SAMPLES + MAX_RESAMPLED_CHUNK_SAMPLES;
 const REALTIME_TIMING_SEGMENTS: usize = 64;
 
-fn callback_scratch_samples(buffer_max_frames: u32, channels: usize) -> Result<usize, String> {
-    let frames = if buffer_max_frames == 0 {
-        UNKNOWN_CALLBACK_MAX_FRAMES
+fn normalize_device_rate(rate: u32) -> u32 {
+    if (MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_DEVICE_RATE).contains(&rate) {
+        rate
     } else {
-        (buffer_max_frames as usize).min(UNKNOWN_CALLBACK_MAX_FRAMES)
-    };
-    frames
-        .checked_mul(channels.max(1))
-        .ok_or_else(|| "audio callback scratch capacity overflow".to_string())
+        SAMPLE_RATE
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CubebSampleKind {
+    Float32,
+    Signed16,
+}
+
+impl CubebSampleKind {
+    fn format(self) -> SampleFormat {
+        match self {
+            Self::Float32 => SampleFormat::Float32NE,
+            Self::Signed16 => SampleFormat::S16NE,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Float32 => "Float32NE",
+            Self::Signed16 => "S16NE",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CubebStreamCandidate {
+    sample: CubebSampleKind,
+    rate: u32,
+    channels: u16,
+}
+
+fn push_candidate_pair(
+    candidates: &mut Vec<CubebStreamCandidate>,
+    sample: CubebSampleKind,
+    rate: u32,
+) {
+    for channels in [2, 1] {
+        let candidate = CubebStreamCandidate {
+            sample,
+            rate,
+            channels,
+        };
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+}
+
+fn cubeb_stream_candidates(_backend_id: &[u8], preferred_rate: u32) -> Vec<CubebStreamCandidate> {
+    let mut candidates = Vec::with_capacity(8);
+    push_candidate_pair(&mut candidates, CubebSampleKind::Float32, SAMPLE_RATE);
+    let preferred_rate = normalize_device_rate(preferred_rate);
+    // ALSA and WinMM commonly advertise S16NE at the endpoint's preferred rate, but these
+    // same-device fallbacks are harmless and useful for strict endpoints on every backend.
+    push_candidate_pair(&mut candidates, CubebSampleKind::Signed16, preferred_rate);
+    push_candidate_pair(&mut candidates, CubebSampleKind::Signed16, SAMPLE_RATE);
+    push_candidate_pair(&mut candidates, CubebSampleKind::Float32, preferred_rate);
+    candidates
+}
+
+fn cubeb_capture_stream_candidates(
+    backend_id: &[u8],
+    preferred_rate: u32,
+) -> Vec<CubebStreamCandidate> {
+    let mut candidates = cubeb_stream_candidates(backend_id, preferred_rate);
+    let formats_and_rates: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.channels == 2)
+        .map(|candidate| (candidate.sample, candidate.rate))
+        .collect();
+    candidates.reserve(formats_and_rates.len() * 3);
+    for (sample, rate) in formats_and_rates {
+        for channels in [4, 6, 8] {
+            candidates.push(CubebStreamCandidate {
+                sample,
+                rate,
+                channels,
+            });
+        }
+    }
+    candidates
+}
+
+fn cubeb_playback_stream_candidates(
+    backend_id: &[u8],
+    preferred_rate: u32,
+) -> Vec<CubebStreamCandidate> {
+    let mut candidates = cubeb_stream_candidates(backend_id, preferred_rate);
+    if normalized_cubeb_backend_family(backend_id) != "alsa" {
+        return candidates;
+    }
+
+    // Preserve every stereo/mono attempt first. Some strict ALSA hardware PCMs expose only their
+    // physical multichannel width, so append matching quad/5.1/7.1 attempts without broadening
+    // capture or changing the preferred path for normal endpoints.
+    let formats_and_rates: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.channels == 2)
+        .map(|candidate| (candidate.sample, candidate.rate))
+        .collect();
+    candidates.reserve(formats_and_rates.len() * 3);
+    for (sample, rate) in formats_and_rates {
+        for channels in [4, 6, 8] {
+            candidates.push(CubebStreamCandidate {
+                sample,
+                rate,
+                channels,
+            });
+        }
+    }
+    candidates
+}
+
+fn cubeb_output_channel_layout(channels: u16) -> Option<ChannelLayout> {
+    match channels {
+        1 => Some(ChannelLayout::MONO),
+        2 => Some(ChannelLayout::STEREO),
+        4 => Some(ChannelLayout::QUAD),
+        6 => Some(ChannelLayout::_3F2_LFE),
+        8 => Some(ChannelLayout::_3F4_LFE),
+        _ => None,
+    }
+}
+
+trait CubebCaptureSample: Copy + Send + Sync + 'static {
+    fn to_float(self) -> f32;
+}
+
+impl CubebCaptureSample for f32 {
+    fn to_float(self) -> f32 {
+        if self.is_finite() {
+            self
+        } else {
+            0.0
+        }
+    }
+}
+
+impl CubebCaptureSample for i16 {
+    fn to_float(self) -> f32 {
+        f32::from(self) / 32_768.0
+    }
+}
+
+trait CubebPlaybackSample: Copy + Send + Sync + 'static {
+    fn from_float(sample: f32) -> Self;
+}
+
+impl CubebPlaybackSample for f32 {
+    fn from_float(sample: f32) -> Self {
+        sample
+    }
+}
+
+impl CubebPlaybackSample for i16 {
+    fn from_float(sample: f32) -> Self {
+        if !sample.is_finite() {
+            0
+        } else if sample < 0.0 {
+            (sample.max(-1.0) * 32_768.0).round() as i16
+        } else {
+            (sample.min(1.0) * f32::from(i16::MAX)).round() as i16
+        }
+    }
+}
+
+fn cubeb_latency_frames(context: &cubeb::Context, params: &cubeb::StreamParamsRef) -> u32 {
+    context
+        .min_latency(params)
+        .unwrap_or(FRAME_SAMPLES as u32)
+        .clamp(1, CUBEB_MAX_LATENCY_FRAMES)
+}
+
+fn store_cubeb_latency(target: &AtomicU32, value: cubeb::Result<u32>) {
+    if let Ok(frames) = value {
+        if frames > 0 {
+            target.store(frames.min(CUBEB_MAX_LATENCY_FRAMES), Ordering::Release);
+        }
+    }
+}
+
+fn load_cubeb_latency(source: &AtomicU32) -> Option<u32> {
+    let value = source.load(Ordering::Acquire);
+    (value != UNKNOWN_CUBEB_LATENCY_FRAMES).then_some(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrerollDecision {
+    raw_frames: usize,
+    skip_frames: usize,
+    admitted_frames: usize,
+    matched: bool,
+}
+
+impl PrerollDecision {
+    fn unchanged(raw_frames: usize) -> Self {
+        Self {
+            raw_frames,
+            skip_frames: 0,
+            admitted_frames: raw_frames,
+            matched: false,
+        }
+    }
+}
+
+/// libcubeb's WASAPI input implementation injects two backend buffers of bit-exact silence
+/// whenever it sets up or transparently reconfigures a stream. Those buffers are an internal
+/// resampler guard, not captured time, and must never become queued Opus/RTP frames.
+struct WasapiPrerollFilter {
+    enabled: bool,
+    sample_rate: u32,
+    nominal_frames: usize,
+}
+
+impl WasapiPrerollFilter {
+    fn new(enabled: bool, sample_rate: u32, requested_latency_frames: u32) -> Self {
+        let sample_rate = sample_rate.max(1);
+        let min_frames = (sample_rate as usize / 1_000).max(1);
+        let max_frames = (sample_rate as usize * 40 / 1_000).max(min_frames);
+        Self {
+            enabled,
+            sample_rate,
+            nominal_frames: (requested_latency_frames as usize).clamp(min_frames, max_frames),
+        }
+    }
+
+    fn classify(
+        &mut self,
+        raw_frames: usize,
+        mut is_zero_frame: impl FnMut(usize) -> bool,
+    ) -> PrerollDecision {
+        if !self.enabled || raw_frames == 0 {
+            return PrerollDecision::unchanged(raw_frames);
+        }
+
+        let nominal = self.nominal_frames.max(1);
+        // A normal Cubeb callback can legally contain more than one packet. Only an oversized
+        // callback with a long exact-zero prefix and a small retained tail matches the WASAPI
+        // implementation's injected-padding signature.
+        if raw_frames < nominal.saturating_mul(3) {
+            let min_frames = (self.sample_rate as usize / 1_000).max(1);
+            if raw_frames >= min_frames {
+                self.nominal_frames = self.nominal_frames.min(raw_frames);
+            }
+            return PrerollDecision::unchanged(raw_frames);
+        }
+
+        let leading_zero_frames = (0..raw_frames)
+            .take_while(|index| is_zero_frame(*index))
+            .count();
+        for retained_quanta in 1..=4usize {
+            let retained = nominal.saturating_mul(retained_quanta);
+            if retained >= raw_frames {
+                break;
+            }
+            let skipped = raw_frames - retained;
+            if skipped >= nominal.saturating_mul(2) && skipped <= leading_zero_frames {
+                return PrerollDecision {
+                    raw_frames,
+                    skip_frames: skipped,
+                    admitted_frames: retained,
+                    matched: true,
+                };
+            }
+        }
+        PrerollDecision::unchanged(raw_frames)
+    }
+}
+
+#[derive(Clone)]
+struct CaptureCallbackResources {
+    ring: CaptureFrameProducer,
+    encoder_epoch: Arc<AtomicU64>,
+    aec_timing: Arc<AecTiming>,
+    diagnostics: Arc<CaptureDiagnostics>,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    backend_latency_frames: Arc<AtomicU32>,
+    latency_probe_requested: Arc<AtomicBool>,
+    first_callback_ns: Arc<AtomicU64>,
+    first_callback_frames: Arc<AtomicU64>,
+    wasapi_preroll_filter: bool,
+    requested_latency_frames: u32,
+    stream_generation: u64,
+    open_attempt: u64,
+}
+
+struct CaptureCallbackProcessor {
+    resources: CaptureCallbackResources,
+    sample_rate: u32,
+    device_change_epoch: u64,
+    capture_clock: CaptureClockMapper,
+    resampler: Resampler,
+    accumulator: FrameAccumulator,
+    resampled_scratch: Vec<f32>,
+    preroll_filter: WasapiPrerollFilter,
+}
+
+impl CaptureCallbackProcessor {
+    fn new(resources: CaptureCallbackResources, sample_rate: u32) -> Self {
+        let mut resampler = Resampler::new(sample_rate);
+        resampler.reserve_realtime_input(CAPTURE_PROCESS_CHUNK_FRAMES);
+        let device_change_epoch = resources.device_change.epoch();
+        let preroll_filter = WasapiPrerollFilter::new(
+            resources.wasapi_preroll_filter,
+            sample_rate,
+            resources.requested_latency_frames,
+        );
+        Self {
+            resources,
+            sample_rate,
+            device_change_epoch,
+            capture_clock: CaptureClockMapper::default(),
+            resampler,
+            accumulator: FrameAccumulator::with_capacity(
+                REALTIME_ACCUMULATOR_SAMPLES,
+                REALTIME_TIMING_SEGMENTS,
+            ),
+            resampled_scratch: Vec::with_capacity(MAX_RESAMPLED_CHUNK_SAMPLES),
+            preroll_filter,
+        }
+    }
+
+    fn classify_preroll(
+        &mut self,
+        raw_frames: usize,
+        is_zero_frame: impl FnMut(usize) -> bool,
+    ) -> PrerollDecision {
+        let decision = self.preroll_filter.classify(raw_frames, is_zero_frame);
+        if decision.matched {
+            self.resources
+                .diagnostics
+                .note_backend_preroll(decision.skip_frames);
+            self.resources
+                .backend_latency_frames
+                .store(self.resources.requested_latency_frames, Ordering::Release);
+            self.resources
+                .latency_probe_requested
+                .store(true, Ordering::Release);
+            self.resources.aec_timing.reset_capture_path();
+            self.capture_clock = CaptureClockMapper::default();
+            self.resampler.reset();
+            let pending = self.accumulator.pending_samples();
+            self.accumulator.reset();
+            self.resources.diagnostics.set_accumulator_pending(0);
+            self.resources
+                .diagnostics
+                .note_preroll_pending_samples_discarded(pending);
+        }
+        decision
+    }
+
+    fn process(&mut self, mono: &[f32], raw: &[f32], input_frames: usize) {
+        if self
+            .resources
+            .device_change
+            .update_observed_epoch(&mut self.device_change_epoch)
+        {
+            // A default CoreAudio route switch keeps the Cubeb stream alive, but all timing and
+            // partial resampling state belongs to the old hardware path. Explicit streams are
+            // stopped by the control thread; resetting here also prevents a final mixed frame.
+            self.resources.aec_timing.reset_capture_path();
+            self.capture_clock = CaptureClockMapper::default();
+            self.resampler.reset();
+            self.accumulator.reset();
+            self.resources.diagnostics.set_accumulator_pending(0);
+            self.resources.diagnostics.note_timestamp_discontinuity();
+        }
+        let resources = &self.resources;
+        let callback_encoder_epoch = resources.encoder_epoch.load(Ordering::Acquire);
+        let observation = resources.aec_timing.observe_input_callback(
+            &mut self.capture_clock,
+            load_cubeb_latency(&resources.backend_latency_frames),
+            input_frames,
+            self.sample_rate,
+        );
+        if resources.diagnostics.observe_callback(
+            observation.callback_mono_ns,
+            input_frames,
+            self.sample_rate,
+        ) {
+            resources
+                .first_callback_frames
+                .store(input_frames as u64, Ordering::Release);
+            resources
+                .first_callback_ns
+                .store(observation.callback_mono_ns, Ordering::Release);
+        }
+        if resources.diagnostics.signal_windows_enabled() {
+            resources.diagnostics.raw_input.record(raw);
+        }
+        resources.diagnostics.observe_capture_clock(
+            observation.clock_status,
+            observation.capture_clock_delta_ns,
+            observation.expected_capture_delta_ns,
+            observation.capture_clock_delta_error_ns,
+            observation.bridge_residual_ns,
+        );
+        if observation.discontinuity {
+            resources.diagnostics.note_timestamp_discontinuity();
+        }
+        if !observation.valid {
+            resources.diagnostics.note_invalid_timestamp();
+        }
+
+        let mut produced_frames = 0;
+        for (chunk_index, chunk) in mono.chunks(CAPTURE_PROCESS_CHUNK_FRAMES).enumerate() {
+            let frame_offset = chunk_index.saturating_mul(CAPTURE_PROCESS_CHUNK_FRAMES);
+            let chunk_capture_ts_ns = observation.first_sample_mono_ns.saturating_add(
+                (frame_offset as u64).saturating_mul(1_000_000_000) / u64::from(self.sample_rate),
+            );
+            let timing = self.resampler.process_timed_into(
+                chunk,
+                chunk_capture_ts_ns,
+                observation.callback_mono_ns,
+                observation.valid,
+                observation.frame_timing_valid,
+                &mut self.resampled_scratch,
+            );
+            resources
+                .diagnostics
+                .observe_resampled_samples(self.resampled_scratch.len());
+            produced_frames += self.accumulator.push_samples_and_drain_with(
+                &self.resampled_scratch,
+                timing,
+                |timing, samples| {
+                    let _ = resources.ring.push(
+                        CaptureFrameMetadata {
+                            encoder_epoch: callback_encoder_epoch,
+                            capture_generation: resources.stream_generation,
+                            capture_open_attempt: resources.open_attempt,
+                            capture_ts_ns: timing.capture_ts_ns,
+                            capture_callback_ts_ns: timing.callback_ts_ns,
+                            capture_timestamp_valid: timing.valid,
+                        },
+                        samples,
+                    );
+                },
+            );
+        }
+        resources
+            .diagnostics
+            .set_accumulator_pending(self.accumulator.pending_samples());
+        resources
+            .diagnostics
+            .observe_frames_produced(produced_frames);
+        if produced_frames > 0 {
+            resources.diagnostics.observe_ring_len(resources.ring.len());
+        }
+    }
+}
+
+enum CubebCaptureStream {
+    MonoF32(cubeb::Stream<MonoFrame<f32>>),
+    StereoF32(cubeb::Stream<StereoFrame<f32>>),
+    QuadF32(cubeb::Stream<MultichannelFrame<f32, 4>>),
+    Surround51F32(cubeb::Stream<MultichannelFrame<f32, 6>>),
+    Surround71F32(cubeb::Stream<MultichannelFrame<f32, 8>>),
+    MonoI16(cubeb::Stream<MonoFrame<i16>>),
+    StereoI16(cubeb::Stream<StereoFrame<i16>>),
+    QuadI16(cubeb::Stream<MultichannelFrame<i16, 4>>),
+    Surround51I16(cubeb::Stream<MultichannelFrame<i16, 6>>),
+    Surround71I16(cubeb::Stream<MultichannelFrame<i16, 8>>),
+}
+
+impl CubebCaptureStream {
+    fn stop(&self) -> cubeb::Result<()> {
+        match self {
+            Self::MonoF32(stream) => stream.stop(),
+            Self::StereoF32(stream) => stream.stop(),
+            Self::QuadF32(stream) => stream.stop(),
+            Self::Surround51F32(stream) => stream.stop(),
+            Self::Surround71F32(stream) => stream.stop(),
+            Self::MonoI16(stream) => stream.stop(),
+            Self::StereoI16(stream) => stream.stop(),
+            Self::QuadI16(stream) => stream.stop(),
+            Self::Surround51I16(stream) => stream.stop(),
+            Self::Surround71I16(stream) => stream.stop(),
+        }
+    }
+
+    fn input_latency(&self) -> cubeb::Result<u32> {
+        match self {
+            Self::MonoF32(stream) => stream.input_latency(),
+            Self::StereoF32(stream) => stream.input_latency(),
+            Self::QuadF32(stream) => stream.input_latency(),
+            Self::Surround51F32(stream) => stream.input_latency(),
+            Self::Surround71F32(stream) => stream.input_latency(),
+            Self::MonoI16(stream) => stream.input_latency(),
+            Self::StereoI16(stream) => stream.input_latency(),
+            Self::QuadI16(stream) => stream.input_latency(),
+            Self::Surround51I16(stream) => stream.input_latency(),
+            Self::Surround71I16(stream) => stream.input_latency(),
+        }
+    }
+}
+
+fn cubeb_backend_injects_wasapi_preroll(backend_id: &[u8]) -> bool {
+    backend_id.eq_ignore_ascii_case(b"wasapi")
+}
+
+struct StereoCaptureRealtime {
+    processor: CaptureCallbackProcessor,
+    raw_scratch: Vec<f32>,
+    downmixer: AdaptiveDownmixer,
+}
+
+impl StereoCaptureRealtime {
+    fn new(resources: CaptureCallbackResources, sample_rate: u32) -> Self {
+        Self {
+            processor: CaptureCallbackProcessor::new(resources, sample_rate),
+            raw_scratch: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize * 2],
+            downmixer: AdaptiveDownmixer::with_capacity(2, CUBEB_MAX_LATENCY_FRAMES as usize),
+        }
+    }
+
+    fn process<T: CubebCaptureSample>(&mut self, input: &[StereoFrame<T>]) -> bool {
+        let decision = self.processor.classify_preroll(input.len(), |index| {
+            input[index].l.to_float() == 0.0 && input[index].r.to_float() == 0.0
+        });
+        if decision.matched {
+            self.downmixer.reset();
+        }
+        let input = &input[decision.skip_frames..];
+        let Some(samples) = input.len().checked_mul(2) else {
+            return false;
+        };
+        if samples > self.raw_scratch.len() {
+            return false;
+        }
+        for (index, frame) in input.iter().enumerate() {
+            self.raw_scratch[index * 2] = frame.l.to_float();
+            self.raw_scratch[index * 2 + 1] = frame.r.to_float();
+        }
+        let raw = &self.raw_scratch[..samples];
+        let mono = self.downmixer.process(raw);
+        self.processor.process(mono, raw, input.len());
+        true
+    }
+}
+
+struct MonoCaptureRealtime {
+    processor: CaptureCallbackProcessor,
+    scratch: Vec<f32>,
+}
+
+struct MultichannelCaptureRealtime<const CHANNELS: usize> {
+    processor: CaptureCallbackProcessor,
+    raw_scratch: Vec<f32>,
+    downmixer: AdaptiveDownmixer,
+}
+
+type StereoCaptureInit<T> = (
+    cubeb::Stream<StereoFrame<T>>,
+    Arc<RealtimeCallbackState<StereoCaptureRealtime>>,
+);
+type MonoCaptureInit<T> = (
+    cubeb::Stream<MonoFrame<T>>,
+    Arc<RealtimeCallbackState<MonoCaptureRealtime>>,
+);
+type MultichannelCaptureInit<T, const CHANNELS: usize> = (
+    cubeb::Stream<MultichannelFrame<T, CHANNELS>>,
+    Arc<RealtimeCallbackState<MultichannelCaptureRealtime<CHANNELS>>>,
+);
+
+impl MonoCaptureRealtime {
+    fn new(resources: CaptureCallbackResources, sample_rate: u32) -> Self {
+        Self {
+            processor: CaptureCallbackProcessor::new(resources, sample_rate),
+            scratch: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize],
+        }
+    }
+
+    fn process<T: CubebCaptureSample>(&mut self, input: &[MonoFrame<T>]) -> bool {
+        let decision = self
+            .processor
+            .classify_preroll(input.len(), |index| input[index].m.to_float() == 0.0);
+        let input = &input[decision.skip_frames..];
+        if input.len() > self.scratch.len() {
+            return false;
+        }
+        for (sample, frame) in self.scratch.iter_mut().zip(input) {
+            *sample = frame.m.to_float();
+        }
+        let mono = &self.scratch[..input.len()];
+        self.processor.process(mono, mono, input.len());
+        true
+    }
+}
+
+impl<const CHANNELS: usize> MultichannelCaptureRealtime<CHANNELS> {
+    fn new(resources: CaptureCallbackResources, sample_rate: u32) -> Self {
+        Self {
+            processor: CaptureCallbackProcessor::new(resources, sample_rate),
+            raw_scratch: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize * CHANNELS],
+            downmixer: AdaptiveDownmixer::with_capacity(
+                CHANNELS,
+                CUBEB_MAX_LATENCY_FRAMES as usize,
+            ),
+        }
+    }
+
+    fn process<T: CubebCaptureSample>(&mut self, input: &[MultichannelFrame<T, CHANNELS>]) -> bool {
+        let decision = self.processor.classify_preroll(input.len(), |index| {
+            input[index]
+                .channels
+                .iter()
+                .all(|sample| sample.to_float() == 0.0)
+        });
+        if decision.matched {
+            self.downmixer.reset();
+        }
+        let input = &input[decision.skip_frames..];
+        let Some(samples) = input.len().checked_mul(CHANNELS) else {
+            return false;
+        };
+        if CHANNELS == 0 || samples > self.raw_scratch.len() {
+            return false;
+        }
+        for (target, sample) in self
+            .raw_scratch
+            .iter_mut()
+            .zip(input.iter().flat_map(|frame| frame.channels.iter()))
+        {
+            *target = sample.to_float();
+        }
+        let raw = &self.raw_scratch[..samples];
+        let mono = self.downmixer.process(raw);
+        self.processor.process(mono, raw, input.len());
+        true
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_cpal_capture(
+fn init_stereo_capture_stream<T: CubebCaptureSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<StereoCaptureInit<T>> {
+    let realtime: Arc<RealtimeCallbackState<StereoCaptureRealtime>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<StereoFrame<T>>::new();
+    builder
+        .name("PerfectComms microphone")
+        .latency(latency_frames)
+        .data_callback(move |input, _| {
+            if callback_errored.load(Ordering::Acquire) {
+                return input.len().min(isize::MAX as usize) as isize;
+            }
+            if callback_realtime.with_callback_mut(|state| state.process(input)) != Some(true) {
+                callback_errored.store(true, Ordering::Release);
+            }
+            input.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                // Fail closed until the explicit endpoint is reopened. The legacy AudioUnit
+                // backend can otherwise retarget this stream to the system default.
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_input(params);
+    } else {
+        builder.input(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn init_mono_capture_stream<T: CubebCaptureSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<MonoCaptureInit<T>> {
+    let realtime: Arc<RealtimeCallbackState<MonoCaptureRealtime>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<MonoFrame<T>>::new();
+    builder
+        .name("PerfectComms microphone")
+        .latency(latency_frames)
+        .data_callback(move |input, _| {
+            if callback_errored.load(Ordering::Acquire) {
+                return input.len().min(isize::MAX as usize) as isize;
+            }
+            if callback_realtime.with_callback_mut(|state| state.process(input)) != Some(true) {
+                callback_errored.store(true, Ordering::Release);
+            }
+            input.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_input(params);
+    } else {
+        builder.input(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn init_multichannel_capture_stream<T: CubebCaptureSample, const CHANNELS: usize>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<MultichannelCaptureInit<T, CHANNELS>> {
+    let realtime: Arc<RealtimeCallbackState<MultichannelCaptureRealtime<CHANNELS>>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<MultichannelFrame<T, CHANNELS>>::new();
+    builder
+        .name("PerfectComms microphone")
+        .latency(latency_frames)
+        .data_callback(move |input, _| {
+            if callback_errored.load(Ordering::Acquire) {
+                return input.len().min(isize::MAX as usize) as isize;
+            }
+            if callback_realtime.with_callback_mut(|state| state.process(input)) != Some(true) {
+                callback_errored.store(true, Ordering::Release);
+            }
+            input.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_input(params);
+    } else {
+        builder.input(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+fn open_stereo_capture_stream<T: CubebCaptureSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: CaptureCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<StereoFrame<T>>, String> {
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_stereo_capture_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(StereoCaptureRealtime::new(resources, sample_rate))
+        .map_err(|_| "internal stereo callback initialization was duplicated".to_string())?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_mono_capture_stream<T: CubebCaptureSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: CaptureCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<MonoFrame<T>>, String> {
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_mono_capture_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(MonoCaptureRealtime::new(resources, sample_rate))
+        .map_err(|_| "internal mono callback initialization was duplicated".to_string())?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_multichannel_capture_stream<T: CubebCaptureSample, const CHANNELS: usize>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: CaptureCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<MultichannelFrame<T, CHANNELS>>, String> {
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_multichannel_capture_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(MultichannelCaptureRealtime::new(resources, sample_rate))
+        .map_err(|_| {
+            "internal multichannel input callback initialization was duplicated".to_string()
+        })?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_capture_candidate(
+    context: &cubeb::Context,
+    selected: &SelectedDevice,
+    prefs: StreamPrefs,
+    candidate: CubebStreamCandidate,
+    resources: CaptureCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<(CubebCaptureStream, u32), String> {
+    let layout = cubeb_output_channel_layout(candidate.channels).ok_or_else(|| {
+        format!(
+            "unsupported Cubeb input channel count: {}",
+            candidate.channels
+        )
+    })?;
+    let params = StreamParamsBuilder::new()
+        .format(candidate.sample.format())
+        .rate(candidate.rate)
+        .channels(u32::from(candidate.channels))
+        .layout(layout)
+        .prefs(prefs)
+        .take();
+    let latency_frames = cubeb_latency_frames(context, params.as_ref());
+    let mut resources = resources;
+    resources.requested_latency_frames = latency_frames;
+    resources.wasapi_preroll_filter =
+        cubeb_backend_injects_wasapi_preroll(context.backend_id_bytes());
+    // Seed every backend with a bounded estimate before start. Current C PulseAudio and ALSA
+    // backends do not implement stream_get_input_latency, and WASAPI's first callback can race
+    // the first successful query. A later backend value atomically upgrades this estimate.
+    resources
+        .backend_latency_frames
+        .store(latency_frames, Ordering::Release);
+    resources
+        .latency_probe_requested
+        .store(true, Ordering::Release);
+    let stream = match (candidate.sample, candidate.channels) {
+        (CubebSampleKind::Float32, 2) => open_stereo_capture_stream::<f32>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::StereoF32),
+        (CubebSampleKind::Float32, 1) => open_mono_capture_stream::<f32>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::MonoF32),
+        (CubebSampleKind::Float32, 4) => open_multichannel_capture_stream::<f32, 4>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::QuadF32),
+        (CubebSampleKind::Float32, 6) => open_multichannel_capture_stream::<f32, 6>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::Surround51F32),
+        (CubebSampleKind::Float32, 8) => open_multichannel_capture_stream::<f32, 8>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::Surround71F32),
+        (CubebSampleKind::Signed16, 2) => open_stereo_capture_stream::<i16>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::StereoI16),
+        (CubebSampleKind::Signed16, 1) => open_mono_capture_stream::<i16>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::MonoI16),
+        (CubebSampleKind::Signed16, 4) => open_multichannel_capture_stream::<i16, 4>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::QuadI16),
+        (CubebSampleKind::Signed16, 6) => open_multichannel_capture_stream::<i16, 6>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::Surround51I16),
+        (CubebSampleKind::Signed16, 8) => open_multichannel_capture_stream::<i16, 8>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebCaptureStream::Surround71I16),
+        _ => Err("unsupported Cubeb capture candidate".to_string()),
+    }?;
+    Ok((stream, latency_frames))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_cubeb_capture(
     device_id: Option<String>,
     ring: CaptureFrameProducer,
     encoder_epoch: Arc<AtomicU64>,
@@ -1557,187 +3057,127 @@ pub fn spawn_cpal_capture(
     stream_generation: u64,
     media_events: SyncSender<MediaStateEvent>,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    let _com = WindowsComApartment::initialize()
+        .map_err(|error| format!("initialize COM for Cubeb input: {error}"))?;
     aec_timing.reset_capture_path();
     let open_attempt = diagnostics.begin_open_attempt();
-    let selected = pick_device(&device_id)?;
-    let config = pick_input_config(&selected.device)?;
-    let in_rate = config.sample_rate();
-    let channels = config.channels() as usize;
-    if !(MIN_REALTIME_CAPTURE_RATE..=MAX_REALTIME_CAPTURE_RATE).contains(&in_rate) {
-        return Err(format!(
-            "unsupported realtime input rate {in_rate}Hz (expected {MIN_REALTIME_CAPTURE_RATE}..={MAX_REALTIME_CAPTURE_RATE})"
-        ));
+    let context = init_cubeb_context("PerfectComms microphone")
+        .map_err(|error| format!("initialize Cubeb input context: {error}"))?;
+    let explicit = device_id.as_deref().is_some_and(|id| !id.is_empty());
+    let devices = if explicit {
+        Some(
+            context
+                .enumerate_devices(DeviceType::INPUT)
+                .map_err(|error| format!("enumerate input devices: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let preferred_rate = context.preferred_sample_rate().unwrap_or(SAMPLE_RATE);
+    let selected = pick_device(
+        devices.as_ref(),
+        &device_id,
+        preferred_rate,
+        "input",
+        DeviceType::INPUT,
+        context.backend_id_bytes(),
+    )?;
+    let prefs = if explicit {
+        StreamPrefs::DISABLE_DEVICE_SWITCHING
+    } else {
+        StreamPrefs::NONE
+    };
+    let errored = Arc::new(AtomicBool::new(false));
+    let device_change = Arc::new(CubebDeviceChangeSignal::default());
+    let backend_latency_frames = Arc::new(AtomicU32::new(UNKNOWN_CUBEB_LATENCY_FRAMES));
+    let latency_probe_requested = Arc::new(AtomicBool::new(true));
+    let first_callback_ns = Arc::new(AtomicU64::new(0));
+    let first_callback_frames = Arc::new(AtomicU64::new(0));
+    let resources = CaptureCallbackResources {
+        ring,
+        encoder_epoch,
+        aec_timing: aec_timing.clone(),
+        diagnostics: diagnostics.clone(),
+        device_change: device_change.clone(),
+        backend_latency_frames: backend_latency_frames.clone(),
+        latency_probe_requested: latency_probe_requested.clone(),
+        first_callback_ns: first_callback_ns.clone(),
+        first_callback_frames: first_callback_frames.clone(),
+        wasapi_preroll_filter: false,
+        requested_latency_frames: FRAME_SAMPLES as u32,
+        stream_generation,
+        open_attempt,
+    };
+
+    // Preserve stereo and mono as the preferred paths, then try quad/5.1/7.1 capture for strict
+    // USB interfaces and hardware endpoints. Every attempt retains the exact selected endpoint,
+    // and multichannel streams are adaptively downmixed before entering the mono voice pipeline.
+    let mut failures = Vec::new();
+    let mut opened = None;
+    for candidate in
+        cubeb_capture_stream_candidates(context.backend_id_bytes(), selected.preferred_rate)
+    {
+        device_change.clear_pending();
+        errored.store(false, Ordering::Release);
+        match open_capture_candidate(
+            &context,
+            &selected,
+            prefs,
+            candidate,
+            resources.clone(),
+            errored.clone(),
+        ) {
+            Ok((stream, latency_frames)) => {
+                opened = Some((stream, candidate, latency_frames));
+                break;
+            }
+            Err(error) => failures.push(format!(
+                "{}/{}/{}ch: {error}",
+                candidate.sample.label(),
+                candidate.rate,
+                candidate.channels
+            )),
+        }
     }
-    let sample_format = config.sample_format();
-    let (buffer_mode, buffer_min_frames, buffer_max_frames) = supported_buffer_details(&config);
+    let (stream, candidate, latency_frames) =
+        opened.ok_or_else(|| format!("build input stream: {}", failures.join("; ")))?;
     let descriptor = StreamDescriptor {
         requested_device: selected.requested_device.clone(),
         resolved_device: selected.resolved_device.clone(),
         requested_default: selected.requested_default,
         requested_matched: selected.requested_matched,
         fell_back_to_default: selected.fell_back_to_default,
-        sample_rate: in_rate,
-        channels: channels as u16,
-        sample_format: format!("{sample_format:?}"),
-        buffer_mode,
-        buffer_min_frames,
-        buffer_max_frames,
+        sample_rate: candidate.rate,
+        channels: candidate.channels,
+        sample_format: candidate.sample.label().to_string(),
+        buffer_mode: cubeb_buffer_mode(&context),
+        buffer_min_frames: latency_frames,
+        buffer_max_frames: latency_frames,
     };
-    let errored = Arc::new(AtomicBool::new(false));
-    let make_err = || {
-        let ef = errored.clone();
-        move |_e| {
-            ef.store(true, Ordering::Relaxed);
+    // Keep `devices` alive through all init/startup work: backend endpoint handles can point into
+    // the enumeration collection and are only safe to release after Cubeb resolves the stream.
+    match device_change.take_action(selected.requested_default) {
+        CubebDeviceChangeAction::ResetDefaultStream => {
+            aec_timing.reset_capture_path();
+            backend_latency_frames.store(latency_frames, Ordering::Release);
+            store_cubeb_latency(&backend_latency_frames, stream.input_latency());
+            latency_probe_requested.store(true, Ordering::Release);
         }
-    };
-
-    let cb_ring = ring;
-    let cb_diagnostics = diagnostics.clone();
-    let mut capture_clock = CaptureClockMapper::default();
-    let mut downmixer = AdaptiveDownmixer::with_capacity(channels, CAPTURE_PROCESS_CHUNK_FRAMES);
-    let mut resampler = Resampler::new(in_rate);
-    resampler.reserve_realtime_input(CAPTURE_PROCESS_CHUNK_FRAMES);
-    let mut accumulator =
-        FrameAccumulator::with_capacity(REALTIME_ACCUMULATOR_SAMPLES, REALTIME_TIMING_SEGMENTS);
-    let mut resampled_scratch = Vec::with_capacity(MAX_RESAMPLED_CHUNK_SAMPLES);
-    let first_callback_ns = Arc::new(AtomicU64::new(0));
-    let first_callback_frames = Arc::new(AtomicU64::new(0));
-    let cb_first_callback_ns = first_callback_ns.clone();
-    let cb_first_callback_frames = first_callback_frames.clone();
-    let mut push = move |data: &[f32], info: &cpal::InputCallbackInfo| {
-        // A callback is one capture transaction: every derived 20 ms frame retains the privacy
-        // epoch that was current before this callback touched its PCM.
-        let callback_encoder_epoch = encoder_epoch.load(Ordering::Acquire);
-        let input_frames = data.len() / channels.max(1);
-        let observation =
-            aec_timing.observe_input_callback(&mut capture_clock, info, input_frames, in_rate);
-        let first_callback =
-            cb_diagnostics.observe_callback(observation.callback_mono_ns, input_frames, in_rate);
-        if first_callback {
-            cb_first_callback_frames.store(input_frames as u64, Ordering::Release);
-            cb_first_callback_ns.store(observation.callback_mono_ns, Ordering::Release);
-        }
-        if cb_diagnostics.signal_windows_enabled() {
-            cb_diagnostics.raw_input.record(data);
-        }
-        cb_diagnostics.observe_capture_clock(
-            observation.clock_status,
-            observation.capture_clock_delta_ns,
-            observation.expected_capture_delta_ns,
-            observation.capture_clock_delta_error_ns,
-            observation.bridge_residual_ns,
-        );
-        if observation.discontinuity {
-            cb_diagnostics.note_timestamp_discontinuity();
-        }
-        if !observation.valid {
-            cb_diagnostics.note_invalid_timestamp();
-        }
-        let chunk_samples = CAPTURE_PROCESS_CHUNK_FRAMES.saturating_mul(channels.max(1));
-        let mut produced_frames = 0;
-        for (chunk_index, chunk) in data.chunks(chunk_samples).enumerate() {
-            let complete_samples = chunk.len() - chunk.len() % channels.max(1);
-            if complete_samples == 0 {
-                continue;
-            }
-            let chunk = &chunk[..complete_samples];
-            let frame_offset = chunk_index.saturating_mul(CAPTURE_PROCESS_CHUNK_FRAMES);
-            let chunk_capture_ts_ns = observation.first_sample_mono_ns.saturating_add(
-                (frame_offset as u64).saturating_mul(1_000_000_000) / u64::from(in_rate),
-            );
-            let mono = downmixer.process(chunk);
-            let timing = resampler.process_timed_into(
-                mono,
-                chunk_capture_ts_ns,
-                observation.callback_mono_ns,
-                observation.valid,
-                observation.frame_timing_valid,
-                &mut resampled_scratch,
-            );
-            cb_diagnostics.observe_resampled_samples(resampled_scratch.len());
-            produced_frames += accumulator.push_samples_and_drain_with(
-                &resampled_scratch,
-                timing,
-                |timing, samples| {
-                    let _ = cb_ring.push(
-                        CaptureFrameMetadata {
-                            encoder_epoch: callback_encoder_epoch,
-                            capture_generation: stream_generation,
-                            capture_open_attempt: open_attempt,
-                            capture_ts_ns: timing.capture_ts_ns,
-                            capture_callback_ts_ns: timing.callback_ts_ns,
-                            capture_timestamp_valid: timing.valid,
-                        },
-                        samples,
-                    );
-                },
+        CubebDeviceChangeAction::ReopenExplicitStream => {
+            let _ = stream.stop();
+            return Err(
+                "selected input device changed; CoreAudio callback requires stream reopen"
+                    .to_string(),
             );
         }
-        let pending_samples = accumulator.pending_samples();
-        cb_diagnostics.set_accumulator_pending(pending_samples);
-        cb_diagnostics.observe_frames_produced(produced_frames);
-        if produced_frames > 0 {
-            cb_diagnostics.observe_ring_len(cb_ring.len());
-        }
-    };
-
-    let stream_config: cpal::StreamConfig = config.into();
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => selected.device.build_input_stream(
-            stream_config,
-            move |data: &[f32], info| {
-                push(data, info);
-            },
-            make_err(),
-            None,
-        ),
-        cpal::SampleFormat::I16 => selected.device.build_input_stream(
-            stream_config,
-            {
-                let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
-                let mut scratch = Vec::with_capacity(max_samples);
-                let oversize = errored.clone();
-                move |data: &[i16], info| {
-                    if data.len() > scratch.capacity() {
-                        oversize.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    scratch.clear();
-                    scratch.extend(data.iter().map(|&sample| sample as f32 / 32768.0));
-                    push(&scratch, info);
-                }
-            },
-            make_err(),
-            None,
-        ),
-        cpal::SampleFormat::U16 => selected.device.build_input_stream(
-            stream_config,
-            {
-                let max_samples = callback_scratch_samples(buffer_max_frames, channels)?;
-                let mut scratch = Vec::with_capacity(max_samples);
-                let oversize = errored.clone();
-                move |data: &[u16], info| {
-                    if data.len() > scratch.capacity() {
-                        oversize.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    scratch.clear();
-                    scratch.extend(
-                        data.iter()
-                            .map(|&sample| (sample as f32 - 32768.0) / 32768.0),
-                    );
-                    push(&scratch, info);
-                }
-            },
-            make_err(),
-            None,
-        ),
-        fmt => return Err(format!("unsupported sample format: {fmt:?}")),
+        CubebDeviceChangeAction::None => {}
     }
-    .map_err(|e| format!("build input stream: {e}"))?;
-
+    if errored.load(Ordering::Acquire) {
+        let _ = stream.stop();
+        return Err("input device failed while starting".to_string());
+    }
     let started_ns = monotonic_ns();
-    stream.play().map_err(|e| format!("stream play: {e}"))?;
     diagnostics.mark_stream_started(started_ns, descriptor.clone());
     send_media_state(
         &media_events,
@@ -1762,7 +3202,26 @@ pub fn spawn_cpal_capture(
     );
     healthy.store(true, Ordering::Relaxed);
     let mut first_callback_reported = false;
+    let mut last_latency_refresh = Instant::now() - CUBEB_FAST_LATENCY_REFRESH;
+    let mut fast_probe_active = true;
+    let mut fast_probe_deadline = Instant::now() + CUBEB_FAST_LATENCY_PROBE_WINDOW;
     while !stop.load(Ordering::Relaxed) {
+        match device_change.take_action(selected.requested_default) {
+            CubebDeviceChangeAction::ResetDefaultStream => {
+                aec_timing.reset_capture_path();
+                backend_latency_frames.store(latency_frames, Ordering::Release);
+                latency_probe_requested.store(true, Ordering::Release);
+                last_latency_refresh = Instant::now() - CUBEB_FAST_LATENCY_REFRESH;
+            }
+            CubebDeviceChangeAction::ReopenExplicitStream => {
+                let _ = stream.stop();
+                return Err(
+                    "selected input device changed; CoreAudio callback requires stream reopen"
+                        .to_string(),
+                );
+            }
+            CubebDeviceChangeAction::None => {}
+        }
         if !first_callback_reported {
             let callback_ns = first_callback_ns.load(Ordering::Acquire);
             if callback_ns != 0 {
@@ -1783,165 +3242,46 @@ pub fn spawn_cpal_capture(
                 first_callback_reported = true;
             }
         }
-        if errored.load(Ordering::Relaxed) {
-            drop(stream);
-            return Err("input device error (disconnected?)".into());
+        if latency_probe_requested.swap(false, Ordering::AcqRel) {
+            fast_probe_active = true;
+            fast_probe_deadline = Instant::now() + CUBEB_FAST_LATENCY_PROBE_WINDOW;
+        }
+        let refresh_interval = if fast_probe_active {
+            CUBEB_FAST_LATENCY_REFRESH
+        } else {
+            CUBEB_LATENCY_REFRESH
+        };
+        if last_latency_refresh.elapsed() >= refresh_interval {
+            let latency = stream.input_latency();
+            let succeeded = latency.as_ref().is_ok_and(|frames| *frames > 0);
+            store_cubeb_latency(&backend_latency_frames, latency);
+            if succeeded || Instant::now() >= fast_probe_deadline {
+                fast_probe_active = false;
+            }
+            last_latency_refresh = Instant::now();
+        }
+        if errored.load(Ordering::Acquire) {
+            let _ = stream.stop();
+            return Err("input device stream failed".to_string());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    drop(stream);
+    stream
+        .stop()
+        .map_err(|error| format!("input stream stop: {error}"))?;
     Ok(())
 }
 
-pub fn enumerate_output_devices() -> Vec<DeviceInfo> {
-    let host = cpal::default_host();
-    let default_id = host
-        .default_output_device()
-        .and_then(|device| device.id().ok())
-        .map(|id| id.to_string());
-    let mut out = Vec::new();
-    if let Ok(devices) = host.output_devices() {
-        for device in devices {
-            let id = match device.id() {
-                Ok(id) => id.to_string(),
-                Err(_) => continue,
-            };
-            let name = match device
-                .description()
-                .ok()
-                .and_then(|description| device_display_name(&description))
-            {
-                Some(name) => name,
-                _ => continue,
-            };
-            if pick_output_config(&device).is_err() {
-                continue;
-            }
-            let is_default = Some(&id) == default_id.as_ref();
-            out.push(DeviceInfo {
-                id,
-                name,
-                default: is_default,
-            });
-        }
-    }
-    out.sort_by_key(|d| std::cmp::Reverse(d.default));
-    out
-}
-
-fn pick_output_device(
-    host: &cpal::Host,
-    device_id: &Option<String>,
-) -> Result<SelectedDevice, String> {
-    let requested_id = device_id.as_deref().filter(|id| !id.is_empty());
-    let selected = requested_id
-        .and_then(|id| id.parse::<cpal::DeviceId>().ok())
-        .and_then(|id| host.device_by_id(&id));
-    let device = selected_or_default(
-        device_id.as_deref(),
-        selected,
-        || host.default_output_device(),
-        "output",
-    )?;
-    let resolved_device = device.id().map(|id| id.to_string()).unwrap_or_default();
-    Ok(SelectedDevice {
-        device,
-        requested_device: device_id.clone().unwrap_or_default(),
-        resolved_device,
-        requested_default: requested_id.is_none(),
-        requested_matched: true,
-        fell_back_to_default: false,
-    })
-}
-
-fn pick_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    if let Ok(ranges) = device.supported_output_configs() {
-        let mut best: Option<cpal::SupportedStreamConfigRange> = None;
-        for r in ranges {
-            if !supported_sample_format(r.sample_format()) {
-                continue;
-            }
-            if r.min_sample_rate() <= SAMPLE_RATE && r.max_sample_rate() >= SAMPLE_RATE {
-                let better = match &best {
-                    None => true,
-                    Some(b) => {
-                        output_config_score(r.channels(), r.sample_format())
-                            < output_config_score(b.channels(), b.sample_format())
-                    }
-                };
-                if better {
-                    best = Some(r);
-                }
-            }
-        }
-        if let Some(r) = best {
-            return Ok(r.with_sample_rate(SAMPLE_RATE));
-        }
-    }
-    let default = device
-        .default_output_config()
-        .map_err(|e| format!("default output config: {e}"))?;
-    if !supported_sample_format(default.sample_format()) {
-        return Err(format!(
-            "unsupported default output sample format: {:?}",
-            default.sample_format()
-        ));
-    }
-    Ok(default)
-}
-
-fn output_config_score(channels: u16, format: cpal::SampleFormat) -> (u8, u8, u16) {
-    let channel_rank = match channels {
-        2 => 0, // Preserve spatial pan without relying on an ambiguous multichannel layout.
-        1 => 1,
-        _ => 2,
-    };
-    let format_rank = match format {
-        cpal::SampleFormat::F32 => 0,
-        cpal::SampleFormat::I16 => 1,
-        cpal::SampleFormat::U16 => 2,
-        _ => 3,
-    };
-    (channel_rank, format_rank, channels)
-}
-
-fn write_out_frame(out: &mut [f32], frame: usize, channels: usize, l: f32, r: f32) {
-    let base = frame * channels;
-    if channels == 1 {
-        out[base] = (l + r) * 0.5;
-        return;
-    }
-    out[base..base + channels].fill(0.0);
-    out[base] = l;
-    out[base + 1] = r;
-    match channels {
-        // Common channel orders: 3.0 = FL/FR/FC, quad = FL/FR/RL/RR,
-        // 5.0 = FL/FR/FC/RL/RR, 5.1+ = FL/FR/FC/LFE/SL/SR/...
-        3 => out[base + 2] = (l + r) * 0.5,
-        4 => {
-            out[base + 2] = l * 0.5;
-            out[base + 3] = r * 0.5;
-        }
-        5 => {
-            out[base + 2] = (l + r) * 0.5;
-            out[base + 3] = l * 0.5;
-            out[base + 4] = r * 0.5;
-        }
-        6.. => {
-            out[base + 2] = (l + r) * 0.5;
-            // Keep LFE silent; voice-band content does not belong there.
-            out[base + 4] = l * 0.5;
-            out[base + 5] = r * 0.5;
-        }
-        _ => {}
-    }
+pub fn enumerate_output_devices() -> Result<Vec<DeviceInfo>, String> {
+    enumerate_cubeb_devices(DeviceType::OUTPUT)
 }
 
 const UNDERRUN_FADE_SAMPLES: u32 = 240; // 5 ms at the internal 48 kHz clock.
 const UNDERRUN_RESUME_SAMPLES: u32 = 96; // 2 ms crossfade when audio returns.
 
-#[derive(Default)]
 struct UnderrunFader {
+    fade_samples: u32,
+    resume_samples: u32,
     last_output: (f32, f32),
     fade_from: (f32, f32),
     fade_remaining: u32,
@@ -1950,32 +3290,67 @@ struct UnderrunFader {
     starved: bool,
 }
 
+impl Default for UnderrunFader {
+    fn default() -> Self {
+        Self::for_sample_rate(SAMPLE_RATE)
+    }
+}
+
 impl UnderrunFader {
+    fn for_sample_rate(sample_rate: u32) -> Self {
+        let scaled = |samples: u32| {
+            u64::from(samples)
+                .saturating_mul(u64::from(sample_rate.max(1)))
+                .div_ceil(u64::from(SAMPLE_RATE))
+                .clamp(1, u64::from(u32::MAX)) as u32
+        };
+        Self {
+            fade_samples: scaled(UNDERRUN_FADE_SAMPLES),
+            resume_samples: scaled(UNDERRUN_RESUME_SAMPLES),
+            last_output: (0.0, 0.0),
+            fade_from: (0.0, 0.0),
+            fade_remaining: 0,
+            resume_remaining: 0,
+            resume_from: (0.0, 0.0),
+            starved: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        let fade_samples = self.fade_samples;
+        let resume_samples = self.resume_samples;
+        *self = Self {
+            fade_samples,
+            resume_samples,
+            ..Self::for_sample_rate(SAMPLE_RATE)
+        };
+    }
+
     fn process(&mut self, pair: (f32, f32), available: bool) -> (f32, f32) {
         let output = if !available {
             if !self.starved {
                 self.starved = true;
-                self.fade_remaining = UNDERRUN_FADE_SAMPLES;
+                self.fade_remaining = self.fade_samples;
                 self.fade_from = self.last_output;
                 self.resume_remaining = 0;
             }
             if self.fade_remaining == 0 {
                 (0.0, 0.0)
             } else {
-                let factor = self.fade_remaining as f32 / UNDERRUN_FADE_SAMPLES as f32;
+                let factor = self.fade_remaining as f32 / self.fade_samples as f32;
                 self.fade_remaining -= 1;
                 (self.fade_from.0 * factor, self.fade_from.1 * factor)
             }
         } else {
             if self.starved {
                 self.starved = false;
-                self.resume_remaining = UNDERRUN_RESUME_SAMPLES;
+                self.resume_remaining = self.resume_samples;
                 self.resume_from = self.last_output;
             }
             if self.resume_remaining == 0 {
                 pair
             } else {
-                let progress = 1.0 - self.resume_remaining as f32 / UNDERRUN_RESUME_SAMPLES as f32;
+                let progress = 1.0 - self.resume_remaining as f32 / self.resume_samples as f32;
                 self.resume_remaining -= 1;
                 (
                     self.resume_from.0 + (pair.0 - self.resume_from.0) * progress,
@@ -2038,6 +3413,13 @@ impl Default for MonitorPlayout {
 }
 
 impl MonitorPlayout {
+    fn for_sample_rate(sample_rate: u32) -> Self {
+        Self {
+            underrun_fader: UnderrunFader::for_sample_rate(sample_rate),
+            ..Self::default()
+        }
+    }
+
     fn reset_interpolation(&mut self) {
         self.primed = false;
         self.s0 = (0.0, 0.0);
@@ -2050,7 +3432,7 @@ impl MonitorPlayout {
     fn reset_for_generation(&mut self, generation: u64) {
         self.observed_generation = generation;
         self.reset_interpolation();
-        self.underrun_fader = UnderrunFader::default();
+        self.underrun_fader.reset();
     }
 
     fn render(
@@ -2111,8 +3493,665 @@ impl MonitorPlayout {
     }
 }
 
+#[derive(Clone)]
+struct PlaybackCallbackResources {
+    ring: PlaybackConsumer,
+    monitor_ring: PlaybackConsumer,
+    monitor_state: Arc<MicrophoneMonitorState>,
+    counters: Arc<NativeCounters>,
+    progress: Arc<PlaybackProgress>,
+    aec_timing: Arc<AecTiming>,
+    diagnostics: Arc<PlaybackDiagnostics>,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    start_succeeded: Arc<AtomicBool>,
+    backend_latency_frames: Arc<AtomicU32>,
+    first_callback_ns: Arc<AtomicU64>,
+    first_callback_frames: Arc<AtomicU64>,
+}
+
+struct PlaybackRealtime {
+    resources: PlaybackCallbackResources,
+    sample_rate: u32,
+    remote_s0: (f32, f32),
+    remote_s1: (f32, f32),
+    remote_s0_available: bool,
+    remote_s1_available: bool,
+    remote_pos: f64,
+    remote_underrun_fader: UnderrunFader,
+    monitor_playout: MonitorPlayout,
+    flat_output: Vec<f32>,
+}
+
+impl PlaybackRealtime {
+    fn new(resources: PlaybackCallbackResources, sample_rate: u32) -> Self {
+        Self {
+            resources,
+            sample_rate,
+            remote_s0: (0.0, 0.0),
+            remote_s1: (0.0, 0.0),
+            remote_s0_available: false,
+            remote_s1_available: false,
+            remote_pos: 1.0,
+            remote_underrun_fader: UnderrunFader::for_sample_rate(sample_rate),
+            monitor_playout: MonitorPlayout::for_sample_rate(sample_rate),
+            flat_output: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize * 2],
+        }
+    }
+
+    fn render(&mut self, frames: usize, mut write: impl FnMut(usize, f32, f32)) -> bool {
+        let Some(flat_samples) = frames.checked_mul(2) else {
+            return false;
+        };
+        if flat_samples > self.flat_output.len() {
+            return false;
+        }
+        let resources = &self.resources;
+        let callback_ns = monotonic_ns();
+        if resources.diagnostics.observe_callback(callback_ns, frames) {
+            resources
+                .first_callback_frames
+                .store(frames as u64, Ordering::Release);
+            resources
+                .first_callback_ns
+                .store(callback_ns, Ordering::Release);
+        }
+        resources.aec_timing.observe_output_latency_frames(
+            load_cubeb_latency(&resources.backend_latency_frames),
+            self.sample_rate,
+        );
+        resources.progress.mark_callback();
+        resources
+            .counters
+            .playback_callbacks
+            .fetch_add(1, Ordering::Relaxed);
+
+        let target_pairs = (FRAME_SAMPLES * 4) as f64;
+        let queued_pairs = resources.ring.len();
+        let ratio = SAMPLE_RATE as f64 / f64::from(self.sample_rate.max(1));
+        let effective_ratio = if queued_pairs == 0 {
+            ratio
+        } else {
+            let error = (queued_pairs as f64 - target_pairs) / target_pairs;
+            ratio * (1.0 + (error * 0.05).clamp(-0.004, 0.004))
+        };
+        let mut requested_pairs = 0u64;
+        let mut consumed_pairs = 0u64;
+        let mut underrun_pairs = 0u64;
+        for frame in 0..frames {
+            while self.remote_pos >= 1.0 {
+                self.remote_s0 = self.remote_s1;
+                self.remote_s0_available = self.remote_s1_available;
+                requested_pairs += 1;
+                match resources.ring.pop_stereo() {
+                    Some(pair) => {
+                        self.remote_s1 = pair;
+                        self.remote_s1_available = true;
+                        consumed_pairs += 1;
+                    }
+                    None => {
+                        self.remote_s1 = (0.0, 0.0);
+                        self.remote_s1_available = false;
+                        underrun_pairs += 1;
+                    }
+                }
+                self.remote_pos -= 1.0;
+            }
+            let remote_t = self.remote_pos as f32;
+            let remote_pair = (
+                self.remote_s0.0 + (self.remote_s1.0 - self.remote_s0.0) * remote_t,
+                self.remote_s0.1 + (self.remote_s1.1 - self.remote_s0.1) * remote_t,
+            );
+            let remote_pair = self.remote_underrun_fader.process(
+                remote_pair,
+                self.remote_s0_available || self.remote_s1_available,
+            );
+            self.remote_pos += effective_ratio;
+
+            let monitor_pair = self.monitor_playout.render(
+                &resources.monitor_ring,
+                &resources.monitor_state,
+                ratio,
+            );
+            let monitor_gain = resources.monitor_state.gain();
+            let left = (remote_pair.0 + monitor_pair.0 * monitor_gain).clamp(-1.0, 1.0);
+            let right = (remote_pair.1 + monitor_pair.1 * monitor_gain).clamp(-1.0, 1.0);
+            write(frame, left, right);
+            self.flat_output[frame * 2] = left;
+            self.flat_output[frame * 2 + 1] = right;
+        }
+        resources
+            .counters
+            .playback_requested_pairs
+            .fetch_add(requested_pairs, Ordering::Relaxed);
+        resources
+            .counters
+            .playback_consumed_pairs
+            .fetch_add(consumed_pairs, Ordering::Relaxed);
+        resources
+            .counters
+            .playback_underrun_pairs
+            .fetch_add(underrun_pairs, Ordering::Relaxed);
+        resources
+            .counters
+            .record_playback_output(&self.flat_output[..flat_samples]);
+        true
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct MultichannelFrame<T, const CHANNELS: usize> {
+    channels: [T; CHANNELS],
+}
+
+impl<T, const CHANNELS: usize> cubeb::Frame for MultichannelFrame<T, CHANNELS> {}
+
+fn map_stereo_to_multichannel<const CHANNELS: usize>(left: f32, right: f32) -> [f32; CHANNELS] {
+    let mut output = [0.0; CHANNELS];
+    if CHANNELS < 2 {
+        return output;
+    }
+    output[0] = left;
+    output[1] = right;
+    match CHANNELS {
+        // Cubeb QUAD: FL, FR, BL, BR.
+        4 => {
+            output[2] = left * 0.5;
+            output[3] = right * 0.5;
+        }
+        // Cubeb 3F2_LFE: FL, FR, FC, LFE, SL, SR.
+        6 => {
+            output[2] = (left + right) * 0.5;
+            output[4] = left * 0.5;
+            output[5] = right * 0.5;
+        }
+        // Cubeb 3F4_LFE: FL, FR, FC, LFE, BL, BR, SL, SR.
+        8 => {
+            output[2] = (left + right) * 0.5;
+            output[4] = left * 0.5;
+            output[5] = right * 0.5;
+            output[6] = left * 0.5;
+            output[7] = right * 0.5;
+        }
+        _ => {}
+    }
+    output
+}
+
+enum CubebPlaybackStream {
+    MonoF32(cubeb::Stream<MonoFrame<f32>>),
+    StereoF32(cubeb::Stream<StereoFrame<f32>>),
+    QuadF32(cubeb::Stream<MultichannelFrame<f32, 4>>),
+    Surround51F32(cubeb::Stream<MultichannelFrame<f32, 6>>),
+    Surround71F32(cubeb::Stream<MultichannelFrame<f32, 8>>),
+    MonoI16(cubeb::Stream<MonoFrame<i16>>),
+    StereoI16(cubeb::Stream<StereoFrame<i16>>),
+    QuadI16(cubeb::Stream<MultichannelFrame<i16, 4>>),
+    Surround51I16(cubeb::Stream<MultichannelFrame<i16, 6>>),
+    Surround71I16(cubeb::Stream<MultichannelFrame<i16, 8>>),
+}
+
+type StereoPlaybackInit<T> = (
+    cubeb::Stream<StereoFrame<T>>,
+    Arc<RealtimeCallbackState<PlaybackRealtime>>,
+);
+type MonoPlaybackInit<T> = (
+    cubeb::Stream<MonoFrame<T>>,
+    Arc<RealtimeCallbackState<PlaybackRealtime>>,
+);
+type MultichannelPlaybackInit<T, const CHANNELS: usize> = (
+    cubeb::Stream<MultichannelFrame<T, CHANNELS>>,
+    Arc<RealtimeCallbackState<PlaybackRealtime>>,
+);
+
+impl CubebPlaybackStream {
+    fn stop(&self) -> cubeb::Result<()> {
+        match self {
+            Self::MonoF32(stream) => stream.stop(),
+            Self::StereoF32(stream) => stream.stop(),
+            Self::QuadF32(stream) => stream.stop(),
+            Self::Surround51F32(stream) => stream.stop(),
+            Self::Surround71F32(stream) => stream.stop(),
+            Self::MonoI16(stream) => stream.stop(),
+            Self::StereoI16(stream) => stream.stop(),
+            Self::QuadI16(stream) => stream.stop(),
+            Self::Surround51I16(stream) => stream.stop(),
+            Self::Surround71I16(stream) => stream.stop(),
+        }
+    }
+
+    fn latency(&self) -> cubeb::Result<u32> {
+        match self {
+            Self::MonoF32(stream) => stream.latency(),
+            Self::StereoF32(stream) => stream.latency(),
+            Self::QuadF32(stream) => stream.latency(),
+            Self::Surround51F32(stream) => stream.latency(),
+            Self::Surround71F32(stream) => stream.latency(),
+            Self::MonoI16(stream) => stream.latency(),
+            Self::StereoI16(stream) => stream.latency(),
+            Self::QuadI16(stream) => stream.latency(),
+            Self::Surround51I16(stream) => stream.latency(),
+            Self::Surround71I16(stream) => stream.latency(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_cpal_playback(
+fn init_stereo_playback_stream<T: CubebPlaybackSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    gate: Arc<AtomicBool>,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<StereoPlaybackInit<T>> {
+    let realtime: Arc<RealtimeCallbackState<PlaybackRealtime>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<StereoFrame<T>>::new();
+    builder
+        .name("PerfectComms speaker")
+        .latency(latency_frames)
+        .data_callback(move |_, output| {
+            if !gate.load(Ordering::Acquire) || callback_errored.load(Ordering::Acquire) {
+                for frame in output.iter_mut() {
+                    frame.l = T::from_float(0.0);
+                    frame.r = T::from_float(0.0);
+                }
+                return output.len().min(isize::MAX as usize) as isize;
+            }
+            let rendered = callback_realtime.with_callback_mut(|state| {
+                state.render(output.len(), |index, left, right| {
+                    output[index].l = T::from_float(left);
+                    output[index].r = T::from_float(right);
+                })
+            });
+            if rendered != Some(true) {
+                for frame in output.iter_mut() {
+                    frame.l = T::from_float(0.0);
+                    frame.r = T::from_float(0.0);
+                }
+                callback_errored.store(true, Ordering::Release);
+            }
+            output.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                // Silence an explicit stream immediately; the control thread will report the
+                // change and let the managed watchdog reopen the same selected endpoint.
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_output(params);
+    } else {
+        builder.output(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn init_mono_playback_stream<T: CubebPlaybackSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    gate: Arc<AtomicBool>,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<MonoPlaybackInit<T>> {
+    let realtime: Arc<RealtimeCallbackState<PlaybackRealtime>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<MonoFrame<T>>::new();
+    builder
+        .name("PerfectComms speaker")
+        .latency(latency_frames)
+        .data_callback(move |_, output| {
+            if !gate.load(Ordering::Acquire) || callback_errored.load(Ordering::Acquire) {
+                for frame in output.iter_mut() {
+                    frame.m = T::from_float(0.0);
+                }
+                return output.len().min(isize::MAX as usize) as isize;
+            }
+            let rendered = callback_realtime.with_callback_mut(|state| {
+                state.render(output.len(), |index, left, right| {
+                    output[index].m = T::from_float((left + right) * 0.5);
+                })
+            });
+            if rendered != Some(true) {
+                for frame in output.iter_mut() {
+                    frame.m = T::from_float(0.0);
+                }
+                callback_errored.store(true, Ordering::Release);
+            }
+            output.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_output(params);
+    } else {
+        builder.output(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn init_multichannel_playback_stream<T: CubebPlaybackSample, const CHANNELS: usize>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    gate: Arc<AtomicBool>,
+    device_change: Arc<CubebDeviceChangeSignal>,
+    errored: Arc<AtomicBool>,
+) -> cubeb::Result<MultichannelPlaybackInit<T, CHANNELS>> {
+    let realtime: Arc<RealtimeCallbackState<PlaybackRealtime>> =
+        Arc::new(RealtimeCallbackState::new());
+    let callback_realtime = realtime.clone();
+    let callback_errored = errored.clone();
+    let state_errored = errored.clone();
+    let mut builder = StreamBuilder::<MultichannelFrame<T, CHANNELS>>::new();
+    builder
+        .name("PerfectComms speaker")
+        .latency(latency_frames)
+        .data_callback(move |_, output| {
+            if !gate.load(Ordering::Acquire) || callback_errored.load(Ordering::Acquire) {
+                for frame in output.iter_mut() {
+                    frame.channels.fill(T::from_float(0.0));
+                }
+                return output.len().min(isize::MAX as usize) as isize;
+            }
+            let rendered = callback_realtime.with_callback_mut(|state| {
+                state.render(output.len(), |index, left, right| {
+                    let mapped = map_stereo_to_multichannel::<CHANNELS>(left, right);
+                    for (target, sample) in output[index].channels.iter_mut().zip(mapped) {
+                        *target = T::from_float(sample);
+                    }
+                })
+            });
+            if rendered != Some(true) {
+                for frame in output.iter_mut() {
+                    frame.channels.fill(T::from_float(0.0));
+                }
+                callback_errored.store(true, Ordering::Release);
+            }
+            output.len().min(isize::MAX as usize) as isize
+        })
+        .state_callback(move |state| {
+            if matches!(state, State::Error | State::Drained) {
+                state_errored.store(true, Ordering::Release);
+            }
+        });
+    if cubeb_backend_supports_device_change_callback(context.backend_id_bytes()) {
+        let callback_device_change = device_change;
+        let callback_errored = (!selected.requested_default).then(|| errored.clone());
+        builder.device_changed_cb(move || {
+            callback_device_change.notify();
+            if let Some(errored) = callback_errored.as_ref() {
+                errored.store(true, Ordering::Release);
+            }
+        });
+    }
+    if selected.requested_default {
+        builder.default_output(params);
+    } else {
+        builder.output(selected.device, params);
+    }
+    builder.init(context).map(|stream| (stream, realtime))
+}
+
+fn open_stereo_playback_stream<T: CubebPlaybackSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: PlaybackCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<StereoFrame<T>>, String> {
+    let gate = resources.start_succeeded.clone();
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_stereo_playback_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        gate,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(PlaybackRealtime::new(resources, sample_rate))
+        .map_err(|_| "internal stereo output callback initialization was duplicated".to_string())?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_mono_playback_stream<T: CubebPlaybackSample>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: PlaybackCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<MonoFrame<T>>, String> {
+    let gate = resources.start_succeeded.clone();
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_mono_playback_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        gate,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(PlaybackRealtime::new(resources, sample_rate))
+        .map_err(|_| "internal mono output callback initialization was duplicated".to_string())?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_multichannel_playback_stream<T: CubebPlaybackSample, const CHANNELS: usize>(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    selected: &SelectedDevice,
+    latency_frames: u32,
+    sample_rate: u32,
+    resources: PlaybackCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<cubeb::Stream<MultichannelFrame<T, CHANNELS>>, String> {
+    let gate = resources.start_succeeded.clone();
+    let device_change = resources.device_change.clone();
+    let (stream, realtime) = init_multichannel_playback_stream(
+        context,
+        params,
+        selected,
+        latency_frames,
+        gate,
+        device_change,
+        errored,
+    )
+    .map_err(|error| format!("init failed: {error}"))?;
+    realtime
+        .initialize(PlaybackRealtime::new(resources, sample_rate))
+        .map_err(|_| {
+            "internal multichannel output callback initialization was duplicated".to_string()
+        })?;
+    stream
+        .start()
+        .map_err(|error| format!("start failed: {error}"))?;
+    Ok(stream)
+}
+
+fn open_playback_candidate(
+    context: &cubeb::Context,
+    selected: &SelectedDevice,
+    prefs: StreamPrefs,
+    candidate: CubebStreamCandidate,
+    resources: PlaybackCallbackResources,
+    errored: Arc<AtomicBool>,
+) -> Result<(CubebPlaybackStream, u32), String> {
+    let layout = cubeb_output_channel_layout(candidate.channels).ok_or_else(|| {
+        format!(
+            "unsupported Cubeb output channel count: {}",
+            candidate.channels
+        )
+    })?;
+    let params = StreamParamsBuilder::new()
+        .format(candidate.sample.format())
+        .rate(candidate.rate)
+        .channels(u32::from(candidate.channels))
+        .layout(layout)
+        .prefs(prefs)
+        .take();
+    let latency_frames = cubeb_latency_frames(context, params.as_ref());
+    let stream = match (candidate.sample, candidate.channels) {
+        (CubebSampleKind::Float32, 2) => open_stereo_playback_stream::<f32>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::StereoF32),
+        (CubebSampleKind::Float32, 1) => open_mono_playback_stream::<f32>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::MonoF32),
+        (CubebSampleKind::Float32, 4) => open_multichannel_playback_stream::<f32, 4>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::QuadF32),
+        (CubebSampleKind::Float32, 6) => open_multichannel_playback_stream::<f32, 6>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::Surround51F32),
+        (CubebSampleKind::Float32, 8) => open_multichannel_playback_stream::<f32, 8>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::Surround71F32),
+        (CubebSampleKind::Signed16, 2) => open_stereo_playback_stream::<i16>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::StereoI16),
+        (CubebSampleKind::Signed16, 1) => open_mono_playback_stream::<i16>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::MonoI16),
+        (CubebSampleKind::Signed16, 4) => open_multichannel_playback_stream::<i16, 4>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::QuadI16),
+        (CubebSampleKind::Signed16, 6) => open_multichannel_playback_stream::<i16, 6>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::Surround51I16),
+        (CubebSampleKind::Signed16, 8) => open_multichannel_playback_stream::<i16, 8>(
+            context,
+            params.as_ref(),
+            selected,
+            latency_frames,
+            candidate.rate,
+            resources,
+            errored,
+        )
+        .map(CubebPlaybackStream::Surround71I16),
+        _ => Err("unsupported Cubeb playback candidate".to_string()),
+    }?;
+    Ok((stream, latency_frames))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_cubeb_playback(
     device_id: Option<String>,
     playback: Arc<Mutex<PlaybackRing>>,
     monitor_playback: Arc<Mutex<PlaybackRing>>,
@@ -2125,197 +4164,135 @@ pub fn spawn_cpal_playback(
     stream_generation: u64,
     media_events: SyncSender<MediaStateEvent>,
 ) -> Result<(), String> {
-    let host = cpal::default_host();
-    let selected = pick_output_device(&host, &device_id)?;
-    let config = pick_output_config(&selected.device)?;
-    let out_channels = config.channels() as usize;
-    let out_rate = config.sample_rate();
-    let sample_format = config.sample_format();
-    let (buffer_mode, buffer_min_frames, buffer_max_frames) = supported_buffer_details(&config);
+    #[cfg(windows)]
+    let _com = WindowsComApartment::initialize()
+        .map_err(|error| format!("initialize COM for Cubeb output: {error}"))?;
+    let context = init_cubeb_context("PerfectComms speaker")
+        .map_err(|error| format!("initialize Cubeb output context: {error}"))?;
+    let explicit = device_id.as_deref().is_some_and(|id| !id.is_empty());
+    let devices = if explicit {
+        Some(
+            context
+                .enumerate_devices(DeviceType::OUTPUT)
+                .map_err(|error| format!("enumerate output devices: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let preferred_rate = context.preferred_sample_rate().unwrap_or(SAMPLE_RATE);
+    let selected = pick_device(
+        devices.as_ref(),
+        &device_id,
+        preferred_rate,
+        "output",
+        DeviceType::OUTPUT,
+        context.backend_id_bytes(),
+    )?;
+    let prefs = if explicit {
+        StreamPrefs::DISABLE_DEVICE_SWITCHING
+    } else {
+        StreamPrefs::NONE
+    };
+    // Take lock-free consumer handles once. The outer mutexes remain for control-path ABI
+    // compatibility, but are never touched by a hardware callback.
+    let ring = playback
+        .lock()
+        .map_err(|_| "playback ring lock poisoned".to_string())?
+        .consumer();
+    let monitor_ring = monitor_playback
+        .lock()
+        .map_err(|_| "monitor playback ring lock poisoned".to_string())?
+        .consumer();
+    let errored = Arc::new(AtomicBool::new(false));
+    let device_change = Arc::new(CubebDeviceChangeSignal::default());
+    let start_succeeded = Arc::new(AtomicBool::new(false));
+    let backend_latency_frames = Arc::new(AtomicU32::new(UNKNOWN_CUBEB_LATENCY_FRAMES));
+    let first_callback_ns = Arc::new(AtomicU64::new(0));
+    let first_callback_frames = Arc::new(AtomicU64::new(0));
+    let resources = PlaybackCallbackResources {
+        ring,
+        monitor_ring,
+        monitor_state: monitor_state.clone(),
+        counters: counters.clone(),
+        progress: progress.clone(),
+        aec_timing: aec_timing.clone(),
+        diagnostics: diagnostics.clone(),
+        device_change: device_change.clone(),
+        start_succeeded: start_succeeded.clone(),
+        backend_latency_frames: backend_latency_frames.clone(),
+        first_callback_ns: first_callback_ns.clone(),
+        first_callback_frames: first_callback_frames.clone(),
+    };
+
+    // Keep the app contract at stereo float/48 kHz while adapting the hardware side. Strict ALSA
+    // devices receive native S16NE/preferred-rate attempts and, only after every stereo/mono
+    // attempt, output-only physical-width fallbacks on the same selected endpoint.
+    let mut failures = Vec::new();
+    let mut opened = None;
+    for candidate in
+        cubeb_playback_stream_candidates(context.backend_id_bytes(), selected.preferred_rate)
+    {
+        device_change.clear_pending();
+        errored.store(false, Ordering::Release);
+        match open_playback_candidate(
+            &context,
+            &selected,
+            prefs,
+            candidate,
+            resources.clone(),
+            errored.clone(),
+        ) {
+            Ok((stream, latency_frames)) => {
+                opened = Some((stream, candidate, latency_frames));
+                break;
+            }
+            Err(error) => failures.push(format!(
+                "{}/{}/{}ch: {error}",
+                candidate.sample.label(),
+                candidate.rate,
+                candidate.channels
+            )),
+        }
+    }
+    let (stream, candidate, latency_frames) =
+        opened.ok_or_else(|| format!("build output stream: {}", failures.join("; ")))?;
     let descriptor = StreamDescriptor {
         requested_device: selected.requested_device.clone(),
         resolved_device: selected.resolved_device.clone(),
         requested_default: selected.requested_default,
         requested_matched: selected.requested_matched,
         fell_back_to_default: selected.fell_back_to_default,
-        sample_rate: out_rate,
-        channels: out_channels as u16,
-        sample_format: format!("{sample_format:?}"),
-        buffer_mode,
-        buffer_min_frames,
-        buffer_max_frames,
+        sample_rate: candidate.rate,
+        channels: candidate.channels,
+        sample_format: candidate.sample.label().to_string(),
+        buffer_mode: cubeb_buffer_mode(&context),
+        buffer_min_frames: latency_frames,
+        buffer_max_frames: latency_frames,
     };
-    let stream_config: cpal::StreamConfig = config.into();
-    let ratio = SAMPLE_RATE as f64 / out_rate.max(1) as f64;
-
-    // Take a lock-free consumer handle once. The outer mutex remains for control-path ABI
-    // compatibility, but is never touched by the hardware callback.
-    let cb_ring = playback
-        .lock()
-        .map_err(|_| "playback ring lock poisoned".to_string())?
-        .consumer();
-    let cb_monitor_ring = monitor_playback
-        .lock()
-        .map_err(|_| "monitor playback ring lock poisoned".to_string())?
-        .consumer();
-    let target_pairs = (FRAME_SAMPLES * 4) as f64;
-    let mut remote_s0 = (0.0f32, 0.0f32);
-    let mut remote_s1 = (0.0f32, 0.0f32);
-    let mut remote_s0_available = false;
-    let mut remote_s1_available = false;
-    let mut remote_pos = 1.0f64;
-    let mut remote_underrun_fader = UnderrunFader::default();
-    let mut monitor_playout = MonitorPlayout::default();
-    let fill_counters = counters.clone();
-    let fill_progress = progress.clone();
-    let fill_timing = aec_timing.clone();
-    let fill_diagnostics = diagnostics.clone();
-    let first_callback_ns = Arc::new(AtomicU64::new(0));
-    let first_callback_frames = Arc::new(AtomicU64::new(0));
-    let fill_first_callback_ns = first_callback_ns.clone();
-    let fill_first_callback_frames = first_callback_frames.clone();
-    let mut fill = move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
-        let frames = out.len() / out_channels.max(1);
-        let callback_ns = monotonic_ns();
-        if fill_diagnostics.observe_callback(callback_ns, frames) {
-            fill_first_callback_frames.store(frames as u64, Ordering::Release);
-            fill_first_callback_ns.store(callback_ns, Ordering::Release);
+    // Keep `devices` alive until both possible init attempts have resolved the endpoint handle.
+    store_cubeb_latency(&backend_latency_frames, stream.latency());
+    match device_change.take_action(selected.requested_default) {
+        CubebDeviceChangeAction::ResetDefaultStream => {
+            aec_timing.reset_playback_path();
+            backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
+            store_cubeb_latency(&backend_latency_frames, stream.latency());
         }
-        fill_timing.observe_output_callback(info);
-        fill_progress.mark_callback();
-        fill_counters
-            .playback_callbacks
-            .fetch_add(1, Ordering::Relaxed);
-        let queued_pairs = cb_ring.len();
-        let eff_ratio = if queued_pairs == 0 {
-            ratio
-        } else {
-            let err = (queued_pairs as f64 - target_pairs) / target_pairs;
-            ratio * (1.0 + (err * 0.05).clamp(-0.004, 0.004))
-        };
-        let mut requested_pairs = 0u64;
-        let mut consumed_pairs = 0u64;
-        let mut underrun_pairs = 0u64;
-        for f in 0..frames {
-            while remote_pos >= 1.0 {
-                remote_s0 = remote_s1;
-                remote_s0_available = remote_s1_available;
-                requested_pairs += 1;
-                match cb_ring.pop_stereo() {
-                    Some(pair) => {
-                        remote_s1 = pair;
-                        remote_s1_available = true;
-                        consumed_pairs += 1;
-                    }
-                    None => {
-                        remote_s1 = (0.0, 0.0);
-                        remote_s1_available = false;
-                        // Local monitoring is not a remote packet. Keep the remote underrun
-                        // counters honest even while the monitor is producing audible output.
-                        underrun_pairs += 1;
-                    }
-                }
-                remote_pos -= 1.0;
-            }
-            let remote_t = remote_pos as f32;
-            let remote_pair = (
-                remote_s0.0 + (remote_s1.0 - remote_s0.0) * remote_t,
-                remote_s0.1 + (remote_s1.1 - remote_s0.1) * remote_t,
+        CubebDeviceChangeAction::ReopenExplicitStream => {
+            let _ = stream.stop();
+            return Err(
+                "selected output device changed; CoreAudio callback requires stream reopen"
+                    .to_string(),
             );
-            let remote_pair = remote_underrun_fader
-                .process(remote_pair, remote_s0_available || remote_s1_available);
-            remote_pos += eff_ratio;
-
-            let monitor_pair = monitor_playout.render(&cb_monitor_ring, &monitor_state, ratio);
-            let monitor_gain = monitor_state.gain();
-            let l = (remote_pair.0 + monitor_pair.0 * monitor_gain).clamp(-1.0, 1.0);
-            let r = (remote_pair.1 + monitor_pair.1 * monitor_gain).clamp(-1.0, 1.0);
-            write_out_frame(out, f, out_channels, l, r);
         }
-        fill_counters
-            .playback_requested_pairs
-            .fetch_add(requested_pairs, Ordering::Relaxed);
-        fill_counters
-            .playback_consumed_pairs
-            .fetch_add(consumed_pairs, Ordering::Relaxed);
-        fill_counters
-            .playback_underrun_pairs
-            .fetch_add(underrun_pairs, Ordering::Relaxed);
-        fill_counters.record_playback_output(out);
-    };
-
-    let errored = Arc::new(AtomicBool::new(false));
-    let make_err = || {
-        let es = stop.clone();
-        let errored = errored.clone();
-        move |_e| {
-            errored.store(true, Ordering::Release);
-            es.store(true, Ordering::Relaxed);
-        }
-    };
-
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => selected.device.build_output_stream(
-            stream_config,
-            move |data: &mut [f32], info| fill(data, info),
-            make_err(),
-            None,
-        ),
-        cpal::SampleFormat::I16 => {
-            let mut scratch = vec![0.0; callback_scratch_samples(buffer_max_frames, out_channels)?];
-            let oversize = errored.clone();
-            let oversize_stop = stop.clone();
-            selected.device.build_output_stream(
-                stream_config,
-                move |data: &mut [i16], info| {
-                    let data_len = data.len();
-                    if data_len > scratch.len() {
-                        data.fill(0);
-                        oversize.store(true, Ordering::Release);
-                        oversize_stop.store(true, Ordering::Release);
-                        return;
-                    }
-                    fill(&mut scratch[..data_len], info);
-                    for (d, &s) in data.iter_mut().zip(&scratch[..data_len]) {
-                        *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                    }
-                },
-                make_err(),
-                None,
-            )
-        }
-        cpal::SampleFormat::U16 => {
-            let mut scratch = vec![0.0; callback_scratch_samples(buffer_max_frames, out_channels)?];
-            let oversize = errored.clone();
-            let oversize_stop = stop.clone();
-            selected.device.build_output_stream(
-                stream_config,
-                move |data: &mut [u16], info| {
-                    let data_len = data.len();
-                    if data_len > scratch.len() {
-                        data.fill(32768);
-                        oversize.store(true, Ordering::Release);
-                        oversize_stop.store(true, Ordering::Release);
-                        return;
-                    }
-                    fill(&mut scratch[..data_len], info);
-                    for (d, &s) in data.iter_mut().zip(&scratch[..data_len]) {
-                        *d = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
-                    }
-                },
-                make_err(),
-                None,
-            )
-        }
-        fmt => return Err(format!("unsupported output sample format: {fmt:?}")),
+        CubebDeviceChangeAction::None => {}
     }
-    .map_err(|e| format!("build output stream: {e}"))?;
-
+    if errored.load(Ordering::Acquire) {
+        let _ = stream.stop();
+        return Err("output device failed while starting".to_string());
+    }
     let started_ns = monotonic_ns();
-    stream
-        .play()
-        .map_err(|e| format!("output stream play: {e}"))?;
     diagnostics.mark_stream_started(descriptor.clone());
+    start_succeeded.store(true, Ordering::Release);
     send_media_state(
         &media_events,
         MediaStateEvent {
@@ -2338,7 +4315,25 @@ pub fn spawn_cpal_playback(
     progress.mark_started();
     counters.playback_starts.fetch_add(1, Ordering::Relaxed);
     let mut first_callback_reported = false;
+    let mut last_latency_refresh = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        match device_change.take_action(selected.requested_default) {
+            CubebDeviceChangeAction::ResetDefaultStream => {
+                aec_timing.reset_playback_path();
+                backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
+                store_cubeb_latency(&backend_latency_frames, stream.latency());
+                last_latency_refresh = Instant::now();
+            }
+            CubebDeviceChangeAction::ReopenExplicitStream => {
+                start_succeeded.store(false, Ordering::Release);
+                let _ = stream.stop();
+                return Err(
+                    "selected output device changed; CoreAudio callback requires stream reopen"
+                        .to_string(),
+                );
+            }
+            CubebDeviceChangeAction::None => {}
+        }
         if !first_callback_reported {
             let callback_ns = first_callback_ns.load(Ordering::Acquire);
             if callback_ns != 0 {
@@ -2357,15 +4352,22 @@ pub fn spawn_cpal_playback(
                 first_callback_reported = true;
             }
         }
+        if last_latency_refresh.elapsed() >= CUBEB_LATENCY_REFRESH {
+            store_cubeb_latency(&backend_latency_frames, stream.latency());
+            last_latency_refresh = Instant::now();
+        }
+        if errored.load(Ordering::Acquire) {
+            start_succeeded.store(false, Ordering::Release);
+            let _ = stream.stop();
+            counters
+                .playback_callback_errors
+                .fetch_add(1, Ordering::Relaxed);
+            return Err("output device stream failed".to_string());
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    drop(stream);
-    if errored.load(Ordering::Acquire) {
-        counters
-            .playback_callback_errors
-            .fetch_add(1, Ordering::Relaxed);
-        return Err("output device callback failed".to_string());
-    }
+    start_succeeded.store(false, Ordering::Release);
+    let _ = stream.stop();
     counters.playback_stops.fetch_add(1, Ordering::Relaxed);
     diagnostics.mark_stopped();
     send_media_state(
@@ -2385,6 +4387,7 @@ pub fn spawn_cpal_playback(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::AtomicUsize;
 
     fn stereo_test_pairs(count: usize) -> Vec<f32> {
         let mut samples = Vec::with_capacity(count * 2);
@@ -2394,6 +4397,21 @@ mod tests {
             samples.push(sample);
         }
         samples
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_com_initialization_balances_only_successful_references() {
+        assert_eq!(com_initialization_needs_uninitialize(COM_S_OK), Ok(true));
+        assert_eq!(com_initialization_needs_uninitialize(COM_S_FALSE), Ok(true));
+        assert_eq!(
+            com_initialization_needs_uninitialize(COM_RPC_E_CHANGED_MODE),
+            Ok(false)
+        );
+        assert_eq!(
+            com_initialization_needs_uninitialize(0x8000_4005_u32 as i32),
+            Err(0x8000_4005_u32 as i32)
+        );
     }
 
     #[test]
@@ -2536,37 +4554,6 @@ mod tests {
         assert_eq!(selected, 11);
     }
 
-    #[test]
-    fn windows_device_label_prefers_endpoint_friendly_name() {
-        let extended = vec!["Microphone (Razer Seiren Mini)".to_string()];
-        assert_eq!(
-            choose_device_display_name("Microphone", &extended, true).as_deref(),
-            Some("Microphone (Razer Seiren Mini)")
-        );
-    }
-
-    #[test]
-    fn windows_device_label_ignores_blank_extended_lines_and_falls_back() {
-        let extended = vec!["  ".to_string(), "".to_string()];
-        assert_eq!(
-            choose_device_display_name("  Headphones  ", &extended, true).as_deref(),
-            Some("Headphones")
-        );
-    }
-
-    #[test]
-    fn non_windows_device_label_keeps_primary_name() {
-        let extended = vec!["diagnostic metadata".to_string()];
-        assert_eq!(
-            choose_device_display_name("Built-in Audio Analog Stereo", &extended, false).as_deref(),
-            Some("Built-in Audio Analog Stereo")
-        );
-    }
-
-    #[test]
-    fn device_label_rejects_empty_presentation_data() {
-        assert_eq!(choose_device_display_name("  ", &[], true), None);
-    }
     use crate::proto::{FRAME_SAMPLES, SAMPLE_RATE};
 
     fn timed_frame(capture_ns: u64, callback_ns: u64, valid: bool) -> AudioFrame {
@@ -2591,26 +4578,416 @@ mod tests {
     }
 
     #[test]
-    fn callback_scratch_is_bounded_and_channel_sized() {
-        assert_eq!(callback_scratch_samples(480, 2).unwrap(), 960);
+    fn cubeb_device_ids_are_binary_safe_and_backend_scoped() {
         assert_eq!(
-            callback_scratch_samples(0, 2).unwrap(),
-            UNKNOWN_CALLBACK_MAX_FRAMES * 2
+            encode_device_id(b"wasapi", b"headphones"),
+            "cubeb-v2:776173617069:6865616470686f6e6573"
         );
         assert_eq!(
-            callback_scratch_samples(u32::MAX, 6).unwrap(),
-            UNKNOWN_CALLBACK_MAX_FRAMES * 6
+            encode_device_id(b"alsa", &[0, 0xff, b':']),
+            "cubeb-v2:616c7361:00ff3a"
         );
-        assert!(callback_scratch_samples(2, usize::MAX).is_err());
+        assert_ne!(
+            encode_device_id(b"pulse", b"same"),
+            encode_device_id(b"alsa", b"same")
+        );
+        assert_eq!(
+            encode_device_id(b"audiounit", b"same"),
+            encode_device_id(b"audiounit-rust", b"same")
+        );
+        assert_ne!(
+            encode_device_id(b"wasapi", b"ab"),
+            encode_device_id(b"wasapi", b"a:b")
+        );
+    }
+
+    #[test]
+    fn device_change_callbacks_are_only_registered_for_coreaudio_backends() {
+        assert!(cubeb_backend_supports_device_change_callback(b"audiounit"));
+        assert!(cubeb_backend_supports_device_change_callback(
+            b"audiounit-rust"
+        ));
+        assert!(cubeb_backend_supports_device_change_callback(
+            b"  AudioUnit-Rust  "
+        ));
+        assert!(!cubeb_backend_supports_device_change_callback(b"wasapi"));
+        assert!(!cubeb_backend_supports_device_change_callback(b"pulse"));
+        assert!(!cubeb_backend_supports_device_change_callback(b"alsa"));
+    }
+
+    #[test]
+    fn device_change_signal_resets_defaults_and_reopens_explicit_streams() {
+        let signal = CubebDeviceChangeSignal::default();
+        let mut observed_epoch = signal.epoch();
+
+        assert_eq!(signal.take_action(true), CubebDeviceChangeAction::None);
+        assert!(!signal.update_observed_epoch(&mut observed_epoch));
+
+        signal.notify();
+        assert!(signal.update_observed_epoch(&mut observed_epoch));
+        assert!(!signal.update_observed_epoch(&mut observed_epoch));
+        assert_eq!(
+            signal.take_action(true),
+            CubebDeviceChangeAction::ResetDefaultStream
+        );
+        assert_eq!(signal.take_action(true), CubebDeviceChangeAction::None);
+
+        signal.notify();
+        signal.notify();
+        assert!(signal.update_observed_epoch(&mut observed_epoch));
+        assert_eq!(
+            signal.take_action(false),
+            CubebDeviceChangeAction::ReopenExplicitStream
+        );
+        assert_eq!(signal.take_action(false), CubebDeviceChangeAction::None);
+
+        signal.notify();
+        signal.clear_pending();
+        assert!(signal.update_observed_epoch(&mut observed_epoch));
+        assert_eq!(signal.take_action(true), CubebDeviceChangeAction::None);
+    }
+
+    #[test]
+    fn cubeb_device_match_accepts_v1_and_exact_compatible_legacy_ids() {
+        let raw = b"endpoint:with:colons";
+        let v2 = encode_device_id(b"wasapi", raw);
+        let mut v1 = CUBEB_DEVICE_ID_V1_PREFIX.to_string();
+        append_hex(&mut v1, raw);
+        assert!(requested_device_matches(&v2, b"wasapi", raw));
+        assert!(requested_device_matches(&v1, b"wasapi", raw));
+        assert!(requested_device_matches(
+            "wasapi:endpoint:with:colons",
+            b"wasapi",
+            raw
+        ));
+        assert!(!requested_device_matches(&v2, b"winmm", raw));
+        assert!(!requested_device_matches(
+            "wasapi:endpoint:with:colons",
+            b"winmm",
+            raw
+        ));
+        assert!(!requested_device_matches(
+            "pipewire:endpoint:with:colons",
+            b"pulse",
+            raw
+        ));
+        assert!(!requested_device_matches(
+            "wasapi:endpoint:with:colons",
+            b"wasapi",
+            b"different"
+        ));
+        assert!(!requested_device_matches(
+            "cubeb-v2:zz:00",
+            b"wasapi",
+            b"\0"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn alsa_hint_ioid_direction_filter_is_fail_closed() {
+        assert_eq!(alsa_hint_directions(None), (true, true));
+        assert_eq!(alsa_hint_directions(Some(b"Input")), (true, false));
+        assert_eq!(alsa_hint_directions(Some(b"OUTPUT")), (false, true));
+        assert_eq!(alsa_hint_directions(Some(b"unknown")), (false, false));
+    }
+
+    #[test]
+    fn cubeb_default_marker_tracks_multimedia_not_voice_preference() {
+        assert!(!cubeb_preference_is_default(
+            cubeb::ffi::CUBEB_DEVICE_PREF_NONE as u32
+        ));
+        assert!(!cubeb_preference_is_default(
+            cubeb::ffi::CUBEB_DEVICE_PREF_VOICE as u32
+        ));
+        assert!(cubeb_preference_is_default(
+            cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA as u32
+        ));
+        assert!(cubeb_preference_is_default(
+            cubeb::ffi::CUBEB_DEVICE_PREF_ALL as u32
+        ));
+    }
+
+    #[test]
+    fn cubeb_backend_override_is_linux_only_and_allowlisted() {
+        assert_eq!(allowed_cubeb_backend(Some("pulse"), true), Some("pulse"));
+        assert_eq!(allowed_cubeb_backend(Some("alsa"), true), Some("alsa"));
+        assert_eq!(allowed_cubeb_backend(Some("jack"), true), None);
+        assert_eq!(allowed_cubeb_backend(Some("pulse"), false), None);
+    }
+
+    #[test]
+    fn only_wasapi_enables_capture_preroll_filter() {
+        assert!(cubeb_backend_injects_wasapi_preroll(b"wasapi"));
+        assert!(cubeb_backend_injects_wasapi_preroll(b"WASAPI"));
+        assert!(!cubeb_backend_injects_wasapi_preroll(b"winmm"));
+        assert!(!cubeb_backend_injects_wasapi_preroll(b"pulse"));
+        assert!(!cubeb_backend_injects_wasapi_preroll(b"alsa"));
+        assert!(!cubeb_backend_injects_wasapi_preroll(b"audiounit"));
+    }
+
+    #[test]
+    fn wasapi_preroll_filter_preserves_real_tail_and_rearms_implicitly() {
+        let mut filter = WasapiPrerollFilter::new(true, 48_000, 480);
+        let mut first = vec![0.0f32; 8_160];
+        first[7_680..].fill(0.25);
+        let decision = filter.classify(first.len(), |index| first[index] == 0.0);
+        assert_eq!(
+            decision,
+            PrerollDecision {
+                raw_frames: 8_160,
+                skip_frames: 7_680,
+                admitted_frames: 480,
+                matched: true,
+            }
+        );
+        assert!(first[decision.skip_frames..]
+            .iter()
+            .all(|sample| *sample == 0.25));
+
+        let normal = vec![0.5f32; 480];
+        assert_eq!(
+            filter.classify(normal.len(), |index| normal[index] == 0.0),
+            PrerollDecision::unchanged(480)
+        );
+
+        let mut reconfigured = vec![0.0f32; 8_640];
+        reconfigured[7_680..].fill(-0.5);
+        let second = filter.classify(reconfigured.len(), |index| reconfigured[index] == 0.0);
+        assert!(second.matched);
+        assert_eq!(second.skip_frames, 7_680);
+        assert_eq!(second.admitted_frames, 960);
+    }
+
+    #[test]
+    fn wasapi_preroll_filter_keeps_one_quantum_of_all_zero_input() {
+        let mut filter = WasapiPrerollFilter::new(true, 48_000, 480);
+        let silence = vec![0.0f32; 8_160];
+        let decision = filter.classify(silence.len(), |index| silence[index] == 0.0);
+        assert!(decision.matched);
+        assert_eq!(decision.skip_frames, 7_680);
+        assert_eq!(decision.admitted_frames, 480);
+    }
+
+    #[test]
+    fn preroll_filter_preserves_normal_silence_large_nonzero_and_other_backends() {
+        let normal_silence = vec![0.0f32; 960];
+        let mut wasapi = WasapiPrerollFilter::new(true, 48_000, 480);
+        assert_eq!(
+            wasapi.classify(normal_silence.len(), |index| normal_silence[index] == 0.0),
+            PrerollDecision::unchanged(960)
+        );
+
+        let large_nonzero = vec![0.25f32; 8_160];
+        assert_eq!(
+            wasapi.classify(large_nonzero.len(), |index| large_nonzero[index] == 0.0),
+            PrerollDecision::unchanged(8_160)
+        );
+
+        let large_silence = vec![0.0f32; 8_160];
+        let mut pulse = WasapiPrerollFilter::new(false, 48_000, 480);
+        assert_eq!(
+            pulse.classify(large_silence.len(), |index| large_silence[index] == 0.0),
+            PrerollDecision::unchanged(8_160)
+        );
+    }
+
+    #[test]
+    fn cubeb_candidates_keep_float_48k_first_then_try_native_s16() {
+        let candidates = cubeb_stream_candidates(b"alsa", 44_100);
+        assert_eq!(
+            &candidates[..4],
+            &[
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Float32,
+                    rate: SAMPLE_RATE,
+                    channels: 2,
+                },
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Float32,
+                    rate: SAMPLE_RATE,
+                    channels: 1,
+                },
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Signed16,
+                    rate: 44_100,
+                    channels: 2,
+                },
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Signed16,
+                    rate: 44_100,
+                    channels: 1,
+                },
+            ]
+        );
+        assert!(candidates.contains(&CubebStreamCandidate {
+            sample: CubebSampleKind::Signed16,
+            rate: SAMPLE_RATE,
+            channels: 2,
+        }));
+        assert!(candidates.contains(&CubebStreamCandidate {
+            sample: CubebSampleKind::Float32,
+            rate: 44_100,
+            channels: 1,
+        }));
+        assert_eq!(cubeb_stream_candidates(b"winmm", 44_100), candidates);
+        assert_eq!(cubeb_stream_candidates(b"wasapi", 44_100), candidates);
+    }
+
+    #[test]
+    fn strict_alsa_playback_appends_multichannel_candidates_only_after_stereo_and_mono() {
+        let base_candidates = cubeb_stream_candidates(b"alsa", 44_100);
+        let playback_candidates = cubeb_playback_stream_candidates(b"alsa", 44_100);
+        assert_eq!(
+            &playback_candidates[..base_candidates.len()],
+            base_candidates.as_slice()
+        );
+        assert!(base_candidates
+            .iter()
+            .all(|candidate| candidate.channels <= 2));
+        assert!(playback_candidates[base_candidates.len()..]
+            .iter()
+            .all(|candidate| matches!(candidate.channels, 4 | 6 | 8)));
+        for sample in [CubebSampleKind::Float32, CubebSampleKind::Signed16] {
+            for channels in [4, 6, 8] {
+                assert!(playback_candidates.contains(&CubebStreamCandidate {
+                    sample,
+                    rate: SAMPLE_RATE,
+                    channels,
+                }));
+            }
+        }
+        assert_eq!(
+            cubeb_playback_stream_candidates(b"wasapi", 44_100),
+            cubeb_stream_candidates(b"wasapi", 44_100)
+        );
+        assert_eq!(
+            cubeb_playback_stream_candidates(b"pulse", 44_100),
+            cubeb_stream_candidates(b"pulse", 44_100)
+        );
+    }
+
+    #[test]
+    fn capture_appends_multichannel_candidates_only_after_stereo_and_mono() {
+        for backend in [
+            b"wasapi".as_slice(),
+            b"winmm".as_slice(),
+            b"pulse".as_slice(),
+            b"alsa".as_slice(),
+            b"audiounit".as_slice(),
+        ] {
+            let base_candidates = cubeb_stream_candidates(backend, 44_100);
+            let capture_candidates = cubeb_capture_stream_candidates(backend, 44_100);
+            assert_eq!(
+                &capture_candidates[..base_candidates.len()],
+                base_candidates.as_slice()
+            );
+            assert!(base_candidates
+                .iter()
+                .all(|candidate| candidate.channels <= 2));
+            assert!(capture_candidates[base_candidates.len()..]
+                .iter()
+                .all(|candidate| matches!(candidate.channels, 4 | 6 | 8)));
+            for sample in [CubebSampleKind::Float32, CubebSampleKind::Signed16] {
+                for channels in [4, 6, 8] {
+                    assert!(capture_candidates.contains(&CubebStreamCandidate {
+                        sample,
+                        rate: SAMPLE_RATE,
+                        channels,
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cubeb_multichannel_layouts_and_stereo_mapping_match_speaker_order() {
+        assert_eq!(cubeb_output_channel_layout(1), Some(ChannelLayout::MONO));
+        assert_eq!(cubeb_output_channel_layout(2), Some(ChannelLayout::STEREO));
+        assert_eq!(cubeb_output_channel_layout(4), Some(ChannelLayout::QUAD));
+        assert_eq!(
+            cubeb_output_channel_layout(6),
+            Some(ChannelLayout::_3F2_LFE)
+        );
+        assert_eq!(
+            cubeb_output_channel_layout(8),
+            Some(ChannelLayout::_3F4_LFE)
+        );
+        assert_eq!(cubeb_output_channel_layout(3), None);
+
+        assert_eq!(
+            map_stereo_to_multichannel::<4>(0.8, -0.4),
+            [0.8, -0.4, 0.4, -0.2]
+        );
+        assert_eq!(
+            map_stereo_to_multichannel::<6>(0.8, -0.4),
+            [0.8, -0.4, 0.2, 0.0, 0.4, -0.2]
+        );
+        assert_eq!(
+            map_stereo_to_multichannel::<8>(0.8, -0.4),
+            [0.8, -0.4, 0.2, 0.0, 0.4, -0.2, 0.4, -0.2]
+        );
+        assert_eq!(
+            std::mem::size_of::<MultichannelFrame<i16, 8>>(),
+            std::mem::size_of::<i16>() * 8
+        );
+    }
+
+    #[test]
+    fn signed16_conversion_covers_full_scale_and_non_finite_output() {
+        assert_eq!(<i16 as CubebCaptureSample>::to_float(i16::MIN), -1.0);
+        assert!(
+            (<i16 as CubebCaptureSample>::to_float(i16::MAX) - (32_767.0 / 32_768.0)).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(<i16 as CubebPlaybackSample>::from_float(-1.0), i16::MIN);
+        assert_eq!(<i16 as CubebPlaybackSample>::from_float(1.0), i16::MAX);
+        assert_eq!(<i16 as CubebPlaybackSample>::from_float(f32::NAN), 0);
+    }
+
+    #[test]
+    fn realtime_callback_state_initializes_once_and_mutates_after_publish() {
+        let state = RealtimeCallbackState::new();
+        assert_eq!(state.with_callback_mut(|value: &mut u32| *value), None);
+        assert_eq!(state.initialize(7), Ok(()));
+        assert_eq!(state.with_callback_mut(|value| *value += 5), Some(()));
+        assert_eq!(state.with_callback_mut(|value| *value), Some(12));
+        assert_eq!(state.initialize(99), Err(99));
+    }
+
+    #[test]
+    fn realtime_callback_state_drops_contained_value_exactly_once() {
+        struct DropSignal(Arc<AtomicUsize>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let state = RealtimeCallbackState::new();
+            assert!(state.initialize(DropSignal(drops.clone())).is_ok());
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn transient_cubeb_latency_error_preserves_last_good_value() {
+        let latency = AtomicU32::new(240);
+        store_cubeb_latency(&latency, Err(cubeb::Error::Error));
+        assert_eq!(load_cubeb_latency(&latency), Some(240));
+        store_cubeb_latency(&latency, Ok(0));
+        assert_eq!(load_cubeb_latency(&latency), Some(240));
+        store_cubeb_latency(&latency, Ok(480));
+        assert_eq!(load_cubeb_latency(&latency), Some(480));
+        store_cubeb_latency(&latency, Ok(CUBEB_MAX_LATENCY_FRAMES + 1));
+        assert_eq!(load_cubeb_latency(&latency), Some(CUBEB_MAX_LATENCY_FRAMES));
     }
 
     #[test]
     fn realtime_capture_pipeline_retains_preallocated_capacities() {
-        for rate in [
-            MIN_REALTIME_CAPTURE_RATE,
-            SAMPLE_RATE,
-            MAX_REALTIME_CAPTURE_RATE,
-        ] {
+        for rate in [MIN_REALTIME_CAPTURE_RATE, SAMPLE_RATE, 384_000] {
             let mut downmixer = AdaptiveDownmixer::with_capacity(2, CAPTURE_PROCESS_CHUNK_FRAMES);
             let downmix_capacity = downmixer.scratch.capacity();
             let interleaved = vec![0.1f32; CAPTURE_PROCESS_CHUNK_FRAMES * 2];
@@ -2687,6 +5064,39 @@ mod tests {
         assert!(second.frame_timing_valid);
         assert!(!second.discontinuity);
         assert_eq!(second.clock_status, CaptureClockStatus::Continuous);
+    }
+
+    #[test]
+    fn cubeb_capture_clock_mapper_smooths_normal_callback_jitter() {
+        let mut mapper = CaptureClockMapper::default();
+        let first = mapper.observe(2_008_000_000, Some(384), 480, 48_000);
+        assert_eq!(first.first_sample_mono_ns, 2_000_000_000);
+
+        let jittered = mapper.observe(2_018_500_000, Some(384), 480, 48_000);
+        assert_eq!(jittered.first_sample_mono_ns, 2_010_000_000);
+        assert_eq!(jittered.bridge_residual_ns, Some(500_000));
+        assert!(jittered.frame_timing_valid);
+        assert!(!jittered.discontinuity);
+        assert_eq!(jittered.clock_status, CaptureClockStatus::Continuous);
+    }
+
+    #[test]
+    fn cubeb_capture_clock_mapper_reanchors_and_flags_a_large_gap() {
+        let mut mapper = CaptureClockMapper::default();
+        mapper.observe(3_008_000_000, Some(384), 480, 48_000);
+
+        let gap = mapper.observe(3_038_000_000, Some(384), 480, 48_000);
+        assert_eq!(gap.first_sample_mono_ns, 3_030_000_000);
+        assert_eq!(gap.capture_clock_delta_ns, Some(30_000_000));
+        assert_eq!(gap.capture_clock_delta_error_ns, Some(20_000_000));
+        assert!(!gap.frame_timing_valid);
+        assert!(gap.discontinuity);
+        assert_eq!(gap.clock_status, CaptureClockStatus::DeltaMismatch);
+
+        let recovered = mapper.observe(3_048_000_000, Some(384), 480, 48_000);
+        assert_eq!(recovered.first_sample_mono_ns, 3_040_000_000);
+        assert!(recovered.frame_timing_valid);
+        assert!(!recovered.discontinuity);
     }
 
     #[test]
@@ -3184,34 +5594,32 @@ mod tests {
     }
 
     #[test]
-    fn multichannel_output_mapping_uses_front_center_and_surround_without_lfe() {
-        let mut output = [99.0; 6];
-        write_out_frame(&mut output, 0, 6, 0.8, -0.4);
-        assert_eq!(output, [0.8, -0.4, 0.2, 0.0, 0.4, -0.2]);
+    fn underrun_fader_durations_scale_with_hardware_rate() {
+        let at_48k = UnderrunFader::for_sample_rate(48_000);
+        let at_96k = UnderrunFader::for_sample_rate(96_000);
+        assert_eq!(at_48k.fade_samples, UNDERRUN_FADE_SAMPLES);
+        assert_eq!(at_48k.resume_samples, UNDERRUN_RESUME_SAMPLES);
+        assert_eq!(at_96k.fade_samples, UNDERRUN_FADE_SAMPLES * 2);
+        assert_eq!(at_96k.resume_samples, UNDERRUN_RESUME_SAMPLES * 2);
     }
 
     #[test]
-    fn output_config_prefers_stereo_then_mono_before_multichannel() {
-        assert!(
-            output_config_score(2, cpal::SampleFormat::I16)
-                < output_config_score(1, cpal::SampleFormat::F32)
-        );
-        assert!(
-            output_config_score(1, cpal::SampleFormat::I16)
-                < output_config_score(6, cpal::SampleFormat::F32)
-        );
-        assert!(
-            output_config_score(2, cpal::SampleFormat::F32)
-                < output_config_score(2, cpal::SampleFormat::I16)
-        );
-    }
-
-    #[test]
-    fn stream_format_filter_matches_the_formats_with_callback_implementations() {
-        assert!(supported_sample_format(cpal::SampleFormat::F32));
-        assert!(supported_sample_format(cpal::SampleFormat::I16));
-        assert!(supported_sample_format(cpal::SampleFormat::U16));
-        assert!(!supported_sample_format(cpal::SampleFormat::I32));
+    fn cubeb_primary_stream_contract_is_native_float_48k_stereo() {
+        let params = StreamParamsBuilder::new()
+            .format(SampleFormat::Float32NE)
+            .rate(SAMPLE_RATE)
+            .channels(2)
+            .layout(ChannelLayout::STEREO)
+            .prefs(StreamPrefs::NONE)
+            .take();
+        assert!(matches!(
+            params.format(),
+            SampleFormat::Float32LE | SampleFormat::Float32BE
+        ));
+        assert_eq!(params.rate(), SAMPLE_RATE);
+        assert_eq!(params.channels(), 2);
+        assert_eq!(params.layout(), ChannelLayout::STEREO);
+        assert_eq!(params.prefs(), StreamPrefs::NONE);
     }
 
     #[test]

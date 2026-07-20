@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BepInEx.Configuration;
@@ -487,7 +488,9 @@ public class VoiceChatLocalSettings
 
         MicrophoneDeviceIndex.Value = ResolveDeviceIndex<MicDeviceEnum>(
             _savedMicDeviceId.Value, _savedMicDeviceName.Value, _micDevices,
-            MicrophoneDeviceIndex.Value, out var resolvedMic);
+            MicrophoneDeviceIndex.Value, MicDeviceListIsAuthoritative,
+            recoverMissingStableId: ShouldRecoverLegacyDesktopDeviceId(_savedMicDeviceId.Value),
+            out var resolvedMic);
         MigrateLegacyDeviceSelection(_savedMicDeviceId, _savedMicDeviceName, resolvedMic);
         _savedMicIdForPublication = _savedMicDeviceId.Value;
         _savedMicNameForPublication = _savedMicDeviceName.Value;
@@ -514,7 +517,9 @@ public class VoiceChatLocalSettings
 #if WINDOWS
         SpeakerDeviceIndex.Value = ResolveDeviceIndex<SpkDeviceEnum>(
             _savedSpkDeviceId.Value, _savedSpkDeviceName.Value, _spkDevices,
-            SpeakerDeviceIndex.Value, out var resolvedSpeaker);
+            SpeakerDeviceIndex.Value, _spkNamesFromSidecar,
+            recoverMissingStableId: true,
+            out var resolvedSpeaker);
         MigrateLegacyDeviceSelection(_savedSpkDeviceId, _savedSpkDeviceName, resolvedSpeaker);
         _savedSpkIdForPublication = _savedSpkDeviceId.Value;
         _savedSpkNameForPublication = _savedSpkDeviceName.Value;
@@ -891,10 +896,13 @@ public class VoiceChatLocalSettings
         string legacyName,
         IReadOnlyList<VoiceDeviceInfo> devices,
         T fallback,
+        bool authoritativeDeviceList,
+        bool recoverMissingStableId,
         out VoiceDeviceInfo? resolvedDevice)
         where T : struct, Enum
         => (T)(object)ResolveDeviceIndex(
-            savedId, legacyName, devices, (int)(object)fallback, out resolvedDevice);
+            savedId, legacyName, devices, (int)(object)fallback,
+            authoritativeDeviceList, recoverMissingStableId, out resolvedDevice);
 
     internal static int ResolveDeviceIndex(
         string savedId,
@@ -902,34 +910,299 @@ public class VoiceChatLocalSettings
         IReadOnlyList<VoiceDeviceInfo> devices,
         int fallback,
         out VoiceDeviceInfo? resolvedDevice)
+        => ResolveDeviceIndex(
+            savedId, legacyName, devices, fallback,
+            authoritativeDeviceList: true,
+            recoverMissingStableId: false,
+            out resolvedDevice);
+
+    internal static int ResolveDeviceIndex(
+        string savedId,
+        string legacyName,
+        IReadOnlyList<VoiceDeviceInfo> devices,
+        int fallback,
+        bool authoritativeDeviceList,
+        bool recoverMissingStableId,
+        out VoiceDeviceInfo? resolvedDevice)
     {
         resolvedDevice = null;
+        int unavailableMatch = -1;
         if (!string.IsNullOrEmpty(savedId))
         {
             for (int i = 1; i < devices.Count; i++)
             {
-                if (string.Equals(devices[i].Id, savedId, StringComparison.Ordinal))
+                if (!string.Equals(devices[i].Id, savedId, StringComparison.Ordinal)) continue;
+                if (!devices[i].IsAvailable)
+                    unavailableMatch = i;
+                else
                 {
                     resolvedDevice = devices[i];
                     return i;
                 }
             }
-            // Stable IDs are authoritative. Do not silently retarget a missing endpoint to another
-            // device with the same display name; keep the ID so hot-plug can restore it later.
-            return 0;
+
+            // The synthetic list published before the first desktop helper probe is intentionally
+            // non-authoritative. Preserve the placeholder only until a real enumeration arrives;
+            // otherwise startup would erase a valid hot-plugged selection before it can be seen.
+            if (!authoritativeDeviceList && unavailableMatch >= 0)
+            {
+                resolvedDevice = devices[unavailableMatch];
+                return unavailableMatch;
+            }
+
+            // Microphone selections deliberately remain fail-closed: once a stable identity exists,
+            // never redirect capture to a merely similar name or to the system default. Speaker
+            // playback opts into recovery explicitly because silence cannot leak microphone audio.
+            if (!recoverMissingStableId)
+            {
+                if (unavailableMatch >= 0)
+                {
+                    resolvedDevice = devices[unavailableMatch];
+                    return unavailableMatch;
+                }
+                return 0;
+            }
+
+            // A legacy host-prefixed ID can often be matched exactly to Cubeb's versioned raw ID.
+            // If that is unavailable, recover by display name only when it identifies exactly one
+            // live endpoint; duplicate friendly names must never silently retarget audio.
+            int exactLegacyMatch = UniqueLegacyDeviceIdIndex(savedId, devices);
+            if (exactLegacyMatch >= 0)
+            {
+                resolvedDevice = devices[exactLegacyMatch];
+                return exactLegacyMatch;
+            }
+
+            int recovered = UniqueAvailableDeviceNameIndex(legacyName, devices);
+            if (recovered >= 0)
+            {
+                resolvedDevice = devices[recovered];
+                return recovered;
+            }
+
+            // Keep an unavailable saved endpoint as the user's preference. Playback can use a
+            // temporary Default fallback, while a later hot-plug or driver enumeration can still
+            // recover the choice instead of permanently erasing it.
+            if (unavailableMatch >= 0)
+            {
+                resolvedDevice = devices[unavailableMatch];
+                return unavailableMatch;
+            }
+
+            return ResolveAvailableDefault(devices, out resolvedDevice);
         }
         if (!string.IsNullOrEmpty(legacyName))
         {
-            for (int i = 1; i < devices.Count; i++)
+            int recovered = UniqueAvailableDeviceNameIndex(legacyName, devices);
+            if (recovered >= 0)
             {
-                if (!string.Equals(devices[i].Name, legacyName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                resolvedDevice = devices[i];
-                return i;
+                resolvedDevice = devices[recovered];
+                return recovered;
             }
+
+            if (!authoritativeDeviceList)
+            {
+                for (int i = 1; i < devices.Count; i++)
+                {
+                    if (devices[i].IsAvailable ||
+                        !string.Equals(devices[i].Name, legacyName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    resolvedDevice = devices[i];
+                    return i;
+                }
+            }
+
+            return ResolveAvailableDefault(devices, out resolvedDevice);
+        }
+
+        if (fallback >= 0 && fallback < devices.Count && devices[fallback].IsAvailable)
+        {
+            resolvedDevice = devices[fallback];
+            return fallback;
+        }
+        return ResolveAvailableDefault(devices, out resolvedDevice);
+    }
+
+    private static int UniqueAvailableDeviceNameIndex(
+        string name,
+        IReadOnlyList<VoiceDeviceInfo> devices)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return -1;
+        int match = -1;
+        for (int i = 1; i < devices.Count; i++)
+        {
+            if (!devices[i].IsAvailable ||
+                !string.Equals(devices[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (match >= 0) return -1;
+            match = i;
+        }
+        return match;
+    }
+
+    private static int UniqueLegacyDeviceIdIndex(
+        string savedId,
+        IReadOnlyList<VoiceDeviceInfo> devices)
+    {
+        int match = -1;
+        for (int i = 1; i < devices.Count; i++)
+        {
+            if (!devices[i].IsAvailable ||
+                !LegacyDesktopDeviceIdMatchesCubeb(savedId, devices[i].Id))
+                continue;
+            if (match >= 0) return -1;
+            match = i;
+        }
+        return match;
+    }
+
+    internal static bool LegacyDesktopDeviceIdMatchesCubeb(
+        string savedDeviceId,
+        string cubebDeviceId)
+    {
+        byte[]? expectedFamily;
+        byte[] expectedRaw;
+        if (TryExtractLegacyBackendDeviceId(
+                savedDeviceId,
+                out string legacyHost,
+                out string legacyBackendId))
+        {
+            string? family = CompatibleCubebFamily(legacyHost);
+            if (family == null) return false;
+            expectedFamily = Encoding.UTF8.GetBytes(family);
+            expectedRaw = Encoding.UTF8.GetBytes(legacyBackendId);
+        }
+        else if (!TryParseCubebDeviceId(savedDeviceId, out expectedFamily, out expectedRaw))
+        {
+            return false;
+        }
+        if (!TryParseCubebDeviceId(cubebDeviceId, out byte[]? actualFamily, out byte[] actualRaw) ||
+            !expectedRaw.AsSpan().SequenceEqual(actualRaw))
+            return false;
+
+        // v1 did not carry a backend family. Preserve its one-time raw-ID migration, but once
+        // both sides are v2 never let equal raw strings retarget a saved ALSA endpoint to Pulse,
+        // a CoreAudio endpoint to WASAPI, or any other cross-backend combination.
+        return expectedFamily == null || actualFamily == null ||
+               expectedFamily.AsSpan().SequenceEqual(actualFamily);
+    }
+
+    private const int MaxDesktopDeviceIdBytes = 4_096;
+
+    private static bool TryParseCubebDeviceId(
+        string cubebDeviceId,
+        out byte[]? backendFamily,
+        out byte[] rawId)
+    {
+        backendFamily = null;
+        rawId = Array.Empty<byte>();
+        if (string.IsNullOrEmpty(cubebDeviceId)) return false;
+        string rawHex;
+        if (cubebDeviceId.StartsWith("cubeb-v1:", StringComparison.Ordinal))
+        {
+            rawHex = cubebDeviceId.Substring("cubeb-v1:".Length);
+        }
+        else if (cubebDeviceId.StartsWith("cubeb-v2:", StringComparison.Ordinal))
+        {
+            int separator = cubebDeviceId.IndexOf(':', "cubeb-v2:".Length);
+            if (separator < 0 || separator >= cubebDeviceId.Length - 1) return false;
+            string familyHex = cubebDeviceId.Substring(
+                "cubeb-v2:".Length,
+                separator - "cubeb-v2:".Length);
+            if (!TryDecodeDeviceIdHex(familyHex, out byte[] parsedFamily)) return false;
+            backendFamily = parsedFamily;
+            rawHex = cubebDeviceId.Substring(separator + 1);
+        }
+        else
+        {
+            return false;
+        }
+        if (TryDecodeDeviceIdHex(rawHex, out rawId)) return true;
+        backendFamily = null;
+        rawId = Array.Empty<byte>();
+        return false;
+    }
+
+    private static bool TryDecodeDeviceIdHex(string hex, out byte[] bytes)
+    {
+        bytes = Array.Empty<byte>();
+        if (hex.Length == 0 ||
+            hex.Length > MaxDesktopDeviceIdBytes * 2 ||
+            (hex.Length & 1) != 0)
+            return false;
+        bytes = new byte[hex.Length / 2];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            int high = HexNibble(hex[i * 2]);
+            int low = HexNibble(hex[(i * 2) + 1]);
+            if (high < 0 || low < 0)
+            {
+                bytes = Array.Empty<byte>();
+                return false;
+            }
+            bytes[i] = (byte)((high << 4) | low);
+        }
+        return true;
+    }
+
+    private static bool TryExtractLegacyBackendDeviceId(
+        string savedDeviceId,
+        out string host,
+        out string backendDeviceId)
+    {
+        host = string.Empty;
+        backendDeviceId = string.Empty;
+        if (string.IsNullOrEmpty(savedDeviceId)) return false;
+        int separator = savedDeviceId.IndexOf(':');
+        if (separator <= 0 || separator >= savedDeviceId.Length - 1) return false;
+        host = savedDeviceId.Substring(0, separator);
+        if (host is not ("wasapi" or "coreaudio" or "pulseaudio" or "pipewire" or
+            "alsa" or "jack" or "asio"))
+        {
+            host = string.Empty;
+            return false;
+        }
+        backendDeviceId = savedDeviceId.Substring(separator + 1);
+        if (Encoding.UTF8.GetByteCount(backendDeviceId) <= MaxDesktopDeviceIdBytes)
+            return true;
+        host = string.Empty;
+        backendDeviceId = string.Empty;
+        return false;
+    }
+
+    private static string? CompatibleCubebFamily(string legacyHost)
+        => legacyHost switch
+        {
+            "wasapi" => "wasapi",
+            "coreaudio" => "coreaudio",
+            "pulseaudio" => "pulse",
+            "alsa" => "alsa",
+            _ => null,
+        };
+
+    private static int HexNibble(char value)
+        => value is >= '0' and <= '9' ? value - '0'
+         : value is >= 'a' and <= 'f' ? value - 'a' + 10
+         : value is >= 'A' and <= 'F' ? value - 'A' + 10
+         : -1;
+
+    private static int ResolveAvailableDefault(
+        IReadOnlyList<VoiceDeviceInfo> devices,
+        out VoiceDeviceInfo? resolvedDevice)
+    {
+        for (int i = 0; i < devices.Count; i++)
+        {
+            if (!devices[i].IsAvailable || !devices[i].IsDefault) continue;
+            resolvedDevice = devices[i];
+            return i;
+        }
+        if (devices.Count > 0 && devices[0].IsAvailable)
+        {
+            resolvedDevice = devices[0];
             return 0;
         }
-        return fallback >= 0 && fallback < devices.Count ? fallback : 0;
+        resolvedDevice = null;
+        return 0;
     }
 
     internal static bool ShouldReapplyResolvedDevice(
@@ -939,6 +1212,38 @@ public class VoiceChatLocalSettings
         => resolvedDevice is { IsAvailable: true } device &&
            (!previousAvailable ||
             !string.Equals(previousId, device.Id, StringComparison.Ordinal));
+
+    internal static bool ShouldReapplyResolvedDeviceAfterListPublication(
+        bool firstAuthoritativeList,
+        string previousId,
+        bool previousAvailable,
+        VoiceDeviceInfo? resolvedDevice)
+        => ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritativeList,
+            previousId,
+            previousAvailable,
+            previousId,
+            resolvedDevice);
+
+    internal static bool ShouldReapplyResolvedDeviceAfterListPublication(
+        bool firstAuthoritativeList,
+        string previousId,
+        bool previousAvailable,
+        string persistedSavedId,
+        VoiceDeviceInfo? resolvedDevice)
+    {
+        if (firstAuthoritativeList && string.IsNullOrEmpty(previousId))
+            previousId = persistedSavedId ?? string.Empty;
+        if (!ShouldReapplyResolvedDevice(previousId, previousAvailable, resolvedDevice))
+            return false;
+        // An unchanged stable ID is already the identity passed to the native backend at startup,
+        // so the first helper enumeration only establishes its availability baseline. A CPAL or
+        // Cubeb-v1 -> v2 migration changes the actual selection string and must be applied even on
+        // that first list; otherwise a running room can remain stuck on the retired identifier.
+        return !firstAuthoritativeList ||
+               resolvedDevice is { } device &&
+               !string.Equals(previousId, device.Id, StringComparison.Ordinal);
+    }
 
     internal static bool ShouldProcessDeviceSelectionDispatch(
         bool internalIndexCorrection)
@@ -1008,6 +1313,17 @@ public class VoiceChatLocalSettings
            !string.IsNullOrEmpty(currentDefaultId) &&
            !string.Equals(previousDefaultId, currentDefaultId, StringComparison.Ordinal);
 
+    internal static bool ShouldRecoverLegacyDesktopDeviceId(string savedDeviceId)
+    {
+#if WINDOWS
+        return TryExtractLegacyBackendDeviceId(savedDeviceId, out _, out _) ||
+               (TryParseCubebDeviceId(savedDeviceId, out byte[]? family, out _) &&
+                family == null);
+#else
+        return false;
+#endif
+    }
+
     private static void MigrateLegacyDeviceSelection(
         ConfigEntry<string> savedId,
         ConfigEntry<string> savedName,
@@ -1015,10 +1331,13 @@ public class VoiceChatLocalSettings
     {
         if (!resolvedDevice.HasValue) return;
         var device = resolvedDevice.Value;
-        if (!string.Equals(savedId.Value, device.Id, StringComparison.Ordinal))
-            savedId.Value = device.Id;
-        if (!string.Equals(savedName.Value, device.Name, StringComparison.Ordinal))
-            savedName.Value = device.Name;
+        var persisted = PersistedSelectionForDevice(
+            device.IsDefault && string.IsNullOrEmpty(device.Id) ? 0 : 1,
+            device);
+        if (!string.Equals(savedId.Value, persisted.Id, StringComparison.Ordinal))
+            savedId.Value = persisted.Id;
+        if (!string.Equals(savedName.Value, persisted.Name, StringComparison.Ordinal))
+            savedName.Value = persisted.Name;
     }
 
     public static void RefreshDeviceLists()
@@ -1068,6 +1387,18 @@ public class VoiceChatLocalSettings
 #if WINDOWS
     private static DateTime _nextActiveDeviceProbeUtc = DateTime.MinValue;
 #endif
+
+    private static bool MicDeviceListIsAuthoritative
+    {
+        get
+        {
+#if WINDOWS
+            return _micNamesFromSidecar;
+#else
+            return true;
+#endif
+        }
+    }
 
     // Re-enumerate devices (throttled to every 2s) so hot-plugged or removed mics/speakers show up in the
     // in-game device pickers without a game restart. Called from the settings panel's device rows.
@@ -1122,14 +1453,27 @@ public class VoiceChatLocalSettings
     private string _lastResolvedMicId = string.Empty;
     private bool _lastResolvedMicAvailable;
     private string _lastObservedDefaultMicId = DefaultAvailableDeviceId(_micDevices);
+    private bool _hasResolvedAuthoritativeMicList;
+
+    internal static bool MarkAndDetectFirstAuthoritativeList(
+        bool authoritative,
+        ref bool hasResolvedAuthoritativeList)
+    {
+        if (!authoritative || hasResolvedAuthoritativeList) return false;
+        hasResolvedAuthoritativeList = true;
+        return true;
+    }
 
     internal void ResolveMicIndexIfListChanged()
     {
         int version = MicDeviceListVersion;
         if (version == _lastResolvedMicVersion) return;
         _lastResolvedMicVersion = version;
+        bool firstAuthoritative = MarkAndDetectFirstAuthoritativeList(
+            MicDeviceListIsAuthoritative,
+            ref _hasResolvedAuthoritativeMicList);
         string currentDefaultId = DefaultAvailableDeviceId(_micDevices);
-        bool defaultChanged = ShouldReapplyDefaultDevice(
+        bool defaultChanged = !firstAuthoritative && ShouldReapplyDefaultDevice(
             IsPersistedDefaultSelection(
                 (int)MicrophoneDeviceIndex.Value,
                 _savedMicDeviceId.Value,
@@ -1139,17 +1483,15 @@ public class VoiceChatLocalSettings
         _lastObservedDefaultMicId = currentDefaultId;
         var resolved = ResolveDeviceIndex<MicDeviceEnum>(
             _savedMicDeviceId.Value, _savedMicDeviceName.Value, _micDevices,
-            MicrophoneDeviceIndex.Value, out var resolvedDevice);
-        bool becameAvailable = ShouldReapplyResolvedDevice(
-            _lastResolvedMicId, _lastResolvedMicAvailable, resolvedDevice);
-        if ((!string.IsNullOrEmpty(_savedMicDeviceId.Value) ||
-             !string.IsNullOrEmpty(_savedMicDeviceName.Value)) &&
-            (int)(object)resolved <= 0)
-        {
-            _lastResolvedMicId = _savedMicDeviceId.Value;
-            _lastResolvedMicAvailable = false;
-            return;
-        }
+            MicrophoneDeviceIndex.Value, MicDeviceListIsAuthoritative,
+            recoverMissingStableId: ShouldRecoverLegacyDesktopDeviceId(_savedMicDeviceId.Value),
+            out var resolvedDevice);
+        bool becameAvailable = ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritative,
+            _lastResolvedMicId,
+            _lastResolvedMicAvailable,
+            _savedMicDeviceId.Value,
+            resolvedDevice);
         bool indexChanged = !resolved.Equals(MicrophoneDeviceIndex.Value);
         if (indexChanged)
         {
@@ -1173,14 +1515,18 @@ public class VoiceChatLocalSettings
     private string _lastResolvedSpkId = string.Empty;
     private bool _lastResolvedSpkAvailable;
     private string _lastObservedDefaultSpkId = DefaultAvailableDeviceId(_spkDevices);
+    private bool _hasResolvedAuthoritativeSpkList;
 
     internal void ResolveSpkIndexIfListChanged()
     {
         int version = SpkDeviceListVersion;
         if (version == _lastResolvedSpkVersion) return;
         _lastResolvedSpkVersion = version;
+        bool firstAuthoritative = MarkAndDetectFirstAuthoritativeList(
+            _spkNamesFromSidecar,
+            ref _hasResolvedAuthoritativeSpkList);
         string currentDefaultId = DefaultAvailableDeviceId(_spkDevices);
-        bool defaultChanged = ShouldReapplyDefaultDevice(
+        bool defaultChanged = !firstAuthoritative && ShouldReapplyDefaultDevice(
             IsPersistedDefaultSelection(
                 (int)SpeakerDeviceIndex.Value,
                 _savedSpkDeviceId.Value,
@@ -1190,17 +1536,15 @@ public class VoiceChatLocalSettings
         _lastObservedDefaultSpkId = currentDefaultId;
         var resolved = ResolveDeviceIndex<SpkDeviceEnum>(
             _savedSpkDeviceId.Value, _savedSpkDeviceName.Value, _spkDevices,
-            SpeakerDeviceIndex.Value, out var resolvedDevice);
-        bool becameAvailable = ShouldReapplyResolvedDevice(
-            _lastResolvedSpkId, _lastResolvedSpkAvailable, resolvedDevice);
-        if ((!string.IsNullOrEmpty(_savedSpkDeviceId.Value) ||
-             !string.IsNullOrEmpty(_savedSpkDeviceName.Value)) &&
-            (int)(object)resolved <= 0)
-        {
-            _lastResolvedSpkId = _savedSpkDeviceId.Value;
-            _lastResolvedSpkAvailable = false;
-            return;
-        }
+            SpeakerDeviceIndex.Value, _spkNamesFromSidecar,
+            recoverMissingStableId: true,
+            out var resolvedDevice);
+        bool becameAvailable = ShouldReapplyResolvedDeviceAfterListPublication(
+            firstAuthoritative,
+            _lastResolvedSpkId,
+            _lastResolvedSpkAvailable,
+            _savedSpkDeviceId.Value,
+            resolvedDevice);
         bool indexChanged = !resolved.Equals(SpeakerDeviceIndex.Value);
         if (indexChanged)
         {

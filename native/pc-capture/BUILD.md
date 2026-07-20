@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Capture, playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 13.
+Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 13.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -25,10 +25,57 @@ The Pion build additionally names its C-shared targets `win-x64`, `win-x86`,
 
 ## Local build
 
-- All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Linux needs ALSA dev headers (`libasound2-dev pkg-config`).
+- All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Cubeb requires CMake 3.19+ and a C/C++ compiler. Linux additionally needs `pkg-config`, `libpulse-dev`, and `libasound2-dev` so the shipped helper contains its PulseAudio primary backend and ALSA fallback.
 - Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|win-x86|linux-x64|android-arm64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows targets need the matching MinGW C compiler, Linux needs GCC, and Android ARM64 needs the pinned NDK through `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
 - macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Rust and Pion Apple slices, `lipo`s each into a universal binary, seals `libpc-pion.dylib` into a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
 - Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll`, `pc-pion.x86.dll`, `libpc-pion.linux-x64.so`, and `libpc-pion.android-arm64.so`; the macOS dylib stays inside the signed app.
+
+Cubeb is built from the pinned `cubeb-sys` vendored source as a static library
+inside every desktop helper. The build scripts clear
+`LIBCUBEB_SYS_USE_PKG_CONFIG`, preventing a developer or CI machine from
+silently substituting an external `libcubeb` and creating an undeclared runtime
+dependency. Windows uses Cubeb/WASAPI with WinMM fallback, macOS uses
+Cubeb/AudioUnit, and Linux uses Cubeb/PulseAudio with ALSA fallback. PipeWire desktops are supported
+through their standard PulseAudio compatibility service.
+
+The scripts isolate pkg-config discovery so Cubeb's vendored Speex resampler is
+part of the same static helper (the Windows CMake toolchain additionally forces
+`BUNDLE_SPEEX=ON`). Release validation parses PE imports, ELF
+`DT_NEEDED`, and Mach-O load commands and rejects external Cubeb or speexdsp
+libraries. This output-level gate also catches a stale Cargo/CMake cache that
+was previously built with system-library opt-ins.
+
+Every desktop helper also implements `--build-info`. The response binds protocol
+13 to Cubeb 0.36.0, an immutable audio-contract marker, and the exact compiled
+backend set for that target. Release packaging executes this probe, and the
+managed launcher repeats it before using a native helper (including the
+host-native helper launched by Wine/CrossOver/Proton). A same-protocol helper
+from the retired audio engine is therefore rejected instead of being silently
+embedded or launched.
+
+On Linux only, the target dependency also unifies cubeb-sys's upstream
+`unittest-build` feature. That unfortunately named switch disables Cubeb's
+nested Rust Pulse backend and retains the vendored C PulseAudio plus ALSA
+backends with `LAZY_LOAD_LIBS=ON`. This is a deliberate runtime-coverage choice:
+the C Pulse implementation is legacy, but the helper can launch and fall back
+to ALSA on a host where `libpulse.so.0` is absent. The release ELF verifier
+rejects `DT_NEEDED` entries for PulseAudio, ALSA, or an external Cubeb library.
+Cubeb's ALSA backend enumerates only one `default` endpoint upstream. Perfect
+Comms supplements that list with `snd_device_name_hint` while still opening the
+selected PCM through Cubeb, so wired, USB, `plug`, and `plughw` endpoints remain
+selectable on ALSA-only hosts. PulseAudio and PipeWire's Pulse service use
+Cubeb's native enumeration. Do not enable this feature for macOS; its current
+Rust AudioUnit backend remains part of both universal slices.
+
+`PC_CUBEB_BACKEND=pulse|alsa` is an allowlisted Linux-only diagnostic/CI
+override. Production launchers leave it unset and use Cubeb's standard backend
+selection; unsupported values and non-Linux overrides are ignored.
+
+Headless CI proves backend feature selection, compilation, static packaging,
+and the absence of forbidden runtime links; it does not claim that a physical
+headset, hot-plug transition, or OS route works. Release qualification still
+needs real-device checks on Windows/WASAPI, macOS/AudioUnit, Linux
+PulseAudio/PipeWire-Pulse, and Linux ALSA explicit/default routing.
 
 These names are frozen: the managed build (`PerfectComms.csproj`), the packaging scripts, the CI workflows, and the mod's extractor all key off them. Do not rename them.
 
@@ -59,18 +106,27 @@ The managed build embeds each helper as `Lib.pc-capture.<file>` and each standal
 
 The helper binds `127.0.0.1:0`, writes `{port, pid}` to the handshake file, and the mod connects over loopback (Wine Winsock bridges to host loopback).
 
+Because Wine, Proton, and CrossOver launch the host-native helper, Cubeb talks
+to the host audio stack directly: PulseAudio/ALSA on Linux and AudioUnit on
+macOS. It does not route the helper's audio through Wine's emulated WASAPI
+layer. Native Windows launches use Cubeb's WASAPI backend.
+
+Android remains a separate media surface. Unity owns microphone capture and
+`AudioSource` playback while `pc-mobile` owns codec/mixing/transport; Cubeb is
+desktop-only and is not present in the Android library or APK payload.
+
 ## Mic permission (TCC) and fallback
 
 On macOS, mic permission (TCC) attributes to the **CrossOver / host process that launches the helper**, not to a separate signed app identity. If capture permission is absent or no input device exists, the helper reports a recoverable `mic-error` and retries the input device with capped backoff. Signaling, peer connections, mixing, and speaker playback remain active, so receive-only use is supported. A capture stream that had previously worked and later wedges is still supervised and may trigger a bounded helper/media recovery. Mic permission is an OS-level grant and is not something the mod can grant in code.
 
 ## CI
 
-- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64), plus Android ARM64 with the pinned NDK. It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
+- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64), plus Android ARM64 with the pinned NDK. It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
 - `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes `PerfectComms+dependencies-win-x86-steam-itch.zip`, `PerfectComms+dependencies-win-x64-epic-msstore.zip`, `PerfectComms.dll`, and `PerfectCommsAndroid.dll`. Each dependency ZIP is built from the matching SHA-pinned BepInEx build and its native PE machine types are verified before upload. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. The mod rejects any helper whose `proto != 13` (the `Proto` constant in `SidecarVoiceClient`). Protocol 13 adds local microphone monitoring with optional delayed playback; protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of the older protocol 6 ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes, so a stale or mismatched side-file cannot be used; the embedded, version-matched helper wins.
+The helper announces `proto` in its `ready` payload. Before launch, the mod also requires the helper's `--build-info` response to prove protocol 13, Cubeb 0.36.0, and the platform's exact backend inventory. Protocol 13 adds local microphone monitoring with optional delayed playback; protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling control, encoded-RTP receive metrics, selected ICE/RTCP path metrics, and encoder-policy telemetry. Protocol 8 added managed `AUDIO_OUT` injection and playback lifecycle acknowledgement for the selected-output setup test; protocol 7 added restartable live device/synthetic switching, native input gain/VAD controls, and bounded local/peer level telemetry on top of the older protocol 6 ICE policy. The bundled binary is content-hashed (`NativeLibraryCache`) and re-extracted automatically whenever it changes; the launcher separately hashes and contract-checks the extracted executable, so a stale same-protocol helper from the retired engine cannot run.
 
 ## Media diagnostics
 

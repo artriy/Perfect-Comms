@@ -391,7 +391,7 @@ internal static class SidecarProtocol
                 nameElement.ValueKind != JsonValueKind.String)
                 return false;
 
-            // Device IDs are opaque CPAL values. Never case-fold, trim, or otherwise normalize
+            // Device IDs are opaque native-backend values. Never case-fold, trim, or otherwise normalize
             // them before persistence/round-tripping.
             var id = idElement.GetString() ?? string.Empty;
             var name = nameElement.GetString()?.Trim() ?? string.Empty;

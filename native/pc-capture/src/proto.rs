@@ -24,7 +24,7 @@ pub struct AudioFrame {
     pub capture_open_attempt: u64,
     /// Process-local monotonic time at which the frame's first sample reached the ADC.
     pub capture_ts_ns: u64,
-    /// Process-local monotonic time at which CPAL delivered the buffer containing that sample.
+    /// Process-local monotonic time at which the native audio backend delivered the buffer.
     /// This is internal timing metadata and is intentionally not part of the legacy PCM wire frame.
     pub capture_callback_ts_ns: u64,
     pub capture_timestamp_valid: bool,

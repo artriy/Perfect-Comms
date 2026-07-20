@@ -46,7 +46,7 @@ internal readonly record struct WineLaunchControlPaths(
     string ExitPath,
     string CancellationPath);
 
-internal readonly record struct NativeHelperProtocolProbeResult(
+internal readonly record struct NativeHelperContractProbeResult(
     bool Started,
     bool TimedOut,
     int ExitCode,
@@ -56,10 +56,15 @@ internal readonly record struct NativeHelperProtocolProbeResult(
 
 internal static class SidecarLauncher
 {
-    internal const int NativeHelperProtocolProbeTimeoutMs = 2_000;
-    private const string NativeHelperProtocolArgument = "--protocol-version";
-    private const int NativeHelperProtocolOutputLimit = 64;
-    private const int NativeHelperProtocolDiagnosticLimit = 256;
+    internal const int NativeHelperContractProbeTimeoutMs = 2_000;
+    private const string NativeHelperContractArgument = "--build-info";
+    private const int NativeHelperContractOutputLimit = 1_024;
+    private const int NativeHelperContractDiagnosticLimit = 256;
+    private const int NativeHelperBuildInfoSchema = 1;
+    private const string NativeHelperAudioEngine = "cubeb";
+    private const string NativeHelperCubebVersion = "0.36.0";
+    private const string NativeHelperAudioContract =
+        "PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;";
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
     internal const int WineHelperExitWaitMs = 4_500;
     internal const string WinePrivateDirectoryScript = """
@@ -107,7 +112,7 @@ internal static class SidecarLauncher
         helper_exited=${12}
         launch_cancelled=${13}
         launch_nonce=${14}
-        expected_protocol=${15}
+        expected_build_info=${15}
         shift 15
 
         write_receipt() {
@@ -188,14 +193,14 @@ internal static class SidecarLauncher
         probe_status=127
         probe_helper() {
           probe_output_file="$private_dir/.probe-output.$$"
-          run_bounded "$probe_output_file" 2 "$1" --protocol-version
+          run_bounded "$probe_output_file" 2 "$1" --build-info
           bounded_result=$?
           probe_status=$bounded_status
           probe_output=$(/bin/cat "$probe_output_file" 2>/dev/null) || probe_output=
           /bin/rm -f "$probe_output_file"
           if [ "$bounded_result" -eq 2 ]; then fail_launch cancelled 125; fi
           if [ "$probe_status" -ne 0 ]; then return 1; fi
-          if [ "$probe_output" != "$expected_protocol" ]; then probe_status=65; return 1; fi
+          if [ "$probe_output" != "$expected_build_info" ]; then probe_status=65; return 1; fi
           return 0
         }
 
@@ -222,19 +227,13 @@ internal static class SidecarLauncher
         selected_helper=
         primary_status=127
         fallback_status=127
-        if [ -z "$fallback_helper" ] || [ "$fallback_helper" = "$primary_helper" ]; then
-          # The signed universal macOS app has no alternate location and is already validated by
-          # release signing/smoke gates. Linux always supplies a staged+original pair and takes
-          # the portable bounded execution probe path below.
+        probe_helper "$primary_helper"
+        primary_status=$probe_status
+        if [ "$primary_status" -eq 0 ]; then
           selected_helper=$primary_helper
-          primary_status=0
         else
-          probe_helper "$primary_helper"
-          primary_status=$probe_status
-          if [ "$primary_status" -eq 0 ]; then
-            selected_helper=$primary_helper
-          else
-            if is_cancelled; then fail_launch cancelled 125; fi
+          if is_cancelled; then fail_launch cancelled 125; fi
+          if [ -n "$fallback_helper" ] && [ "$fallback_helper" != "$primary_helper" ]; then
             probe_helper "$fallback_helper"
             fallback_status=$probe_status
             if [ "$fallback_status" -eq 0 ]; then selected_helper=$fallback_helper; fi
@@ -270,7 +269,7 @@ internal static class SidecarLauncher
         """;
     private static readonly object BundleVersionGate = new();
     private static readonly Dictionary<string, string> BundleVersions = new(StringComparer.Ordinal);
-    private static readonly object NativeHelperProtocolGate = new();
+    private static readonly object NativeHelperContractGate = new();
     private static readonly Dictionary<string, NativeHelperIdentity> ValidatedNativeHelpers = new(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? StringComparer.OrdinalIgnoreCase
@@ -278,7 +277,8 @@ internal static class SidecarLauncher
     private readonly record struct NativeHelperIdentity(
         long Length,
         long CreationTimeUtcTicks,
-        long LastWriteTimeUtcTicks);
+        long LastWriteTimeUtcTicks,
+        string Sha256);
 
     public static string TargetTriple()
         => TargetTripleFor(
@@ -331,6 +331,39 @@ internal static class SidecarLauncher
                     $"pc-capture: unsupported Linux process architecture {processArchitecture}");
         throw new PlatformNotSupportedException("pc-capture: unsupported operating system");
     }
+
+    private static string[] ExpectedNativeHelperBackendsForCurrentProcess()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return new[] { "wasapi", "winmm" };
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return new[] { "alsa", "pulse" };
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return new[] { "audiounit", "audiounit-rust" };
+        throw new PlatformNotSupportedException(
+            "pc-capture: no Cubeb backend contract for the current operating system");
+    }
+
+    internal static string ExpectedNativeHelperBuildInfoJson(WineHostOs hostOs)
+        => hostOs switch
+        {
+            WineHostOs.Linux => ExpectedNativeHelperBuildInfoJson(new[] { "alsa", "pulse" }),
+            WineHostOs.MacOS => ExpectedNativeHelperBuildInfoJson(
+                new[] { "audiounit", "audiounit-rust" }),
+            _ => throw new PlatformNotSupportedException(
+                "pc-capture: no Cubeb backend contract for the Wine host operating system"),
+        };
+
+    internal static string ExpectedNativeHelperBuildInfoJsonForCurrentProcess()
+        => ExpectedNativeHelperBuildInfoJson(ExpectedNativeHelperBackendsForCurrentProcess());
+
+    private static string ExpectedNativeHelperBuildInfoJson(IReadOnlyList<string> backends)
+        => $"{{\"schema\":{NativeHelperBuildInfoSchema}," +
+           $"\"protocol\":{SidecarVoiceClient.Proto}," +
+           $"\"audio_engine\":\"{NativeHelperAudioEngine}\"," +
+           $"\"cubeb_version\":\"{NativeHelperCubebVersion}\"," +
+           $"\"compiled_backends\":[\"{string.Join("\",\"", backends)}\"]," +
+           $"\"contract\":\"{NativeHelperAudioContract}\"}}";
 
     public static string HelperFileName(string triple)
         => triple.Contains("windows") ? "PerfectCommsAudio.exe" : "PerfectCommsAudio";
@@ -869,7 +902,7 @@ internal static class SidecarLauncher
         string? hostToken,
         bool enumerate,
         WineLaunchControlPaths hostControl,
-        int expectedProtocol,
+        string expectedBuildInfo,
         string? hostQuarantineTarget = null)
     {
         ThrowIfNullOrWhiteSpace(hostPrivateDirectory, nameof(hostPrivateDirectory));
@@ -881,8 +914,7 @@ internal static class SidecarLauncher
         ThrowIfNullOrWhiteSpace(hostControl.FailurePath, nameof(hostControl));
         ThrowIfNullOrWhiteSpace(hostControl.ExitPath, nameof(hostControl));
         ThrowIfNullOrWhiteSpace(hostControl.CancellationPath, nameof(hostControl));
-        if (expectedProtocol <= 0)
-            throw new ArgumentOutOfRangeException(nameof(expectedProtocol));
+        ThrowIfNullOrWhiteSpace(expectedBuildInfo, nameof(expectedBuildInfo));
 
         var arguments = new List<string>
         {
@@ -900,7 +932,7 @@ internal static class SidecarLauncher
             hostControl.ExitPath,
             hostControl.CancellationPath,
             hostControl.Nonce,
-            expectedProtocol.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            expectedBuildInfo,
         };
         if (enumerate)
             arguments.Add("--enumerate");
@@ -1052,7 +1084,7 @@ internal static class SidecarLauncher
         PublishFileAtomically(sourceDsp, stagedDsp);
         PublishFileAtomically(sourcePion, stagedPion);
         // Hardened Linux hosts commonly mark either the Steam library or /tmp noexec. The host
-        // script performs a real --protocol-version execution probe and falls back between both
+        // script performs a real --build-info Cubeb contract probe and falls back between both
         // locations; chmod's executable bit alone cannot detect a noexec mount.
         return new WineHelperCandidates(stagedHelper, helperPath, stagedHelper, stagedDsp);
     }
@@ -1385,15 +1417,15 @@ internal static class SidecarLauncher
             throw new ArgumentException("Value cannot be null or whitespace.", parameterName);
     }
 
-    private static bool TryValidateNativeHelperProtocol(string helperPath, out string failureReason)
-        => TryValidateNativeHelperProtocol(
+    private static bool TryValidateNativeHelperContract(string helperPath, out string failureReason)
+        => TryValidateNativeHelperContract(
             helperPath,
-            RunNativeHelperProtocolProbe,
+            RunNativeHelperContractProbe,
             out failureReason);
 
-    internal static bool TryValidateNativeHelperProtocol(
+    internal static bool TryValidateNativeHelperContract(
         string helperPath,
-        Func<string, int, NativeHelperProtocolProbeResult> probe,
+        Func<string, int, NativeHelperContractProbeResult> probe,
         out string failureReason)
     {
         if (probe == null) throw new ArgumentNullException(nameof(probe));
@@ -1404,11 +1436,11 @@ internal static class SidecarLauncher
                 out var identity,
                 out failureReason))
         {
-            LogNativeHelperProtocolFailure(helperPath, failureReason);
+            LogNativeHelperContractFailure(helperPath, failureReason);
             return false;
         }
 
-        lock (NativeHelperProtocolGate)
+        lock (NativeHelperContractGate)
         {
             if (!TryGetNativeHelperIdentity(
                     normalizedPath,
@@ -1417,7 +1449,7 @@ internal static class SidecarLauncher
                     out failureReason))
             {
                 ValidatedNativeHelpers.Remove(normalizedPath);
-                LogNativeHelperProtocolFailure(normalizedPath, failureReason);
+                LogNativeHelperContractFailure(normalizedPath, failureReason);
                 return false;
             }
             if (ValidatedNativeHelpers.TryGetValue(normalizedPath, out var cached))
@@ -1426,26 +1458,26 @@ internal static class SidecarLauncher
                 {
                     VoiceDiagnostics.Log(
                         "sidecar.launch",
-                        $"event=protocol-preflight-cache-hit expected={SidecarVoiceClient.Proto} helper={SafeDiagnosticField(normalizedPath, 512)}");
+                        $"event=helper-contract-cache-hit protocol={SidecarVoiceClient.Proto} engine={NativeHelperAudioEngine} cubeb={NativeHelperCubebVersion} helper={SafeDiagnosticField(normalizedPath, 512)}");
                     return true;
                 }
                 ValidatedNativeHelpers.Remove(normalizedPath);
             }
 
             var stopwatch = Stopwatch.StartNew();
-            NativeHelperProtocolProbeResult result;
+            NativeHelperContractProbeResult result;
             try
             {
-                result = probe(normalizedPath, NativeHelperProtocolProbeTimeoutMs);
+                result = probe(normalizedPath, NativeHelperContractProbeTimeoutMs);
             }
             catch (Exception ex)
             {
-                result = new NativeHelperProtocolProbeResult(
+                result = new NativeHelperContractProbeResult(
                     false, false, -1, string.Empty, false, ExceptionDiagnostic(ex));
             }
-            if (!TryAcceptNativeHelperProtocolProbe(result, out failureReason))
+            if (!TryAcceptNativeHelperContractProbe(result, out failureReason))
             {
-                LogNativeHelperProtocolFailure(
+                LogNativeHelperContractFailure(
                     normalizedPath,
                     failureReason,
                     stopwatch.ElapsedMilliseconds);
@@ -1460,8 +1492,8 @@ internal static class SidecarLauncher
                 validatedIdentity != identity)
             {
                 failureReason =
-                    "native helper protocol preflight failed: helper changed while it was being validated";
-                LogNativeHelperProtocolFailure(
+                    "native helper contract preflight failed: helper changed while it was being validated";
+                LogNativeHelperContractFailure(
                     normalizedPath,
                     failureReason,
                     stopwatch.ElapsedMilliseconds);
@@ -1471,13 +1503,13 @@ internal static class SidecarLauncher
             ValidatedNativeHelpers[normalizedPath] = validatedIdentity;
             VoiceDiagnostics.Log(
                 "sidecar.launch",
-                $"event=protocol-preflight-complete expected={SidecarVoiceClient.Proto} actual={SidecarVoiceClient.Proto} elapsedMs={stopwatch.ElapsedMilliseconds} helper={SafeDiagnosticField(normalizedPath, 512)}");
+                $"event=helper-contract-complete protocol={SidecarVoiceClient.Proto} engine={NativeHelperAudioEngine} cubeb={NativeHelperCubebVersion} elapsedMs={stopwatch.ElapsedMilliseconds} helper={SafeDiagnosticField(normalizedPath, 512)}");
             return true;
         }
     }
 
-    private static bool TryAcceptNativeHelperProtocolProbe(
-        NativeHelperProtocolProbeResult result,
+    private static bool TryAcceptNativeHelperContractProbe(
+        NativeHelperContractProbeResult result,
         out string failureReason)
     {
         failureReason = string.Empty;
@@ -1485,39 +1517,81 @@ internal static class SidecarLauncher
         if (!result.Started)
         {
             failureReason = diagnostic.Length == 0
-                ? "native helper protocol preflight failed to start"
-                : $"native helper protocol preflight failed to start: {diagnostic}";
+                ? "native helper contract preflight failed to start"
+                : $"native helper contract preflight failed to start: {diagnostic}";
             return false;
         }
         if (result.TimedOut)
         {
             failureReason =
-                $"native helper protocol preflight timed out after {NativeHelperProtocolProbeTimeoutMs} ms";
+                $"native helper contract preflight timed out after {NativeHelperContractProbeTimeoutMs} ms";
             return false;
         }
         if (result.ExitCode != 0)
         {
             failureReason = diagnostic.Length == 0
-                ? $"native helper protocol preflight failed with exit code {result.ExitCode}"
-                : $"native helper protocol preflight failed with exit code {result.ExitCode}: {diagnostic}";
+                ? $"native helper contract preflight failed with exit code {result.ExitCode}"
+                : $"native helper contract preflight failed with exit code {result.ExitCode}: {diagnostic}";
             return false;
         }
         if (result.StandardOutputTruncated)
         {
             failureReason =
-                $"native helper protocol preflight failed: {NativeHelperProtocolArgument} output exceeded {NativeHelperProtocolOutputLimit} characters";
+                $"native helper contract preflight failed: {NativeHelperContractArgument} output exceeded {NativeHelperContractOutputLimit} characters";
             return false;
         }
 
-        var actual = result.StandardOutput.Trim();
-        var expected = SidecarVoiceClient.Proto.ToString(
-            System.Globalization.CultureInfo.InvariantCulture);
-        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+        try
         {
-            var safeActual = SanitizeStderrForDiagnostics(actual, string.Empty);
-            if (safeActual.Length == 0) safeActual = "<empty>";
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("root is not an object");
+            if (!root.TryGetProperty("schema", out var schema) ||
+                !schema.TryGetInt32(out var actualSchema) ||
+                actualSchema != NativeHelperBuildInfoSchema)
+                throw new InvalidDataException(
+                    $"schema is not {NativeHelperBuildInfoSchema}");
+            if (!root.TryGetProperty("protocol", out var protocol) ||
+                !protocol.TryGetInt32(out var actualProtocol) ||
+                actualProtocol != SidecarVoiceClient.Proto)
+                throw new InvalidDataException(
+                    $"protocol is not {SidecarVoiceClient.Proto}");
+            if (!root.TryGetProperty("audio_engine", out var engine) ||
+                !string.Equals(engine.GetString(), NativeHelperAudioEngine, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    $"audio engine is not {NativeHelperAudioEngine}");
+            if (!root.TryGetProperty("cubeb_version", out var cubebVersion) ||
+                !string.Equals(
+                    cubebVersion.GetString(), NativeHelperCubebVersion, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    $"Cubeb version is not {NativeHelperCubebVersion}");
+            if (!root.TryGetProperty("contract", out var contract) ||
+                !string.Equals(contract.GetString(), NativeHelperAudioContract, StringComparison.Ordinal))
+                throw new InvalidDataException("audio contract marker is invalid");
+            if (!root.TryGetProperty("compiled_backends", out var backends) ||
+                backends.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("compiled backend inventory is missing");
+
+            var expectedBackends = new HashSet<string>(
+                ExpectedNativeHelperBackendsForCurrentProcess(), StringComparer.Ordinal);
+            var actualBackends = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var backend in backends.EnumerateArray())
+            {
+                if (backend.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrEmpty(backend.GetString()) ||
+                    !actualBackends.Add(backend.GetString()!))
+                    throw new InvalidDataException(
+                        "compiled backend inventory contains an invalid or duplicate entry");
+            }
+            if (!actualBackends.SetEquals(expectedBackends))
+                throw new InvalidDataException(
+                    "compiled backend inventory does not match this platform");
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException or InvalidOperationException)
+        {
             failureReason =
-                $"native helper protocol mismatch: expected {expected}, got {safeActual}";
+                $"native helper Cubeb contract mismatch: {ExceptionDiagnostic(ex)}";
             return false;
         }
         return true;
@@ -1540,29 +1614,38 @@ internal static class SidecarLauncher
             if (!info.Exists)
             {
                 failureReason =
-                    "native helper protocol preflight failed: helper file is unavailable";
+                    "native helper contract preflight failed: helper file is unavailable";
                 return false;
             }
+            string sha256;
+            using (var stream = new FileStream(
+                normalizedPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete))
+            using (var hash = SHA256.Create())
+                sha256 = Convert.ToHexString(hash.ComputeHash(stream));
             identity = new NativeHelperIdentity(
                 info.Length,
                 info.CreationTimeUtc.Ticks,
-                info.LastWriteTimeUtc.Ticks);
+                info.LastWriteTimeUtc.Ticks,
+                sha256);
             return true;
         }
         catch (Exception ex)
         {
             failureReason =
-                $"native helper protocol preflight could not inspect helper: {ExceptionDiagnostic(ex)}";
+                $"native helper contract preflight could not inspect helper: {ExceptionDiagnostic(ex)}";
             return false;
         }
     }
 
-    private static NativeHelperProtocolProbeResult RunNativeHelperProtocolProbe(
+    private static NativeHelperContractProbeResult RunNativeHelperContractProbe(
         string helperPath,
         int timeoutMs)
     {
-        var standardOutput = new BoundedProtocolProbeCapture(NativeHelperProtocolOutputLimit);
-        var standardError = new BoundedProtocolProbeCapture(NativeHelperProtocolDiagnosticLimit);
+        var standardOutput = new BoundedProtocolProbeCapture(NativeHelperContractOutputLimit);
+        var standardError = new BoundedProtocolProbeCapture(NativeHelperContractDiagnosticLimit);
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo(helperPath)
@@ -1573,13 +1656,13 @@ internal static class SidecarLauncher
                 CreateNoWindow = true,
             },
         };
-        process.StartInfo.ArgumentList.Add(NativeHelperProtocolArgument);
+        process.StartInfo.ArgumentList.Add(NativeHelperContractArgument);
         var started = false;
         try
         {
             if (!process.Start())
             {
-                return new NativeHelperProtocolProbeResult(
+                return new NativeHelperContractProbeResult(
                     false,
                     false,
                     -1,
@@ -1601,7 +1684,7 @@ internal static class SidecarLauncher
             try { if (!timedOut) exitCode = process.ExitCode; } catch { }
             var stdout = standardOutput.Snapshot();
             var stderr = standardError.Snapshot();
-            return new NativeHelperProtocolProbeResult(
+            return new NativeHelperContractProbeResult(
                 true,
                 timedOut,
                 exitCode,
@@ -1612,7 +1695,7 @@ internal static class SidecarLauncher
         catch (Exception ex)
         {
             var stdout = standardOutput.Snapshot();
-            return new NativeHelperProtocolProbeResult(
+            return new NativeHelperContractProbeResult(
                 started,
                 false,
                 -1,
@@ -1667,14 +1750,14 @@ internal static class SidecarLauncher
         try { Task.WaitAll(drains, 100); } catch { }
     }
 
-    private static void LogNativeHelperProtocolFailure(
+    private static void LogNativeHelperContractFailure(
         string helperPath,
         string failureReason,
         long elapsedMs = 0)
     {
         VoiceDiagnostics.Log(
             "sidecar.launch",
-            $"event=protocol-preflight-failed expected={SidecarVoiceClient.Proto} elapsedMs={elapsedMs} helper={SafeDiagnosticField(helperPath, 512)} reason={SafeDiagnosticField(failureReason, 320)}");
+            $"event=helper-contract-failed protocol={SidecarVoiceClient.Proto} engine={NativeHelperAudioEngine} cubeb={NativeHelperCubebVersion} elapsedMs={elapsedMs} helper={SafeDiagnosticField(helperPath, 512)} reason={SafeDiagnosticField(failureReason, 320)}");
     }
 
     public static SidecarDeviceEnumerationResult EnumerateDevices()
@@ -1714,7 +1797,7 @@ internal static class SidecarLauncher
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-prepare wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
-            if (!wine && !TryValidateNativeHelperProtocol(helperPath, out _))
+            if (!wine && !TryValidateNativeHelperContract(helperPath, out _))
                 return SidecarDeviceEnumerationResult.Failure;
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
             paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
@@ -1753,7 +1836,7 @@ internal static class SidecarLauncher
                     hostToken: null,
                     enumerate: true,
                     hostControl,
-                    SidecarVoiceClient.Proto,
+                    ExpectedNativeHelperBuildInfoJson(hostOs),
                     hostQuarantineTarget: hostQuarantineTarget);
             }
             else
@@ -1893,9 +1976,9 @@ internal static class SidecarLauncher
                 "sidecar.launch",
                 $"event=prepare wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
             if (!wine &&
-                !TryValidateNativeHelperProtocol(helperPath, out var protocolFailure))
+                !TryValidateNativeHelperContract(helperPath, out var contractFailure))
             {
-                result.FailureReason = protocolFailure;
+                result.FailureReason = contractFailure;
                 return result;
             }
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
@@ -1939,7 +2022,7 @@ internal static class SidecarLauncher
                     hostToken,
                     enumerate: false,
                     hostControl,
-                    SidecarVoiceClient.Proto,
+                    ExpectedNativeHelperBuildInfoJson(hostOs),
                     hostQuarantineTarget: hostQuarantineTarget);
 
                 process = Process.Start(wpsi);

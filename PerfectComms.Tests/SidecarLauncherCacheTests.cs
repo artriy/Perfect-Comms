@@ -230,7 +230,7 @@ public sealed class SidecarLauncherCacheTests
                 oddRoot + "/token",
                 enumerate: false,
                 control,
-                SidecarVoiceClient.Proto,
+                SidecarLauncher.ExpectedNativeHelperBuildInfoJson(WineHostOs.Linux),
                 hostQuarantineTarget: oddRoot + "/PerfectCommsAudio.app");
 
             Assert.Equal(secret, File.ReadAllText(localToken));
@@ -539,11 +539,12 @@ public sealed class SidecarLauncherCacheTests
         var helperExited = Path.Combine(privateDirectory, ".helper-exited");
         var launchCancelled = Path.Combine(privateDirectory, ".launch-cancelled");
         const string launchNonce = "ABCDEF0123456789";
+        var expectedBuildInfo = SidecarLauncher.ExpectedNativeHelperBuildInfoJsonForCurrentProcess();
         File.WriteAllText(token, "secret");
         File.WriteAllText(
             helper,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 13; exit 0; fi\n" +
+            $"if [ \"$1\" = \"--build-info\" ]; then printf '%s\\n' '{expectedBuildInfo}'; exit 0; fi\n" +
             "while [ \"$#\" -gt 0 ]; do\n" +
             "  if [ \"$1\" = \"--handshake\" ]; then shift; printf '%s' ok > \"$1\"; exit 0; fi\n" +
             "  shift\n" +
@@ -573,7 +574,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(helperExited);
             psi.ArgumentList.Add(launchCancelled);
             psi.ArgumentList.Add(launchNonce);
-            psi.ArgumentList.Add(SidecarVoiceClient.Proto.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add(expectedBuildInfo);
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             psi.ArgumentList.Add("--token-file");
@@ -620,16 +621,17 @@ public sealed class SidecarLauncherCacheTests
             Path.Combine(privateDirectory, ".launch-failed"),
             Path.Combine(privateDirectory, ".helper-exited"),
             Path.Combine(privateDirectory, ".launch-cancelled"));
+        var expectedBuildInfo = SidecarLauncher.ExpectedNativeHelperBuildInfoJsonForCurrentProcess();
         File.WriteAllText(token, "secret");
         File.WriteAllText(
             primary,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 9; exit 0; fi\n" +
+            "if [ \"$1\" = \"--build-info\" ]; then printf '%s\\n' stale-helper; exit 0; fi\n" +
             $"printf '%s' primary > '{selected}'; exit 91\n");
         File.WriteAllText(
             fallback,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 13; exit 0; fi\n" +
+            $"if [ \"$1\" = \"--build-info\" ]; then printf '%s\\n' '{expectedBuildInfo}'; exit 0; fi\n" +
             $"printf '%s' fallback > '{selected}'\n" +
             "while [ \"$#\" -gt 0 ]; do\n" +
             "  if [ \"$1\" = \"--handshake\" ]; then shift; printf '%s' ok > \"$1\"; exit 0; fi\n" +
@@ -660,7 +662,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(control.ExitPath);
             psi.ArgumentList.Add(control.CancellationPath);
             psi.ArgumentList.Add(control.Nonce);
-            psi.ArgumentList.Add(SidecarVoiceClient.Proto.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add(expectedBuildInfo);
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             psi.ArgumentList.Add("--token-file");
@@ -679,6 +681,85 @@ public sealed class SidecarLauncherCacheTests
             Assert.Equal("fallback", File.ReadAllText(selected));
             Assert.Equal("ok", File.ReadAllText(handshake));
             Assert.False(File.Exists(control.FailurePath));
+        }
+        finally
+        {
+            if (Directory.Exists(parent)) Directory.Delete(parent, true);
+        }
+    }
+
+    [Fact]
+    public void HostLaunchScriptRejectsSingleCandidateThatReportsCpalOnUnix()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var parent = NewTemporaryDirectory();
+        var privateDirectory = Path.Combine(parent, "perfect-comms-reject-cpal");
+        Directory.CreateDirectory(privateDirectory);
+        var helper = Path.Combine(privateDirectory, "stale-helper");
+        var handshake = Path.Combine(privateDirectory, "handshake.json");
+        var launched = Path.Combine(parent, "stale-helper-launched");
+        var control = new WineLaunchControlPaths(
+            "REJECTCPAL012345",
+            Path.Combine(privateDirectory, ".launch-owned"),
+            Path.Combine(privateDirectory, ".launch-started"),
+            Path.Combine(privateDirectory, ".launch-failed"),
+            Path.Combine(privateDirectory, ".helper-exited"),
+            Path.Combine(privateDirectory, ".launch-cancelled"));
+        var staleBuildInfo = SidecarLauncher.ExpectedNativeHelperBuildInfoJsonForCurrentProcess()
+            .Replace("\"audio_engine\":\"cubeb\"", "\"audio_engine\":\"cpal\"",
+                StringComparison.Ordinal);
+        File.WriteAllText(
+            helper,
+            "#!/bin/sh\n" +
+            $"if [ \"$1\" = \"--build-info\" ]; then printf '%s\\n' '{staleBuildInfo}'; exit 0; fi\n" +
+            $"printf '%s' launched > '{launched}'\n" +
+            "exit 0\n");
+        try
+        {
+            var psi = new ProcessStartInfo("/bin/sh")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add(SidecarLauncher.WineHelperLaunchScript);
+            psi.ArgumentList.Add("perfect-comms-bootstrap");
+            psi.ArgumentList.Add(privateDirectory);
+            psi.ArgumentList.Add(string.Empty);
+            psi.ArgumentList.Add(helper);
+            psi.ArgumentList.Add(string.Empty);
+            psi.ArgumentList.Add(string.Empty);
+            psi.ArgumentList.Add(string.Empty);
+            psi.ArgumentList.Add(string.Empty);
+            psi.ArgumentList.Add(handshake);
+            psi.ArgumentList.Add(control.OwnershipPath);
+            psi.ArgumentList.Add(control.StartedPath);
+            psi.ArgumentList.Add(control.FailurePath);
+            psi.ArgumentList.Add(control.ExitPath);
+            psi.ArgumentList.Add(control.CancellationPath);
+            psi.ArgumentList.Add(control.Nonce);
+            psi.ArgumentList.Add(SidecarLauncher.ExpectedNativeHelperBuildInfoJsonForCurrentProcess());
+            psi.ArgumentList.Add("--handshake");
+            psi.ArgumentList.Add(handshake);
+            using var process = Process.Start(psi);
+            Assert.NotNull(process);
+            var completed = process!.WaitForExit(5_000);
+            if (!completed)
+            {
+                try { process.Kill(); } catch { }
+                try { process.WaitForExit(1_000); } catch { }
+            }
+            var stderr = process.StandardError.ReadToEnd();
+
+            Assert.True(completed, stderr);
+            Assert.Equal(126, process.ExitCode);
+            Assert.False(File.Exists(launched));
+            Assert.False(File.Exists(control.StartedPath));
+            Assert.True(SidecarLauncher.TryReadWineLaunchFailure(
+                control, out var reason, out var failureCode));
+            Assert.Equal("no-executable-candidate", reason);
+            Assert.Equal(126, failureCode);
         }
         finally
         {
@@ -706,16 +787,17 @@ public sealed class SidecarLauncherCacheTests
             Path.Combine(privateDirectory, ".launch-failed"),
             Path.Combine(privateDirectory, ".helper-exited"),
             Path.Combine(privateDirectory, ".launch-cancelled"));
+        var expectedBuildInfo = SidecarLauncher.ExpectedNativeHelperBuildInfoJsonForCurrentProcess();
         File.WriteAllText(token, "secret");
         File.WriteAllText(
             primary,
             "#!/bin/sh\n" +
-            $"if [ \"$1\" = \"--protocol-version\" ]; then printf '%s' entered > '{probeEntered}'; exec /bin/sleep 30; fi\n" +
+            $"if [ \"$1\" = \"--build-info\" ]; then printf '%s' entered > '{probeEntered}'; exec /bin/sleep 30; fi\n" +
             "exit 90\n");
         File.WriteAllText(
             fallback,
             "#!/bin/sh\n" +
-            "if [ \"$1\" = \"--protocol-version\" ]; then printf '%s\\n' 13; exit 0; fi\n" +
+            $"if [ \"$1\" = \"--build-info\" ]; then printf '%s\\n' '{expectedBuildInfo}'; exit 0; fi\n" +
             "exit 0\n");
         try
         {
@@ -743,7 +825,7 @@ public sealed class SidecarLauncherCacheTests
             psi.ArgumentList.Add(control.ExitPath);
             psi.ArgumentList.Add(control.CancellationPath);
             psi.ArgumentList.Add(control.Nonce);
-            psi.ArgumentList.Add(SidecarVoiceClient.Proto.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add(expectedBuildInfo);
             psi.ArgumentList.Add("--handshake");
             psi.ArgumentList.Add(handshake);
             using var process = Process.Start(psi);

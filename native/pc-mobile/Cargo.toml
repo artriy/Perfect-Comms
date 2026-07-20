@@ -22,3 +22,9 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+# pc-mobile owns the release-wide lockfile, so it must resolve the same patched
+# Cubeb crates as pc-capture even though Android does not compile desktop audio.
+cubeb = { path = "../vendor/cubeb" }
+cubeb-sys = { path = "../vendor/cubeb-sys" }

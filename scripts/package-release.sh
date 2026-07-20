@@ -56,6 +56,10 @@ copy_third_party_license_texts() {
 	mkdir -p "$destination/licenses"
 	local source
 	for source in \
+		libcubeb.LICENSE \
+		cubeb-rs.LICENSE \
+		cubeb-speex-resampler.LICENSE \
+		cubeb-coreaudio-rust-dependencies.html \
 		opus.COPYING \
 		opusic-c.COPYING \
 		webrtc-apm.COPYING \
@@ -73,6 +77,12 @@ copy_third_party_license_texts() {
 		pion-go-dependencies.txt; do
 		require_nonempty "$root/Libs/$source"
 	done
+	cp "$root/Libs/libcubeb.LICENSE" "$destination/licenses/libcubeb-ISC.txt"
+	cp "$root/Libs/cubeb-rs.LICENSE" "$destination/licenses/cubeb-rs-ISC.txt"
+	cp "$root/Libs/cubeb-speex-resampler.LICENSE" \
+		"$destination/licenses/cubeb-speex-resampler-BSD-3-Clause.txt"
+	cp "$root/Libs/cubeb-coreaudio-rust-dependencies.html" \
+		"$destination/licenses/cubeb-coreaudio-rust-dependencies.html"
 	cp "$root/Libs/opus.COPYING" "$destination/licenses/libopus-BSD-3-Clause.txt"
 	cp "$root/Libs/opusic-c.COPYING" "$destination/licenses/opusic-c-BSD-3-Clause.txt"
 	cp "$root/Libs/webrtc-apm.COPYING" "$destination/licenses/webrtc-audio-processing-BSD-3-Clause.txt"
@@ -173,6 +183,11 @@ else
 	echo "Python 3 is required to verify native release asset formats and architectures." >&2
 	exit 1
 fi
+if [[ "$config" != "Android" ]]; then
+	"$asset_python" "$root/scripts/verify-release-assets.py" \
+		--helper-build-info "$linux_helper" \
+		--expected-protocol "$sidecar_protocol"
+fi
 "$asset_python" "$root/scripts/verify-release-assets.py" \
 	--root "$root" --configuration "$config"
 
@@ -180,7 +195,16 @@ if command -v cygpath >/dev/null 2>&1; then
 	dotnet_project="$(cygpath -w "$project")"
 fi
 
-dotnet build "$dotnet_project" -c "$config" --nologo -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true
+dotnet build "$dotnet_project" -c "$config" --nologo --no-incremental \
+	-p:RestoreLockedMode=true -p:ValidateReleaseAssets=true
+
+if [[ "$config" != "Android" ]]; then
+	dotnet test "$root/PerfectComms.Tests/PerfectComms.Tests.csproj" \
+		-c "$config" --nologo \
+		--filter 'FullyQualifiedName~EmbeddedDesktopHelpersMatchStagedFiles' \
+		-p:RestoreLockedMode=true -p:ValidateReleaseAssets=true
+	echo "release.package.embedded_helpers_match configuration=$config"
+fi
 
 rm -rf "$output"
 mkdir -p "$output/BepInEx/plugins"

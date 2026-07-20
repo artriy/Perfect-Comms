@@ -402,7 +402,7 @@ public class VoiceChatRoom
 #if WINDOWS
         var settings = VoiceSettings.Instance;
         // Repeating the empty selection is intentional here: the persisted choice is still
-        // "Default", but the OS endpoint behind that choice changed and CPAL streams do not
+        // "Default", but the OS endpoint behind that choice changed and native streams do not
         // migrate to it automatically.
         _voiceBackend?.SetMicrophone(
             string.Empty, settings?.MicVolume.Value ?? 1f, forceRestart: true);

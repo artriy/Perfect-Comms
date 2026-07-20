@@ -10,6 +10,10 @@ from pathlib import Path, PurePosixPath
 
 
 LICENSE_FILES = {
+    "licenses/libcubeb-ISC.txt",
+    "licenses/cubeb-rs-ISC.txt",
+    "licenses/cubeb-speex-resampler-BSD-3-Clause.txt",
+    "licenses/cubeb-coreaudio-rust-dependencies.html",
     "licenses/libopus-BSD-3-Clause.txt",
     "licenses/opusic-c-BSD-3-Clause.txt",
     "licenses/webrtc-audio-processing-BSD-3-Clause.txt",

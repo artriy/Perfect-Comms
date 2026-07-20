@@ -2,10 +2,12 @@
 
 PerfectComms native host-side microphone capture helper.
 
-Captures audio via cpal (CoreAudio / WASAPI / ALSA-PipeWire), resamples to
-48000 Hz mono f32 in 20ms (960-sample) frames, and streams them plus a JSON
-control channel over a loopback TCP connection (127.0.0.1, ephemeral port,
-stdin token auth) to the PerfectComms BepInEx mod.
+Captures and plays audio through Mozilla Cubeb, using WASAPI (with Cubeb's
+WinMM fallback) on Windows,
+AudioUnit on macOS, and PulseAudio with ALSA fallback on Linux. Capture is
+resampled to 48000 Hz mono f32 in 20ms (960-sample) frames and streamed with a
+JSON control channel over a loopback TCP connection (127.0.0.1, ephemeral
+port, stdin token auth) to the PerfectComms BepInEx mod.
 
 Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled
 libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the
@@ -96,19 +98,24 @@ Linux x64, macOS x64/arm64/universal, and Android ARM64 targets are supported.
 
 The crate is target-agnostic Rust with no host-only constructs, so each target
 above is built by its own CI runner (native compile per OS). Each target builds
-where its native toolchain and system audio libraries live: Windows targets on a
-Windows runner (WASAPI), the Linux target on a Linux runner (ALSA/PipeWire via
-`alsa-sys`, which needs ALSA dev headers), and the macOS targets on a macOS
-runner (CoreAudio + Apple toolchain).
+where its native toolchain and system audio libraries live: Windows targets on
+a Windows runner (Cubeb/WASAPI with WinMM fallback), the Linux target on a Linux runner
+(Cubeb/PulseAudio with ALSA fallback), and the macOS targets on a macOS runner
+(Cubeb/AudioUnit + Apple toolchain). Cubeb is C/C++ and Rust internally, so
+CMake 3.19 or newer and a C/C++ compiler are required. Linux builds also need
+`pkg-config`, `libpulse-dev`, and `libasound2-dev`; those headers compile both
+host backends while Cubeb loads the available system audio service at runtime.
+The release verifier rejects hard `DT_NEEDED` links to PulseAudio, ALSA, or an
+external Cubeb library, so the helper can still start on Pulse/PipeWire and
+ALSA-only hosts even when the other audio library is not installed.
 
 Cross-compiling from a single host is not assumed. `cargo build --release`,
 `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and
-`cargo test` were all verified on the native host. Building a non-host target
-from this machine needs that target's system audio libs and linker (for example
-the Linux build needs ALSA dev headers and a cross sysroot for pkg-config), so
-non-host targets are produced on their own CI runners. Cross-target builds,
-`lipo`, codesign, and notarization are owned by the distribution plan, not this
-crate.
+`cargo test` are run on native hosts. Building a non-host target needs that
+target's C/C++ toolchain, system audio headers/frameworks, linker, and a
+correctly configured Cargo/CMake cross environment, so non-host targets are
+produced on their own CI runners. Cross-target builds, `lipo`, codesign, and
+notarization are owned by the distribution plan, not this crate.
 
 macOS ships universal (`lipo x86_64 + aarch64`) inside a minimal `.app` bundle
 with `Info.plist` `NSMicrophoneUsageDescription`, ad-hoc codesigned (`codesign
@@ -122,3 +129,46 @@ as embedded resources. On Windows and Linux, the mod extracts the embedded,
 content-matched Pion library beside the helper; macOS uses the copy already
 inside the signed app. Android extracts its Pion resource and passes the exact
 absolute path to `pc-mobile` before creating the transport.
+
+Cubeb itself is compiled from the version pinned by `Cargo.lock` and statically
+linked into each desktop helper. There is no `cubeb.dll`, `libcubeb.so`, or
+`libcubeb.dylib` to install or ship. `LIBCUBEB_SYS_USE_PKG_CONFIG` is
+intentionally cleared by the release build scripts so an ambient system Cubeb
+cannot change that packaging contract. The scripts isolate pkg-config discovery
+so Cubeb deterministically compiles its vendored Speex resampler. Output-level
+PE, ELF, and Mach-O checks reject external Cubeb
+or speexdsp libraries, covering stale local Cargo/CMake caches as well as clean
+CI builds.
+
+`pc-capture --build-info` reports protocol 13, Cubeb 0.36.0, the immutable
+Perfect Comms audio-contract marker, and the exact backends compiled into that
+binary. Packaging executes this probe, and the managed launcher requires the
+same contract before every uncached native launch, including host-native
+Wine/CrossOver/Proton launches. A retired same-protocol helper cannot pass this
+check.
+
+Linux deliberately enables cubeb-sys's upstream `unittest-build` feature for
+production. Despite that feature's name, it is the upstream switch that omits
+the nested Rust backends; this keeps Cubeb's C PulseAudio and ALSA backends in
+lazy-load mode. The tradeoff is intentional: the C Pulse path is legacy and
+ALSA has a lower upstream support tier, but a host missing `libpulse.so.0` can
+still start and use ALSA. Cubeb's ALSA enumerator exposes only its single
+`default` endpoint upstream, so Perfect Comms supplements it with ALSA PCM
+hints and passes an explicitly selected raw PCM name back through Cubeb. This
+preserves wired, USB, `plug`, and `plughw` choices on ALSA-only machines.
+PulseAudio and PipeWire's Pulse service retain Cubeb's own per-device list.
+Windows keeps WASAPI, and macOS keeps Cubeb's current Rust AudioUnit backend.
+
+For deterministic Linux diagnostics and CI, `PC_CUBEB_BACKEND=pulse` or
+`PC_CUBEB_BACKEND=alsa` forces one of those two compiled backends. Normal
+launches leave it unset so Cubeb performs its standard ordered selection;
+unrecognized values and all non-Linux overrides are ignored.
+
+The headless build gates validate backend selection policy and binary linkage,
+not physical endpoint routing. Headsets, wired-jack route changes, hot-plugging,
+and OS permissions still require real-device validation on each host audio
+stack.
+
+Android audio is deliberately outside this dependency: `pc-mobile` continues
+to receive Unity `Microphone` PCM and returns mixed PCM to a Unity
+`AudioSource`. The Android build does not compile or link Cubeb.

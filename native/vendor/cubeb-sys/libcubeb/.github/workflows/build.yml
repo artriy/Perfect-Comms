@@ -1,0 +1,114 @@
+name: Build
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    env:
+      BUILD_TYPE: ${{ matrix.type }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+        type: [Release, Debug]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Install Dependencies (Linux)
+      run: sudo apt-get update && sudo apt-get install libpulse-dev pulseaudio
+      if: matrix.os == 'ubuntu-24.04'
+
+    - name: Start Sound Server (Linux)
+      run: pulseaudio -D --start --exit-idle-time=-1
+      if: matrix.os == 'ubuntu-24.04'
+
+    - name: Cache VB-CABLE package (Windows)
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}\vbcable-cache
+        key: vbcable-driver-pack43-${{ runner.os }}-66fd0a4d9f4896ff41632b7e3d53892c085c4561f53e8ae8d0f0bc10eedd1cdd
+      if: ${{ matrix.os == 'windows-2025' }}
+
+    - name: Install virtual audio devices (Windows)
+      shell: pwsh
+      env:
+        VBCABLE_CACHE_DIR: ${{ runner.temp }}\vbcable-cache
+      run: .\.github\scripts\setup_windows_audio.ps1
+      if: ${{ matrix.os == 'windows-2025' }}
+
+    - name: Allow microphone access to all apps (Windows)
+      shell: pwsh
+      run: |
+        New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy\"
+        New-ItemProperty -Path "HKLM:\SOFTWARE\policies\microsoft\windows\appprivacy" -Name "LetAppsAccessMicrophone" -Value "0x00000001"  -PropertyType "dword"
+      if: ${{ matrix.os == 'windows-2025' }}
+
+    - name: Install virtual audio devices (macOS)
+      if: ${{ matrix.os == 'macos-15' || matrix.os == 'macos-15-intel' }}
+      run: |
+        brew install switchaudio-osx
+        brew install blackhole-2ch
+        sudo kill -9 `pgrep coreaudiod`
+        sleep 10
+        SwitchAudioSource -s "BlackHole 2ch" -t input
+        SwitchAudioSource -s "BlackHole 2ch" -t output
+
+    - name: Configure CMake
+      shell: bash
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE
+
+    - name: Build
+      shell: bash
+      run: cmake --build build
+
+    - name: Test
+      shell: bash
+      run: (cd build && ctest -V)
+
+    - name: Test winmm
+      shell: bash
+      run: (cd build && CUBEB_BACKEND=winmm ctest -V)
+      if: ${{ matrix.os == 'windows-2025' }}
+
+  build-android:
+    runs-on: ubuntu-24.04
+    env:
+      BUILD_TYPE: ${{ matrix.type }}
+      BUILD_ARCH: ${{ matrix.arch }}
+    strategy:
+      matrix:
+        type: [Release, Debug]
+        arch: [arm64-v8a, armeabi-v7a, x86_64]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Configure CMake
+      shell: bash
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_NATIVE_API_LEVEL=android-28 -DANDROID_ABI=$BUILD_ARCH
+
+    - name: Build
+      shell: bash
+      run: cmake --build build
+
+  check_format:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Install Dependencies (Linux)
+      run: sudo apt-get update && sudo apt-get install clang-format-18
+
+    - name: Configure CMake
+      shell: bash
+      run: cmake -S . -B build -DCLANG_FORMAT_BINARY=clang-format-18
+
+    - name: Check format
+      shell: bash
+      run: cmake --build build --target clang-format-check
