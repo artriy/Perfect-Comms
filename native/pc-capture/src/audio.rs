@@ -1710,7 +1710,7 @@ impl AlsaHintApi {
         // SAFETY: constant NUL-terminated soname and standard dlopen flags.
         let handle = unsafe {
             libc::dlopen(
-                b"libasound.so.2\0".as_ptr().cast(),
+                c"libasound.so.2".as_ptr(),
                 libc::RTLD_LAZY | libc::RTLD_LOCAL,
             )
         };
@@ -1761,8 +1761,7 @@ fn enumerate_alsa_hint_devices() -> Result<Vec<AlsaHintDevice>, String> {
     let api = AlsaHintApi::load()?;
     let mut hints: *mut *mut libc::c_void = ptr::null_mut();
     // SAFETY: output pointer is valid and ALSA owns the returned null-terminated hint array.
-    let result =
-        unsafe { (api.device_name_hint)(-1, b"pcm\0".as_ptr().cast(), &mut hints as *mut _) };
+    let result = unsafe { (api.device_name_hint)(-1, c"pcm".as_ptr(), &mut hints as *mut _) };
     if result < 0 || hints.is_null() {
         return Err(format!("enumerate ALSA PCM hints: error {result}"));
     }
@@ -1822,8 +1821,8 @@ fn enumerate_alsa_hint_devices() -> Result<Vec<AlsaHintDevice>, String> {
     Ok(devices)
 }
 
-fn cubeb_preference_is_default(preferred_bits: u32) -> bool {
-    preferred_bits & cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA as u32 != 0
+fn cubeb_preference_is_default(preferred_bits: impl Into<i64>) -> bool {
+    preferred_bits.into() & i64::from(cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA) != 0
 }
 
 fn enumerate_cubeb_devices(direction: DeviceType) -> Result<Vec<DeviceInfo>, String> {
@@ -1887,7 +1886,7 @@ fn enumerate_cubeb_devices(direction: DeviceType) -> Result<Vec<DeviceInfo>, Str
             // A default stream with StreamPrefs::NONE follows the multimedia/console route.
             // WASAPI can separately mark the communications endpoint as VOICE; that endpoint
             // must not replace the actual default in the managed device picker.
-            default: cubeb_preference_is_default(info.preferred().bits() as u32),
+            default: cubeb_preference_is_default(info.preferred().bits()),
         });
     }
     out.sort_by(|left, right| {
@@ -4695,16 +4694,16 @@ mod tests {
     #[test]
     fn cubeb_default_marker_tracks_multimedia_not_voice_preference() {
         assert!(!cubeb_preference_is_default(
-            cubeb::ffi::CUBEB_DEVICE_PREF_NONE as u32
+            cubeb::ffi::CUBEB_DEVICE_PREF_NONE
         ));
         assert!(!cubeb_preference_is_default(
-            cubeb::ffi::CUBEB_DEVICE_PREF_VOICE as u32
+            cubeb::ffi::CUBEB_DEVICE_PREF_VOICE
         ));
         assert!(cubeb_preference_is_default(
-            cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA as u32
+            cubeb::ffi::CUBEB_DEVICE_PREF_MULTIMEDIA
         ));
         assert!(cubeb_preference_is_default(
-            cubeb::ffi::CUBEB_DEVICE_PREF_ALL as u32
+            cubeb::ffi::CUBEB_DEVICE_PREF_ALL
         ));
     }
 
