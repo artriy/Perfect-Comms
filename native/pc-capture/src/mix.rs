@@ -20,6 +20,7 @@ const WALL_COMBS: [usize; 4] = [397, 439, 491, 547];
 const WALL_ALLPASS: [usize; 2] = [185, 141];
 const GHOST_TAIL_SAMPLES: usize = crate::codec::SAMPLE_RATE as usize * 2;
 const WALL_TAIL_SAMPLES: usize = crate::codec::SAMPLE_RATE as usize;
+const FILTER_TRANSITION_SAMPLES: usize = 96; // 2 ms at 48 kHz.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterMode {
@@ -154,6 +155,31 @@ fn apply_filter(
     }
 }
 
+fn add_routed_sample(
+    mode: FilterMode,
+    frame: usize,
+    left: f32,
+    right: f32,
+    out_stereo: &mut [f32],
+    ghost_send: &mut [f32],
+    wall_send: &mut [f32],
+) {
+    match mode {
+        FilterMode::Ghost => {
+            ghost_send[2 * frame] += left;
+            ghost_send[2 * frame + 1] += right;
+        }
+        FilterMode::WallMuffle | FilterMode::ListenerMuffle => {
+            wall_send[2 * frame] += left;
+            wall_send[2 * frame + 1] += right;
+        }
+        _ => {
+            out_stereo[2 * frame] += left;
+            out_stereo[2 * frame + 1] += right;
+        }
+    }
+}
+
 struct Reverb {
     feedback: f32,
     comb_l: Vec<Vec<f32>>,
@@ -267,6 +293,10 @@ struct Glide {
     mode: FilterMode,
     bz1: f32,
     bz2: f32,
+    previous_mode: FilterMode,
+    previous_bz1: f32,
+    previous_bz2: f32,
+    transition_remaining: usize,
 }
 
 pub struct Mixer {
@@ -283,6 +313,7 @@ pub struct Mixer {
     ghost_tail: usize,
     wall_tail: usize,
     observed_deafen_epoch: u64,
+    had_input_last_round: bool,
 }
 
 impl Default for Mixer {
@@ -307,6 +338,7 @@ impl Mixer {
             ghost_tail: 0,
             wall_tail: 0,
             observed_deafen_epoch: 0,
+            had_input_last_round: false,
         }
     }
 
@@ -322,6 +354,13 @@ impl Mixer {
         self.ghost_lp_z2 = 0.0;
         self.ghost_tail = 0;
         self.wall_tail = 0;
+        self.had_input_last_round = false;
+    }
+
+    /// True while one empty 20 ms mix is needed to flush per-peer filter state or while an
+    /// existing reverb tail still has samples to render.
+    pub fn needs_idle_mix(&self) -> bool {
+        self.had_input_last_round || self.ghost_tail > 0 || self.wall_tail > 0
     }
 
     pub fn mix(&mut self, per_peer: &[(String, &[f32])], gs: &GameState, out_stereo: &mut [f32]) {
@@ -334,6 +373,7 @@ impl Mixer {
             self.observed_deafen_epoch = snap.deafen_epoch;
         }
         if snap.local.deafened {
+            self.had_input_last_round = false;
             return;
         }
         let frames = out_stereo.len() / 2;
@@ -365,40 +405,79 @@ impl Mixer {
                 mode,
                 bz1: 0.0,
                 bz2: 0.0,
+                previous_mode: mode,
+                previous_bz1: 0.0,
+                previous_bz2: 0.0,
+                transition_remaining: 0,
             });
             if g.mode != mode {
+                g.previous_mode = g.mode;
+                g.previous_bz1 = g.bz1;
+                g.previous_bz2 = g.bz2;
+                g.transition_remaining = FILTER_TRANSITION_SAMPLES;
                 g.mode = mode;
                 g.bz1 = 0.0;
                 g.bz2 = 0.0;
             }
-            let n = frames.min(mono.len());
-            for f in 0..n {
-                let s = apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, mono[f]);
-                g.left += GAIN_GLIDE_K * (target.0 - g.left);
-                g.right += GAIN_GLIDE_K * (target.1 - g.right);
-                let sl = s * g.left;
-                let sr = s * g.right;
-                // Ghost / occlusion routes go to a reverb send bus (mixed back below with their
-                // dry+wet levels); everyone else mixes straight to the output.
-                match mode {
-                    FilterMode::Ghost => {
-                        self.ghost_send[2 * f] += sl;
-                        self.ghost_send[2 * f + 1] += sr;
-                    }
-                    FilterMode::WallMuffle | FilterMode::ListenerMuffle => {
-                        self.wall_send[2 * f] += sl;
-                        self.wall_send[2 * f + 1] += sr;
-                    }
-                    _ => {
-                        out_stereo[2 * f] += sl;
-                        out_stereo[2 * f + 1] += sr;
-                    }
+            let transition_mode = (g.transition_remaining > 0).then_some(g.previous_mode);
+            for active_mode in [Some(mode), transition_mode].into_iter().flatten() {
+                match active_mode {
+                    FilterMode::Ghost => any_ghost = true,
+                    FilterMode::WallMuffle | FilterMode::ListenerMuffle => any_wall = true,
+                    _ => {}
                 }
             }
-            match mode {
-                FilterMode::Ghost => any_ghost = true,
-                FilterMode::WallMuffle | FilterMode::ListenerMuffle => any_wall = true,
-                _ => {}
+            let n = frames.min(mono.len());
+            for f in 0..n {
+                let current = apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, mono[f]);
+                g.left += GAIN_GLIDE_K * (target.0 - g.left);
+                g.right += GAIN_GLIDE_K * (target.1 - g.right);
+                if g.transition_remaining == 0 {
+                    add_routed_sample(
+                        mode,
+                        f,
+                        current * g.left,
+                        current * g.right,
+                        out_stereo,
+                        &mut self.ghost_send,
+                        &mut self.wall_send,
+                    );
+                    continue;
+                }
+
+                let previous = apply_filter(
+                    g.previous_mode,
+                    &lp650,
+                    &hp650,
+                    &mut g.previous_bz1,
+                    &mut g.previous_bz2,
+                    mono[f],
+                );
+                let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
+                let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
+                    1.0
+                } else {
+                    completed as f32 / (FILTER_TRANSITION_SAMPLES - 1) as f32
+                };
+                add_routed_sample(
+                    g.previous_mode,
+                    f,
+                    previous * g.left * (1.0 - progress),
+                    previous * g.right * (1.0 - progress),
+                    out_stereo,
+                    &mut self.ghost_send,
+                    &mut self.wall_send,
+                );
+                add_routed_sample(
+                    mode,
+                    f,
+                    current * g.left * progress,
+                    current * g.right * progress,
+                    out_stereo,
+                    &mut self.ghost_send,
+                    &mut self.wall_send,
+                );
+                g.transition_remaining -= 1;
             }
         }
 
@@ -467,6 +546,17 @@ impl Mixer {
         if sample_index < out_stereo.len() {
             out_stereo[sample_index] = soft_limit_sample(out_stereo[sample_index]);
         }
+
+        for (peer, glide) in self.glide.iter_mut() {
+            if !per_peer.iter().any(|(present, _)| present == peer) {
+                glide.bz1 = 0.0;
+                glide.bz2 = 0.0;
+                glide.previous_bz1 = 0.0;
+                glide.previous_bz2 = 0.0;
+                glide.transition_remaining = 0;
+            }
+        }
+        self.had_input_last_round = !per_peer.is_empty();
 
         self.glide
             .retain(|k, _| snap.peers.contains_key(k) || per_peer.iter().any(|(pid, _)| pid == k));
@@ -538,6 +628,9 @@ struct PeerQueue {
     jitter_frames: f64,
     stable_arrivals: usize,
     shed_quiet_frame: bool,
+    last_output_sample: f32,
+    has_rendered: bool,
+    transition_from: Option<f32>,
 }
 
 impl PeerQueue {
@@ -553,10 +646,17 @@ impl PeerQueue {
             jitter_frames: 0.0,
             stable_arrivals: 0,
             shed_quiet_frame: false,
+            last_output_sample: 0.0,
+            has_rendered: false,
+            transition_from: None,
         }
     }
 
     fn reset_playout(&mut self) {
+        if self.has_rendered {
+            self.transition_from = Some(self.last_output_sample);
+            self.has_rendered = false;
+        }
         self.frames.clear();
         self.front_offset = 0;
         self.recovery_debt_samples = 0;
@@ -749,12 +849,15 @@ impl PeerJitter {
             && interval.is_some_and(|elapsed| elapsed >= JITTER_UNDERRUN_REBUFFER)
         {
             q.primed = false;
+            q.transition_from = Some(q.last_output_sample);
+            q.has_rendered = false;
         }
         if q.frames.len() >= cap {
             if let Some(evicted) = q.frames.pop_front() {
                 let evicted_samples = evicted.len().saturating_sub(q.front_offset);
                 q.front_offset = 0;
                 q.recovery_debt_samples = q.recovery_debt_samples.saturating_sub(evicted_samples);
+                q.transition_from = Some(q.last_output_sample);
                 self.metrics
                     .overflow_evicted_frames
                     .fetch_add(1, Ordering::Relaxed);
@@ -814,6 +917,13 @@ impl PeerJitter {
         self.peers.remove(peer);
     }
 
+    /// Clears stale decoded PCM while preserving the last rendered boundary for a smooth restart.
+    pub fn reset_peer(&mut self, peer: &str) {
+        if let Some(queue) = self.peers.get_mut(peer) {
+            queue.reset_playout();
+        }
+    }
+
     pub fn playout_round(&mut self) -> Vec<(String, Vec<f32>)> {
         let mut out = Vec::new();
         let metrics = &self.metrics;
@@ -843,11 +953,18 @@ impl PeerJitter {
             }
 
             let available = q.available_samples();
+            let output_samples = q.frame_samples.max(1);
             if available == 0 {
                 q.primed = false;
+                if q.has_rendered {
+                    let frame = fade_from_sample(q.last_output_sample, output_samples);
+                    q.last_output_sample = 0.0;
+                    q.has_rendered = false;
+                    q.transition_from = Some(0.0);
+                    out.push((peer.clone(), frame));
+                }
                 continue;
             }
-            let output_samples = q.frame_samples.max(1);
             if available < output_samples {
                 // Catch-up advances through frame boundaries, so a transport stall can leave a
                 // partial decoded tail. Never hand a short vector to the fixed-cadence mixer: fade
@@ -857,7 +974,14 @@ impl PeerJitter {
                 q.recovery_debt_samples = 0;
                 q.primed = false;
                 q.shed_quiet_frame = false;
-                out.push((peer.clone(), fade_and_pad_tail(&source, output_samples)));
+                let mut frame = fade_and_pad_tail(&source, output_samples);
+                if let Some(from) = q.transition_from.take() {
+                    crossfade_head(&mut frame, from);
+                }
+                q.last_output_sample = 0.0;
+                q.has_rendered = false;
+                q.transition_from = Some(0.0);
+                out.push((peer.clone(), frame));
                 continue;
             }
             let max_extra = (output_samples / JITTER_CATCHUP_MAX_RATE_DIVISOR).max(1);
@@ -866,7 +990,7 @@ impl PeerJitter {
                 .min(max_extra)
                 .min(available.saturating_sub(output_samples));
             let input_samples = output_samples + extra;
-            let frame = if extra == 0
+            let mut frame = if extra == 0
                 && q.front_offset == 0
                 && q.frames
                     .front()
@@ -892,13 +1016,20 @@ impl PeerJitter {
                 q.consume_prefix(input_samples);
                 frame
             };
+            if let Some(from) = q.transition_from.take() {
+                crossfade_head(&mut frame, from);
+            }
+            q.last_output_sample = frame.last().copied().unwrap_or(0.0);
+            q.has_rendered = true;
             out.push((peer.clone(), frame));
         }
         out
     }
 
     pub fn is_idle(&self) -> bool {
-        self.peers.values().all(|q| q.frames.is_empty())
+        self.peers
+            .values()
+            .all(|q| q.frames.is_empty() && !q.primed)
     }
 
     pub fn metrics_snapshot(&self) -> DecodedPlayoutSnapshot {
@@ -959,6 +1090,33 @@ fn overlap_accelerate(source: &[f32], output_samples: usize, extra: usize) -> Ve
     output.extend_from_slice(&source[cut + extra + overlap..]);
     debug_assert_eq!(output.len(), output_samples);
     output
+}
+
+fn fade_from_sample(from: f32, output_samples: usize) -> Vec<f32> {
+    let mut output = vec![0.0; output_samples];
+    let fade = output_samples.min(JITTER_TAIL_FADE_SAMPLES);
+    if fade == 1 {
+        output[0] = 0.0;
+    } else if fade > 1 {
+        for (index, sample) in output[..fade].iter_mut().enumerate() {
+            let phase = index as f32 / (fade - 1) as f32;
+            let gain = 0.5 + 0.5 * (std::f32::consts::PI * phase).cos();
+            *sample = from * gain;
+        }
+    }
+    output
+}
+
+fn crossfade_head(frame: &mut [f32], from: f32) {
+    let fade = frame.len().min(JITTER_TAIL_FADE_SAMPLES);
+    if fade == 1 {
+        return;
+    }
+    for (index, sample) in frame[..fade].iter_mut().enumerate() {
+        let phase = index as f32 / (fade - 1) as f32;
+        let weight = 0.5 - 0.5 * (std::f32::consts::PI * phase).cos();
+        *sample = from + (*sample - from) * weight;
+    }
 }
 
 fn fade_and_pad_tail(source: &[f32], output_samples: usize) -> Vec<f32> {
@@ -1054,6 +1212,10 @@ mod tests {
             vec![0.0, 1.0, 2.0, 3.0],
             "frames played in arrival order"
         );
+        assert!(!jb.is_idle(), "a rendered edge still needs one fade round");
+        let fade = jb.playout_round();
+        assert_eq!(fade.len(), 1);
+        assert_eq!(fade[0].1, vec![0.0]);
         assert!(jb.is_idle());
         assert!(jb.playout_round().is_empty());
     }
@@ -1117,6 +1279,14 @@ mod tests {
         assert_eq!(jb.recovery_debt_samples_for("a"), Some(0));
         assert_eq!(jb.depth_samples_for("a"), Some(0));
         assert!(
+            !jb.is_idle(),
+            "the last voiced edge must remain pending until its fade-to-silence round"
+        );
+        let fade = jb.playout_round();
+        assert_eq!(fade.len(), 1);
+        assert_eq!(fade[0].1.len(), FRAME_SIZE);
+        assert!(fade[0].1.iter().all(|sample| sample.is_finite()));
+        assert!(
             jb.is_idle(),
             "recovered history must not remain as permanent latency"
         );
@@ -1128,6 +1298,44 @@ mod tests {
         assert_eq!(metrics.catchup_samples, (FRAME_SIZE * 5) as u64);
         assert_eq!(metrics.overflow_evicted_frames, 0);
         assert_eq!(metrics.overflow_evicted_samples, 0);
+    }
+
+    #[test]
+    fn jitter_crossfades_underflow_and_resume_without_a_hard_edge() {
+        let mut jb = PeerJitter::with_staging_limits(1, 8);
+        jb.push("a", vec![0.8; FRAME_SIZE]);
+        let voice = jb.playout_round();
+        assert_eq!(voice[0].1.last().copied(), Some(0.8));
+
+        let fade = jb.playout_round();
+        assert_eq!(fade.len(), 1);
+        assert_eq!(fade[0].1[0], 0.8);
+        assert_eq!(fade[0].1[JITTER_TAIL_FADE_SAMPLES - 1], 0.0);
+        assert!(fade[0].1[JITTER_TAIL_FADE_SAMPLES..]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        assert!(
+            fade[0]
+                .1
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0f32, f32::max)
+                < 0.03,
+            "fade to silence introduced a click"
+        );
+
+        jb.push("a", vec![-0.8; FRAME_SIZE]);
+        let resumed = jb.playout_round();
+        assert_eq!(resumed[0].1[0], 0.0);
+        assert!(
+            resumed[0]
+                .1
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0f32, f32::max)
+                < 0.03,
+            "resume from silence introduced a click"
+        );
     }
 
     #[test]
@@ -1421,6 +1629,10 @@ mod tests {
             out.iter().any(|&s| s.abs() > 0.0),
             "ghost/wall produced no output"
         );
+        assert!(
+            mixer.needs_idle_mix(),
+            "effect tails require idle mix rounds"
+        );
 
         // Go silent: the reverb tail must ring out, stay finite, and decay (never run away).
         let empty: Vec<(String, &[f32])> = vec![];
@@ -1433,8 +1645,56 @@ mod tests {
             });
         }
         assert!(peak < 0.2, "reverb tail did not decay: {peak}");
+        for _ in 0..40 {
+            mixer.mix(&empty, &gs, &mut out);
+        }
+        assert!(
+            !mixer.needs_idle_mix(),
+            "effect scheduler must quiesce after the tail"
+        );
     }
 
+    #[test]
+    fn filter_mode_switch_crossfades_the_per_speaker_boundary() {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            1.0,
+            vec![(
+                "p",
+                PeerState {
+                    gain: 1.0,
+                    pan: 0.0,
+                    mode: 0,
+                },
+            )],
+        );
+        let mut mixer = Mixer::new();
+        let mono = vec![0.2f32; FRAME_SIZE];
+        let per_peer = vec![("p".to_string(), mono.as_slice())];
+        let mut before = vec![0.0f32; FRAME_SIZE * 2];
+        for _ in 0..10 {
+            mixer.mix(&per_peer, &gs, &mut before);
+        }
+
+        gs.upsert_peer(
+            "p".to_string(),
+            PeerState {
+                gain: 1.0,
+                pan: 0.0,
+                mode: 3,
+            },
+        );
+        let mut after = vec![0.0f32; FRAME_SIZE * 2];
+        mixer.mix(&per_peer, &gs, &mut after);
+        assert!(
+            (after[0] - before[before.len() - 2]).abs() < 0.01,
+            "mode switch introduced an abrupt left-channel boundary"
+        );
+        assert!(
+            (after[1] - before[before.len() - 1]).abs() < 0.01,
+            "mode switch introduced an abrupt right-channel boundary"
+        );
+    }
     #[test]
     fn deafen_transition_discards_reverb_tails_and_filter_history() {
         let gs = gs_with(

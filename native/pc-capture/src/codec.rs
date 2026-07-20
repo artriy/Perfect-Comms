@@ -88,12 +88,11 @@ impl EncoderNetworkController {
             .map(|value| value.clamp(0.0, 1.0))
             .collect();
         losses.sort_unstable_by(f64::total_cmp);
-        // One shared Opus frame must serve every recipient. The upper quartile protects the
-        // typical lossy route without allowing one isolated, severely broken peer to force lower
-        // fidelity on an otherwise healthy lobby. For one to three recipients nearest-rank P75
-        // is still the worst sample, which is the conservative behavior wanted for small calls.
+        // One shared Opus frame must serve every recipient. Use the second-worst fresh route
+        // (or the sole route for a one-peer call): one arbitrarily broken receiver can never
+        // lower fidelity for healthy peers, while two corroborating bad routes still adapt.
         let representative_loss = losses
-            .get((losses.len().saturating_mul(3).saturating_sub(1)) / 4)
+            .get(losses.len().saturating_sub(2))
             .copied()
             .unwrap_or(0.0);
         let packet_loss_percent = if representative_loss < 0.01 {
@@ -1909,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_policy_uses_upper_quartile_without_sacrificing_a_lobby_to_one_outlier() {
+    fn encoder_policy_uses_second_worst_fresh_route_without_sacrificing_a_lobby_to_one_outlier() {
         let mut controller = EncoderNetworkController::new();
         let peers = [
             EncoderFeedback { fraction_lost: 0.0 },
@@ -1930,15 +1929,31 @@ mod tests {
         assert_eq!(policy.packet_loss_percent, 15);
         assert_eq!(policy.bitrate, DEFAULT_ENCODER_BITRATE);
 
-        let mut small_call = EncoderNetworkController::new();
-        let small_policy = small_call.observe(&[
+        let mut two_peer_call = EncoderNetworkController::new();
+        let two_peer_policy = two_peer_call.observe(&[
+            EncoderFeedback { fraction_lost: 0.0 },
+            EncoderFeedback {
+                fraction_lost: 0.60,
+            },
+        ]);
+        assert_eq!(
+            two_peer_policy.packet_loss_percent,
+            DEFAULT_ENCODER_PACKET_LOSS_PERCENT
+        );
+        assert_eq!(two_peer_policy.bitrate, DEFAULT_ENCODER_BITRATE);
+
+        let mut corroborated = EncoderNetworkController::new();
+        let corroborated_policy = corroborated.observe(&[
             EncoderFeedback { fraction_lost: 0.0 },
             EncoderFeedback {
                 fraction_lost: 0.09,
             },
+            EncoderFeedback {
+                fraction_lost: 0.10,
+            },
         ]);
-        assert_eq!(small_policy.packet_loss_percent, 20);
-        assert_eq!(small_policy.bitrate, 44_000);
+        assert_eq!(corroborated_policy.packet_loss_percent, 20);
+        assert_eq!(corroborated_policy.bitrate, 44_000);
     }
 
     #[test]

@@ -37,6 +37,13 @@ internal static class PcMobileNative
     public static extern float pc_push_mic(IntPtr handle, float[] samples, int len);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern float pc_push_mic_with_gap(
+        IntPtr handle,
+        float[] samples,
+        int len,
+        ulong skippedBeforeCurrent);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int pc_pull_playback(IntPtr handle, float[] outBuf, int cap);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

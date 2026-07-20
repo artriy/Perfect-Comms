@@ -3325,6 +3325,14 @@ impl UnderrunFader {
         };
     }
 
+    fn mark_discontinuity(&mut self) {
+        self.starved = true;
+        self.fade_from = self.last_output;
+        self.fade_remaining = self.fade_samples;
+        self.resume_from = self.last_output;
+        self.resume_remaining = 0;
+    }
+
     fn process(&mut self, pair: (f32, f32), available: bool) -> (f32, f32) {
         let output = if !available {
             if !self.starved {
@@ -3563,6 +3571,16 @@ impl PlaybackRealtime {
             .counters
             .playback_callbacks
             .fetch_add(1, Ordering::Relaxed);
+
+        if resources.ring.take_discontinuity() {
+            resources.ring.discard_all();
+            self.remote_s0 = (0.0, 0.0);
+            self.remote_s1 = (0.0, 0.0);
+            self.remote_s0_available = false;
+            self.remote_s1_available = false;
+            self.remote_pos = 1.0;
+            self.remote_underrun_fader.mark_discontinuity();
+        }
 
         let target_pairs = (FRAME_SAMPLES * 4) as f64;
         let queued_pairs = resources.ring.len();

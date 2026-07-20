@@ -216,11 +216,26 @@ internal sealed class MobileVoiceClient : IDisposable
     // Mic floats (mono 48k); accumulated into 960-sample frames and pushed to the engine, which
     // runs DSP + Opus + WebRTC send. Returns nothing; OnLevel fires per pushed frame.
     public void PushMic(float[] mono, int count)
+        => PushMicInternal(mono, count, skippedBeforeCurrent: 0, gapAware: false);
+
+    public void PushMicWithMediaGap(float[] mono, int count, ulong skippedBeforeCurrent)
+        => PushMicInternal(mono, count, skippedBeforeCurrent, gapAware: true);
+
+    private void PushMicInternal(
+        float[] mono,
+        int count,
+        ulong skippedBeforeCurrent,
+        bool gapAware)
     {
         if (mono == null || count <= 0 || Volatile.Read(ref _micActive) == 0) return;
         lock (_micLock)
         {
             if (ReadHandle() == IntPtr.Zero || Volatile.Read(ref _micActive) == 0) return;
+            if (gapAware && _micFill != 0)
+            {
+                Array.Clear(_micAccum, 0, _micAccum.Length);
+                _micFill = 0;
+            }
             int i = 0;
             while (i < count)
             {
@@ -228,17 +243,26 @@ internal sealed class MobileVoiceClient : IDisposable
                 Array.Copy(mono, i, _micAccum, _micFill, take);
                 _micFill += take;
                 i += take;
-                if (_micFill == MicFrame)
+                if (_micFill != MicFrame) continue;
+
+                // Native emits the configured gain/VAD level event at a bounded 100 ms cadence.
+                // Do not race it with a per-frame hard-coded speaking threshold here.
+                if (TryAcquireNativeHandle(out var handle))
                 {
-                    // Native emits the configured gain/VAD level event at a bounded 100 ms cadence.
-                    // Do not race it with a per-frame hard-coded speaking threshold here.
-                    if (TryAcquireNativeHandle(out var handle))
+                    try
                     {
-                        try { _ = PcMobileNative.pc_push_mic(handle, _micAccum, MicFrame); }
-                        finally { ReleaseNativeHandle(); }
+                        _ = gapAware
+                            ? PcMobileNative.pc_push_mic_with_gap(
+                                handle,
+                                _micAccum,
+                                MicFrame,
+                                skippedBeforeCurrent)
+                            : PcMobileNative.pc_push_mic(handle, _micAccum, MicFrame);
                     }
-                    _micFill = 0;
+                    finally { ReleaseNativeHandle(); }
                 }
+                skippedBeforeCurrent = 0;
+                _micFill = 0;
             }
         }
     }

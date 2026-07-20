@@ -92,13 +92,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
 #if ANDROID || WINDOWS
     private readonly object _unityEncodeSync = new();
-    private readonly Queue<(float[] buffer, int samples, int epoch)> _unityEncodeQueue = new();
+    private readonly Queue<(float[] buffer, int samples, int epoch, ulong sequence, long queuedTicks)> _unityEncodeQueue = new();
     private readonly float[] _unityCaptureAccum = new float[AudioHelpers.FrameSize];
     private int _unityCaptureFill;
+    private ulong _unityCaptureSequence;
+    private long _unityCaptureDroppedSamples;
     private long _unityEncodeDroppedFrames;
     private Thread? _unityEncodeWorker;
     private bool _unityEncodeStop;
-    private const int UnityEncodeQueueMaxFrames = 16;
+    private const int UnityEncodeQueueMaxFrames = 5;
 #endif
 
 #if WINDOWS
@@ -3195,6 +3197,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _androidMicrophone = new AndroidMicrophone();
                 _androidMicrophone.ReuseBuffer = true;
                 _androidMicrophone.DataAvailable += OnAndroidMicrophoneData;
+                _androidMicrophone.SamplesDropped += OnAndroidMicrophoneSamplesDropped;
                 _androidMicrophone.SetVolume(1f);
                 // A setup preview can briefly own Unity's process-global Microphone surface while
                 // the room is starting. Production capture remains requested and reacquires that
@@ -3247,6 +3250,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (microphone != null)
         {
             try { microphone.DataAvailable -= OnAndroidMicrophoneData; } catch { }
+            try { microphone.SamplesDropped -= OnAndroidMicrophoneSamplesDropped; } catch { }
             try { microphone.Dispose(); } catch { }
         }
 
@@ -3256,6 +3260,19 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _localSpeaking = false;
         if (hadMic)
             VoiceDiagnostics.Log("voice.mic", $"ready=false reason={reason} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)} samples={Volatile.Read(ref _micSamples)}");
+    }
+
+    private void OnAndroidMicrophoneSamplesDropped(int samples)
+    {
+        if (samples <= 0) return;
+        lock (_unityEncodeSync)
+        {
+            var discarded = (long)samples + _unityCaptureFill;
+            _unityCaptureFill = 0;
+            _unityCaptureSequence +=
+                (ulong)((discarded + AudioHelpers.FrameSize - 1) / AudioHelpers.FrameSize);
+            Interlocked.Add(ref _unityCaptureDroppedSamples, discarded);
+        }
     }
 
     private void OnAndroidMicrophoneData(float[] buffer, int length)
@@ -3298,13 +3315,19 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 var frame = ArrayPool<float>.Shared.Rent(AudioHelpers.FrameSize);
                 Array.Copy(_unityCaptureAccum, 0, frame, 0, AudioHelpers.FrameSize);
                 _unityCaptureFill = 0;
+                var sequence = _unityCaptureSequence++;
                 while (_unityEncodeQueue.Count >= UnityEncodeQueueMaxFrames)
                 {
                     var dropped = _unityEncodeQueue.Dequeue();
                     ArrayPool<float>.Shared.Return(dropped.buffer, clearArray: false);
                     Interlocked.Increment(ref _unityEncodeDroppedFrames);
                 }
-                _unityEncodeQueue.Enqueue((frame, AudioHelpers.FrameSize, epoch));
+                _unityEncodeQueue.Enqueue((
+                    frame,
+                    AudioHelpers.FrameSize,
+                    epoch,
+                    sequence,
+                    System.Diagnostics.Stopwatch.GetTimestamp()));
             }
             if (_unityEncodeWorker == null)
             {
@@ -3318,30 +3341,60 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void UnityEncodeWorkerLoop()
     {
+#if ANDROID
+        long nextDeadlineTicks = 0;
+        int lastPushedEpoch = int.MinValue;
+        ulong lastPushedSequence = 0;
+        bool haveLastPushedSequence = false;
+#endif
         while (true)
         {
             float[] buffer;
             int samples;
             int epoch;
+            ulong sequence;
+            long queuedTicks;
             lock (_unityEncodeSync)
             {
                 while (_unityEncodeQueue.Count == 0 && !_unityEncodeStop && !_disposed)
                     Monitor.Wait(_unityEncodeSync);
                 if (_unityEncodeStop || _disposed)
                     return;
-                (buffer, samples, epoch) = _unityEncodeQueue.Dequeue();
+                (buffer, samples, epoch, sequence, queuedTicks) = _unityEncodeQueue.Dequeue();
             }
 
             try
             {
                 if (epoch != Volatile.Read(ref _captureEpoch)) continue;
+#if ANDROID
+                var ageTicks = System.Diagnostics.Stopwatch.GetTimestamp() - queuedTicks;
+                if (ageTicks > System.Diagnostics.Stopwatch.Frequency / 10) continue;
+                PaceUnityEncode(ref nextDeadlineTicks);
+#endif
                 lock (_captureFrameSync)
                 {
                     if (epoch != _captureEpoch || Mute) continue;
                     try
                     {
 #if ANDROID
-                        _mobileVoice?.PushMic(buffer, samples);
+                        var mobileVoice = _mobileVoice;
+                        if (mobileVoice != null)
+                        {
+                            if (lastPushedEpoch != epoch)
+                            {
+                                lastPushedEpoch = epoch;
+                                haveLastPushedSequence = false;
+                            }
+                            ulong skippedBeforeCurrent = 0;
+                            if (haveLastPushedSequence && sequence > lastPushedSequence)
+                                skippedBeforeCurrent = sequence - lastPushedSequence - 1;
+                            mobileVoice.PushMicWithMediaGap(
+                                buffer,
+                                samples,
+                                skippedBeforeCurrent);
+                            lastPushedSequence = sequence;
+                            haveLastPushedSequence = true;
+                        }
 #else
                         ProcessMicrophoneCaptureSamples(buffer, samples);
 #endif
@@ -3360,6 +3413,25 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
     }
 
+#if ANDROID
+    private static void PaceUnityEncode(ref long nextDeadlineTicks)
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        long deadline = nextDeadlineTicks > now ? nextDeadlineTicks : now;
+        while (now < deadline)
+        {
+            long remainingTicks = deadline - now;
+            int remainingMs = (int)(remainingTicks * 1000 / System.Diagnostics.Stopwatch.Frequency);
+            if (remainingMs > 1)
+                Thread.Sleep(remainingMs - 1);
+            else
+                Thread.Yield();
+            now = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+        nextDeadlineTicks = deadline + System.Diagnostics.Stopwatch.Frequency / 50;
+    }
+#endif
+
     private void StopUnityEncodeWorker()
     {
         Thread? worker;
@@ -3369,6 +3441,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _unityEncodeWorker = null;
             _unityEncodeStop = true;
             _unityCaptureFill = 0;
+            _unityCaptureSequence = 0;
             while (_unityEncodeQueue.Count > 0)
             {
                 var queued = _unityEncodeQueue.Dequeue();
@@ -4596,7 +4669,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} " +
             $"sidecarLevelEventsWindow={sidecarLevelEventsWindow} sidecarLevelEventsTotal={sidecarLevelEventsTotal} sidecarLevelAgeMs={sidecarLevelAgeMs} sidecarPeerLevelBatchesTotal={sidecarPeerLevelBatchesTotal} sidecarPeerLevelsTotal={sidecarPeerLevelsTotal} sidecarPeerLevelsAgeMs={sidecarPeerLevelsAgeMs} sidecarPeerLevelsMappedWindow={sidecarPeerLevelsMappedWindow} sidecarPeerLevelsUnmappedWindow={sidecarPeerLevelsUnmappedWindow} " +
             $"managedMicCallbacks={Volatile.Read(ref _micCallbacks)} managedMicBytes={Volatile.Read(ref _micBytes)} managedMicSamples={Volatile.Read(ref _micSamples)} managedMicWindowSamples={micWindowSamples} managedMicPeak={micPeak:0.000000} managedMicRms={micRms:0.000000} managedMicCrest={micCrest:0.00} managedMicNonZeroSamples={micNonZeroSamples} managedMicSilentCallbacks={micSilentCallbacks} managedMicNearClipSamples={micNearClipSamples} managedMicClipPct={micClipPct:0.000} managedMicZeroCrossRate={micZeroCrossRate:0.0000} " +
-            $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicProcessingFailures={Volatile.Read(ref _micProcessingFailures)} unityEncodeDroppedFrames={Volatile.Read(ref _unityEncodeDroppedFrames)}{mobilePlaybackText} " +
+            $"managedMicMutedDrops={Volatile.Read(ref _micMutedDrops)} managedMicProcessingFailures={Volatile.Read(ref _micProcessingFailures)} unityCaptureDroppedSamples={Interlocked.Read(ref _unityCaptureDroppedSamples)} unityEncodeDroppedFrames={Volatile.Read(ref _unityEncodeDroppedFrames)}{mobilePlaybackText} " +
             $"noiseGate={noiseGateThreshold:0.000000} vadThreshold={vadThreshold:0.000000} gateReason={_lastGateReason} gatePeak={_lastGatePeak:0.000000} gateRms={_lastGateRms:0.000000} gateThreshold={_lastGateThreshold:0.000000} txGain={_lastTransmitGain:0.000} " +
             $"syntheticTone={_captureOptions.SyntheticMicToneEnabled} noiseSuppression={_captureOptions.NoiseSuppressionEnabled} strongerNoiseSuppression={_captureOptions.NoiseSuppressionEnabled && _captureOptions.StrongerNoiseSuppressionEnabled} syntheticFrames={Volatile.Read(ref _syntheticFrames)} capture={DescribeCaptureMode()} calibration={_captureOptions.MicCalibrationDiagnostics} sensitivity={_captureOptions.MicSensitivity:0.00} micReady={_microphoneReady} speakerConfigured={_speakerReady} speakerMuted={VoiceChatHudState.IsSpeakerMuted} masterVolume={_masterVolume:0.000} recordDevice={Volatile.Read(ref _lastOpenedRecordDevice)} micDigitalSilence={Volatile.Read(ref _digitalSilenceDetected)}");
         if (CaptureUsesUnity)

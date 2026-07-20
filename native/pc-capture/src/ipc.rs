@@ -4,6 +4,7 @@ use crate::audio::{
 };
 use crate::codec::{
     decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
+    MAX_CONCEAL_FRAMES,
 };
 use crate::diagnostics::{
     media_state_json, send_media_state, CaptureDiagnostics, MediaDiagnostics, MediaStateEvent,
@@ -1587,6 +1588,67 @@ impl CaptureFramePacer {
     }
 }
 
+const CAPTURE_MEDIA_FRAME_NS: u64 = 20_000_000;
+
+#[derive(Default)]
+struct CaptureMediaTimeline {
+    key: Option<CapturePacerKey>,
+    last_sent_sequence: Option<u64>,
+    last_sent_capture_ts_ns: Option<u64>,
+}
+
+impl CaptureMediaTimeline {
+    fn reset(&mut self) {
+        self.key = None;
+        self.last_sent_sequence = None;
+        self.last_sent_capture_ts_ns = None;
+    }
+
+    fn skipped_before(
+        &mut self,
+        key: CapturePacerKey,
+        sequence: u64,
+        capture_ts_ns: u64,
+        capture_timestamp_valid: bool,
+    ) -> u64 {
+        if self.key != Some(key) {
+            let restarted_live_stream = self.key.is_some() && self.last_sent_sequence.is_some();
+            self.key = Some(key);
+            self.last_sent_sequence = None;
+            self.last_sent_capture_ts_ns = None;
+            return if restarted_live_stream {
+                MAX_CONCEAL_FRAMES as u64 + 1
+            } else {
+                0
+            };
+        }
+        let sequence_gap = self
+            .last_sent_sequence
+            .and_then(|previous| sequence.checked_sub(previous))
+            .map_or(0, |distance| distance.saturating_sub(1));
+        let clock_gap = if capture_timestamp_valid {
+            self.last_sent_capture_ts_ns
+                .and_then(|previous| capture_ts_ns.checked_sub(previous))
+                .map(|elapsed| {
+                    elapsed
+                        .saturating_add(CAPTURE_MEDIA_FRAME_NS / 2)
+                        .checked_div(CAPTURE_MEDIA_FRAME_NS)
+                        .unwrap_or(0)
+                        .saturating_sub(1)
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        sequence_gap.max(clock_gap)
+    }
+
+    fn note_sent(&mut self, sequence: u64, capture_ts_ns: u64, capture_timestamp_valid: bool) {
+        self.last_sent_sequence = Some(sequence);
+        self.last_sent_capture_ts_ns = capture_timestamp_valid.then_some(capture_ts_ns);
+    }
+}
+
 pub fn run_session(stream: TcpStream, cfg: &ServerConfig) -> std::io::Result<()> {
     let Some(reader) = authenticate_session(&stream, cfg)? else {
         return Ok(());
@@ -1791,8 +1853,10 @@ fn run_authenticated_session(
         let mut applied_encoder_policy_generation = 0u64;
         let mut active_encoder_epoch = 0u64;
         let mut pacer = CaptureFramePacer::default();
+        let mut media_timeline = CaptureMediaTimeline::default();
         let mut was_transmit_enabled = false;
         let mut monitor_stereo = vec![0.0f32; proto::AUDIO_OUT_SAMPLES];
+        let silence_frame = [0.0f32; proto::FRAME_SAMPLES];
         let mut frame = AudioFrame {
             encoder_epoch: 0,
             capture_generation: 0,
@@ -1821,20 +1885,23 @@ fn run_authenticated_session(
                 noise_gate.reset();
                 last_capture_stream = None;
                 pacer.reset();
+                media_timeline.reset();
                 applied_encoder_policy_generation = 0;
                 active_encoder_epoch = requested_epoch;
                 writer_privacy.publish_applied(active_encoder_epoch);
             }
             let dropped = writer_ring.dropped();
-            if writer_ring.pop_into(&mut frame) {
+            if let Some(capture_sequence) = writer_ring.pop_into_with_sequence(&mut frame) {
                 let transmit_enabled = writer_transmit_enabled.load(Ordering::Acquire);
                 let monitor_enabled = writer_monitor_state.enabled();
                 if transmit_enabled && !was_transmit_enabled {
                     pacer.reset();
+                    media_timeline.reset();
                 }
                 was_transmit_enabled = transmit_enabled;
                 if !transmit_enabled && !monitor_enabled {
                     pacer.reset();
+                    media_timeline.reset();
                     continue;
                 }
                 let f = &mut frame;
@@ -1985,6 +2052,49 @@ fn run_authenticated_session(
                     }
                     applied_encoder_policy_generation = policy.generation;
                 }
+                let skipped_before_current = media_timeline.skipped_before(
+                    pacer_key,
+                    capture_sequence,
+                    f.capture_ts_ns,
+                    f.capture_timestamp_valid,
+                );
+                if skipped_before_current > 0 {
+                    writer_counters
+                        .capture_media_gap_frames
+                        .fetch_add(skipped_before_current, Ordering::Relaxed);
+                }
+                if skipped_before_current > MAX_CONCEAL_FRAMES as u64 {
+                    if let Err(error) = encoder.reset_encoder() {
+                        writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "pc-capture: Opus encoder discontinuity reset failed after \
+                             {skipped_before_current} skipped capture frames: {error}"
+                        );
+                        return;
+                    }
+                    writer_counters
+                        .opus_discontinuity_resets
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    // Keep Opus/FEC/DRED history chronological across a bounded local capture
+                    // gap. These placeholder packets intentionally never reach RTP; the next
+                    // packet's media-sequence gap lets the receiver recover their silent time.
+                    if skipped_before_current > 0 {
+                        writer_counters
+                            .opus_gap_placeholders
+                            .fetch_add(skipped_before_current, Ordering::Relaxed);
+                    }
+                    for _ in 0..skipped_before_current {
+                        if encoder.encode(&silence_frame).is_empty() {
+                            writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "pc-capture: Opus encoder produced no placeholder packet for a \
+                                 skipped capture frame"
+                            );
+                            return;
+                        }
+                    }
+                }
                 let pkt = encoder.encode(&f.samples);
                 if !pkt.is_empty() {
                     if !writer_transmit_enabled.load(Ordering::Acquire)
@@ -1997,7 +2107,16 @@ fn run_authenticated_session(
                         continue;
                     }
                     writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
-                    writer_rtc.send_opus(&pkt, active_encoder_epoch);
+                    writer_rtc.send_opus_with_media_gap(
+                        &pkt,
+                        active_encoder_epoch,
+                        skipped_before_current,
+                    );
+                    media_timeline.note_sent(
+                        capture_sequence,
+                        f.capture_ts_ns,
+                        f.capture_timestamp_valid,
+                    );
                 } else {
                     writer_counters.opus_empty.fetch_add(1, Ordering::Relaxed);
                     eprintln!("pc-capture: Opus encoder produced no packet for a valid frame");
@@ -2166,7 +2285,8 @@ fn run_authenticated_session(
                 if let Some(levels) = peer_levels.take_due(Instant::now()) {
                     drain_telemetry.publish_peers(levels);
                 }
-                if jitter.is_idle() {
+                let needs_idle_mix = mixer.needs_idle_mix();
+                if jitter.is_idle() && !needs_idle_mix {
                     drain_counters
                         .jitter_idle_ticks
                         .fetch_add(1, Ordering::Relaxed);
@@ -2176,7 +2296,7 @@ fn run_authenticated_session(
                 }
 
                 let round = jitter.playout_round();
-                if !round.is_empty() {
+                if !round.is_empty() || needs_idle_mix {
                     drain_counters.mix_rounds.fetch_add(1, Ordering::Relaxed);
                     drain_counters
                         .mixed_peer_frames
@@ -2318,6 +2438,7 @@ fn run_authenticated_session(
                         }
                         out_stop.store(false, Ordering::Release);
                         out_spawn_ns.store(0, Ordering::Release);
+                        playback.lock().unwrap().discard_all();
                         // This event is emitted only after the previous worker has fully stopped.
                         // Managed setup can therefore ignore stale playback events, wait for the
                         // following stream-started/first-callback pair, and avoid feeding its test
@@ -2947,6 +3068,60 @@ mod tests {
             ..next_generation
         };
         assert_eq!(pacer.deadline(next_epoch, late_now), late_now);
+    }
+
+    #[test]
+    fn capture_media_timeline_preserves_sequence_timestamp_and_restart_gaps() {
+        let mut timeline = CaptureMediaTimeline::default();
+        let first_key = CapturePacerKey {
+            encoder_epoch: 1,
+            capture_generation: 2,
+            capture_open_attempt: 3,
+        };
+        assert_eq!(
+            timeline.skipped_before(first_key, 10, 1_000_000_000, true),
+            0
+        );
+        timeline.note_sent(10, 1_000_000_000, true);
+
+        assert_eq!(
+            timeline.skipped_before(first_key, 11, 1_020_000_000, true),
+            0
+        );
+        timeline.note_sent(11, 1_020_000_000, true);
+        assert_eq!(
+            timeline.skipped_before(first_key, 13, 1_060_000_000, true),
+            1,
+            "sequence and timestamp gaps agree on one missing frame"
+        );
+        timeline.note_sent(13, 1_060_000_000, true);
+        assert_eq!(
+            timeline.skipped_before(first_key, 14, 1_200_000_000, true),
+            6,
+            "capture timestamps expose time discarded before it reached the ring"
+        );
+        timeline.note_sent(14, 1_200_000_000, true);
+        assert_eq!(
+            timeline.skipped_before(first_key, 15, 0, false),
+            0,
+            "invalid hardware timestamps fall back to sequence continuity"
+        );
+        timeline.note_sent(15, 0, false);
+
+        let restarted_key = CapturePacerKey {
+            capture_generation: 4,
+            ..first_key
+        };
+        assert_eq!(
+            timeline.skipped_before(restarted_key, 0, 2_000_000_000, true),
+            MAX_CONCEAL_FRAMES as u64 + 1,
+            "a live stream restart must force an explicit codec discontinuity"
+        );
+        timeline.note_sent(0, 2_000_000_000, true);
+        assert_eq!(
+            timeline.skipped_before(restarted_key, 1, 2_020_000_000, true),
+            0
+        );
     }
 
     #[test]

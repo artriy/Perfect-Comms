@@ -57,7 +57,7 @@ internal static class SidecarProtocol
     public const int HeaderBytes = 5;
     public const int MaxPayloadBytes = 1 << 20;
     public const int MaxPeerLevelsPerBatch = 32;
-    public const int MobileAbi = 4;
+    public const int MobileAbi = 5;
     private const int MaxPeerIdChars = 32;
     private const float DefaultInputGain = 1f;
     private const float DefaultVadThreshold = 0.004f;

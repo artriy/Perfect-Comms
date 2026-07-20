@@ -392,13 +392,25 @@ impl RtcEngine {
     }
 
     pub fn send_opus(&self, packet: &[u8], packet_encoder_epoch: u64) {
+        self.send_opus_with_media_gap(packet, packet_encoder_epoch, 0);
+    }
+
+    /// Sends one encoded frame after advancing RTP media time over locally discarded capture
+    /// frames. The gap is applied before this packet so receivers invoke loss concealment at the
+    /// actual discontinuity instead of treating nonadjacent microphone PCM as contiguous.
+    pub fn send_opus_with_media_gap(
+        &self,
+        packet: &[u8],
+        packet_encoder_epoch: u64,
+        skipped_before_current: u64,
+    ) {
         let Some((backend, handle)) = self.backend_handle() else {
             return;
         };
         let media_sequence = {
             let mut sequence = self.outbound_media_sequence.lock().unwrap();
-            let value = *sequence;
-            *sequence = sequence.wrapping_add(1);
+            let value = sequence.wrapping_add(skipped_before_current);
+            *sequence = value.wrapping_add(1);
             value
         };
         if let Err(status) =
@@ -449,6 +461,23 @@ impl RtcEngine {
 
     pub fn native_transport_snapshot(&self) -> crate::proto::NativeStatsSnapshot {
         self.counters.snapshot(0, 0, 0)
+    }
+
+    pub fn record_capture_media_gap(
+        &self,
+        skipped_frames: u64,
+        placeholder_frames: u64,
+        discontinuity_resets: u64,
+    ) {
+        self.counters
+            .capture_media_gap_frames
+            .fetch_add(skipped_frames, Ordering::Relaxed);
+        self.counters
+            .opus_gap_placeholders
+            .fetch_add(placeholder_frames, Ordering::Relaxed);
+        self.counters
+            .opus_discontinuity_resets
+            .fetch_add(discontinuity_resets, Ordering::Relaxed);
     }
 
     pub fn encoder_policy_snapshot(&self) -> EncoderPolicySnapshot {

@@ -46,6 +46,7 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 
     // Fires on main thread (via Tick) with (float[] buf, int length)
     public event Action<float[], int>? DataAvailable;
+    public event Action<int>? SamplesDropped;
 
     public event Action<float[], int>? OnFrame;
 
@@ -167,8 +168,10 @@ internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
         const int MaxSamplesPerTick = SampleRate / 5;
         if (newSamples > MaxSamplesPerTick)
         {
-            _lastPos = (_lastPos + (newSamples - MaxSamplesPerTick)) % clipSamples;
+            int droppedSamples = newSamples - MaxSamplesPerTick;
+            _lastPos = (_lastPos + droppedSamples) % clipSamples;
             newSamples = MaxSamplesPerTick;
+            SamplesDropped?.Invoke(droppedSamples);
         }
 
         try

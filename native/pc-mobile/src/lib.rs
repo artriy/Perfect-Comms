@@ -8,15 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::{ptr, slice};
 
-// ABI 4 adds the Pion transport-path constructor. Android must provide the extracted
-// libpc-pion.so path before the shared voice engine constructs its RtcEngine.
-pub const PC_ABI_VERSION: c_int = 4;
+// ABI 5 adds capture-gap-aware microphone pushes. Android must preserve dropped microphone time
+// so RTP concealment remains chronological instead of splicing nonadjacent PCM.
+pub const PC_ABI_VERSION: c_int = 5;
 
 // Release packaging reads this exported, NUL-terminated marker directly from the ELF file.
 // Keep its decimal value in sync with PC_ABI_VERSION and scripts/verify-release-assets.py.
 #[used]
 #[no_mangle]
-pub static PC_MOBILE_ABI_MARKER: [u8; 29] = *b"PERFECTCOMMS_PC_MOBILE_ABI=4\0";
+pub static PC_MOBILE_ABI_MARKER: [u8; 29] = *b"PERFECTCOMMS_PC_MOBILE_ABI=5\0";
 
 // Serializes the global transport-path update with engine construction. The Pion loader copies
 // the path, so the managed UTF-8 buffer only needs to remain valid for the FFI call itself.
@@ -163,6 +163,34 @@ pub unsafe extern "C" fn pc_push_mic(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn pc_push_mic_with_gap(
+    handle: *mut MobileEngine,
+    samples: *const c_float,
+    len: c_int,
+    skipped_before_current: u64,
+) -> c_float {
+    if handle.is_null() || samples.is_null() || len <= 0 {
+        return 0.0;
+    }
+    let mobile = &*handle;
+    if !mobile.is_healthy() {
+        return 0.0;
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        mobile.engine.push_mic_with_media_gap(
+            slice::from_raw_parts(samples, len as usize),
+            skipped_before_current,
+        )
+    })) {
+        Ok(level) => level,
+        Err(_) => {
+            mobile.mark_unhealthy();
+            0.0
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn pc_pull_playback(
     handle: *mut MobileEngine,
     out: *mut c_float,
@@ -256,8 +284,8 @@ mod tests {
 
     #[test]
     fn abi_version_matches_contract() {
-        assert_eq!(PC_ABI_VERSION, 4);
-        assert_eq!(pc_abi_version(), 4);
+        assert_eq!(PC_ABI_VERSION, 5);
+        assert_eq!(pc_abi_version(), 5);
         assert_eq!(
             PC_MOBILE_ABI_MARKER.as_slice(),
             format!("PERFECTCOMMS_PC_MOBILE_ABI={PC_ABI_VERSION}\0").as_bytes()
@@ -283,6 +311,10 @@ mod tests {
             pc_engine_free(ptr::null_mut());
             pc_control(ptr::null_mut(), ptr::null());
             assert_eq!(pc_push_mic(ptr::null_mut(), ptr::null(), 0), 0.0);
+            assert_eq!(
+                pc_push_mic_with_gap(ptr::null_mut(), ptr::null(), 0, 1),
+                0.0
+            );
             assert_eq!(pc_pull_playback(ptr::null_mut(), ptr::null_mut(), 0), 0);
             assert_eq!(pc_mic_level(ptr::null_mut()), 0.0);
             assert_eq!(pc_poll_signal(ptr::null_mut(), ptr::null_mut(), 0), 0);

@@ -1,5 +1,6 @@
 use crate::codec::{
     decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec, FRAME_SIZE,
+    MAX_CONCEAL_FRAMES,
 };
 use crate::dsp::{Dsp, DspConfig};
 use crate::gamestate::{GameState, LocalState, PeerState};
@@ -72,7 +73,7 @@ pub(crate) fn reset_decoded_peer_timeline(
     // An encoded-buffer fast-forward starts a new decoder timeline. Any staged/catch-up PCM was
     // decoded against the old sequence history and must not play in front of the restart packet.
     last_seq.remove(peer);
-    jitter.remove(peer);
+    jitter.reset_peer(peer);
     if let Some(codec) = decoders.get_mut(peer) {
         codec.reset_decoder()?;
     }
@@ -178,6 +179,10 @@ impl Engine {
     }
 
     pub fn push_mic(&self, samples: &[f32]) -> f32 {
+        self.push_mic_with_media_gap(samples, 0)
+    }
+
+    pub fn push_mic_with_media_gap(&self, samples: &[f32], skipped_before_current: u64) -> f32 {
         if samples.len() != FRAME_SIZE {
             return f32::from_bits(self.level.load(Ordering::Relaxed));
         }
@@ -224,6 +229,15 @@ impl Engine {
             self.telemetry
                 .publish_local(window_peak, window_peak >= input.vad_threshold);
         }
+        self.rtc.record_capture_media_gap(
+            skipped_before_current,
+            if skipped_before_current <= MAX_CONCEAL_FRAMES as u64 {
+                skipped_before_current
+            } else {
+                0
+            },
+            u64::from(skipped_before_current > MAX_CONCEAL_FRAMES as u64),
+        );
         if policy.generation != self.encoder_policy_generation.load(Ordering::Relaxed)
             && encoder
                 .set_network_conditions(policy.packet_loss_percent, policy.bitrate)
@@ -231,6 +245,19 @@ impl Engine {
         {
             self.encoder_policy_generation
                 .store(policy.generation, Ordering::Relaxed);
+        }
+        if skipped_before_current > MAX_CONCEAL_FRAMES as u64 {
+            encoder
+                .reset_encoder()
+                .expect("pc-capture: Opus encoder discontinuity reset failed");
+        } else {
+            let silence = [0.0f32; FRAME_SIZE];
+            for _ in 0..skipped_before_current {
+                assert!(
+                    !encoder.encode(&silence).is_empty(),
+                    "pc-capture: Opus encoder produced no placeholder packet"
+                );
+            }
         }
         let pkt = encoder.encode(&buf[..]);
         // DTX is disabled, so every valid 20 ms frame must produce a packet. Treat an encoder
@@ -240,7 +267,8 @@ impl Engine {
             "pc-capture: Opus encoder produced no packet"
         );
         let packet_encoder_epoch = self.encoder_epoch.load(Ordering::Acquire);
-        self.rtc.send_opus(&pkt, packet_encoder_epoch);
+        self.rtc
+            .send_opus_with_media_gap(&pkt, packet_encoder_epoch, skipped_before_current);
         pk
     }
 
@@ -327,7 +355,8 @@ impl Engine {
         }
 
         let round = state.jitter.playout_round();
-        if round.is_empty() {
+        let needs_idle_mix = state.mixer.needs_idle_mix();
+        if round.is_empty() && !needs_idle_mix {
             return 0;
         }
         let per_peer: Vec<(String, &[f32])> = round
@@ -786,13 +815,21 @@ mod tests {
             receive,
             vec![path],
             crate::codec::EncoderPolicySnapshot::default(),
-            crate::proto::NativeStatsSnapshot::default(),
+            crate::proto::NativeStatsSnapshot {
+                capture_media_gap_frames: 7,
+                opus_gap_placeholders: 1,
+                opus_discontinuity_resets: 1,
+                ..Default::default()
+            },
         );
         assert!(!json.contains("peer_id"));
         assert!(!json.contains("candidate_pair_id"));
         assert!(!json.contains("192.168.1.20"));
         assert!(!json.contains("203.0.113.5"));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["capture_media_gap_frames"], 7);
+        assert_eq!(value["opus_gap_placeholders"], 1);
+        assert_eq!(value["opus_discontinuity_resets"], 1);
         assert_eq!(value["network_paths"][0]["relay"], true);
         assert_eq!(value["network_paths"][0]["current_rtt_ms"], 212.5);
         assert_eq!(value["media_receive"]["sequence_gaps"], 3);
@@ -887,6 +924,9 @@ struct MobileDiagnosticsMsg {
     rtp_tx_stale_epoch_dropped: u64,
     rtp_tx_write_timeouts: u64,
     rtp_tx_queue_depth_max: u64,
+    capture_media_gap_frames: u64,
+    opus_gap_placeholders: u64,
+    opus_discontinuity_resets: u64,
 }
 
 fn mobile_diagnostics_json(
@@ -950,6 +990,9 @@ fn mobile_diagnostics_json(
         rtp_tx_stale_epoch_dropped: transport.rtp_tx_stale_epoch_dropped,
         rtp_tx_write_timeouts: transport.rtp_tx_write_timeouts,
         rtp_tx_queue_depth_max: transport.rtp_tx_queue_depth_max,
+        capture_media_gap_frames: transport.capture_media_gap_frames,
+        opus_gap_placeholders: transport.opus_gap_placeholders,
+        opus_discontinuity_resets: transport.opus_discontinuity_resets,
     })
     .expect("mobile diagnostics serialize")
 }

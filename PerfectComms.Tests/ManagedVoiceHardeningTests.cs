@@ -349,7 +349,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
         Assert.Equal(13, SidecarVoiceClient.Proto);
-        Assert.Equal(4, SidecarProtocol.MobileAbi);
+        Assert.Equal(5, SidecarProtocol.MobileAbi);
     }
 
     [Theory]

@@ -1,5 +1,46 @@
 # Changelog
 
+## Perfect Comms v4.1.2
+
+Perfect Comms v4.1.2 rebuilds desktop capture and playback for more dependable device handling and clearer voice. Microphone stalls now preserve the correct timeline, damaged playback fades or recovers at safe boundaries, and one unstable connection can no longer reduce voice quality for an otherwise healthy lobby.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.2/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Rebuilt Desktop Audio
+
+- **Desktop audio now runs through Mozilla Cubeb.**
+  > <sub>Perfect Comms now uses the same mature audio layer used by major desktop applications. Windows uses WASAPI with a WinMM fallback, macOS uses AudioUnit, and Linux uses PulseAudio or PipeWire with an ALSA fallback. Capture and playback remain low-latency while following each platform's native audio system more consistently.</sub>
+
+- **Microphone and speaker selection is more reliable.**
+  > <sub>Perfect Comms now tracks stable device identities, correctly distinguishes devices with duplicate names, confirms that playback has actually started before reporting it ready, and can safely fall back to the default speaker when a selected output is no longer available.</sub>
+
+- **Audio tests use the same native path as live voice.**
+  > <sub>Microphone monitoring and speaker tests now follow the selected native capture and playback routes. Device changes discard stale test audio, re-prime cleanly, and report clearer reasons when an output is unavailable, busy, denied by the system, or unable to start.</sub>
+
+### Clearer, More Stable Voice
+
+- **Microphone stalls no longer splice unrelated audio together.**
+  > <sub>When capture briefly falls behind, Perfect Comms preserves the missing time instead of joining nonadjacent microphone samples. Short gaps become correctly timed concealed silence, while longer interruptions reset safely before live speech resumes. The same timing protection is used on desktop and Android.</sub>
+
+- **Playback interruptions recover without harsh audio jumps.**
+  > <sub>Short dropouts, decoder recovery, voice-effect changes, and stream restarts now fade or crossfade over safe boundaries instead of producing abrupt waveform discontinuities. Filter and reverb transitions also finish smoothly when a voice becomes silent.</sub>
+
+- **A full speaker buffer now fails safely.**
+  > <sub>If the output buffer fills, Perfect Comms discards the new overflowing block instead of deleting audio that was already queued. Playback receives a discontinuity marker, clears stale data, and re-primes rather than replaying delayed audio or producing static.</sub>
+
+- **One damaged connection no longer lowers quality for everyone.**
+  > <sub>Send-quality adaptation now ignores a single isolated bad route when the rest of the lobby is healthy. Multiple genuinely degraded connections still reduce bitrate and increase packet-loss protection when needed.</sub>
+
+### Diagnostics and Validation
+
+- **Voice diagnostics can identify the failing audio stage.**
+  > <sub>Diagnostic sessions now report capture timing, dropped samples, microphone clipping, DSP status, Opus gap recovery, packet loss, jitter-buffer recovery, output overflow, callback health, and the actual native devices and backends in use.</sub>
+
+- **Native helper packaging is more strongly verified.**
+  > <sub>Release checks now validate the Cubeb backend, protocol contract, architecture, bundled runtime libraries, and companion Pion transport for Windows 32-bit and 64-bit, Linux, and Intel and Apple Silicon Macs. Stale helpers from the retired desktop audio engine are rejected before launch.</sub>
+
 ## Perfect Comms v4.1.1
 
 Perfect Comms v4.1.1 makes voice connections easier to understand and more flexible across different networks. A new live status shows exactly what voice is waiting for, while the rebuilt cross-platform connection engine adds more relay options and stronger handling for busy lobbies.

@@ -1178,8 +1178,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 : "na";
             VoiceDiagnostics.Log(
                 "sidecar.native.stats",
-                $"managedGeneration={managedGeneration} captureFrames={captureFrames} captureDropped={ReadU64(root, "capture_ring_dropped")} " +
-                $"opusEncoded={opusEncoded} opusEmpty={ReadU64(root, "opus_empty")} opusErrors={ReadU64(root, "opus_errors")} " +
+                $"managedGeneration={managedGeneration} captureFrames={captureFrames} captureDropped={ReadU64(root, "capture_ring_dropped")} captureMediaGapFrames={ReadU64(root, "capture_media_gap_frames")} " +
+                $"opusEncoded={opusEncoded} opusGapPlaceholders={ReadU64(root, "opus_gap_placeholders")} opusDiscontinuityResets={ReadU64(root, "opus_discontinuity_resets")} opusEmpty={ReadU64(root, "opus_empty")} opusErrors={ReadU64(root, "opus_errors")} " +
                 $"rtpTxAttempts={ReadU64(root, "rtp_tx_attempts")} rtpTxOk={rtpTxOk} rtpTxErrors={ReadU64(root, "rtp_tx_errors")} " +
                 $"rtpTxQueueDropped={ReadU64(root, "rtp_tx_queue_dropped")} rtpTxStaleEpochDropped={ReadU64(root, "rtp_tx_stale_epoch_dropped")} rtpTxWriteTimeouts={ReadU64(root, "rtp_tx_write_timeouts")} rtpTxQueueDepthMax={ReadU64(root, "rtp_tx_queue_depth_max")} " +
                 $"rtpRxPackets={rtpRxPackets} rtpRxBytes={ReadU64(root, "rtp_rx_bytes")} staleRtpDropped={ReadU64(root, "stale_rtp_rx_dropped")} " +

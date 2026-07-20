@@ -136,7 +136,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
     }
 }
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(not(target_os = "android"))]
@@ -389,10 +389,18 @@ impl CaptureFrameProducer {
 impl CaptureFrameConsumer {
     /// Copies the next owned slot into a caller-reused frame and immediately recycles the slot.
     pub fn pop_into(&self, frame: &mut AudioFrame) -> bool {
+        self.pop_into_with_sequence(frame).is_some()
+    }
+
+    /// As `pop_into`, but also returns the capture-ring sequence assigned before any oldest-frame
+    /// eviction. Gaps therefore preserve microphone media time without adding metadata to the
+    /// legacy PCM wire format.
+    pub fn pop_into_with_sequence(&self, frame: &mut AudioFrame) -> Option<u64> {
         let Ok(slot) = self.inner.ready_rx.try_recv() else {
-            return false;
+            return None;
         };
-        self.inner.note_removed(slot.sequence);
+        let sequence = slot.sequence;
+        self.inner.note_removed(sequence);
         frame.encoder_epoch = slot.metadata.encoder_epoch;
         frame.capture_generation = slot.metadata.capture_generation;
         frame.capture_open_attempt = slot.metadata.capture_open_attempt;
@@ -404,7 +412,7 @@ impl CaptureFrameConsumer {
         }
         frame.samples.copy_from_slice(&slot.samples);
         self.inner.return_free(slot);
-        true
+        Some(sequence)
     }
 
     /// Safe from the control thread during stop/restart. A concurrently checked-out encoder frame
@@ -461,6 +469,7 @@ struct PlaybackRingInner {
     read_sequence: AtomicU64,
     write_sequence: AtomicU64,
     dropped: AtomicU64,
+    pending_discontinuity: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -494,9 +503,8 @@ impl PlaybackRingInner {
                 return None;
             }
 
-            // Load before claiming. If the producer had to discard this exact slot in order to
-            // make room, its compare-exchange below advances `read_sequence` and this claim
-            // fails, so the possibly-overwritten value is never returned.
+            // Load before claiming. The producer never advances `read_sequence`, so a callback
+            // cannot jump to unrelated PCM in the middle of a render block.
             let packed = self.slots[(read % self.capacity_pairs) as usize].load(Ordering::Acquire);
             if self
                 .read_sequence
@@ -525,40 +533,38 @@ impl PlaybackRing {
                 read_sequence: AtomicU64::new(0),
                 write_sequence: AtomicU64::new(0),
                 dropped: AtomicU64::new(0),
+                pending_discontinuity: AtomicBool::new(false),
             }),
         }
     }
 
     pub fn push(&mut self, interleaved: &[f32]) {
         let pairs = interleaved.len() / 2;
-        for i in 0..pairs {
-            // There is one producer in the IPC/mixer path. The consumer may advance the read
-            // sequence concurrently; CAS lets either side win without a lock. On overflow the
-            // oldest pair is discarded, preserving the previous latest-audio-wins policy.
-            let written = self.inner.write_sequence.load(Ordering::Relaxed);
-            loop {
-                let read = self.inner.read_sequence.load(Ordering::Acquire);
-                if written.saturating_sub(read) < self.inner.capacity_pairs {
-                    break;
-                }
-                if self
-                    .inner
-                    .read_sequence
-                    .compare_exchange_weak(read, read + 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-                    break;
-                }
-            }
-
-            let pair = pack_stereo(interleaved[2 * i], interleaved[2 * i + 1]);
-            self.inner.slots[(written % self.inner.capacity_pairs) as usize]
-                .store(pair, Ordering::Release);
-            self.inner
-                .write_sequence
-                .store(written + 1, Ordering::Release);
+        if pairs == 0 {
+            return;
         }
+        let written = self.inner.write_sequence.load(Ordering::Relaxed);
+        let read = self.inner.read_sequence.load(Ordering::Acquire);
+        let used = written.saturating_sub(read).min(self.inner.capacity_pairs);
+        if pairs as u64 > self.inner.capacity_pairs.saturating_sub(used) {
+            self.inner
+                .dropped
+                .fetch_add(pairs as u64, Ordering::Relaxed);
+            self.inner
+                .pending_discontinuity
+                .store(true, Ordering::Release);
+            return;
+        }
+
+        for i in 0..pairs {
+            let sequence = written + i as u64;
+            let pair = pack_stereo(interleaved[2 * i], interleaved[2 * i + 1]);
+            self.inner.slots[(sequence % self.inner.capacity_pairs) as usize]
+                .store(pair, Ordering::Release);
+        }
+        self.inner
+            .write_sequence
+            .store(written + pairs as u64, Ordering::Release);
     }
 
     pub fn pop_stereo(&mut self) -> Option<(f32, f32)> {
@@ -592,6 +598,18 @@ impl PlaybackConsumer {
 
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Returns and clears the producer's one-shot signal that a complete playback block was
+    /// rejected. The realtime callback owns timeline recovery and can safely discard stale PCM.
+    pub fn take_discontinuity(&self) -> bool {
+        self.inner
+            .pending_discontinuity
+            .swap(false, Ordering::AcqRel)
+    }
+
+    pub fn discard_all(&self) {
+        self.inner.discard_all();
     }
 }
 
@@ -759,6 +777,9 @@ pub struct NativeStatsSnapshot {
     pub opus_encoded: u64,
     pub opus_empty: u64,
     pub opus_errors: u64,
+    pub capture_media_gap_frames: u64,
+    pub opus_gap_placeholders: u64,
+    pub opus_discontinuity_resets: u64,
     pub rtp_tx_attempts: u64,
     pub rtp_tx_ok: u64,
     pub rtp_tx_errors: u64,
@@ -1454,13 +1475,20 @@ mod tests {
     }
 
     #[test]
-    fn playback_ring_drops_oldest_when_full() {
+    fn playback_ring_rejects_new_blocks_instead_of_skipping_queued_audio() {
         let mut ring = PlaybackRing::new(2);
-        ring.push(&[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+        let consumer = ring.consumer();
+        ring.push(&[1.0, 1.0, 2.0, 2.0]);
+        ring.push(&[3.0, 3.0]);
         assert_eq!(ring.len(), 2);
         assert_eq!(ring.dropped(), 1);
+        assert!(consumer.take_discontinuity());
+        assert!(
+            !consumer.take_discontinuity(),
+            "discontinuity marker is one-shot"
+        );
+        assert_eq!(ring.pop_stereo(), Some((1.0, 1.0)));
         assert_eq!(ring.pop_stereo(), Some((2.0, 2.0)));
-        assert_eq!(ring.pop_stereo(), Some((3.0, 3.0)));
         assert_eq!(ring.pop_stereo(), None);
     }
 
@@ -1512,7 +1540,7 @@ mod tests {
             }
         }
         let ring = producer.join().unwrap();
-        assert_eq!(previous, 20_000.0);
+        assert!(previous > 0.0);
         assert!(ring.dropped() > 0, "stress case should exercise overflow");
     }
 
