@@ -24,3 +24,14 @@ targets = [
 ignore-build-dependencies = false
 ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
+
+# cubeb-sys contains several nested ISC license files for the native and Rust
+# backends. Pin the package-level wrapper license so filesystem traversal order
+# cannot select a different copyright notice on another operating system.
+[cubeb-sys.clarify]
+license = "ISC"
+
+[[cubeb-sys.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+checksum = "8c044baa5d883274736eeece0b955249076c2697b826e576fce59496235b2cf5"
