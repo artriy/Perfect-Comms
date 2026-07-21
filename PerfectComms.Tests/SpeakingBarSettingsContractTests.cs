@@ -136,4 +136,24 @@ public sealed class SpeakingBarSettingsContractTests
         Assert.False(SpeakingBarScalePolicy.ConfigTextContainsSetting(config, "UI", "MissingSetting"));
         Assert.False(SpeakingBarScalePolicy.ConfigTextContainsSetting(config, "Audio", "SpeakingBarScale"));
     }
+
+    [Theory]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, true, false, false)]
+    public void HudFeatureDisableTogglesIndependentlyControlVisibility(
+        bool disableVoiceControlsHud,
+        bool disableSpeakingBar,
+        bool expectedVoiceControlsHudVisible,
+        bool expectedSpeakingBarVisible)
+    {
+        VoiceHudFeatureVisibility visibility = VoiceHudFeatureVisibility.Resolve(
+            disableVoiceControlsHud,
+            disableSpeakingBar);
+
+        Assert.Equal(expectedVoiceControlsHudVisible, visibility.VoiceControlsHudVisible);
+        Assert.Equal(expectedSpeakingBarVisible, visibility.SpeakingBarVisible);
+    }
+
 }

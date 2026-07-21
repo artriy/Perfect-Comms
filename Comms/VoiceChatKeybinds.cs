@@ -105,15 +105,15 @@ public static class VoiceChatKeybinds
         {
             var primary = config.Bind(section, key, KeyCode.None,
                 new ConfigDescription("Retired host-wide voice refresh binding."));
-            config.Remove(primary.Definition);
+            PerfectCommsConfigStore.Remove(config, primary.Definition);
 
             var modifier = config.Bind(section, key + " Modifier", KeyCode.None,
                 new ConfigDescription("Retired host-wide voice refresh modifier."));
-            config.Remove(modifier.Definition);
+            PerfectCommsConfigStore.Remove(config, modifier.Definition);
 
             var modifierMatch = config.Bind(section, key + " Modifier Match", VoiceModifierMatch.Exact,
                 new ConfigDescription("Retired host-wide voice refresh modifier matching mode."));
-            config.Remove(modifierMatch.Definition);
+            PerfectCommsConfigStore.Remove(config, modifierMatch.Definition);
         }
     }
 

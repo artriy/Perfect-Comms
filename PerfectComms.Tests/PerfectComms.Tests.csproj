@@ -41,6 +41,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
+		<PackageReference Include="BepInEx.Core" Version="6.0.0-be.735" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
 		<!-- Keep the production Socket.IO version explicit in both Dependabot directories so
 		     a grouped update regenerates this ProjectReference consumer's lock file too. -->

@@ -50,6 +50,7 @@ public static partial class VoiceChatHudState
     private static float _btnX = 0.99f;
     private static float _btnY = 0.10f;
     private static VoiceControlsLayout _controlsLayout = VoiceControlsLayout.Vertical;
+    private static bool _voiceControlsHudEnabled = true;
     private static JailUnmuteButtonPlacement _jailPlacement = JailUnmuteButtonPlacement.MeetingCard;
     private static bool _jailOnCard;
     private static GameObject?  _micTooltip;
@@ -273,6 +274,9 @@ public static partial class VoiceChatHudState
         _btnX = settings.ButtonPositionX.Value;
         _btnY = settings.ButtonPositionY.Value;
         _controlsLayout = settings.VoiceControlsLayout.Value;
+        _voiceControlsHudEnabled = VoiceHudFeatureVisibility.Resolve(
+            settings.DisableVoiceControlsHud.Value,
+            settings.DisableSpeakingBar.Value).VoiceControlsHudVisible;
         _jailPlacement = settings.JailUnmuteButtonPlacement.Value;
         // Switching away from card mode: drop the card-placement guard now so PositionButtons
         // restores the Voice-HUD spot this frame instead of waiting for the next HUD tick.
@@ -288,6 +292,11 @@ public static partial class VoiceChatHudState
                 if (hudRoot != null && _jailButtonObj.transform.parent != hudRoot)
                     _jailButtonObj.transform.SetParent(hudRoot, false);
             }
+        }
+        if (!_voiceControlsHudEnabled)
+        {
+            HideVoiceControlsHud();
+            return;
         }
         PositionButtons();
     }
@@ -556,6 +565,12 @@ public static partial class VoiceChatHudState
     {
         try
         {
+            var settings = VoiceSettings.Instance;
+            if (settings != null &&
+                !VoiceHudFeatureVisibility.Resolve(
+                    settings.DisableVoiceControlsHud.Value,
+                    settings.DisableSpeakingBar.Value).VoiceControlsHudVisible)
+                return;
             // 1) Decode every embedded-PNG sprite now (the dominant first-init cost). HudManager-independent and
             //    cached in _spriteCache, so the later CreateIconChild/LoadSprite calls are free.
             _ = Sprites.MicOn;
@@ -640,16 +655,24 @@ public static partial class VoiceChatHudState
         var pendingToast = _pendingToast;
         if (pendingToast != null) { _pendingToast = null; ShowToast(pendingToast); }
 
-        _lastUpdateStep = "ensure-buttons";
-        long bTicks = VoiceFrameProfiler.Begin();
-        EnsureHudButtons(hud);
-        VoiceFrameProfiler.End("hud.buttons", bTicks);
-        _lastUpdateStep = "ensure-tooltips";
-        long tTicks = VoiceFrameProfiler.Begin();
-        EnsureTooltips(hud);
-        VoiceFrameProfiler.End("hud.tooltips", tTicks);
-        _lastUpdateStep = "ensure-parent";
-        EnsureHudParent(hud);
+        if (_voiceControlsHudEnabled)
+        {
+            _lastUpdateStep = "ensure-buttons";
+            long bTicks = VoiceFrameProfiler.Begin();
+            EnsureHudButtons(hud);
+            VoiceFrameProfiler.End("hud.buttons", bTicks);
+            _lastUpdateStep = "ensure-tooltips";
+            long tTicks = VoiceFrameProfiler.Begin();
+            EnsureTooltips(hud);
+            VoiceFrameProfiler.End("hud.tooltips", tTicks);
+            _lastUpdateStep = "ensure-parent";
+            EnsureHudParent(hud);
+        }
+        else
+        {
+            _lastUpdateStep = "controls-hidden";
+            HideVoiceControlsHud();
+        }
         _lastUpdateStep = "role-state";
         VoiceRoleMuteState.Update();
         // Apply exactly once after role/cache refresh on the ready-HUD path. The room tick later in
@@ -660,12 +683,18 @@ public static partial class VoiceChatHudState
         UpdateHudButtonsVisibility();
 #if ANDROID
         _lastUpdateStep = "touch-input";
-        UpdateAndroidTouchInput();
+        if (_voiceControlsHudEnabled)
+            UpdateAndroidTouchInput();
+        else
+            ReleaseAndroidTouchInput();
 #endif
-        _lastUpdateStep = "button-visuals";
-        long vTicks = VoiceFrameProfiler.Begin();
-        RefreshButtonVisuals();
-        VoiceFrameProfiler.End("hud.visuals", vTicks);
+        if (_voiceControlsHudEnabled)
+        {
+            _lastUpdateStep = "button-visuals";
+            long vTicks = VoiceFrameProfiler.Begin();
+            RefreshButtonVisuals();
+            VoiceFrameProfiler.End("hud.visuals", vTicks);
+        }
         _lastUpdateStep = "toast";
         UpdateToast(hud);
         _lastUpdateStep = "compact-status";
@@ -882,8 +911,28 @@ public static partial class VoiceChatHudState
         obj.transform.SetParent(root, false);
     }
 
+    private static void HideVoiceControlsHud()
+    {
+        _micButtonObj?.SetActive(false);
+        _spkButtonObj?.SetActive(false);
+        _jailButtonObj?.SetActive(false);
+#if ANDROID
+        _radioTouchButtonObj?.SetActive(false);
+        ReleaseAndroidTouchInput();
+#endif
+        _jailOnCard = false;
+        HideTooltips();
+        if (_compactStatusObj != null && _compactStatusObj.activeSelf)
+            _compactStatusObj.SetActive(false);
+    }
+
     private static void UpdateHudButtonsVisibility()
     {
+        if (!_voiceControlsHudEnabled)
+        {
+            HideVoiceControlsHud();
+            return;
+        }
         if (_micButtonObj == null || _spkButtonObj == null) return;
         _micButtonObj.SetActive(true);
         _spkButtonObj.SetActive(true);
@@ -1507,6 +1556,13 @@ public static partial class VoiceChatHudState
 
     private static void UpdateCompactStatus(HudManager hud)
     {
+        if (!_voiceControlsHudEnabled)
+        {
+            if (_compactStatusObj != null && _compactStatusObj.activeSelf)
+                _compactStatusObj.SetActive(false);
+            return;
+        }
+
         string transient = Time.unscaledTime < _compactStatusExpiry ? _compactStatusMessage : string.Empty;
         if (transient.Length == 0 && _compactStatusMessage.Length != 0)
             _compactStatusMessage = "";

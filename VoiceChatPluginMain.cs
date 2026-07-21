@@ -23,6 +23,7 @@ public class VoiceChatPluginMain : BasePlugin
     public const string Version = "4.1.2";
     public static ManualLogSource Logger { get; private set; } = null!;
     internal static ConfigFile PluginConfig { get; private set; } = null!;
+    private static PerfectCommsConfigStore? _configStore;
     public Harmony Harmony { get; } = new(Id);
     private const string ResPrefix = "Lib.";
     private static readonly Dictionary<string, Assembly> _asmCache
@@ -49,6 +50,7 @@ public class VoiceChatPluginMain : BasePlugin
         try { SidecarVoiceHost.Shutdown(reason); }
         catch { /* the OS will finish teardown; never block the remaining shutdown hooks */ }
 #endif
+        PerfectCommsConfigStore.TryFlushPending();
     }
 
     private static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)
@@ -81,10 +83,19 @@ public class VoiceChatPluginMain : BasePlugin
     public override void Load()
     {
         Logger = Log;
-        PluginConfig = Config;
-        VoiceSettings.Instance = new VoiceChatLocalSettings(Config);
+        _configStore = PerfectCommsConfigStore.Open(
+            Config,
+            new BepInPlugin(Id, "Perfect Comms", Version),
+            Application.persistentDataPath,
+            message => Log.LogInfo(message),
+            message => Log.LogWarning(message));
+        PluginConfig = _configStore.Config;
+        VoiceSettings.Instance = new VoiceChatLocalSettings(PluginConfig);
         VoiceSettings.Instance.WireRuntimeHandlers();
-        VoiceChatKeybinds.Initialize(Config);
+        VoiceChatKeybinds.Initialize(PluginConfig);
+        VoiceChatGameOptions.GetInstance();
+        VoiceRoleIntegrationOptions.GetInstance();
+        _configStore.CompleteInitialization();
         VanillaLobbyDiagnostics.Configure(message => Logger.LogInfo(message), message => Logger.LogWarning(message));
         VoiceDiagnostics.DebugInfo("[VC] Loading Perfect Comms.");
         VoiceDiagnostics.Init();

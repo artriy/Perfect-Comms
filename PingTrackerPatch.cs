@@ -585,6 +585,22 @@ public static class PingTrackerPatch
     private static void RenderOverlay(PingTracker? __instance)
     {
         long overlayTicks = VoiceFrameProfiler.Begin();
+        var settings = VoiceSettings.Instance;
+        if (settings != null &&
+            !VoiceHudFeatureVisibility.Resolve(
+                settings.DisableVoiceControlsHud.Value,
+                settings.DisableSpeakingBar.Value).SpeakingBarVisible)
+        {
+            _activeSpeakerIds.Clear();
+            _activeSpeakerLevels.Clear();
+            _activeSpeakerNames.Clear();
+            _playerLookup.Clear();
+            if (_slots.Count > 0 || _barRoot?.activeSelf == true)
+                ClearSpeakingBarSlots();
+            VoiceFrameProfiler.End("overlay.pingtracker", overlayTicks);
+            return;
+        }
+
         long ensureBarTicks = VoiceFrameProfiler.Begin();
         EnsureBar(__instance);
         VoiceFrameProfiler.End("overlay.ensurebar", ensureBarTicks);

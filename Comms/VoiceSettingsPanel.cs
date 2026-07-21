@@ -116,14 +116,18 @@ public static class VoiceSettingsPanel
         _shown = true;
         VoiceChatPatches.ReleaseHeldTransmitInputs();
 
-        bool previewEnabled = VoiceSettings.Instance.SpeakingBarLivePreview.Value;
+        bool speakingBarEnabled = VoiceHudFeatureVisibility.Resolve(
+            VoiceSettings.Instance.DisableVoiceControlsHud.Value,
+            VoiceSettings.Instance.DisableSpeakingBar.Value).SpeakingBarVisible;
+        bool previewEnabled = speakingBarEnabled &&
+                              VoiceSettings.Instance.SpeakingBarLivePreview.Value;
         _lastLivePreviewEnabled = previewEnabled;
         _livePreviewProgress = previewEnabled ? 1f : 0f;
         // Build the light-weight preview card up front and warm its render world over the
         // next few frames. Toggling Live Preview later should only reveal already-ready
         // objects, never construct fifteen avatars and a render texture on the click frame.
         _livePreviewUnavailable = false;
-        EnsureLivePreview();
+        if (speakingBarEnabled) EnsureLivePreview();
         ApplyPanelPresentation();
         UpdateLivePreview(0f);
 
@@ -687,7 +691,10 @@ public static class VoiceSettingsPanel
         });
     }
 
-    private static void SpeakingBarNamePositionStep(List<Entry> defs, VoiceChatLocalSettings settings)
+    private static void SpeakingBarNamePositionStep(
+        List<Entry> defs,
+        VoiceChatLocalSettings settings,
+        Func<bool>? visible = null)
     {
         // Auto was appended to the persisted enum to preserve the legacy 0-3 values,
         // but it belongs first in the user-facing stepper because it is the v4 default.
@@ -704,7 +711,7 @@ public static class VoiceSettingsPanel
         defs.Add(new Entry
         {
             Key = "Speaking Bar Name Position",
-            Visible = Always,
+            Visible = visible ?? Always,
             Build = (pane, paneW, y) => new VoiceUiKit.StepperRow(
                 () => Array.IndexOf(order, settings.SpeakingBarNamePosition.Value) switch
                 {
@@ -765,34 +772,65 @@ public static class VoiceSettingsPanel
 
     private static void BuildHud(List<Entry> defs, VoiceChatLocalSettings s)
     {
+        Func<VoiceHudFeatureVisibility> visibility = () => VoiceHudFeatureVisibility.Resolve(
+            s.DisableVoiceControlsHud.Value,
+            s.DisableSpeakingBar.Value);
+        Func<bool> showVoiceControls = () => visibility().VoiceControlsHudVisible;
+        Func<bool> showSpeakingBar = () => visibility().SpeakingBarVisible;
+
         Section(defs, "VOICE CONTROLS");
-        EnumStep(defs, "Controls Layout", s.VoiceControlsLayout, new[] { "Vertical", "Horizontal" });
-        Slider(defs, "Button Position X", s.ButtonPositionX, Pct);
-        Slider(defs, "Button Position Y", s.ButtonPositionY, Pct);
-        Slider(defs, "Button Scale", s.OverlayScale, Num2);
-        Toggle(defs, "Mute / Deafen Status Reminder", s.ShowMuteDeafenStatusAlerts);
+        Toggle(
+            defs,
+            "Disable Voice Controls HUD",
+            () => s.DisableVoiceControlsHud.Value,
+            value =>
+            {
+                s.DisableVoiceControlsHud.Value = value;
+                _rebuildRequested = true;
+            },
+            SettingHelp(s.DisableVoiceControlsHud));
+        EnumStep(defs, "Controls Layout", s.VoiceControlsLayout,
+            new[] { "Vertical", "Horizontal" }, showVoiceControls);
+        Slider(defs, "Button Position X", s.ButtonPositionX, Pct, showVoiceControls);
+        Slider(defs, "Button Position Y", s.ButtonPositionY, Pct, showVoiceControls);
+        Slider(defs, "Button Scale", s.OverlayScale, Num2, showVoiceControls);
+        Toggle(defs, "Mute / Deafen Status Reminder", s.ShowMuteDeafenStatusAlerts,
+            showVoiceControls);
 
         Section(defs, "SPEAKING BAR");
-        Toggle(defs, "Show All Players", s.SpeakingBarFixedAllPlayers);
-        Toggle(defs, "Live Preview", s.SpeakingBarLivePreview);
+        Toggle(
+            defs,
+            "Disable Speaking Bar",
+            () => s.DisableSpeakingBar.Value,
+            value =>
+            {
+                s.DisableSpeakingBar.Value = value;
+                _rebuildRequested = true;
+            },
+            SettingHelp(s.DisableSpeakingBar));
+        Toggle(defs, "Show All Players", s.SpeakingBarFixedAllPlayers, showSpeakingBar);
+        Toggle(defs, "Live Preview", s.SpeakingBarLivePreview, showSpeakingBar);
         EnumStep(defs, "Speaking Bar Position", s.SpeakingBarPosition, new[]
         {
             "Top Left", "Top Middle", "Top Right", "Bottom Left", "Bottom Middle", "Bottom Right",
             "Middle Left", "Middle Right"
-        });
+        }, showSpeakingBar);
         EnumStep(defs, "Side Layout", s.SpeakingBarSideLayout, new[] { "Single Lane", "Wrapped" },
-            () => !s.SpeakingBarManualLayout.Value &&
+            () => showSpeakingBar() &&
+                  !s.SpeakingBarManualLayout.Value &&
                   SpeakingBarLayoutPolicy.IsSidePreset(s.SpeakingBarPosition.Value));
-        SpeakingBarNamePositionStep(defs, s);
-        Slider(defs, "Speaking Bar Scale", s.SpeakingBarScale, Pct);
-        Toggle(defs, "Speaking Bar Backdrop", s.SpeakingBarBackdrop);
-        Toggle(defs, "Speaking Bar Manual Layout", s.SpeakingBarManualLayout);
+        SpeakingBarNamePositionStep(defs, s, showSpeakingBar);
+        Slider(defs, "Speaking Bar Scale", s.SpeakingBarScale, Pct, showSpeakingBar);
+        Toggle(defs, "Speaking Bar Backdrop", s.SpeakingBarBackdrop, showSpeakingBar);
+        Toggle(defs, "Speaking Bar Manual Layout", s.SpeakingBarManualLayout, showSpeakingBar);
         EnumStep(defs, "Speaking Bar Layout", s.SpeakingBarLayout, new[] { "Vertical", "Horizontal" },
-            () => s.SpeakingBarManualLayout.Value);
+            () => showSpeakingBar() && s.SpeakingBarManualLayout.Value);
         EnumStep(defs, "Avatar Facing", s.SpeakingBarAvatarFacing, new[] { "Right", "Left" },
-            () => s.SpeakingBarManualLayout.Value);
-        Slider(defs, "Speaking Bar X", s.SpeakingBarX, Pct, () => s.SpeakingBarManualLayout.Value);
-        Slider(defs, "Speaking Bar Y", s.SpeakingBarY, Pct, () => s.SpeakingBarManualLayout.Value);
+            () => showSpeakingBar() && s.SpeakingBarManualLayout.Value);
+        Slider(defs, "Speaking Bar X", s.SpeakingBarX, Pct,
+            () => showSpeakingBar() && s.SpeakingBarManualLayout.Value);
+        Slider(defs, "Speaking Bar Y", s.SpeakingBarY, Pct,
+            () => showSpeakingBar() && s.SpeakingBarManualLayout.Value);
 
         Section(defs, "MEETING OVERLAY");
         Toggle(defs, "Meeting Speaking Overlay", s.MeetingSpeakingOverlay);
@@ -808,7 +846,8 @@ public static class VoiceSettingsPanel
             "Reopens the guided audio, controls, and HUD setup. Your current settings are kept unless you finish with changes.");
 
         Section(defs, "TROUBLESHOOTING");
-        Toggle(defs, "Show Fake 15 Players", s.ShowFake15Players);
+        Toggle(defs, "Show Fake 15 Players", s.ShowFake15Players,
+            () => !s.DisableSpeakingBar.Value);
         Toggle(defs, "Diagnostics",
             () => s.DebugVoiceStats.Value || s.MicCalibrationDiagnostics.Value,
             v => s.ApplyDiagnosticsToggle(v),
@@ -915,23 +954,35 @@ public static class VoiceSettingsPanel
         var settings = VoiceSettings.Instance;
         if (settings == null) return;
 
-        bool enabled = settings.SpeakingBarLivePreview.Value;
+        bool speakingBarEnabled = VoiceHudFeatureVisibility.Resolve(
+            settings.DisableVoiceControlsHud.Value,
+            settings.DisableSpeakingBar.Value).SpeakingBarVisible;
+        bool enabled = speakingBarEnabled && settings.SpeakingBarLivePreview.Value;
         if (enabled != _lastLivePreviewEnabled && _livePreviewUnavailable)
             _livePreviewUnavailable = false;
         _lastLivePreviewEnabled = enabled;
-        _livePreviewProgress = SpeakingBarLivePreviewTransitionPolicy.Advance(
-            _livePreviewProgress,
-            enabled,
-            unscaledDeltaTime);
+        _livePreviewProgress = speakingBarEnabled
+            ? SpeakingBarLivePreviewTransitionPolicy.Advance(
+                _livePreviewProgress,
+                enabled,
+                unscaledDeltaTime)
+            : 0f;
 
-        bool shouldRender = _shown && (enabled || _livePreviewProgress > 0.001f);
-        if (_shown) EnsureLivePreview();
+        bool shouldRender = speakingBarEnabled && _shown &&
+                            (enabled || _livePreviewProgress > 0.001f);
+        if (_shown && speakingBarEnabled) EnsureLivePreview();
         if (_livePreview == null)
         {
             if (_livePreviewUnavailable) _livePreviewProgress = 0f;
             return;
         }
         var preview = _livePreview;
+
+        if (!speakingBarEnabled)
+        {
+            preview.SetPresentation(0f, false);
+            return;
+        }
 
         try
         {

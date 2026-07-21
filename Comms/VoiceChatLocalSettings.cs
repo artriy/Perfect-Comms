@@ -8,32 +8,33 @@ using BepInEx.Configuration;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
+
 public enum MicDeviceEnum
 {
-    Default   =  0,
-    Device1   =  1, Device2   =  2, Device3   =  3, Device4   =  4,
-    Device5   =  5, Device6   =  6, Device7   =  7, Device8   =  8,
-    Device9   =  9, Device10  = 10
+    Default = 0,
+    Device1 = 1, Device2 = 2, Device3 = 3, Device4 = 4,
+    Device5 = 5, Device6 = 6, Device7 = 7, Device8 = 8,
+    Device9 = 9, Device10 = 10
 }
 
 public enum SpkDeviceEnum
 {
-    Default   =  0,
-    Device1   =  1, Device2   =  2, Device3   =  3, Device4   =  4,
-    Device5   =  5, Device6   =  6, Device7   =  7, Device8   =  8,
-    Device9   =  9, Device10  = 10
+    Default = 0,
+    Device1 = 1, Device2 = 2, Device3 = 3, Device4 = 4,
+    Device5 = 5, Device6 = 6, Device7 = 7, Device8 = 8,
+    Device9 = 9, Device10 = 10
 }
 
 public enum SpeakingBarPosition
 {
-    TopLeft      = 0,
-    TopMiddle    = 1,
-    TopRight     = 2,
-    MiddleLeft   = 6,
-    MiddleRight  = 7,
-    BottomLeft   = 3,
+    TopLeft = 0,
+    TopMiddle = 1,
+    TopRight = 2,
+    MiddleLeft = 6,
+    MiddleRight = 7,
+    BottomLeft = 3,
     BottomMiddle = 4,
-    BottomRight  = 5,
+    BottomRight = 5,
 }
 
 public enum VoiceControlsLayout
@@ -45,24 +46,24 @@ public enum VoiceControlsLayout
 public enum SpeakingBarNamePosition
 {
     Bottom = 0,
-    Top    = 1,
-    Left   = 2,
-    Right  = 3,
+    Top = 1,
+    Left = 2,
+    Right = 3,
     // Keep the four explicit positions at their legacy numeric values so existing
     // config files continue to represent a user override. Auto is the v4 default.
-    Auto   = 4,
+    Auto = 4,
 }
 
 public enum SpeakingBarAvatarFacing
 {
     Right = 0,
-    Left  = 1,
+    Left = 1,
 }
 
 public enum SpeakingBarSideLayout
 {
     SingleLane = 0,
-    Wrapped    = 1,
+    Wrapped = 1,
 }
 
 public enum JailUnmuteButtonPlacement
@@ -75,6 +76,16 @@ public enum VoiceMicMode
 {
     OpenMic = 0,
     PushToTalk = 1,
+}
+
+internal readonly record struct VoiceHudFeatureVisibility(
+    bool VoiceControlsHudVisible,
+    bool SpeakingBarVisible)
+{
+    internal static VoiceHudFeatureVisibility Resolve(
+        bool disableVoiceControlsHud,
+        bool disableSpeakingBar)
+        => new(!disableVoiceControlsHud, !disableSpeakingBar);
 }
 
 public class VoiceChatLocalSettings
@@ -252,7 +263,9 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> ButtonPositionX { get; }
     public ConfigEntry<float> ButtonPositionY { get; }
     public ConfigEntry<bool> ShowMuteDeafenStatusAlerts { get; }
+    public ConfigEntry<bool> DisableVoiceControlsHud { get; }
     public ConfigEntry<VoiceControlsLayout> VoiceControlsLayout { get; }
+    public ConfigEntry<bool> DisableSpeakingBar { get; }
     public ConfigEntry<SpeakingBarPosition> SpeakingBarPosition { get; }
     public ConfigEntry<SpeakingBarSideLayout> SpeakingBarSideLayout { get; }
     public ConfigEntry<VoiceControlsLayout> SpeakingBarLayout { get; }
@@ -501,7 +514,7 @@ public class VoiceChatLocalSettings
         {
             if (_correcting) return;
             int newIdx = (int)MicrophoneDeviceIndex.Value;
-            int count  = _micDevices.Length;
+            int count = _micDevices.Length;
             if (newIdx < count) return;
 
             _correcting = true;
@@ -530,7 +543,7 @@ public class VoiceChatLocalSettings
         {
             if (_correcting) return;
             int newIdx = (int)SpeakerDeviceIndex.Value;
-            int count  = _spkDevices.Length;
+            int count = _spkDevices.Length;
             if (newIdx < count) return;
 
             _correcting = true;
@@ -555,9 +568,15 @@ public class VoiceChatLocalSettings
         ShowMuteDeafenStatusAlerts = config.Bind("UI", "ShowMuteDeafenStatusAlerts", true,
             new ConfigDescription("Shows a small persistent HUD reminder while the microphone is muted or voice playback is deafened."));
 
+        DisableVoiceControlsHud = config.Bind("UI", "DisableVoiceControlsHud", false,
+            new ConfigDescription("Hides the microphone, speaker, and role voice controls HUD while keeping their keybinds active."));
+
         VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,
             new ConfigDescription("Arranges the microphone, speaker, and role voice controls vertically or horizontally."));
+
+        DisableSpeakingBar = config.Bind("UI", "DisableSpeakingBar", false,
+            new ConfigDescription("Hides the in-game speaking bar completely."));
 
         SpeakingBarPosition = config.Bind("UI", "SpeakingBarPosition",
             VoiceChatPlugin.VoiceChat.SpeakingBarPosition.TopMiddle,
@@ -724,16 +743,15 @@ public class VoiceChatLocalSettings
 
         var before = FirstRunSetupDraft.CaptureExisting(this);
         int previousRevision = CompletedSetupRevision.Value;
-        bool saveOnConfigSet = _config.SaveOnConfigSet;
+        using IDisposable batch = PerfectCommsConfigStore.BeginBatch(_config);
         try
         {
-            _config.SaveOnConfigSet = false;
             draft.ApplyTo(this);
             // The marker is deliberately last: a crash or exception before this assignment
             // causes setup to be offered again instead of treating a partial draft as complete.
             CompletedSetupRevision.Value =
                 FirstRunSetupPolicy.RevisionToStoreOnCompletion(previousRevision);
-            _config.Save();
+            PerfectCommsConfigStore.Save(_config);
         }
         catch
         {
@@ -741,7 +759,7 @@ public class VoiceChatLocalSettings
             {
                 before.ApplyTo(this);
                 CompletedSetupRevision.Value = previousRevision;
-                _config.Save();
+                PerfectCommsConfigStore.Save(_config);
             }
             catch
             {
@@ -749,10 +767,6 @@ public class VoiceChatLocalSettings
                 // from disk unless the final atomic save above succeeded.
             }
             throw;
-        }
-        finally
-        {
-            _config.SaveOnConfigSet = saveOnConfigSet;
         }
     }
 
@@ -766,19 +780,18 @@ public class VoiceChatLocalSettings
         int revision = FirstRunSetupPolicy.RevisionToStoreOnCompletion(previousRevision);
         if (previousRevision == revision) return;
 
-        bool saveOnConfigSet = _config.SaveOnConfigSet;
+        using IDisposable batch = PerfectCommsConfigStore.BeginBatch(_config);
         try
         {
-            _config.SaveOnConfigSet = false;
             CompletedSetupRevision.Value = revision;
-            _config.Save();
+            PerfectCommsConfigStore.Save(_config);
         }
         catch
         {
             try
             {
                 CompletedSetupRevision.Value = previousRevision;
-                _config.Save();
+                PerfectCommsConfigStore.Save(_config);
             }
             catch
             {
@@ -786,10 +799,6 @@ public class VoiceChatLocalSettings
                 // the previous on-disk value remains the only revision considered trustworthy.
             }
             throw;
-        }
-        finally
-        {
-            _config.SaveOnConfigSet = saveOnConfigSet;
         }
     }
 
@@ -814,36 +823,28 @@ public class VoiceChatLocalSettings
         bool removeNatFix,
         bool removeWineForceRelay)
     {
-        bool saveOnConfigSet = config.SaveOnConfigSet;
-        try
+        using IDisposable batch = PerfectCommsConfigStore.BeginBatch(config);
+        // Binding consumes BepInEx's private orphan entries. Removing the resulting public entries
+        // before saving deletes only the retired keys while preserving every unrelated setting.
+        if (removeNatFix)
         {
-            // Binding consumes BepInEx's private orphan entries. Removing the resulting public entries
-            // before saving deletes only the retired keys while preserving every unrelated setting.
-            config.SaveOnConfigSet = false;
-            if (removeNatFix)
-            {
-                ConfigEntry<bool> retiredNatFix = config.Bind(
-                    "Voice Server",
-                    "NatFix",
-                    true,
-                    new ConfigDescription("Retired: TURN fallback is automatic."));
-                config.Remove(retiredNatFix.Definition);
-            }
-            if (removeWineForceRelay)
-            {
-                ConfigEntry<bool> retiredWineForceRelay = config.Bind(
-                    "Voice Server",
-                    "WineForceRelay",
-                    false,
-                    new ConfigDescription("Retired: Wine uses automatic direct-to-TURN fallback."));
-                config.Remove(retiredWineForceRelay.Definition);
-            }
-            config.Save();
+            ConfigEntry<bool> retiredNatFix = config.Bind(
+                "Voice Server",
+                "NatFix",
+                true,
+                new ConfigDescription("Retired: TURN fallback is automatic."));
+            PerfectCommsConfigStore.Remove(config, retiredNatFix.Definition);
         }
-        finally
+        if (removeWineForceRelay)
         {
-            config.SaveOnConfigSet = saveOnConfigSet;
+            ConfigEntry<bool> retiredWineForceRelay = config.Bind(
+                "Voice Server",
+                "WineForceRelay",
+                false,
+                new ConfigDescription("Retired: Wine uses automatic direct-to-TURN fallback."));
+            PerfectCommsConfigStore.Remove(config, retiredWineForceRelay.Definition);
         }
+        PerfectCommsConfigStore.Save(config);
     }
 
     private void ApplySpeakingBarV4Migration(bool hadLegacySpeakingBarScale)
@@ -857,23 +858,14 @@ public class VoiceChatLocalSettings
         if (!plan.ShouldApply)
             return;
 
-        // Commit the four related values together. Otherwise SaveOnConfigSet could
-        // persist the converted scale before the version marker and a crash during
-        // startup would apply the conversion a second time on the next launch.
-        bool saveOnConfigSet = _config.SaveOnConfigSet;
-        try
-        {
-            _config.SaveOnConfigSet = false;
-            SpeakingBarScale.Value = plan.Scale;
-            SpeakingBarBackdrop.Value = plan.Backdrop;
-            SpeakingBarNamePosition.Value = plan.NamePosition;
-            _speakingBarSettingsVersion.Value = plan.TargetVersion;
-        }
-        finally
-        {
-            _config.SaveOnConfigSet = saveOnConfigSet;
-        }
-        _config.Save();
+        // Commit the four related values through one cross-process merge. The version marker remains
+        // last so a failure before the atomic replacement cannot apply the conversion twice.
+        using IDisposable batch = PerfectCommsConfigStore.BeginBatch(_config);
+        SpeakingBarScale.Value = plan.Scale;
+        SpeakingBarBackdrop.Value = plan.Backdrop;
+        SpeakingBarNamePosition.Value = plan.NamePosition;
+        _speakingBarSettingsVersion.Value = plan.TargetVersion;
+        PerfectCommsConfigStore.Save(_config);
     }
 
     // Subscribe AFTER construction (so the ctor's own initial .Value assignments don't dispatch). A single
@@ -1648,10 +1640,15 @@ public class VoiceChatLocalSettings
                 VoiceChatRoom.Current?.SetSpeaker(id);
         }
 #endif
-        else if (configEntry == ButtonPositionX || configEntry == ButtonPositionY ||
+        else if (configEntry == DisableVoiceControlsHud ||
+                 configEntry == ButtonPositionX || configEntry == ButtonPositionY ||
                  configEntry == VoiceControlsLayout)
         {
             VoiceChatHudState.RefreshButtonLayout();
+        }
+        else if (configEntry == DisableSpeakingBar)
+        {
+            PingTrackerPatch.ClearSpeakingBarSlots();
         }
         else if (configEntry == SpeakingBarPosition)
         {
