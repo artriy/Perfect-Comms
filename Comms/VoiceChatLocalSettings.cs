@@ -87,6 +87,18 @@ internal readonly record struct VoiceHudFeatureVisibility(
         bool disableSpeakingBar)
         => new(!disableVoiceControlsHud, !disableSpeakingBar);
 }
+internal readonly record struct VoiceHudControlVisibility(
+    bool PrimaryControlsVisible,
+    bool JailUnmuteVisible);
+
+internal static class VoiceHudControlVisibilityPolicy
+{
+    internal static VoiceHudControlVisibility Resolve(
+        bool primaryControlsEnabled,
+        bool canLocalJailorUnmute)
+        => new(primaryControlsEnabled, canLocalJailorUnmute);
+}
+
 
 public class VoiceChatLocalSettings
 {
@@ -569,7 +581,7 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Shows a small persistent HUD reminder while the microphone is muted or voice playback is deafened."));
 
         DisableVoiceControlsHud = config.Bind("UI", "DisableVoiceControlsHud", false,
-            new ConfigDescription("Hides the microphone, speaker, and role voice controls HUD while keeping their keybinds active."));
+            new ConfigDescription("Hides the microphone, speaker, and mobile radio controls while keeping their keybinds and the Jailor unmute button active."));
 
         VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,

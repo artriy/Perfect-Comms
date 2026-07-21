@@ -311,6 +311,12 @@ public static partial class VoiceChatHudState
 
     private static void PositionButtons()
     {
+        if (!_voiceControlsHudEnabled)
+        {
+            PositionStandaloneJailButton();
+            return;
+        }
+
         if (_micButtonObj == null || _spkButtonObj == null) return;
 
         var cam = MainCamera();
@@ -391,6 +397,38 @@ public static partial class VoiceChatHudState
                 _jailButtonObj.transform.position = jailPos;
         }
     }
+    private static void PositionStandaloneJailButton()
+    {
+        if (_jailButtonObj == null || _jailOnCard) return;
+
+        var cam = MainCamera();
+        if (cam == null) return;
+
+        var jailPos = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, ButtonViewportDepth));
+        jailPos = new Vector3(jailPos.x, jailPos.y, -100f);
+
+        float minX = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity;
+        float minY = float.PositiveInfinity;
+        float maxY = float.NegativeInfinity;
+        IncludeProposedButtonViewportBounds(
+            cam,
+            _jailButtonObj,
+            _jailButtonSrs,
+            jailPos,
+            ref minX,
+            ref maxX,
+            ref minY,
+            ref maxY);
+        jailPos += ButtonGroupClampDelta(cam, minX, maxX, minY, maxY);
+
+        var parent = _jailButtonObj.transform.parent;
+        if (parent != null)
+            _jailButtonObj.transform.localPosition = parent.InverseTransformPoint(jailPos);
+        else
+            _jailButtonObj.transform.position = jailPos;
+    }
+
 
     private static void ClampVoiceButtonViewportPositions(Camera cam, ref Vector3 micPos, ref Vector3 spkPos, ref Vector3 jailPos)
     {
@@ -655,12 +693,12 @@ public static partial class VoiceChatHudState
         var pendingToast = _pendingToast;
         if (pendingToast != null) { _pendingToast = null; ShowToast(pendingToast); }
 
+        _lastUpdateStep = "ensure-buttons";
+        long bTicks = VoiceFrameProfiler.Begin();
+        EnsureHudButtons(hud);
+        VoiceFrameProfiler.End("hud.buttons", bTicks);
         if (_voiceControlsHudEnabled)
         {
-            _lastUpdateStep = "ensure-buttons";
-            long bTicks = VoiceFrameProfiler.Begin();
-            EnsureHudButtons(hud);
-            VoiceFrameProfiler.End("hud.buttons", bTicks);
             _lastUpdateStep = "ensure-tooltips";
             long tTicks = VoiceFrameProfiler.Begin();
             EnsureTooltips(hud);
@@ -725,6 +763,12 @@ public static partial class VoiceChatHudState
         if (hud.MapButton == null) return;
         _lastUpdateStep = "buttons.resolve-root";
         var root = ResolveHudRoot(hud);
+        if (!_voiceControlsHudEnabled)
+        {
+            EnsureJailButton(hud, root);
+            return;
+        }
+
 
         if (_micButtonObj == null)
         {
@@ -772,31 +816,35 @@ public static partial class VoiceChatHudState
             return; // build at most one button per frame
         }
 
-        if (_jailButtonObj == null)
-        {
-            var obj = CreateHudButton(
-                hud,
-                root,
-                "jail",
-                "VC_JailUnmuteButton",
-                "VoiceChatPlugin.Resources.JailUnmute.png",
-                JailUnmutePublic,
-                onMouseOver: null,
-                hideTooltipOnMouseOut: false,
-                out var button,
-                out _,
-                out var renderers);
-            _jailButtonObj = obj;
-            _jailButton = button;
-            _jailButtonSrs = renderers;
 #if ANDROID
+        if (EnsureJailButton(hud, root))
             return; // keep the existing one-button-per-frame initialization budget
-#endif
-        }
-
-#if ANDROID
         EnsureAndroidRadioTouchButton(hud, root);
+#else
+        EnsureJailButton(hud, root);
 #endif
+    }
+
+    private static bool EnsureJailButton(HudManager hud, Transform root)
+    {
+        if (_jailButtonObj != null) return false;
+
+        var obj = CreateHudButton(
+            hud,
+            root,
+            "jail",
+            "VC_JailUnmuteButton",
+            "VoiceChatPlugin.Resources.JailUnmute.png",
+            JailUnmutePublic,
+            onMouseOver: null,
+            hideTooltipOnMouseOut: false,
+            out var button,
+            out _,
+            out var renderers);
+        _jailButtonObj = obj;
+        _jailButton = button;
+        _jailButtonSrs = renderers;
+        return true;
     }
 
     private static GameObject CreateHudButton(
@@ -915,12 +963,10 @@ public static partial class VoiceChatHudState
     {
         _micButtonObj?.SetActive(false);
         _spkButtonObj?.SetActive(false);
-        _jailButtonObj?.SetActive(false);
 #if ANDROID
         _radioTouchButtonObj?.SetActive(false);
         ReleaseAndroidTouchInput();
 #endif
-        _jailOnCard = false;
         HideTooltips();
         if (_compactStatusObj != null && _compactStatusObj.activeSelf)
             _compactStatusObj.SetActive(false);
@@ -928,23 +974,27 @@ public static partial class VoiceChatHudState
 
     private static void UpdateHudButtonsVisibility()
     {
-        if (!_voiceControlsHudEnabled)
+        bool canLocalJailorUnmute = VoiceRoleMuteState.CanLocalJailorUnmute(out byte jailedId);
+        VoiceHudControlVisibility visibility = VoiceHudControlVisibilityPolicy.Resolve(
+            _voiceControlsHudEnabled,
+            canLocalJailorUnmute);
+
+        if (!visibility.PrimaryControlsVisible)
         {
             HideVoiceControlsHud();
-            return;
         }
-        if (_micButtonObj == null || _spkButtonObj == null) return;
-        _micButtonObj.SetActive(true);
-        _spkButtonObj.SetActive(true);
+        else
+        {
+            _micButtonObj?.SetActive(true);
+            _spkButtonObj?.SetActive(true);
 #if ANDROID
-        UpdateAndroidRadioTouchButtonVisibility();
+            UpdateAndroidRadioTouchButtonVisibility();
 #endif
+        }
 
-        bool jailVisible = VoiceRoleMuteState.CanLocalJailorUnmute(out byte jailedId);
-        _jailButtonObj?.SetActive(jailVisible);
-
+        _jailButtonObj?.SetActive(visibility.JailUnmuteVisible);
         _jailOnCard = false;
-        if (jailVisible && _jailButtonObj != null &&
+        if (visibility.JailUnmuteVisible && _jailButtonObj != null &&
             _jailPlacement == JailUnmuteButtonPlacement.MeetingCard &&
             TryResolveJaileeCard(jailedId, out var jaileeCard))
         {
@@ -953,22 +1003,26 @@ public static partial class VoiceChatHudState
         }
         else if (_jailButtonObj != null)
         {
-            // Voice-HUD placement (and the fallback when no card resolves): ensure the button
-            // is back on the HUD root so PositionButtons can lay it out with mic/speaker.
-            var hudRoot = _micButtonObj.transform.parent;
-            if (hudRoot != null && _jailButtonObj.transform.parent != hudRoot)
-                _jailButtonObj.transform.SetParent(hudRoot, false);
+            // Voice-HUD placement (and the fallback when no card resolves) remains independent
+            // from the optional microphone/speaker controls.
+            var hud = HudManager.Instance;
+            if (hud != null)
+                ReparentToRoot(_jailButtonObj, ResolveHudRoot(hud));
         }
 
         PositionButtons();
 
-        KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
-        KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
+        if (visibility.PrimaryControlsVisible)
+        {
+            KeepButtonOnTop(_micButtonObj, ref _micButtonSrs);
+            KeepButtonOnTop(_spkButtonObj, ref _spkButtonSrs);
 #if ANDROID
-        KeepButtonOnTop(_radioTouchButtonObj, ref _radioTouchButtonSrs);
+            KeepButtonOnTop(_radioTouchButtonObj, ref _radioTouchButtonSrs);
 #endif
+        }
         KeepButtonOnTop(_jailButtonObj, ref _jailButtonSrs);
     }
+
 
     // Finds the jailed player's meeting card so the unmute button can be attached to it.
     // Returns false outside meetings or when the card/background isn't ready (→ HUD fallback).

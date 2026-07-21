@@ -37,8 +37,7 @@ pub fn set_transport_library_path(path: Option<&Path>) {
 fn transport_library_path() -> Option<PathBuf> {
     let configured = TRANSPORT_LIBRARY_PATH
         .get()
-        .map(|slot| slot.lock().clone())
-        .flatten();
+        .and_then(|slot| slot.lock().clone());
     #[cfg(test)]
     if configured.is_none() && std::env::var_os("PC_REQUIRE_PION").is_some() {
         return std::env::var_os("PC_PION_LIB").map(PathBuf::from);

@@ -40,7 +40,7 @@ Perfect Comms v4.1.2 rebuilds desktop capture and playback for more dependable d
   > <sub>The compact voice HUD gives the current lobby up to 30 seconds to connect, then clears a stalled player-count message while voice recovery continues in the background. A changed lobby roster or a later connection regression starts a fresh bounded status window.</sub>
 
 - **Voice controls and the speaking bar can now be hidden independently.**
-  > <sub>The voice settings now include separate switches for hiding the microphone, speaker, deafen, and jail controls or hiding the all-players speaking bar. Disabling either HUD feature also hides only its related layout and appearance options; the other HUD feature continues working normally.</sub>
+  > <sub>The voice settings now include separate switches for hiding the microphone, speaker, deafen, and mobile radio controls or hiding the all-players speaking bar. The role-critical Jailor unmute button remains available; disabling either optional HUD feature hides only its related layout and appearance options.</sub>
 
 - **Perfect Comms settings now follow you across Among Us installations.**
   > <sub>Perfect Comms stores one user-wide configuration in the game's persistent data folder instead of each installation's BepInEx folder. The first launch migrates the current installation's settings without deleting the old file, and simultaneous clients merge changed settings through locked, atomic writes so unrelated preferences are not overwritten.</sub>
