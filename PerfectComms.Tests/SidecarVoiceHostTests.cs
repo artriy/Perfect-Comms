@@ -63,7 +63,7 @@ public sealed class SidecarVoiceHostTests
         Assert.True(lease.AddPeer("42", isOfferer: true, generation: 1));
         fake.RemoveFailuresRemaining = 1;
 
-        Assert.False(lease.RemovePeer("42"));
+        Assert.False(lease.RemovePeer("42", generation: 1));
         lease.Dispose();
 
         Assert.Equal(new[] { "42", "42" }, fake.RemovedPeers);
@@ -267,16 +267,16 @@ public sealed class SidecarVoiceHostTests
         }
         public void SendOutputTestFrame(float[] interleavedStereo) { }
         public bool AddPeer(string peerId, bool isOfferer, int generation) => true;
-        public bool RemovePeer(string peerId)
+        public bool RemovePeer(string peerId, int generation)
         {
             RemovedPeers.Add(peerId);
             if (RemoveFailuresRemaining <= 0) return true;
             RemoveFailuresRemaining--;
             return false;
         }
-        public bool RestartIce(string peerId, bool createOffer) => true;
-        public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => true;
-        public bool AddIceCandidate(string peerId, string candidate) => true;
+        public bool RestartIce(string peerId, int generation, bool createOffer) => true;
+        public bool SetRemoteSdp(string peerId, int generation, string sdpType, string sdp) => true;
+        public bool AddIceCandidate(string peerId, int generation, string candidate) => true;
         public void SetIceServers(IEnumerable<IceServer> servers) { }
         public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
             => GameStates.Add((deaf, master, peers.Count));

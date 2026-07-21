@@ -348,7 +348,7 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(13, SidecarVoiceClient.Proto);
+        Assert.Equal(14, SidecarVoiceClient.Proto);
         Assert.Equal(5, SidecarProtocol.MobileAbi);
     }
 
@@ -616,6 +616,34 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(5f, VoiceChatRoom.RecoveryBackoffSeconds(0));
         Assert.Equal(10f, VoiceChatRoom.RecoveryBackoffSeconds(1));
         Assert.Equal(20f, VoiceChatRoom.RecoveryBackoffSeconds(2));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(7, true)]
+    [InlineData(8, false)]
+    [InlineData(80, false)]
+    public void TotalMeshCollapseCannotDeferRecoveryPastHardLimit(
+        int consecutiveDeferrals,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VoiceChatRoom.ShouldContinuePeerEscalationDeferral(
+                deferRequested: true,
+                collapsed: true,
+                openChannelsRaw: 0,
+                consecutiveDeferrals));
+    }
+
+    [Fact]
+    public void PartialMeshRecoveryStillDefersWithoutDestructiveRebuild()
+    {
+        Assert.True(VoiceChatRoom.ShouldContinuePeerEscalationDeferral(
+            deferRequested: true,
+            collapsed: false,
+            openChannelsRaw: 1,
+            consecutiveDeferrals: 80));
     }
 
     [Fact]

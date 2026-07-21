@@ -16,4 +16,4 @@
 // Keep the text synchronized with pionABIVersion/pionVersion in the Go ABI and with
 // scripts/verify-release-assets.py. The terminating NUL is part of the marker contract.
 PC_PION_EXPORT PC_PION_USED const char PC_PION_CONTRACT_MARKER[] =
-    "PERFECTCOMMS_PC_PION_ABI=1;PION=4.2.17";
+    "PERFECTCOMMS_PC_PION_ABI=2;PION=4.2.17";

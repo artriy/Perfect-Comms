@@ -60,10 +60,10 @@ internal interface ISidecarVoiceClient : IDisposable
     bool SelectOutputDevice(string deviceId);
     void SendOutputTestFrame(float[] interleavedStereo);
     bool AddPeer(string peerId, bool isOfferer, int generation);
-    bool RemovePeer(string peerId);
-    bool RestartIce(string peerId, bool createOffer);
-    bool SetRemoteSdp(string peerId, string sdpType, string sdp);
-    bool AddIceCandidate(string peerId, string candidate);
+    bool RemovePeer(string peerId, int generation);
+    bool RestartIce(string peerId, int generation, bool createOffer);
+    bool SetRemoteSdp(string peerId, int generation, string sdpType, string sdp);
+    bool AddIceCandidate(string peerId, int generation, string candidate);
     void SetIceServers(IEnumerable<IceServer> servers);
     void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers);
 }
@@ -113,7 +113,7 @@ internal sealed class SidecarVoiceLease : IDisposable
 {
     private readonly SidecarVoiceHostCore _host;
     private readonly SidecarVoiceCallbacks _callbacks;
-    private readonly HashSet<string> _peerIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _peerGenerations = new(StringComparer.Ordinal);
     private int _active = 1;
 
     private readonly Action<float[], int> _frameForwarder;
@@ -174,18 +174,18 @@ internal sealed class SidecarVoiceLease : IDisposable
     }
 
     internal void Deactivate() => Interlocked.Exchange(ref _active, 0);
-    internal void TrackPeer(string peerId)
+    internal void TrackPeer(string peerId, int generation)
     {
-        if (!string.IsNullOrEmpty(peerId)) _peerIds.Add(peerId);
+        if (!string.IsNullOrEmpty(peerId)) _peerGenerations[peerId] = generation;
     }
     internal void UntrackPeer(string peerId)
     {
-        if (!string.IsNullOrEmpty(peerId)) _peerIds.Remove(peerId);
+        if (!string.IsNullOrEmpty(peerId)) _peerGenerations.Remove(peerId);
     }
-    internal string[] TakePeers()
+    internal KeyValuePair<string, int>[] TakePeers()
     {
-        var peers = _peerIds.ToArray();
-        _peerIds.Clear();
+        var peers = _peerGenerations.ToArray();
+        _peerGenerations.Clear();
         return peers;
     }
 
@@ -233,22 +233,22 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client =>
         {
             if (!client.AddPeer(peerId, isOfferer, generation)) return false;
-            TrackPeer(peerId);
+            TrackPeer(peerId, generation);
             return true;
         }, false);
-    public bool RemovePeer(string peerId)
+    public bool RemovePeer(string peerId, int generation)
         => _host.Use(this, client =>
         {
-            var written = client.RemovePeer(peerId);
+            var written = client.RemovePeer(peerId, generation);
             if (written) UntrackPeer(peerId);
             return written;
         }, false);
-    public bool RestartIce(string peerId, bool createOffer)
-        => _host.Use(this, client => client.RestartIce(peerId, createOffer), false);
-    public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
-        => _host.Use(this, client => client.SetRemoteSdp(peerId, sdpType, sdp), false);
-    public bool AddIceCandidate(string peerId, string candidate)
-        => _host.Use(this, client => client.AddIceCandidate(peerId, candidate), false);
+    public bool RestartIce(string peerId, int generation, bool createOffer)
+        => _host.Use(this, client => client.RestartIce(peerId, generation, createOffer), false);
+    public bool SetRemoteSdp(string peerId, int generation, string sdpType, string sdp)
+        => _host.Use(this, client => client.SetRemoteSdp(peerId, generation, sdpType, sdp), false);
+    public bool AddIceCandidate(string peerId, int generation, string candidate)
+        => _host.Use(this, client => client.AddIceCandidate(peerId, generation, candidate), false);
     public void SetIceServers(IEnumerable<IceServer> servers)
         => _host.Use(this, client => client.SetIceServers(servers));
     public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
@@ -436,7 +436,10 @@ internal sealed class SidecarVoiceHostCore
     private bool OwnsLocked(SidecarVoiceLease lease)
         => !_shutdown && lease.IsActive && ReferenceEquals(_owner, lease);
 
-    private static void QuiesceLocked(ISidecarVoiceClient client, IReadOnlyList<string> peerIds, string reason)
+    private static void QuiesceLocked(
+        ISidecarVoiceClient client,
+        IReadOnlyList<KeyValuePair<string, int>> peers,
+        string reason)
     {
         try { client.SetMicActive(false); } catch { }
         try { client.SetSynthetic(false); } catch { }
@@ -449,9 +452,9 @@ internal sealed class SidecarVoiceHostCore
                 peers: Array.Empty<SidecarProtocol.GameStatePeerInput>());
         }
         catch { }
-        foreach (var peerId in peerIds)
-            try { client.RemovePeer(peerId); } catch { }
-        VoiceDiagnostics.Log("sidecar.host", $"event=session-quiesced reason={reason} peersRemoved={peerIds.Count}");
+        foreach (var peer in peers)
+            try { client.RemovePeer(peer.Key, peer.Value); } catch { }
+        VoiceDiagnostics.Log("sidecar.host", $"event=session-quiesced reason={reason} peersRemoved={peers.Count}");
     }
 
     private void DropClientLocked(SidecarVoiceLease? attachedLease, string reason)

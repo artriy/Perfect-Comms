@@ -181,17 +181,29 @@ internal static class SidecarProtocol
         return EncodeControl($"{{\"op\":\"peer-add\",\"peer_id\":{JsonString(peerId)},\"offerer\":{JsonBool(isOfferer)},\"relay_only\":false,\"generation\":{generation}}}");
     }
 
-    public static byte[] RemovePeerFrame(string peerId)
-        => EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)}}}");
+    public static byte[] RemovePeerFrame(string peerId, int generation)
+    {
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        return EncodeControl($"{{\"op\":\"peer-remove\",\"peer_id\":{JsonString(peerId)},\"generation\":{generation}}}");
+    }
 
-    public static byte[] RestartIceFrame(string peerId, bool createOffer)
-        => EncodeControl($"{{\"op\":\"restart-ice\",\"peer_id\":{JsonString(peerId)},\"relay_only\":false,\"create_offer\":{JsonBool(createOffer)}}}");
+    public static byte[] RestartIceFrame(string peerId, int generation, bool createOffer)
+    {
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        return EncodeControl($"{{\"op\":\"restart-ice\",\"peer_id\":{JsonString(peerId)},\"generation\":{generation},\"relay_only\":false,\"create_offer\":{JsonBool(createOffer)}}}");
+    }
 
-    public static byte[] SetRemoteSdpFrame(string peerId, string sdpType, string sdp)
-        => EncodeControl($"{{\"op\":\"set-remote-sdp\",\"peer_id\":{JsonString(peerId)},\"sdp_type\":{JsonString(sdpType)},\"sdp\":{JsonString(sdp)}}}");
+    public static byte[] SetRemoteSdpFrame(string peerId, int generation, string sdpType, string sdp)
+    {
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        return EncodeControl($"{{\"op\":\"set-remote-sdp\",\"peer_id\":{JsonString(peerId)},\"generation\":{generation},\"sdp_type\":{JsonString(sdpType)},\"sdp\":{JsonString(sdp)}}}");
+    }
 
-    public static byte[] AddIceCandidateFrame(string peerId, string candidate)
-        => EncodeControl($"{{\"op\":\"add-ice-candidate\",\"peer_id\":{JsonString(peerId)},\"candidate\":{JsonString(candidate)}}}");
+    public static byte[] AddIceCandidateFrame(string peerId, int generation, string candidate)
+    {
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        return EncodeControl($"{{\"op\":\"add-ice-candidate\",\"peer_id\":{JsonString(peerId)},\"generation\":{generation},\"candidate\":{JsonString(candidate)}}}");
+    }
 
     public static byte[] SetIceServersFrame(IEnumerable<IceServer> servers)
     {

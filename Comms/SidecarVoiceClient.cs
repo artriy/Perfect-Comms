@@ -15,16 +15,17 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 13 adds local microphone monitoring with optional delayed playback. Protocol 12 adds
-    // coordinated logical ICE restart for network-interface changes. Protocol 11 adds
-    // selectable high/very-high WebRTC noise suppression. Protocol 10 sends
-    // stable audio device IDs separately from display names.
+    // Protocol 14 generation-scopes every peer operation so stale queued SDP/ICE work cannot
+    // mutate a replacement peer. Protocol 13 adds local microphone monitoring with optional
+    // delayed playback. Protocol 12 adds coordinated logical ICE restart for network-interface
+    // changes. Protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10
+    // sends stable audio device IDs separately from display names.
     // Protocol 9 adds the speech-safe native noise-gate threshold and complete receive/path
     // telemetry. Protocol 8 requires AUDIO_OUT playback injection plus lifecycle acknowledgement
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 13;
+    public const int Proto = 14;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -379,53 +380,56 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             $"{DescribePeer(peerId)} generation={generation} offerer={isOfferer} policy=automatic-mixed");
     }
 
-    public bool RemovePeer(string peerId)
+    public bool RemovePeer(string peerId, int generation)
     {
         if (string.IsNullOrEmpty(peerId))
         {
-            LogCommand("peer-remove", "rejected", 0, "reason=missing-peer");
+            LogCommand("peer-remove", "rejected", 0, $"generation={generation} reason=missing-peer");
             return false;
         }
-        return SendCommand("peer-remove", () => SidecarProtocol.RemovePeerFrame(peerId), DescribePeer(peerId));
+        return SendCommand(
+            "peer-remove",
+            () => SidecarProtocol.RemovePeerFrame(peerId, generation),
+            $"{DescribePeer(peerId)} generation={generation}");
     }
 
-    public bool RestartIce(string peerId, bool createOffer)
+    public bool RestartIce(string peerId, int generation, bool createOffer)
     {
         if (string.IsNullOrEmpty(peerId))
         {
-            LogCommand("restart-ice", "rejected", 0, "reason=missing-peer");
+            LogCommand("restart-ice", "rejected", 0, $"generation={generation} reason=missing-peer");
             return false;
         }
         return SendCommand(
             "restart-ice",
-            () => SidecarProtocol.RestartIceFrame(peerId, createOffer),
-            $"{DescribePeer(peerId)} policy=automatic-mixed createOffer={createOffer}");
+            () => SidecarProtocol.RestartIceFrame(peerId, generation, createOffer),
+            $"{DescribePeer(peerId)} generation={generation} policy=automatic-mixed createOffer={createOffer}");
     }
 
-    public bool SetRemoteSdp(string peerId, string sdpType, string sdp)
+    public bool SetRemoteSdp(string peerId, int generation, string sdpType, string sdp)
     {
         if (string.IsNullOrEmpty(peerId))
         {
-            LogCommand("set-remote-sdp", "rejected", 0, $"type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)} reason=missing-peer");
+            LogCommand("set-remote-sdp", "rejected", 0, $"generation={generation} type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)} reason=missing-peer");
             return false;
         }
         return SendCommand(
             "set-remote-sdp",
-            () => SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp),
-            $"{DescribePeer(peerId)} type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)}");
+            () => SidecarProtocol.SetRemoteSdpFrame(peerId, generation, sdpType, sdp),
+            $"{DescribePeer(peerId)} generation={generation} type=\"{SafeDiagnosticText(sdpType, 32)}\" sdpBytes={Utf8Bytes(sdp)}");
     }
 
-    public bool AddIceCandidate(string peerId, string candidate)
+    public bool AddIceCandidate(string peerId, int generation, string candidate)
     {
         if (string.IsNullOrEmpty(peerId))
         {
-            LogCommand("add-ice-candidate", "rejected", 0, $"candidateBytes={Utf8Bytes(candidate)} reason=missing-peer");
+            LogCommand("add-ice-candidate", "rejected", 0, $"generation={generation} candidateBytes={Utf8Bytes(candidate)} reason=missing-peer");
             return false;
         }
         return SendCommand(
             "add-ice-candidate",
-            () => SidecarProtocol.AddIceCandidateFrame(peerId, candidate),
-            $"{DescribePeer(peerId)} candidateBytes={Utf8Bytes(candidate)}");
+            () => SidecarProtocol.AddIceCandidateFrame(peerId, generation, candidate),
+            $"{DescribePeer(peerId)} generation={generation} candidateBytes={Utf8Bytes(candidate)}");
     }
 
     public void SetIceServers(IEnumerable<IceServer> servers)
@@ -1182,6 +1186,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"opusEncoded={opusEncoded} opusGapPlaceholders={ReadU64(root, "opus_gap_placeholders")} opusDiscontinuityResets={ReadU64(root, "opus_discontinuity_resets")} opusEmpty={ReadU64(root, "opus_empty")} opusErrors={ReadU64(root, "opus_errors")} " +
                 $"rtpTxAttempts={ReadU64(root, "rtp_tx_attempts")} rtpTxOk={rtpTxOk} rtpTxErrors={ReadU64(root, "rtp_tx_errors")} " +
                 $"rtpTxQueueDropped={ReadU64(root, "rtp_tx_queue_dropped")} rtpTxStaleEpochDropped={ReadU64(root, "rtp_tx_stale_epoch_dropped")} rtpTxWriteTimeouts={ReadU64(root, "rtp_tx_write_timeouts")} rtpTxQueueDepthMax={ReadU64(root, "rtp_tx_queue_depth_max")} " +
+                $"rtcControlDepth={ReadU64(root, "rtc_control_queue_depth")} rtcControlDepthMax={ReadU64(root, "rtc_control_queue_depth_max")} rtcControlOldestMs={ReadU64(root, "rtc_control_oldest_age_ms")} rtcControlStaleDiscarded={ReadU64(root, "rtc_control_stale_discarded")} rtcControlCoalesced={ReadU64(root, "rtc_control_coalesced")} rtcControlCandidateDuplicates={ReadU64(root, "rtc_control_candidate_duplicates")} rtcControlOverflows={ReadU64(root, "rtc_control_overflows")} rtcControlDesiredGenerationMax={ReadU64(root, "rtc_control_desired_generation_max")} rtcControlAppliedGenerationMax={ReadU64(root, "rtc_control_applied_generation_max")} rtcControlGenerationLagMax={ReadU64(root, "rtc_control_generation_lag_max")} " +
                 $"rtpRxPackets={rtpRxPackets} rtpRxBytes={ReadU64(root, "rtp_rx_bytes")} staleRtpDropped={ReadU64(root, "stale_rtp_rx_dropped")} " +
                 $"decodePackets={ReadU64(root, "decode_packets")} decodeFrames={decodeFrames} decodeEmpty={ReadU64(root, "decode_empty")} decodeErrors={ReadU64(root, "decode_errors")} " +
                 $"peerLevelBatches={ReadU64(root, "peer_level_batches")} mixRounds={mixRounds} mixedPeerFrames={ReadU64(root, "mixed_peer_frames")} " +
@@ -1195,6 +1200,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"playbackCallbacks={ReadU64(root, "playback_callbacks")} playbackRequestedPairs={ReadU64(root, "playback_requested_pairs")} playbackConsumedPairs={ReadU64(root, "playback_consumed_pairs")} playbackUnderrunPairs={ReadU64(root, "playback_underrun_pairs")} " +
                 $"playbackLockContentionCallbacks={ReadU64(root, "playback_lock_contention_callbacks")} playbackLockContentionSilencePairs={ReadU64(root, "playback_lock_contention_silence_pairs")} playbackOutputNonzeroSamples={ReadU64(root, "playback_output_nonzero_samples")} playbackOutputPeak={ReadDouble(root, "playback_output_peak"):0.000000} " +
                 $"playbackRingLen={ReadU64(root, "playback_ring_len")} playbackDropped={ReadU64(root, "playback_ring_dropped")} mediaDiagnosticsPresent={hasMediaDiagnostics.ToString().ToLowerInvariant()} mediaDiagnosticsSchema={mediaDiagnosticsSchema} mediaDiagnosticsSchemaSupported={mediaDiagnosticsSchemaSupported} payloadBytes={payloadBytes}");
+            LogNativeRtcControlPeers(root, payloadBytes, managedGeneration);
             LogNativeNetworkPaths(root, payloadBytes, managedGeneration);
             LogNativeMediaDiagnostics(root, payloadBytes, managedGeneration);
         }
@@ -1413,6 +1419,23 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                $"sequenceGaps={FormatOptionalU64(receive, "sequence_gaps")} reorderedRecovered={FormatOptionalU64(receive, "reordered_recovered")} lateDrops={FormatOptionalU64(receive, "late_drops")} duplicateDrops={FormatOptionalU64(receive, "duplicate_drops")} encodedOverflowDrops={FormatOptionalU64(receive, "encoded_overflow_drops")} deadlineLosses={FormatOptionalU64(receive, "deadline_losses")} " +
                $"dredFrames={FormatOptionalU64(receive, "dred_frames")} fecFrames={FormatOptionalU64(receive, "fec_frames")} plcFrames={FormatOptionalU64(receive, "plc_frames")} decoderResets={FormatOptionalU64(receive, "decoder_resets")} talkspurtResets={FormatOptionalU64(receive, "talkspurt_resets")} underruns={FormatOptionalU64(receive, "underruns")} rebuffers={FormatOptionalU64(receive, "rebuffers")} " +
                $"targetFramesMax={FormatOptionalU64(receive, "target_frames_max")} targetFramesCurrentMax={FormatOptionalU64(receive, "target_frames_current_max")} depthFramesMax={FormatOptionalU64(receive, "depth_frames_max")} depthFramesCurrent={FormatOptionalU64(receive, "depth_frames_current")} rtpJitterMsMax={FormatOptionalDouble(receive, "rtp_jitter_ms_max", "0.###")}";
+    }
+
+    private static void LogNativeRtcControlPeers(JsonElement root, int payloadBytes, int managedGeneration)
+    {
+        if (!root.TryGetProperty("rtc_control_peers", out var peers) ||
+            peers.ValueKind != JsonValueKind.Array)
+            return;
+        var count = 0;
+        foreach (var peer in peers.EnumerateArray())
+        {
+            if (peer.ValueKind != JsonValueKind.Object ||
+                count++ >= SidecarProtocol.MaxPeerLevelsPerBatch)
+                continue;
+            VoiceDiagnostics.Log(
+                "sidecar.native.rtc-control-peer",
+                $"managedGeneration={managedGeneration} peer=\"{FormatOptionalText(peer, "peer_id", 64)}\" desiredGeneration={FormatOptionalU64(peer, "desired_generation")} appliedGeneration={FormatOptionalU64(peer, "applied_generation")} payloadBytes={payloadBytes}");
+        }
     }
 
     private static void LogNativeNetworkPaths(JsonElement root, int payloadBytes, int managedGeneration)

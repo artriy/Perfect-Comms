@@ -22,6 +22,24 @@ internal readonly record struct VoiceConnectionProgress(
     internal bool IsConnecting => Stage != VoiceConnectionStage.Ready;
 }
 
+internal readonly record struct VoiceConnectionRosterSignature(
+    int Count,
+    int Xor,
+    long Sum);
+
+internal readonly record struct VoiceConnectionDisplayState(
+    bool HasConnectingPlayersEpisode,
+    VoiceConnectionRosterSignature EpisodeRoster,
+    float EpisodeStartedAt,
+    bool Visible)
+{
+    internal static readonly VoiceConnectionDisplayState Initial = new(
+        false,
+        default,
+        0f,
+        true);
+}
+
 /// <summary>
 /// Pure connection/readiness policy for the compact voice HUD. Local helper startup is only the
 /// first gate: clients cannot actually exchange routed lobby audio until the live roster is known,
@@ -29,6 +47,8 @@ internal readonly record struct VoiceConnectionProgress(
 /// </summary>
 internal static class VoiceConnectionStatusPolicy
 {
+    internal const float ConnectingPlayersDisplayTimeoutSeconds = 30f;
+
     internal static bool IsSnapshotReady(
         VoiceGameStateSnapshot? snapshot,
         bool authenticatedRosterAvailable,
@@ -93,6 +113,29 @@ internal static class VoiceConnectionStatusPolicy
             VoiceConnectionStage.Ready,
             connectedPlayers,
             expectedPlayers);
+    }
+
+    internal static VoiceConnectionDisplayState UpdateDisplayState(
+        VoiceConnectionDisplayState current,
+        VoiceConnectionProgress progress,
+        VoiceConnectionRosterSignature roster,
+        float now)
+    {
+        if (progress.Stage == VoiceConnectionStage.Ready)
+            return new VoiceConnectionDisplayState(false, default, 0f, false);
+
+        // Local startup, retry, and session-sync messages describe failures outside an individual
+        // peer's control. Keep those visible, but preserve any existing player-connection episode
+        // so a brief snapshot gap cannot restart an already-expired 30-second budget.
+        if (progress.Stage != VoiceConnectionStage.ConnectingPlayers)
+            return current with { Visible = true };
+
+        bool startEpisode = !current.HasConnectingPlayersEpisode
+                            || current.EpisodeRoster != roster
+                            || now < current.EpisodeStartedAt;
+        float startedAt = startEpisode ? now : current.EpisodeStartedAt;
+        bool visible = now - startedAt < ConnectingPlayersDisplayTimeoutSeconds;
+        return new VoiceConnectionDisplayState(true, roster, startedAt, visible);
     }
 
     internal static string BuildText(VoiceConnectionProgress progress, int animationFrame)

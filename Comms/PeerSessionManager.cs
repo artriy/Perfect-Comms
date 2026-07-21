@@ -10,11 +10,12 @@ namespace VoiceChatPlugin.VoiceChat;
 
 internal interface IVoiceTransport
 {
+    bool RequiresNativeOperationAcknowledgements { get; }
     bool AddPeer(int clientId, bool isOfferer, int generation);
-    bool RemovePeer(int clientId);
-    bool SetRemoteSdp(int clientId, string sdpType, string sdp);
-    bool AddIceCandidate(int clientId, string candidate);
-    bool RestartIce(int clientId, bool createOffer);
+    bool RemovePeer(int clientId, int generation);
+    bool SetRemoteSdp(int clientId, int generation, string sdpType, string sdp);
+    bool AddIceCandidate(int clientId, int generation, string candidate);
+    bool RestartIce(int clientId, int generation, bool createOffer);
 }
 
 internal interface ISignalingSender
@@ -347,6 +348,7 @@ internal sealed class PeerSessionManager
     private const long FailedLocalSignalRetryIntervalMs = 500;
     private const long IceRestartOfferTimeoutMs = 5000;
     private const int MaxPendingLocalCandidates = 64;
+    internal const long NativeOperationAckTimeoutMs = 3000;
     private const long FailedTransportCommandRetryIntervalMs = 500;
     private const long RelayCredentialRetryIntervalMs = 5000;
     private const long MaxHelloBackoffMs = 60000;
@@ -416,6 +418,11 @@ internal sealed class PeerSessionManager
         public bool PendingTransportAddOfferer;
         public bool PendingTransportRemove;
         public AfterRemoveAction AfterRemove;
+        public bool NativePeerApplied;
+        public bool NativeRemoteDescriptionApplied;
+        public long NativePeerAddRequestedAtMs;
+        public long NativeRemoteSdpRequestedAtMs;
+        public bool NativeAckTimeoutReported;
         public PendingRemoteSdp? PendingTransportSdp;
         public long LastTransportCommandAttemptMs;
         public PendingLocalSignal? PendingLocalSdp;
@@ -427,6 +434,7 @@ internal sealed class PeerSessionManager
     private readonly IVoiceTransport _transport;
     private readonly ISignalingSender _sender;
     private readonly Func<bool> _relayAvailable;
+    private readonly Action<string> _nativeOperationTimeout;
     private readonly Action<int> _requestRelay;
     private readonly Dictionary<int, PeerEntry> _peers = new();
     private readonly Dictionary<int, PendingRemoval> _pendingRemovals = new();
@@ -449,13 +457,15 @@ internal sealed class PeerSessionManager
         IVoiceTransport transport,
         ISignalingSender sender,
         Func<bool>? relayAvailable = null,
-        Action<int>? requestRelay = null)
+        Action<int>? requestRelay = null,
+        Action<string>? nativeOperationTimeout = null)
     {
         _localClientId = localClientId;
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _sender = sender ?? throw new ArgumentNullException(nameof(sender));
         _relayAvailable = relayAvailable ?? (() => false);
         _requestRelay = requestRelay ?? (_ => { });
+        _nativeOperationTimeout = nativeOperationTimeout ?? (_ => { });
         _localSessionId = CreateSessionNonce();
     }
 
@@ -499,6 +509,9 @@ internal sealed class PeerSessionManager
     {
         foreach (var peer in _peers.Values)
         {
+            if (IsWithinNativeOperationDeadline(peer.NativePeerAddRequestedAtMs, nowMs)
+                || IsWithinNativeOperationDeadline(peer.NativeRemoteSdpRequestedAtMs, nowMs))
+                return true;
             if (peer.IceRestartRequestPending)
             {
                 var restartWaitElapsedMs = nowMs - peer.IceRestartRequestStartedMs;
@@ -518,6 +531,115 @@ internal sealed class PeerSessionManager
         }
 
         return false;
+    }
+
+    private static bool IsWithinNativeOperationDeadline(long startedAtMs, long nowMs)
+        => startedAtMs > 0
+           && nowMs >= startedAtMs
+           && nowMs - startedAtMs < NativeOperationAckTimeoutMs;
+
+    private bool CheckNativeOperationDeadline(int clientId, PeerEntry peer, long nowMs)
+    {
+        if (!_transport.RequiresNativeOperationAcknowledgements || peer.NativeAckTimeoutReported)
+            return peer.NativeAckTimeoutReported;
+
+        string? operation = null;
+        long startedAtMs = 0;
+        if (peer.NativePeerAddRequestedAtMs > 0)
+        {
+            operation = "peer-add";
+            startedAtMs = peer.NativePeerAddRequestedAtMs;
+        }
+        else if (peer.NativeRemoteSdpRequestedAtMs > 0)
+        {
+            operation = "set-remote-sdp";
+            startedAtMs = peer.NativeRemoteSdpRequestedAtMs;
+        }
+        if (operation == null
+            || nowMs < startedAtMs
+            || nowMs - startedAtMs < NativeOperationAckTimeoutMs)
+            return false;
+
+        peer.NativeAckTimeoutReported = true;
+        var detail = $"operation={operation} client={clientId} generation={peer.Generation} waitMs={nowMs - startedAtMs}";
+        LogReject("native-operation-ack", clientId, peer, "timeout", detail);
+        _nativeOperationTimeout(detail);
+        return true;
+    }
+
+    public void OnNativeOperationApplied(int clientId, int generation, string operation)
+        => OnNativeOperationApplied(clientId, generation, operation, Environment.TickCount64);
+
+    internal void OnNativeOperationApplied(
+        int clientId,
+        int generation,
+        string operation,
+        long nowMs)
+    {
+        if (!TryGetCurrentPeer(clientId, generation, out var peer))
+        {
+            LogGenerationReject("native-operation-ack", clientId, generation, $"operation={LogSafe(operation)}");
+            return;
+        }
+
+        if (string.Equals(operation, "native-peer-added", StringComparison.Ordinal))
+        {
+            if (!peer.Added)
+            {
+                LogReject("native-operation-ack", clientId, peer, "peer-not-added", $"operation={operation}");
+                return;
+            }
+            CompleteNativePeerAdd(clientId, peer, nowMs, operation);
+            return;
+        }
+        if (string.Equals(operation, "native-remote-sdp-applied", StringComparison.Ordinal))
+        {
+            if (peer.NativeRemoteSdpRequestedAtMs <= 0 || !peer.PendingTransportSdp.HasValue)
+            {
+                LogReject("native-operation-ack", clientId, peer, "no-pending-operation", $"operation={operation}");
+                return;
+            }
+            CompletePendingRemoteSdp(clientId, peer, nowMs, operation);
+            ReplayPendingCandidates(clientId, peer, peer.NegotiationId, nowMs);
+            return;
+        }
+        if (operation is "native-peer-removed" or "native-ice-restarted")
+        {
+            LogEvent("native-operation-ack", clientId, peer, $"operation={operation} accepted=true");
+            return;
+        }
+
+        LogReject("native-operation-ack", clientId, peer, "operation-unknown", $"operation={LogSafe(operation)}");
+    }
+
+    private void CompleteNativePeerAdd(int clientId, PeerEntry peer, long nowMs, string source)
+    {
+        peer.NativePeerApplied = true;
+        peer.NativePeerAddRequestedAtMs = 0;
+        peer.NativeAckTimeoutReported = false;
+        peer.LastProgressMs = nowMs;
+        LogEvent("native-operation-ack", clientId, peer, $"operation=native-peer-added source={source} accepted=true");
+        if (peer.PendingTransportSdp.HasValue
+            && TryWritePendingRemoteSdp(clientId, peer, nowMs, "native-peer-added"))
+            ReplayPendingCandidates(clientId, peer, peer.NegotiationId, nowMs);
+    }
+
+    private void CompletePendingRemoteSdp(int clientId, PeerEntry peer, long nowMs, string source)
+    {
+        if (peer.PendingTransportSdp is not { } pending)
+            return;
+        peer.NativeRemoteDescriptionApplied = true;
+        peer.PendingTransportSdp = null;
+        peer.NativeRemoteSdpRequestedAtMs = 0;
+        peer.NativeAckTimeoutReported = false;
+        peer.LastProgressMs = nowMs;
+        if (string.Equals(pending.SdpType, "answer", StringComparison.OrdinalIgnoreCase))
+            SetState(clientId, peer, PeerState.Connected, "remote-answer-applied");
+        LogEvent(
+            "native-operation-ack",
+            clientId,
+            peer,
+            $"operation=native-remote-sdp-applied source={source} accepted=true sdpType={LogSafe(pending.SdpType)}");
     }
 
     internal PeerSessionDiagnosticsSnapshot GetDiagnosticsSnapshot()
@@ -615,6 +737,8 @@ internal sealed class PeerSessionManager
         {
             var peer = pair.Value;
             PruneExpiredPendingCandidates(pair.Key, peer, nowMs);
+            if (CheckNativeOperationDeadline(pair.Key, peer, nowMs))
+                continue;
             RetryPendingTransportCommands(pair.Key, peer, nowMs);
             if (peer.PendingTransportRemove)
                 continue;
@@ -1183,6 +1307,15 @@ internal sealed class PeerSessionManager
             LogGenerationReject("local-sdp", clientId, generation, $"sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)}");
             return;
         }
+        if (_transport.RequiresNativeOperationAcknowledgements && !peer.NativePeerApplied)
+            CompleteNativePeerAdd(clientId, peer, nowMs, "implicit-local-sdp");
+        if (_transport.RequiresNativeOperationAcknowledgements
+            && peer.NativeRemoteSdpRequestedAtMs > 0
+            && peer.PendingTransportSdp.HasValue)
+        {
+            CompletePendingRemoteSdp(clientId, peer, nowMs, "implicit-local-sdp");
+            ReplayPendingCandidates(clientId, peer, peer.NegotiationId, nowMs);
+        }
         if (peer.Incompatible)
         {
             LogReject("local-sdp", clientId, peer, "protocol-incompatible");
@@ -1240,6 +1373,8 @@ internal sealed class PeerSessionManager
             LogGenerationReject("local-candidate", clientId, generation, $"candidateBytes={Utf8Length(candidate)}");
             return;
         }
+        if (_transport.RequiresNativeOperationAcknowledgements && !peer.NativePeerApplied)
+            CompleteNativePeerAdd(clientId, peer, nowMs, "implicit-local-candidate");
         if (peer.Incompatible)
         {
             LogReject("local-candidate", clientId, peer, "protocol-incompatible");
@@ -1415,17 +1550,29 @@ internal sealed class PeerSessionManager
         // adapters can synchronously emit SDP/candidate callbacks from AddPeer.
         var wasPending = peer.PendingTransportAdd;
         peer.Added = true;
+        peer.NativePeerApplied = !_transport.RequiresNativeOperationAcknowledgements;
+        peer.NativeRemoteDescriptionApplied = false;
+        peer.NativePeerAddRequestedAtMs = 0;
+        peer.NativeAckTimeoutReported = false;
         peer.PendingTransportAdd = false;
         peer.PendingTransportAddOfferer = isOfferer;
         peer.LastTransportCommandAttemptMs = nowMs;
         if (TransportAddPeer(clientId, peer, isOfferer, reason))
         {
             peer.RelayCapable = RelayAvailable();
+            if (_transport.RequiresNativeOperationAcknowledgements && !peer.NativePeerApplied)
+            {
+                peer.NativePeerAddRequestedAtMs = Math.Max(1, nowMs);
+                peer.LastProgressMs = 0;
+                return false;
+            }
             if (wasPending) peer.LastProgressMs = nowMs;
             return true;
         }
 
         peer.Added = false;
+        peer.NativePeerApplied = false;
+        peer.NativePeerAddRequestedAtMs = 0;
         peer.RelayCapable = false;
         peer.PendingTransportAdd = true;
         LogEvent("transport-retry", clientId, peer, $"command=add-peer reason={reason} retryMs={FailedTransportCommandRetryIntervalMs}");
@@ -1441,6 +1588,9 @@ internal sealed class PeerSessionManager
         peer.LastTransportCommandAttemptMs = nowMs;
         if (TransportRemovePeer(clientId, peer, reason))
         {
+            peer.NativePeerApplied = false;
+            peer.NativePeerAddRequestedAtMs = 0;
+            peer.NativeRemoteSdpRequestedAtMs = 0;
             peer.PendingTransportRemove = false;
             return true;
         }
@@ -1469,7 +1619,9 @@ internal sealed class PeerSessionManager
                 $"pendingNegotiation={pending.NegotiationId}");
             return false;
         }
-        if (!peer.Added)
+        if (!peer.Added || !peer.NativePeerApplied)
+            return false;
+        if (peer.NativeRemoteSdpRequestedAtMs > 0)
             return false;
 
         peer.LastTransportCommandAttemptMs = nowMs;
@@ -1478,11 +1630,15 @@ internal sealed class PeerSessionManager
             LogEvent("transport-retry", clientId, peer, $"command=set-remote-sdp reason={reason} retryMs={FailedTransportCommandRetryIntervalMs}");
             return false;
         }
+        if (_transport.RequiresNativeOperationAcknowledgements)
+        {
+            peer.NativeRemoteSdpRequestedAtMs = Math.Max(1, nowMs);
+            peer.NativeAckTimeoutReported = false;
+            peer.LastProgressMs = 0;
+            return false;
+        }
 
-        peer.PendingTransportSdp = null;
-        peer.LastProgressMs = nowMs;
-        if (string.Equals(pending.SdpType, "answer", StringComparison.OrdinalIgnoreCase))
-            SetState(clientId, peer, PeerState.Connected, "remote-answer-written");
+        CompletePendingRemoteSdp(clientId, peer, nowMs, "synchronous-transport");
         return true;
     }
 
@@ -1491,6 +1647,10 @@ internal sealed class PeerSessionManager
         peer.PendingTransportAdd = false;
         peer.PendingTransportAddOfferer = false;
         peer.PendingTransportSdp = null;
+        peer.NativeRemoteDescriptionApplied = false;
+        peer.NativePeerAddRequestedAtMs = 0;
+        peer.NativeRemoteSdpRequestedAtMs = 0;
+        peer.NativeAckTimeoutReported = false;
         if (!peer.PendingTransportRemove)
             peer.LastTransportCommandAttemptMs = 0;
     }
@@ -1981,7 +2141,8 @@ internal sealed class PeerSessionManager
             return;
         }
         peer.PendingTransportSdp = new PendingRemoteSdp(negotiationId, sdpType, sdp);
-        TryWritePendingRemoteSdp(clientId, peer, nowMs, "remote-answer");
+        if (TryWritePendingRemoteSdp(clientId, peer, nowMs, "remote-answer"))
+            ReplayPendingCandidates(clientId, peer, negotiationId, nowMs);
         LogEvent("signal-accepted", clientId, peer, $"type=Answer sdpBytes={Utf8Length(sdp)} nowMs={nowMs}");
     }
 
@@ -1990,9 +2151,7 @@ internal sealed class PeerSessionManager
         _remoteCandidatesReceived++;
         var knownPeer = FindPeer(clientId);
         if (knownPeer != null)
-        {
             knownPeer.RemoteCandidatesReceived++;
-        }
         if (!_peers.TryGetValue(clientId, out var peer))
         {
             CountRejectedCandidate(null);
@@ -2046,7 +2205,9 @@ internal sealed class PeerSessionManager
             LogReject("candidate", clientId, peer, "native-peer-not-added", $"receivedNegotiation={negotiationId} candidateBytes={Utf8Length(candidate)}");
             return;
         }
-        if (peer.PendingTransportSdp.HasValue)
+        if (!peer.NativePeerApplied
+            || !peer.NativeRemoteDescriptionApplied
+            || peer.PendingTransportSdp.HasValue)
         {
             QueuePendingCandidate(clientId, peer, negotiationId, candidate, nowMs);
             return;
@@ -2130,7 +2291,10 @@ internal sealed class PeerSessionManager
                 continue;
             }
 
-            if (!peer.Added || peer.PendingTransportSdp.HasValue)
+            if (!peer.Added
+                || !peer.NativePeerApplied
+                || !peer.NativeRemoteDescriptionApplied
+                || peer.PendingTransportSdp.HasValue)
                 break;
             if (!ForwardRemoteCandidate(clientId, peer, pending.Candidate, "buffered-after-offer", nowMs))
                 break;
@@ -2815,7 +2979,7 @@ internal sealed class PeerSessionManager
             $"command=restart-ice createOffer={Bool(createOffer)} mixedIce=true reason={reason}");
         try
         {
-            var written = _transport.RestartIce(clientId, createOffer);
+            var written = _transport.RestartIce(clientId, peer.Generation, createOffer);
             LogEvent(
                 "transport-command-returned",
                 clientId,
@@ -2837,7 +3001,7 @@ internal sealed class PeerSessionManager
         LogEvent("transport-command", clientId, peer, $"command=remove-peer reason={reason}");
         try
         {
-            var written = _transport.RemovePeer(clientId);
+            var written = _transport.RemovePeer(clientId, peer.Generation);
             LogEvent("transport-command-returned", clientId, peer, $"command=remove-peer reason={reason} written={Bool(written)} nativeAck=false");
             if (!written)
                 LogReject("transport-command", clientId, peer, "write-failed", $"command=remove-peer reason={reason}");
@@ -2859,7 +3023,7 @@ internal sealed class PeerSessionManager
             $"command=set-remote-sdp sdpType={LogSafe(sdpType)} sdpBytes={Utf8Length(sdp)} reason={reason}");
         try
         {
-            var written = _transport.SetRemoteSdp(clientId, sdpType, sdp);
+            var written = _transport.SetRemoteSdp(clientId, peer.Generation, sdpType, sdp);
             LogEvent(
                 "transport-command-returned",
                 clientId,
@@ -2885,7 +3049,7 @@ internal sealed class PeerSessionManager
             $"command=add-ice-candidate candidateBytes={Utf8Length(candidate)} peerCandidateRx={peer.RemoteCandidatesReceived}");
         try
         {
-            var written = _transport.AddIceCandidate(clientId, candidate);
+            var written = _transport.AddIceCandidate(clientId, peer.Generation, candidate);
             LogEvent(
                 "transport-command-returned",
                 clientId,

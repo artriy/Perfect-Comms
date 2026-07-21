@@ -25,7 +25,8 @@ use crate::proto::{
     NetworkPathStats, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
-use std::collections::HashMap;
+use parking_lot::{Condvar as ParkingCondvar, Mutex as ParkingMutex};
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -150,6 +151,7 @@ struct TelemetrySources {
     aec_timing: Arc<AecTiming>,
     media_diagnostics: Arc<MediaDiagnostics>,
     rtc: Arc<RtcEngine>,
+    rtc_scheduler: Arc<RtcOpScheduler>,
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -1009,6 +1011,20 @@ fn spawn_telemetry_writer(
                     sources
                         .counters
                         .snapshot(capture_dropped, playback_len, playback_dropped);
+                let rtc_control = sources.rtc_scheduler.snapshot();
+                snapshot.rtc_control_queue_depth = rtc_control.depth;
+                snapshot.rtc_control_queue_depth_max = rtc_control.max_depth;
+                snapshot.rtc_control_oldest_age_ms = rtc_control.oldest_age_ms;
+                snapshot.rtc_control_stale_discarded = rtc_control.stale_discarded;
+                snapshot.rtc_control_coalesced = rtc_control.coalesced;
+                snapshot.rtc_control_candidate_duplicates = rtc_control.candidate_duplicates;
+                snapshot.rtc_control_overflows = rtc_control.overflows;
+                snapshot.rtc_control_desired_generation_max =
+                    u64::from(rtc_control.desired_generation_max);
+                snapshot.rtc_control_applied_generation_max =
+                    u64::from(rtc_control.applied_generation_max);
+                snapshot.rtc_control_generation_lag_max = u64::from(rtc_control.generation_lag_max);
+                snapshot.rtc_control_peers = rtc_control.peers;
                 let dsp = sources.dsp.lock().unwrap().status();
                 let input = *sources.input.lock().unwrap();
                 snapshot.dsp_config_generation = dsp.config_generation;
@@ -1439,6 +1455,11 @@ fn ensure_playback(
     }
 }
 
+const RTC_MAX_PENDING_PEERS: usize = 64;
+const RTC_MAX_TRACKED_PEERS: usize = 128;
+const RTC_MAX_PENDING_CANDIDATES_PER_PEER: usize = 64;
+const RTC_MAX_PENDING_CANDIDATE_BYTES_PER_PEER: usize = 64 * 1024;
+
 enum RtcOp {
     AddPeer {
         peer_id: String,
@@ -1449,24 +1470,412 @@ enum RtcOp {
     },
     RemovePeer {
         peer_id: String,
+        generation: u32,
     },
     SetRemoteSdp {
         peer_id: String,
+        generation: u32,
         sdp_type: String,
         sdp: String,
     },
     AddIce {
         peer_id: String,
+        generation: u32,
         candidate: String,
     },
     RestartIce {
         peer_id: String,
+        generation: u32,
         relay_only: bool,
         create_offer: bool,
     },
     SetIceServers {
         servers: Vec<crate::proto::IceServer>,
     },
+}
+
+struct PendingPeerRtcOps {
+    generation: u32,
+    queued_at: Instant,
+    remove: bool,
+    add: Option<(bool, bool, u64)>,
+    remote_sdp: Option<(String, String)>,
+    candidates: VecDeque<String>,
+    candidate_bytes: usize,
+    restart: Option<(bool, bool)>,
+}
+
+impl PendingPeerRtcOps {
+    fn new(generation: u32) -> Self {
+        Self {
+            generation,
+            queued_at: Instant::now(),
+            remove: false,
+            add: None,
+            remote_sdp: None,
+            candidates: VecDeque::new(),
+            candidate_bytes: 0,
+            restart: None,
+        }
+    }
+
+    fn operation_count(&self) -> usize {
+        usize::from(self.remove)
+            + usize::from(self.add.is_some())
+            + usize::from(self.remote_sdp.is_some())
+            + self.candidates.len()
+            + usize::from(self.restart.is_some())
+    }
+}
+
+enum RtcWork {
+    Peer(String, PendingPeerRtcOps),
+    IceServers(Vec<crate::proto::IceServer>),
+}
+
+#[derive(Default)]
+struct RtcSchedulerState {
+    pending: HashMap<String, PendingPeerRtcOps>,
+    ready: VecDeque<String>,
+    latest_generations: HashMap<String, u32>,
+    applied_generations: HashMap<String, u32>,
+    pending_ice_servers: Option<Vec<crate::proto::IceServer>>,
+    ice_servers_scheduled: bool,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct RtcSchedulerCounters {
+    stale_discarded: AtomicU64,
+    coalesced: AtomicU64,
+    candidate_duplicates: AtomicU64,
+    overflows: AtomicU64,
+    max_depth: AtomicU64,
+}
+
+#[derive(Clone, Default)]
+struct RtcSchedulerSnapshot {
+    depth: u64,
+    max_depth: u64,
+    oldest_age_ms: u64,
+    stale_discarded: u64,
+    coalesced: u64,
+    candidate_duplicates: u64,
+    overflows: u64,
+    desired_generation_max: u32,
+    applied_generation_max: u32,
+    generation_lag_max: u32,
+    peers: Vec<crate::proto::RtcControlPeerStats>,
+}
+
+struct RtcOpScheduler {
+    state: ParkingMutex<RtcSchedulerState>,
+    changed: ParkingCondvar,
+    counters: RtcSchedulerCounters,
+}
+
+impl RtcOpScheduler {
+    fn new() -> Self {
+        Self {
+            state: ParkingMutex::new(RtcSchedulerState::default()),
+            changed: ParkingCondvar::new(),
+            counters: RtcSchedulerCounters::default(),
+        }
+    }
+
+    fn submit(&self, op: RtcOp) -> bool {
+        let mut state = self.state.lock();
+        if state.closed {
+            return false;
+        }
+        if let RtcOp::SetIceServers { servers } = op {
+            if state.pending_ice_servers.replace(servers).is_some() {
+                self.counters.coalesced.fetch_add(1, Ordering::Relaxed);
+            }
+            state.ice_servers_scheduled = true;
+            self.update_max_depth(&state);
+            self.changed.notify_one();
+            return true;
+        }
+
+        let (peer_id, generation) = match &op {
+            RtcOp::AddPeer {
+                peer_id,
+                generation,
+                ..
+            }
+            | RtcOp::RemovePeer {
+                peer_id,
+                generation,
+            }
+            | RtcOp::SetRemoteSdp {
+                peer_id,
+                generation,
+                ..
+            }
+            | RtcOp::AddIce {
+                peer_id,
+                generation,
+                ..
+            }
+            | RtcOp::RestartIce {
+                peer_id,
+                generation,
+                ..
+            } => (peer_id.clone(), *generation),
+            RtcOp::SetIceServers { .. } => unreachable!(),
+        };
+        if generation == 0 {
+            self.counters.overflows.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        if !state.latest_generations.contains_key(&peer_id)
+            && state.latest_generations.len() >= RTC_MAX_TRACKED_PEERS
+        {
+            self.counters.overflows.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let latest = state.latest_generations.get(&peer_id).copied().unwrap_or(0);
+        if generation < latest {
+            self.counters
+                .stale_discarded
+                .fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        let already_pending = state.pending.contains_key(&peer_id);
+        if !already_pending && state.pending.len() >= RTC_MAX_PENDING_PEERS {
+            self.counters.overflows.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if generation > latest {
+            state.latest_generations.insert(peer_id.clone(), generation);
+            if let Some(previous) = state.pending.remove(&peer_id) {
+                self.counters
+                    .stale_discarded
+                    .fetch_add(previous.operation_count() as u64, Ordering::Relaxed);
+            }
+        }
+
+        let needs_schedule = !already_pending;
+        let pending = state
+            .pending
+            .entry(peer_id.clone())
+            .or_insert_with(|| PendingPeerRtcOps::new(generation));
+        if pending.generation != generation {
+            self.counters
+                .stale_discarded
+                .fetch_add(pending.operation_count() as u64, Ordering::Relaxed);
+            *pending = PendingPeerRtcOps::new(generation);
+        }
+
+        match op {
+            RtcOp::AddPeer {
+                offerer,
+                relay_only,
+                min_encoder_epoch,
+                ..
+            } => {
+                if pending
+                    .add
+                    .replace((offerer, relay_only, min_encoder_epoch))
+                    .is_some()
+                {
+                    self.counters.coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+                pending.remove = false;
+            }
+            RtcOp::RemovePeer { .. } => {
+                let discarded = pending.operation_count();
+                pending.remove = true;
+                pending.add = None;
+                pending.remote_sdp = None;
+                pending.candidates.clear();
+                pending.candidate_bytes = 0;
+                pending.restart = None;
+                if discarded > 0 {
+                    self.counters
+                        .stale_discarded
+                        .fetch_add(discarded as u64, Ordering::Relaxed);
+                }
+            }
+            RtcOp::SetRemoteSdp { sdp_type, sdp, .. } => {
+                if pending.remote_sdp.replace((sdp_type, sdp)).is_some() {
+                    self.counters.coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            RtcOp::AddIce { candidate, .. } => {
+                if pending.candidates.iter().any(|queued| queued == &candidate) {
+                    self.counters
+                        .candidate_duplicates
+                        .fetch_add(1, Ordering::Relaxed);
+                } else if pending.candidates.len() >= RTC_MAX_PENDING_CANDIDATES_PER_PEER
+                    || pending.candidate_bytes.saturating_add(candidate.len())
+                        > RTC_MAX_PENDING_CANDIDATE_BYTES_PER_PEER
+                {
+                    self.counters.overflows.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                } else {
+                    pending.candidate_bytes += candidate.len();
+                    pending.candidates.push_back(candidate);
+                }
+            }
+            RtcOp::RestartIce {
+                relay_only,
+                create_offer,
+                ..
+            } => {
+                if pending
+                    .restart
+                    .replace((relay_only, create_offer))
+                    .is_some()
+                {
+                    self.counters.coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            RtcOp::SetIceServers { .. } => unreachable!(),
+        }
+
+        if needs_schedule {
+            state.ready.push_back(peer_id);
+        }
+        self.update_max_depth(&state);
+        self.changed.notify_one();
+        true
+    }
+
+    fn recv(&self) -> Option<RtcWork> {
+        let mut state = self.state.lock();
+        loop {
+            if state.closed {
+                return None;
+            }
+            if state.ice_servers_scheduled {
+                state.ice_servers_scheduled = false;
+                if let Some(servers) = state.pending_ice_servers.take() {
+                    return Some(RtcWork::IceServers(servers));
+                }
+            }
+            while let Some(peer_id) = state.ready.pop_front() {
+                if let Some(pending) = state.pending.remove(&peer_id) {
+                    return Some(RtcWork::Peer(peer_id, pending));
+                }
+            }
+            self.changed.wait(&mut state);
+        }
+    }
+
+    fn is_current(&self, peer_id: &str, generation: u32) -> bool {
+        self.state
+            .lock()
+            .latest_generations
+            .get(peer_id)
+            .is_some_and(|current| *current == generation)
+    }
+
+    fn mark_applied(&self, peer_id: &str, generation: u32) {
+        let mut state = self.state.lock();
+        if state
+            .latest_generations
+            .get(peer_id)
+            .is_some_and(|current| *current == generation)
+        {
+            state
+                .applied_generations
+                .insert(peer_id.to_string(), generation);
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock();
+        state.closed = true;
+        state.pending.clear();
+        state.ready.clear();
+        state.pending_ice_servers = None;
+        self.changed.notify_all();
+    }
+
+    fn snapshot(&self) -> RtcSchedulerSnapshot {
+        let state = self.state.lock();
+        let depth = Self::depth(&state) as u64;
+        let oldest_age_ms = state
+            .pending
+            .values()
+            .map(|pending| {
+                pending
+                    .queued_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            })
+            .max()
+            .unwrap_or(0);
+        let desired_generation_max = state
+            .latest_generations
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let applied_generation_max = state
+            .applied_generations
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let generation_lag_max = state
+            .latest_generations
+            .iter()
+            .map(|(peer_id, desired)| {
+                desired.saturating_sub(state.applied_generations.get(peer_id).copied().unwrap_or(0))
+            })
+            .max()
+            .unwrap_or(0);
+        let mut peers = state
+            .latest_generations
+            .iter()
+            .map(
+                |(peer_id, desired_generation)| crate::proto::RtcControlPeerStats {
+                    peer_id: peer_id.clone(),
+                    desired_generation: *desired_generation,
+                    applied_generation: state
+                        .applied_generations
+                        .get(peer_id)
+                        .copied()
+                        .unwrap_or(0),
+                },
+            )
+            .collect::<Vec<_>>();
+        peers.sort_unstable_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        RtcSchedulerSnapshot {
+            depth,
+            max_depth: self.counters.max_depth.load(Ordering::Relaxed),
+            oldest_age_ms,
+            stale_discarded: self.counters.stale_discarded.load(Ordering::Relaxed),
+            coalesced: self.counters.coalesced.load(Ordering::Relaxed),
+            candidate_duplicates: self.counters.candidate_duplicates.load(Ordering::Relaxed),
+            overflows: self.counters.overflows.load(Ordering::Relaxed),
+            desired_generation_max,
+            applied_generation_max,
+            generation_lag_max,
+            peers,
+        }
+    }
+
+    fn update_max_depth(&self, state: &RtcSchedulerState) {
+        self.counters
+            .max_depth
+            .fetch_max(Self::depth(state) as u64, Ordering::Relaxed);
+    }
+
+    fn depth(state: &RtcSchedulerState) -> usize {
+        state
+            .pending
+            .values()
+            .map(PendingPeerRtcOps::operation_count)
+            .sum::<usize>()
+            + usize::from(state.pending_ice_servers.is_some())
+    }
 }
 
 #[derive(Default)]
@@ -1703,10 +2112,12 @@ fn run_authenticated_session(
     // session that can never establish a peer connection.
     let counters = Arc::new(NativeCounters::default());
     let (local_signal_tx, local_signal_rx) = std::sync::mpsc::channel::<LocalSignal>();
+    let rtc_control_signal_tx = local_signal_tx.clone();
     let rtc = Arc::new(RtcEngine::new_with_counters(
         local_signal_tx,
         counters.clone(),
     ));
+    let rtc_scheduler = Arc::new(RtcOpScheduler::new());
     if !rtc.transport_ready() {
         let detail = rtc
             .transport_error()
@@ -1793,40 +2204,83 @@ fn run_authenticated_session(
             input: input.clone(),
             aec_timing: aec_timing.clone(),
             media_diagnostics: media_diagnostics.clone(),
+            rtc_scheduler: rtc_scheduler.clone(),
             rtc: rtc.clone(),
         },
         session_supervisor.clone(),
     );
     let rtc_stop = Arc::new(AtomicBool::new(false));
-    let (rtc_op_tx, rtc_op_rx) = std::sync::mpsc::channel::<RtcOp>();
     let ctrl_rtc = rtc.clone();
+    let ctrl_scheduler = rtc_scheduler.clone();
+    let ctrl_signal_tx = rtc_control_signal_tx;
     let ctrl_handle = spawn_critical_worker("rtc-control", session_supervisor.clone(), move || {
-        while let Ok(op) = rtc_op_rx.recv() {
-            match op {
-                RtcOp::AddPeer {
-                    peer_id,
-                    offerer,
-                    relay_only,
-                    generation,
-                    min_encoder_epoch,
-                } => ctrl_rtc.add_peer(peer_id, offerer, relay_only, generation, min_encoder_epoch),
-                RtcOp::RemovePeer { peer_id } => ctrl_rtc.remove_peer(&peer_id),
-                RtcOp::SetRemoteSdp {
-                    peer_id,
-                    sdp_type,
-                    sdp,
-                } => ctrl_rtc.set_remote_sdp(&peer_id, &sdp_type, &sdp),
-                RtcOp::AddIce { peer_id, candidate } => {
-                    ctrl_rtc.add_ice_candidate(&peer_id, &candidate)
+        while let Some(work) = ctrl_scheduler.recv() {
+            match work {
+                RtcWork::IceServers(servers) => ctrl_rtc.set_ice_servers(&servers),
+                RtcWork::Peer(peer_id, mut pending) => {
+                    let generation = pending.generation;
+                    if !ctrl_scheduler.is_current(&peer_id, generation) {
+                        continue;
+                    }
+                    let acknowledge = |state: &str| {
+                        let _ = ctrl_signal_tx.send(LocalSignal::PeerState {
+                            peer_id: peer_id.clone(),
+                            generation,
+                            state: state.to_string(),
+                        });
+                    };
+                    if pending.remove {
+                        if ctrl_rtc.remove_peer(&peer_id, generation)
+                            && ctrl_scheduler.is_current(&peer_id, generation)
+                        {
+                            ctrl_scheduler.mark_applied(&peer_id, generation);
+                            acknowledge("native-peer-removed");
+                        }
+                        continue;
+                    }
+                    if let Some((offerer, relay_only, min_encoder_epoch)) = pending.add.take() {
+                        if !ctrl_rtc.add_peer(
+                            peer_id.clone(),
+                            offerer,
+                            relay_only,
+                            generation,
+                            min_encoder_epoch,
+                        ) {
+                            continue;
+                        }
+                        if !ctrl_scheduler.is_current(&peer_id, generation) {
+                            continue;
+                        }
+                        ctrl_scheduler.mark_applied(&peer_id, generation);
+                        acknowledge("native-peer-added");
+                    }
+                    if let Some((sdp_type, sdp)) = pending.remote_sdp.take() {
+                        if !ctrl_scheduler.is_current(&peer_id, generation) {
+                            continue;
+                        }
+                        if !ctrl_rtc.set_remote_sdp(&peer_id, generation, &sdp_type, &sdp) {
+                            continue;
+                        }
+                        acknowledge("native-remote-sdp-applied");
+                    }
+                    if let Some((relay_only, create_offer)) = pending.restart.take() {
+                        if !ctrl_scheduler.is_current(&peer_id, generation) {
+                            continue;
+                        }
+                        if !ctrl_rtc.restart_ice(&peer_id, generation, relay_only, create_offer) {
+                            continue;
+                        }
+                        acknowledge("native-ice-restarted");
+                    }
+                    while let Some(candidate) = pending.candidates.pop_front() {
+                        if !ctrl_scheduler.is_current(&peer_id, generation) {
+                            break;
+                        }
+                        if !ctrl_rtc.add_ice_candidate(&peer_id, generation, &candidate) {
+                            break;
+                        }
+                    }
                 }
-                RtcOp::RestartIce {
-                    peer_id,
-                    relay_only,
-                    create_offer,
-                } => {
-                    ctrl_rtc.restart_ice(&peer_id, relay_only, create_offer);
-                }
-                RtcOp::SetIceServers { servers } => ctrl_rtc.set_ice_servers(&servers),
             }
         }
     });
@@ -2637,18 +3091,15 @@ fn run_authenticated_session(
                             );
                             break 'control;
                         }
-                        if rtc_op_tx
-                            .send(RtcOp::AddPeer {
-                                peer_id,
-                                offerer,
-                                relay_only,
-                                generation,
-                                min_encoder_epoch,
-                            })
-                            .is_err()
-                        {
+                        if !rtc_scheduler.submit(RtcOp::AddPeer {
+                            peer_id,
+                            offerer,
+                            relay_only,
+                            generation,
+                            min_encoder_epoch,
+                        }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler rejected peer-add"
                             );
                             break 'control;
                         }
@@ -2664,15 +3115,16 @@ fn run_authenticated_session(
                             &playback_supervision,
                         );
                     }
-                    InboundOp::PeerRemove { peer_id } => {
-                        if rtc_op_tx
-                            .send(RtcOp::RemovePeer {
-                                peer_id: peer_id.clone(),
-                            })
-                            .is_err()
-                        {
+                    InboundOp::PeerRemove {
+                        peer_id,
+                        generation,
+                    } => {
+                        if !rtc_scheduler.submit(RtcOp::RemovePeer {
+                            peer_id: peer_id.clone(),
+                            generation,
+                        }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler rejected peer-remove"
                             );
                             break 'control;
                         }
@@ -2686,57 +3138,60 @@ fn run_authenticated_session(
                     }
                     InboundOp::SetRemoteSdp {
                         peer_id,
+                        generation,
                         sdp_type,
                         sdp,
                     } => {
-                        if rtc_op_tx
-                            .send(RtcOp::SetRemoteSdp {
-                                peer_id,
-                                sdp_type,
-                                sdp,
-                            })
-                            .is_err()
-                        {
+                        if !rtc_scheduler.submit(RtcOp::SetRemoteSdp {
+                            peer_id,
+                            generation,
+                            sdp_type,
+                            sdp,
+                        }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler rejected remote SDP"
                             );
                             break 'control;
                         }
                     }
-                    InboundOp::AddIceCandidate { peer_id, candidate } => {
-                        if rtc_op_tx
-                            .send(RtcOp::AddIce { peer_id, candidate })
-                            .is_err()
-                        {
+                    InboundOp::AddIceCandidate {
+                        peer_id,
+                        generation,
+                        candidate,
+                    } => {
+                        if !rtc_scheduler.submit(RtcOp::AddIce {
+                            peer_id,
+                            generation,
+                            candidate,
+                        }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler candidate overflow"
                             );
                             break 'control;
                         }
                     }
                     InboundOp::RestartIce {
                         peer_id,
+                        generation,
                         relay_only,
                         create_offer,
                     } => {
-                        if rtc_op_tx
-                            .send(RtcOp::RestartIce {
-                                peer_id,
-                                relay_only,
-                                create_offer,
-                            })
-                            .is_err()
-                        {
+                        if !rtc_scheduler.submit(RtcOp::RestartIce {
+                            peer_id,
+                            generation,
+                            relay_only,
+                            create_offer,
+                        }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler rejected ICE restart"
                             );
                             break 'control;
                         }
                     }
                     InboundOp::SetIceServers { servers } => {
-                        if rtc_op_tx.send(RtcOp::SetIceServers { servers }).is_err() {
+                        if !rtc_scheduler.submit(RtcOp::SetIceServers { servers }) {
                             eprintln!(
-                                "pc-capture: critical media failure: RTC command channel closed"
+                                "pc-capture: critical media failure: RTC scheduler rejected ICE servers"
                             );
                             break 'control;
                         }
@@ -2816,7 +3271,7 @@ fn run_authenticated_session(
     writer_handle.join().ok();
     drain_handle.join().ok();
     telemetry_handle.join().ok();
-    drop(rtc_op_tx);
+    rtc_scheduler.close();
     ctrl_handle.join().ok();
     drop(rtc);
     signal_handle.join().ok();
@@ -3370,14 +3825,206 @@ mod tests {
     }
 
     #[test]
+    fn rtc_scheduler_latest_generation_supersedes_stale_peer_work() {
+        let scheduler = RtcOpScheduler::new();
+        assert!(scheduler.submit(RtcOp::AddPeer {
+            peer_id: "p1".to_string(),
+            offerer: true,
+            relay_only: false,
+            generation: 10,
+            min_encoder_epoch: 1,
+        }));
+        assert!(scheduler.submit(RtcOp::SetRemoteSdp {
+            peer_id: "p1".to_string(),
+            generation: 10,
+            sdp_type: "answer".to_string(),
+            sdp: "old".to_string(),
+        }));
+        assert!(scheduler.submit(RtcOp::AddIce {
+            peer_id: "p1".to_string(),
+            generation: 10,
+            candidate: "old-candidate".to_string(),
+        }));
+        assert!(scheduler.submit(RtcOp::AddPeer {
+            peer_id: "p1".to_string(),
+            offerer: true,
+            relay_only: false,
+            generation: 11,
+            min_encoder_epoch: 2,
+        }));
+        assert!(scheduler.submit(RtcOp::SetRemoteSdp {
+            peer_id: "p1".to_string(),
+            generation: 11,
+            sdp_type: "answer".to_string(),
+            sdp: "current".to_string(),
+        }));
+        assert!(scheduler.submit(RtcOp::AddIce {
+            peer_id: "p1".to_string(),
+            generation: 10,
+            candidate: "late-stale-candidate".to_string(),
+        }));
+
+        let RtcWork::Peer(peer_id, pending) = scheduler.recv().unwrap() else {
+            panic!("expected peer work");
+        };
+        assert_eq!(peer_id, "p1");
+        assert_eq!(pending.generation, 11);
+        assert!(pending.add.is_some());
+        assert_eq!(
+            pending.remote_sdp,
+            Some(("answer".to_string(), "current".to_string()))
+        );
+        assert!(pending.candidates.is_empty());
+        assert!(scheduler.snapshot().stale_discarded >= 3);
+        scheduler.close();
+    }
+
+    #[test]
+    fn rtc_scheduler_remove_collapses_prior_generation_work() {
+        let scheduler = RtcOpScheduler::new();
+        assert!(scheduler.submit(RtcOp::AddPeer {
+            peer_id: "p1".to_string(),
+            offerer: false,
+            relay_only: false,
+            generation: 20,
+            min_encoder_epoch: 1,
+        }));
+        assert!(scheduler.submit(RtcOp::SetRemoteSdp {
+            peer_id: "p1".to_string(),
+            generation: 20,
+            sdp_type: "offer".to_string(),
+            sdp: "v=0".to_string(),
+        }));
+        assert!(scheduler.submit(RtcOp::AddIce {
+            peer_id: "p1".to_string(),
+            generation: 20,
+            candidate: "candidate".to_string(),
+        }));
+        assert!(scheduler.submit(RtcOp::RemovePeer {
+            peer_id: "p1".to_string(),
+            generation: 20,
+        }));
+
+        let RtcWork::Peer(_, pending) = scheduler.recv().unwrap() else {
+            panic!("expected peer work");
+        };
+        assert!(pending.remove);
+        assert_eq!(pending.operation_count(), 1);
+        scheduler.close();
+    }
+
+    #[test]
+    fn rtc_scheduler_bounds_and_deduplicates_candidate_bursts() {
+        let scheduler = RtcOpScheduler::new();
+        assert!(scheduler.submit(RtcOp::AddPeer {
+            peer_id: "p1".to_string(),
+            offerer: false,
+            relay_only: false,
+            generation: 30,
+            min_encoder_epoch: 1,
+        }));
+        for index in 0..RTC_MAX_PENDING_CANDIDATES_PER_PEER {
+            assert!(scheduler.submit(RtcOp::AddIce {
+                peer_id: "p1".to_string(),
+                generation: 30,
+                candidate: format!("candidate-{index}"),
+            }));
+        }
+        assert!(scheduler.submit(RtcOp::AddIce {
+            peer_id: "p1".to_string(),
+            generation: 30,
+            candidate: "candidate-0".to_string(),
+        }));
+        assert!(!scheduler.submit(RtcOp::AddIce {
+            peer_id: "p1".to_string(),
+            generation: 30,
+            candidate: "overflow".to_string(),
+        }));
+
+        let snapshot = scheduler.snapshot();
+        assert_eq!(snapshot.candidate_duplicates, 1);
+        assert_eq!(snapshot.overflows, 1);
+        assert_eq!(
+            snapshot.depth,
+            (RTC_MAX_PENDING_CANDIDATES_PER_PEER + 1) as u64
+        );
+        let byte_scheduler = RtcOpScheduler::new();
+        assert!(byte_scheduler.submit(RtcOp::AddPeer {
+            peer_id: "p2".to_string(),
+            offerer: false,
+            relay_only: false,
+            generation: 31,
+            min_encoder_epoch: 1,
+        }));
+        assert!(!byte_scheduler.submit(RtcOp::AddIce {
+            peer_id: "p2".to_string(),
+            generation: 31,
+            candidate: "x".repeat(RTC_MAX_PENDING_CANDIDATE_BYTES_PER_PEER + 1),
+        }));
+        assert_eq!(byte_scheduler.snapshot().overflows, 1);
+        byte_scheduler.close();
+        scheduler.close();
+    }
+
+    #[test]
+    fn rtc_scheduler_stress_keeps_only_latest_work_for_fifteen_peers() {
+        const PEERS: usize = 15;
+        const GENERATIONS: u32 = 500;
+        let scheduler = RtcOpScheduler::new();
+
+        for generation in 1..=GENERATIONS {
+            for peer_index in 0..PEERS {
+                let peer_id = format!("p{peer_index}");
+                assert!(scheduler.submit(RtcOp::AddPeer {
+                    peer_id: peer_id.clone(),
+                    offerer: peer_index % 2 == 0,
+                    relay_only: false,
+                    generation,
+                    min_encoder_epoch: u64::from(generation),
+                }));
+                assert!(scheduler.submit(RtcOp::SetRemoteSdp {
+                    peer_id: peer_id.clone(),
+                    generation,
+                    sdp_type: "offer".to_string(),
+                    sdp: format!("sdp-{generation}"),
+                }));
+                for candidate_index in 0..4 {
+                    assert!(scheduler.submit(RtcOp::AddIce {
+                        peer_id: peer_id.clone(),
+                        generation,
+                        candidate: format!("candidate-{generation}-{candidate_index}"),
+                    }));
+                }
+            }
+        }
+
+        {
+            let state = scheduler.state.lock();
+            assert_eq!(state.pending.len(), PEERS);
+            assert_eq!(state.ready.len(), PEERS);
+        }
+        assert_eq!(scheduler.snapshot().depth, (PEERS * 6) as u64);
+        for _ in 0..PEERS {
+            let RtcWork::Peer(_, pending) = scheduler.recv().unwrap() else {
+                panic!("expected peer work");
+            };
+            assert_eq!(pending.generation, GENERATIONS);
+            assert_eq!(pending.candidates.len(), 4);
+            assert_eq!(pending.remote_sdp.as_ref().unwrap().1, "sdp-500");
+        }
+        assert_eq!(scheduler.snapshot().depth, 0);
+        scheduler.close();
+    }
+
+    #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":13,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":14,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":13,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":14,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -3514,7 +4161,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":13,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":14,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -3570,7 +4217,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":13,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":14,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -3579,7 +4226,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 13);
+                assert_eq!(v["proto"], 14);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -3650,7 +4297,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":13,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":14,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -3724,7 +4371,7 @@ mod tests {
         let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         unauthorized
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":13,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":14,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
@@ -3743,7 +4390,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":13,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":14,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

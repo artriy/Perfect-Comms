@@ -47,7 +47,7 @@ ANDROID_NAME_ATTRIBUTE = "{http://schemas.android.com/apk/res/android}name"
 PC_MOBILE_ABI_EXPECTED = 5
 PC_MOBILE_ABI_MARKER_PREFIX = b"PERFECTCOMMS_PC_MOBILE_ABI="
 PC_MOBILE_ABI_MARKER_SYMBOL = b"PC_MOBILE_ABI_MARKER"
-PION_ABI_EXPECTED = 1
+PION_ABI_EXPECTED = 2
 PION_VERSION_EXPECTED = "4.2.17"
 PION_CONTRACT_MARKER_PREFIX = b"PERFECTCOMMS_PC_PION_ABI="
 PION_CONTRACT_MARKER = (
@@ -1740,7 +1740,7 @@ def run_self_tests() -> None:
             valid_x86_macho,
             self_test_pion_macho_slice(
                 MACH_ARM64,
-                marker=PION_CONTRACT_MARKER_PREFIX + b"2;PION=4.2.17" + bytes([0]),
+                marker=PION_CONTRACT_MARKER_PREFIX + b"1;PION=4.2.17" + bytes([0]),
                 use_export_trie=True,
             ),
         ),
@@ -2230,8 +2230,8 @@ def main() -> int:
     parser.add_argument(
         "--expected-protocol",
         type=int,
-        default=13,
-        help="protocol expected from --helper-build-info (default: 13)",
+        default=14,
+        help="protocol expected from --helper-build-info (default: 14)",
     )
     args = parser.parse_args()
     root = args.root.resolve()

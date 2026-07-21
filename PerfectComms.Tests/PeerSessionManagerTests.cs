@@ -8,6 +8,7 @@ public sealed class PeerSessionManagerTests
 {
     private sealed class MockTransport : IVoiceTransport
     {
+        public bool RequiresNativeOperationAcknowledgements { get; set; }
         public readonly List<int> Added = new();
         public readonly List<bool> AddedOfferer = new();
         public readonly List<bool> AddedRelayOnly = new();
@@ -32,22 +33,22 @@ public sealed class PeerSessionManagerTests
             PeerAdded?.Invoke(clientId, isOfferer, false, generation);
             return TryAddPeer?.Invoke(clientId, isOfferer, false, generation) ?? true;
         }
-        public bool RemovePeer(int clientId)
+        public bool RemovePeer(int clientId, int generation)
         {
             Removed.Add(clientId);
             return TryRemovePeer?.Invoke(clientId) ?? true;
         }
-        public bool SetRemoteSdp(int clientId, string sdpType, string sdp)
+        public bool SetRemoteSdp(int clientId, int generation, string sdpType, string sdp)
         {
             RemoteSdp.Add((clientId, sdpType, sdp));
             return TrySetRemoteSdp?.Invoke(clientId, sdpType, sdp) ?? true;
         }
-        public bool AddIceCandidate(int clientId, string candidate)
+        public bool AddIceCandidate(int clientId, int generation, string candidate)
         {
             Candidates.Add((clientId, candidate));
             return TryAddIceCandidate?.Invoke(clientId, candidate) ?? true;
         }
-        public bool RestartIce(int clientId, bool createOffer)
+        public bool RestartIce(int clientId, int generation, bool createOffer)
         {
             IceRestarts.Add((clientId, false, createOffer));
             return TryRestartIce?.Invoke(clientId, false, createOffer) ?? true;
@@ -2157,6 +2158,7 @@ public sealed class PeerSessionManagerTests
             out _,
             out _));
 
+        manager.OnSignal(7, SignalMsgType.Answer, ScopedSdp(negotiationId, "answer", "REMOTE_ANSWER"), 1900);
         manager.OnSignal(7, SignalMsgType.Candidate, ScopedCandidate(negotiationId, "FIRST"), 2000);
         manager.OnSignal(7, SignalMsgType.Candidate, ScopedCandidate(negotiationId, "SECOND"), 2100);
 
@@ -2184,6 +2186,7 @@ public sealed class PeerSessionManagerTests
         var offer = sender.Sent.Last(message => message.Type == SignalMsgType.Offer);
         Xunit.Assert.True(SignalPayload.TryReadSdp(offer.Payload, out var negotiationId, out _, out _));
         manager.OnLocalCandidate(7, generation, "LOCAL_CANDIDATE");
+        manager.OnSignal(7, SignalMsgType.Answer, ScopedSdp(negotiationId, "answer", "REMOTE_ANSWER"), 1900);
         manager.OnSignal(7, SignalMsgType.Candidate, ScopedCandidate(negotiationId, "REMOTE_CANDIDATE"), 2000);
         manager.OnSignal(7, SignalMsgType.Candidate, ScopedCandidate(negotiationId + 1, "STALE_CANDIDATE"), 2000);
 
@@ -2196,7 +2199,7 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(2, negotiating.RemoteCandidatesReceived);
         Xunit.Assert.Equal(1, negotiating.RemoteCandidatesForwarded);
         Xunit.Assert.Equal(1, negotiating.RejectedCandidates);
-        Xunit.Assert.Contains("7:Offering/", negotiating.PeerStates);
+        Xunit.Assert.Contains("7:Connected/", negotiating.PeerStates);
         Xunit.Assert.Contains("candAttempts1-rx2-forwarded1-rejected1", negotiating.PeerStates);
 
         manager.OnPeerConnected(7, generation);
@@ -2206,4 +2209,68 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(1, established.EstablishedPeers);
         Xunit.Assert.Contains("7:Established/", established.PeerStates);
     }
+    [Fact]
+    public void NativeAcknowledgementsGateSdpAndCandidatesUntilApplied()
+    {
+        var transport = new MockTransport
+        {
+            RequiresNativeOperationAcknowledgements = true
+        };
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(3, transport, sender);
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+        var generation = transport.LatestGeneration(7);
+
+        Xunit.Assert.DoesNotContain(sender.Sent, message => message.Type == SignalMsgType.Offer);
+        manager.OnNativeOperationApplied(7, generation, "native-peer-added", 1100);
+        manager.OnLocalSdp(7, generation, "offer", "LOCAL_OFFER", 1200);
+        var offer = sender.Sent.Last(message => message.Type == SignalMsgType.Offer);
+        Xunit.Assert.True(SignalPayload.TryReadScopedSdp(
+            offer.Payload,
+            out _,
+            out var negotiationId,
+            out _,
+            out _));
+
+        manager.OnSignal(7, SignalMsgType.Candidate, ScopedCandidate(negotiationId, "REMOTE_CANDIDATE"), 1300);
+        Xunit.Assert.Empty(transport.Candidates);
+        manager.OnSignal(7, SignalMsgType.Answer, ScopedSdp(negotiationId, "answer", "REMOTE_ANSWER"), 1400);
+        Xunit.Assert.Single(transport.RemoteSdp);
+        Xunit.Assert.Empty(transport.Candidates);
+        Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
+
+        manager.OnNativeOperationApplied(7, generation, "native-remote-sdp-applied", 1500);
+
+        Xunit.Assert.Equal(new[] { (7, "REMOTE_CANDIDATE") }, transport.Candidates);
+        Xunit.Assert.Equal(PeerState.Connected, StateOf(manager, 7));
+    }
+
+    [Fact]
+    public void MissingNativePeerAddAcknowledgementTriggersBoundedRecovery()
+    {
+        var transport = new MockTransport
+        {
+            RequiresNativeOperationAcknowledgements = true
+        };
+        var timeouts = new List<string>();
+        var manager = new PeerSessionManager(
+            3,
+            transport,
+            new MockSender(),
+            nativeOperationTimeout: timeouts.Add);
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+
+        Xunit.Assert.True(manager.HasActiveNegotiation(3999));
+        manager.Tick(3999);
+        Xunit.Assert.Empty(timeouts);
+
+        manager.Tick(4000);
+        manager.Tick(5000);
+
+        Xunit.Assert.Single(timeouts);
+        Xunit.Assert.Contains("operation=peer-add", timeouts[0]);
+        Xunit.Assert.Contains("client=7", timeouts[0]);
+        Xunit.Assert.False(manager.HasActiveNegotiation(5000));
+    }
+
 }

@@ -470,8 +470,11 @@ impl Engine {
                 self.rtc
                     .add_peer(peer_id, offerer, relay_only, generation, min_encoder_epoch);
             }
-            InboundOp::PeerRemove { peer_id } => {
-                self.rtc.remove_peer(&peer_id);
+            InboundOp::PeerRemove {
+                peer_id,
+                generation,
+            } => {
+                self.rtc.remove_peer(&peer_id, generation);
                 self.gs.remove_peer(&peer_id);
                 let mut dec = self.dec.lock().unwrap();
                 dec.decoders.remove(&peer_id);
@@ -483,18 +486,28 @@ impl Engine {
             }
             InboundOp::SetRemoteSdp {
                 peer_id,
+                generation,
                 sdp_type,
                 sdp,
-            } => self.rtc.set_remote_sdp(&peer_id, &sdp_type, &sdp),
-            InboundOp::AddIceCandidate { peer_id, candidate } => {
-                self.rtc.add_ice_candidate(&peer_id, &candidate)
+            } => {
+                self.rtc
+                    .set_remote_sdp(&peer_id, generation, &sdp_type, &sdp);
+            }
+            InboundOp::AddIceCandidate {
+                peer_id,
+                generation,
+                candidate,
+            } => {
+                self.rtc.add_ice_candidate(&peer_id, generation, &candidate);
             }
             InboundOp::RestartIce {
                 peer_id,
+                generation,
                 relay_only,
                 create_offer,
             } => {
-                self.rtc.restart_ice(&peer_id, relay_only, create_offer);
+                self.rtc
+                    .restart_ice(&peer_id, generation, relay_only, create_offer);
             }
             InboundOp::SetDsp {
                 aec,

@@ -33,6 +33,12 @@ Perfect Comms v4.1.2 rebuilds desktop capture and playback for more dependable d
 - **One damaged connection no longer lowers quality for everyone.**
   > <sub>Send-quality adaptation now ignores a single isolated bad route when the rest of the lobby is healthy. Multiple genuinely degraded connections still reduce bitrate and increase packet-loss protection when needed.</sub>
 
+- **Repeated reconnects can no longer bury a player's live connection behind stale work.**
+  > <sub>The native voice helper now keeps only the newest generation of peer, SDP, restart, and ICE-candidate work for each player, with bounded candidate storage and explicit applied-operation acknowledgements. If a current operation does not complete promptly, only that client restarts its helper; a confirmed total mesh collapse can no longer defer global recovery forever. Direct peer-to-peer and TURN relay selection are unchanged.</sub>
+
+- **An unreachable player no longer leaves the connecting message onscreen forever.**
+  > <sub>The compact voice HUD gives the current lobby up to 30 seconds to connect, then clears a stalled player-count message while voice recovery continues in the background. A changed lobby roster or a later connection regression starts a fresh bounded status window.</sub>
+
 ### Diagnostics and Validation
 
 - **Voice diagnostics can identify the failing audio stage.**

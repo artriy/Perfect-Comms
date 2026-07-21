@@ -12,6 +12,7 @@ internal sealed class RpcSignalingSender : ISignalingSender
 #if WINDOWS
 internal sealed class SidecarVoiceTransport : IVoiceTransport
 {
+    public bool RequiresNativeOperationAcknowledgements => true;
     private readonly Func<SidecarVoiceLease?> _voice;
 
     public SidecarVoiceTransport(Func<SidecarVoiceLease?> voice)
@@ -27,20 +28,24 @@ internal sealed class SidecarVoiceTransport : IVoiceTransport
     public bool AddPeer(int clientId, bool isOfferer, int generation)
         => _voice()?.AddPeer(PeerId(clientId), isOfferer, generation) == true;
 
-    public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
+    public bool RemovePeer(int clientId, int generation) =>
+        _voice()?.RemovePeer(PeerId(clientId), generation) == true;
 
-    public bool RestartIce(int clientId, bool createOffer) =>
-        _voice()?.RestartIce(PeerId(clientId), createOffer) == true;
+    public bool RestartIce(int clientId, int generation, bool createOffer) =>
+        _voice()?.RestartIce(PeerId(clientId), generation, createOffer) == true;
 
-    public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
+    public bool SetRemoteSdp(int clientId, int generation, string sdpType, string sdp) =>
+        _voice()?.SetRemoteSdp(PeerId(clientId), generation, sdpType, sdp) == true;
 
-    public bool AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate) == true;
+    public bool AddIceCandidate(int clientId, int generation, string candidate) =>
+        _voice()?.AddIceCandidate(PeerId(clientId), generation, candidate) == true;
 }
 #endif
 
 #if ANDROID
 internal sealed class MobileVoiceTransport : IVoiceTransport
 {
+    public bool RequiresNativeOperationAcknowledgements => false;
     private readonly Func<MobileVoiceClient?> _voice;
 
     public MobileVoiceTransport(Func<MobileVoiceClient?> voice)
@@ -56,13 +61,16 @@ internal sealed class MobileVoiceTransport : IVoiceTransport
     public bool AddPeer(int clientId, bool isOfferer, int generation)
         => _voice()?.AddPeer(PeerId(clientId), isOfferer, generation) == true;
 
-    public bool RemovePeer(int clientId) => _voice()?.RemovePeer(PeerId(clientId)) == true;
+    public bool RemovePeer(int clientId, int generation) =>
+        _voice()?.RemovePeer(PeerId(clientId), generation) == true;
 
-    public bool RestartIce(int clientId, bool createOffer) =>
-        _voice()?.RestartIce(PeerId(clientId), createOffer) == true;
+    public bool RestartIce(int clientId, int generation, bool createOffer) =>
+        _voice()?.RestartIce(PeerId(clientId), generation, createOffer) == true;
 
-    public bool SetRemoteSdp(int clientId, string sdpType, string sdp) => _voice()?.SetRemoteSdp(PeerId(clientId), sdpType, sdp) == true;
+    public bool SetRemoteSdp(int clientId, int generation, string sdpType, string sdp) =>
+        _voice()?.SetRemoteSdp(PeerId(clientId), generation, sdpType, sdp) == true;
 
-    public bool AddIceCandidate(int clientId, string candidate) => _voice()?.AddIceCandidate(PeerId(clientId), candidate) == true;
+    public bool AddIceCandidate(int clientId, int generation, string candidate) =>
+        _voice()?.AddIceCandidate(PeerId(clientId), generation, candidate) == true;
 }
 #endif

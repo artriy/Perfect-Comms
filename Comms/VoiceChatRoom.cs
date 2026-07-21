@@ -27,6 +27,7 @@ public class VoiceChatRoom
     private const float MissingPeerRecoveryGraceSeconds = 8f;
     private const float MissingPeerRecoveryIntervalSeconds = 5f;
     private const float PeerEscalationDeferralRecheckSeconds = 3f;
+    private const int TotalCollapsePeerEscalationMaxDeferrals = 8;
     private const double RadioStateRpcHeartbeatSeconds = 1.0;
     private const float TransitionTraceSeconds = 45f;
     private const float TransitionRosterRetentionMaxSeconds = 3f;
@@ -102,9 +103,12 @@ public class VoiceChatRoom
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
     private bool _voiceRoutingPolicyReady;
     private VoiceConnectionProgress _voiceConnectionProgress = VoiceConnectionProgress.Starting;
+    private VoiceConnectionDisplayState _voiceConnectionDisplayState = VoiceConnectionDisplayState.Initial;
     private float _voiceConnectionStatusRefreshTimer;
     private float _lastVoiceConnectionReadySnapshotTime = -999f;
     internal VoiceConnectionProgress ConnectionProgress => _voiceConnectionProgress;
+    internal bool ShouldShowConnectionProgress =>
+        _voiceConnectionProgress.IsConnecting && _voiceConnectionDisplayState.Visible;
 
     // ── Speaker ────────────────────────────────────────────────────────────────
     public bool UsingSpeaker => _voiceBackend?.UsingSpeaker == true;
@@ -1329,7 +1333,11 @@ public class VoiceChatRoom
             return;
 
         bool deferRequested = _perfectCommsVoice?.ShouldDeferPeerEscalation == true;
-        if (deferRequested)
+        if (ShouldContinuePeerEscalationDeferral(
+                deferRequested,
+                collapsed,
+                openChannelsRaw,
+                _consecutivePeerEscalationDeferrals))
         {
             if (_consecutivePeerEscalationDeferrals < int.MaxValue)
                 _consecutivePeerEscalationDeferrals++;
@@ -1338,6 +1346,13 @@ public class VoiceChatRoom
                 $"backend=native-engine reason=backend-recovery-in-flight remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
                 $"collapsed={collapsed} recheckSec={PeerEscalationDeferralRecheckSeconds:0.0} deferrals={_consecutivePeerEscalationDeferrals}");
             return;
+        }
+        if (deferRequested)
+        {
+            VoiceDiagnostics.Log(
+                "transport.peer-recovery.deferral-limit",
+                $"backend=native-engine reason=total-collapse remotePlayers={remotePlayers} peers={mappedPeers} open={openPeers} " +
+                $"rawOpen={openChannelsRaw} deferrals={_consecutivePeerEscalationDeferrals} action=force-rebuild");
         }
         _consecutivePeerEscalationDeferrals = 0;
 
@@ -1418,6 +1433,16 @@ public class VoiceChatRoom
     internal static bool IsMeshCollapse(int mappedPeers, int remotePlayers)
         => mappedPeers == 0 || (remotePlayers > 0 && mappedPeers * 2 < remotePlayers);
 
+    internal static bool ShouldContinuePeerEscalationDeferral(
+        bool deferRequested,
+        bool collapsed,
+        int openChannelsRaw,
+        int consecutiveDeferrals)
+        => deferRequested
+           && (!collapsed
+               || openChannelsRaw > 0
+               || consecutiveDeferrals < TotalCollapsePeerEscalationMaxDeferrals);
+
     // Exponential backoff (seconds) for a recovery attempt counter: the base interval doubled per prior
     // non-improving attempt, clamped so a stubborn shortfall slows down instead of re-firing every interval.
     // Pure + unit-tested. Shared by the targeted and global/collapse paths (each with its own counter).
@@ -1452,11 +1477,13 @@ public class VoiceChatRoom
         VoiceGameStateSnapshot? snapshot,
         out int expectedPlayers,
         out int connectedPlayers,
-        out bool snapshotContainsEveryRemote)
+        out bool snapshotContainsEveryRemote,
+        out VoiceConnectionRosterSignature rosterSignature)
     {
         expectedPlayers = 0;
         connectedPlayers = 0;
         snapshotContainsEveryRemote = false;
+        rosterSignature = default;
         if (snapshot == null
             || CollectAuthenticatedSnapshotClientIds() != AuthenticatedRosterCollectionState.Populated)
             return false;
@@ -1467,6 +1494,8 @@ public class VoiceChatRoom
 
         snapshotContainsEveryRemote = true;
         var backend = _perfectCommsVoice;
+        int rosterXor = 0;
+        long rosterSum = 0;
         foreach (int clientId in _authenticatedSnapshotClientIds)
         {
             if (clientId == localClientId)
@@ -1478,6 +1507,12 @@ public class VoiceChatRoom
             if (backend?.IsIncompatibleRemoteClient(clientId) == true)
                 continue;
 
+            uint hash = 2166136261u;
+            for (int index = 0; index < 4; index++)
+                hash = (hash ^ (uint)((clientId >> (index * 8)) & 0xFF)) * 16777619u;
+            rosterXor ^= unchecked((int)hash);
+            rosterSum += clientId;
+
             expectedPlayers++;
             if (backend?.IsRemoteClientEstablished(clientId) == true)
                 connectedPlayers++;
@@ -1485,6 +1520,7 @@ public class VoiceChatRoom
                 && !SnapshotContainsConnectionClient(snapshot, clientId))
                 snapshotContainsEveryRemote = false;
         }
+        rosterSignature = new VoiceConnectionRosterSignature(expectedPlayers, rosterXor, rosterSum);
         return true;
     }
 
@@ -1499,7 +1535,8 @@ public class VoiceChatRoom
             snapshot,
             out int expectedPlayers,
             out int connectedPlayers,
-            out bool snapshotContainsEveryRemote);
+            out bool snapshotContainsEveryRemote,
+            out VoiceConnectionRosterSignature rosterSignature);
         bool snapshotReady = VoiceConnectionStatusPolicy.IsSnapshotReady(
             snapshot,
             rosterAvailable,
@@ -1520,6 +1557,12 @@ public class VoiceChatRoom
             connectedPlayers,
             expectedPlayers,
             retainReadyDuringSnapshotGap);
+
+        _voiceConnectionDisplayState = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            _voiceConnectionDisplayState,
+            next,
+            rosterSignature,
+            now);
 
         if (snapshotReady && next.Stage == VoiceConnectionStage.Ready)
             _lastVoiceConnectionReadySnapshotTime = now;
@@ -1826,6 +1869,7 @@ public class VoiceChatRoom
             _perfectCommsVoice = null;
             _voiceRoutingPolicyReady = false;
             _voiceConnectionProgress = VoiceConnectionProgress.Starting;
+            _voiceConnectionDisplayState = VoiceConnectionDisplayState.Initial;
             _voiceConnectionStatusRefreshTimer = 0f;
             _lastVoiceConnectionReadySnapshotTime = -999f;
             if (backend == null) return;

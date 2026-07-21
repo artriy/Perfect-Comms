@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 13;
+pub const PROTO_VERSION: u32 = 14;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -668,18 +668,24 @@ pub enum InboundOp {
         generation: u32,
     },
     #[serde(rename = "peer-remove")]
-    PeerRemove { peer_id: String },
+    PeerRemove { peer_id: String, generation: u32 },
     #[serde(rename = "set-remote-sdp")]
     SetRemoteSdp {
         peer_id: String,
+        generation: u32,
         sdp_type: String,
         sdp: String,
     },
     #[serde(rename = "add-ice-candidate")]
-    AddIceCandidate { peer_id: String, candidate: String },
+    AddIceCandidate {
+        peer_id: String,
+        generation: u32,
+        candidate: String,
+    },
     #[serde(rename = "restart-ice")]
     RestartIce {
         peer_id: String,
+        generation: u32,
         #[serde(default)]
         relay_only: bool,
         #[serde(default = "default_true")]
@@ -716,7 +722,21 @@ pub struct IceServer {
 }
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
-    serde_json::from_str(json)
+    let op: InboundOp = serde_json::from_str(json)?;
+    let generation = match &op {
+        InboundOp::PeerAdd { generation, .. }
+        | InboundOp::PeerRemove { generation, .. }
+        | InboundOp::SetRemoteSdp { generation, .. }
+        | InboundOp::AddIceCandidate { generation, .. }
+        | InboundOp::RestartIce { generation, .. } => Some(*generation),
+        _ => None,
+    };
+    if generation == Some(0) {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "peer generation must be positive",
+        ));
+    }
+    Ok(op)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -787,6 +807,17 @@ pub struct NativeStatsSnapshot {
     pub rtp_tx_stale_epoch_dropped: u64,
     pub rtp_tx_write_timeouts: u64,
     pub rtp_tx_queue_depth_max: u64,
+    pub rtc_control_queue_depth: u64,
+    pub rtc_control_queue_depth_max: u64,
+    pub rtc_control_oldest_age_ms: u64,
+    pub rtc_control_stale_discarded: u64,
+    pub rtc_control_coalesced: u64,
+    pub rtc_control_candidate_duplicates: u64,
+    pub rtc_control_overflows: u64,
+    pub rtc_control_desired_generation_max: u64,
+    pub rtc_control_applied_generation_max: u64,
+    pub rtc_control_generation_lag_max: u64,
+    pub rtc_control_peers: Vec<RtcControlPeerStats>,
     pub rtp_rx_packets: u64,
     pub rtp_rx_bytes: u64,
     pub stale_rtp_rx_dropped: u64,
@@ -895,6 +926,14 @@ pub struct MediaReceiveStats {
     pub depth_frames_max: u64,
     pub depth_frames_current: u64,
     pub rtp_jitter_ms_max: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RtcControlPeerStats {
+    pub peer_id: String,
+    pub desired_generation: u32,
+    pub applied_generation: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1079,7 +1118,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 13);
+        assert_eq!(PROTO_VERSION, 14);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -1196,61 +1235,86 @@ mod tests {
             other => panic!("expected peer-add, got {other:?}"),
         }
         assert!(parse_inbound(r#"{"op":"peer-add","peer_id":"missing-generation"}"#).is_err());
-        match parse_inbound(r#"{"op":"peer-remove","peer_id":"p2"}"#).unwrap() {
-            InboundOp::PeerRemove { peer_id } => assert_eq!(peer_id, "p2"),
+        match parse_inbound(r#"{"op":"peer-remove","peer_id":"p2","generation":43}"#).unwrap() {
+            InboundOp::PeerRemove {
+                peer_id,
+                generation,
+            } => {
+                assert_eq!(peer_id, "p2");
+                assert_eq!(generation, 43);
+            }
             other => panic!("expected peer-remove, got {other:?}"),
         }
         match parse_inbound(
-            r#"{"op":"set-remote-sdp","peer_id":"p3","sdp_type":"offer","sdp":"v=0"}"#,
+            r#"{"op":"set-remote-sdp","peer_id":"p3","generation":44,"sdp_type":"offer","sdp":"v=0"}"#,
         )
         .unwrap()
         {
             InboundOp::SetRemoteSdp {
                 peer_id,
+                generation,
                 sdp_type,
                 sdp,
             } => {
                 assert_eq!(peer_id, "p3");
+                assert_eq!(generation, 44);
                 assert_eq!(sdp_type, "offer");
                 assert_eq!(sdp, "v=0");
             }
             other => panic!("expected set-remote-sdp, got {other:?}"),
         }
-        match parse_inbound(r#"{"op":"add-ice-candidate","peer_id":"p4","candidate":"c"}"#).unwrap()
+        match parse_inbound(
+            r#"{"op":"add-ice-candidate","peer_id":"p4","generation":45,"candidate":"c"}"#,
+        )
+        .unwrap()
         {
-            InboundOp::AddIceCandidate { peer_id, candidate } => {
+            InboundOp::AddIceCandidate {
+                peer_id,
+                generation,
+                candidate,
+            } => {
                 assert_eq!(peer_id, "p4");
+                assert_eq!(generation, 45);
                 assert_eq!(candidate, "c");
             }
             other => panic!("expected add-ice-candidate, got {other:?}"),
         }
         match parse_inbound(
-            r#"{"op":"restart-ice","peer_id":"p5","relay_only":true,"create_offer":false}"#,
+            r#"{"op":"restart-ice","peer_id":"p5","generation":46,"relay_only":true,"create_offer":false}"#,
         )
         .unwrap()
         {
             InboundOp::RestartIce {
                 peer_id,
+                generation,
                 relay_only,
                 create_offer,
             } => {
                 assert_eq!(peer_id, "p5");
+                assert_eq!(generation, 46);
                 assert!(relay_only);
                 assert!(!create_offer);
             }
             other => panic!("expected restart-ice, got {other:?}"),
         }
-        match parse_inbound(r#"{"op":"restart-ice","peer_id":"p6"}"#).unwrap() {
-            InboundOp::RestartIce {
-                relay_only,
-                create_offer,
-                ..
-            } => {
-                assert!(!relay_only);
-                assert!(create_offer);
-            }
-            other => panic!("expected restart-ice defaults, got {other:?}"),
-        }
+        assert!(parse_inbound(r#"{"op":"peer-remove","peer_id":"missing-generation"}"#).is_err());
+        assert!(parse_inbound(r#"{"op":"set-remote-sdp","peer_id":"missing-generation","sdp_type":"offer","sdp":"v=0"}"#).is_err());
+        assert!(parse_inbound(
+            r#"{"op":"add-ice-candidate","peer_id":"missing-generation","candidate":"c"}"#
+        )
+        .is_err());
+        assert!(parse_inbound(r#"{"op":"restart-ice","peer_id":"missing-generation"}"#).is_err());
+        assert!(parse_inbound(
+            r#"{"op":"peer-add","peer_id":"zero","offerer":true,"relay_only":false,"generation":0}"#
+        )
+        .is_err());
+        assert!(parse_inbound(r#"{"op":"peer-remove","peer_id":"zero","generation":0}"#).is_err());
+        assert!(parse_inbound(r#"{"op":"set-remote-sdp","peer_id":"zero","generation":0,"sdp_type":"offer","sdp":"v=0"}"#).is_err());
+        assert!(parse_inbound(
+            r#"{"op":"add-ice-candidate","peer_id":"zero","generation":0,"candidate":"c"}"#
+        )
+        .is_err());
+        assert!(parse_inbound(r#"{"op":"restart-ice","peer_id":"zero","generation":0}"#).is_err());
     }
 
     #[test]
@@ -1338,6 +1402,21 @@ mod tests {
             capture_frames: 10,
             opus_encoded: 9,
             rtp_tx_ok: 18,
+            rtc_control_queue_depth: 6,
+            rtc_control_queue_depth_max: 90,
+            rtc_control_oldest_age_ms: 125,
+            rtc_control_stale_discarded: 4_000,
+            rtc_control_coalesced: 300,
+            rtc_control_candidate_duplicates: 20,
+            rtc_control_overflows: 0,
+            rtc_control_desired_generation_max: 500,
+            rtc_control_applied_generation_max: 500,
+            rtc_control_generation_lag_max: 0,
+            rtc_control_peers: vec![RtcControlPeerStats {
+                peer_id: "34215".to_string(),
+                desired_generation: 500,
+                applied_generation: 500,
+            }],
             rtp_rx_packets: 7,
             decode_frames: 6,
             mix_rounds: 5,
@@ -1395,6 +1474,19 @@ mod tests {
         assert_eq!(value["capture_frames"], 10);
         assert_eq!(value["opus_encoded"], 9);
         assert_eq!(value["rtp_tx_ok"], 18);
+        assert_eq!(value["rtc_control_queue_depth"], 6);
+        assert_eq!(value["rtc_control_queue_depth_max"], 90);
+        assert_eq!(value["rtc_control_oldest_age_ms"], 125);
+        assert_eq!(value["rtc_control_stale_discarded"], 4_000);
+        assert_eq!(value["rtc_control_coalesced"], 300);
+        assert_eq!(value["rtc_control_candidate_duplicates"], 20);
+        assert_eq!(value["rtc_control_overflows"], 0);
+        assert_eq!(value["rtc_control_desired_generation_max"], 500);
+        assert_eq!(value["rtc_control_applied_generation_max"], 500);
+        assert_eq!(value["rtc_control_generation_lag_max"], 0);
+        assert_eq!(value["rtc_control_peers"][0]["peer_id"], "34215");
+        assert_eq!(value["rtc_control_peers"][0]["desired_generation"], 500);
+        assert_eq!(value["rtc_control_peers"][0]["applied_generation"], 500);
         assert_eq!(value["rtp_rx_packets"], 7);
         assert_eq!(value["decode_frames"], 6);
         assert_eq!(value["mix_rounds"], 5);
@@ -1783,7 +1875,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 13);
+        assert_eq!(v["proto"], 14);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

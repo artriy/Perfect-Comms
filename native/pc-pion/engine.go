@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	pionABIVersion         = 1
+	pionABIVersion         = 2
 	outboundQueueCapacity  = 4
 	statsInterval          = 2 * time.Second
 	relayAcceptanceMinWait = 2 * time.Second

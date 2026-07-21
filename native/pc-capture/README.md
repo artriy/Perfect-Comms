@@ -16,7 +16,7 @@ and playback all live in this helper. The Rust media core loads Pion through
 the companion C-shared library built from `native/pc-pion`; transport startup
 fails closed if the matching library is missing. Android uses the same
 DRED-capable media core while intentionally leaving the desktop WebRTC-APM DSP
-path disabled. Protocol version 13.
+path disabled. Protocol version 14.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -140,7 +140,7 @@ PE, ELF, and Mach-O checks reject external Cubeb
 or speexdsp libraries, covering stale local Cargo/CMake caches as well as clean
 CI builds.
 
-`pc-capture --build-info` reports protocol 13, Cubeb 0.36.0, the immutable
+`pc-capture --build-info` reports protocol 14, Cubeb 0.36.0, the immutable
 Perfect Comms audio-contract marker, and the exact backends compiled into that
 binary. Packaging executes this probe, and the managed launcher requires the
 same contract before every uncached native launch, including host-native

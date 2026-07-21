@@ -8,6 +8,7 @@ public sealed class PeerSessionManagerMeshTests
 {
     private sealed class MeshTransport : IVoiceTransport
     {
+        public bool RequiresNativeOperationAcknowledgements => false;
         public readonly List<int> Added = new();
         public readonly List<bool> AddedOfferer = new();
         public readonly List<int> AddedGenerations = new();
@@ -24,25 +25,25 @@ public sealed class PeerSessionManagerMeshTests
             return true;
         }
 
-        public bool RemovePeer(int clientId)
+        public bool RemovePeer(int clientId, int generation)
         {
             Removed.Add(clientId);
             return true;
         }
 
-        public bool SetRemoteSdp(int clientId, string sdpType, string sdp)
+        public bool SetRemoteSdp(int clientId, int generation, string sdpType, string sdp)
         {
             RemoteSdp.Add((clientId, sdpType, sdp));
             return true;
         }
 
-        public bool AddIceCandidate(int clientId, string candidate)
+        public bool AddIceCandidate(int clientId, int generation, string candidate)
         {
             Candidates.Add((clientId, candidate));
             return true;
         }
 
-        public bool RestartIce(int clientId, bool createOffer)
+        public bool RestartIce(int clientId, int generation, bool createOffer)
         {
             IceRestarts.Add((clientId, createOffer));
             return true;

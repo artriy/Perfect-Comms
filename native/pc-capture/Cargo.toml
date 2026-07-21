@@ -22,6 +22,7 @@ serde_json = "1"
 apm-sys = { path = "../apm-sys" }
 pion-sys = { path = "../pion-sys" }
 opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
+parking_lot = "0.12"
 
 # Cubeb (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
 # Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from

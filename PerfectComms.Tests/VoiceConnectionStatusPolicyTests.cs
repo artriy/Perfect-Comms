@@ -155,6 +155,159 @@ public sealed class VoiceConnectionStatusPolicyTests
     }
 
     [Fact]
+    public void ConnectingPlayersDisplayExpiresWithoutChangingConnectionTruth()
+    {
+        var progress = Evaluate(
+            snapshotReady: true,
+            routingPolicyReady: true,
+            connectedPlayers: 9,
+            expectedPlayers: 10);
+        var roster = new VoiceConnectionRosterSignature(10, 17, 55);
+        float startedAt = 100f;
+        var display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            VoiceConnectionDisplayState.Initial,
+            progress,
+            roster,
+            startedAt);
+
+        Assert.True(display.Visible);
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            progress,
+            roster,
+            startedAt + VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds - 0.001f);
+        Assert.True(display.Visible);
+
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            progress,
+            roster,
+            startedAt + VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds);
+
+        Assert.False(display.Visible);
+        Assert.Equal(VoiceConnectionStage.ConnectingPlayers, progress.Stage);
+        Assert.Equal(9, progress.ConnectedPlayers);
+        Assert.Equal(10, progress.ExpectedPlayers);
+    }
+
+    [Fact]
+    public void ChangedRosterRearmsAnExpiredConnectingPlayersDisplay()
+    {
+        var progress = Evaluate(
+            snapshotReady: true,
+            routingPolicyReady: true,
+            connectedPlayers: 1,
+            expectedPlayers: 2);
+        var firstRoster = new VoiceConnectionRosterSignature(2, 11, 12);
+        var replacementRoster = new VoiceConnectionRosterSignature(2, 13, 14);
+        var display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            VoiceConnectionDisplayState.Initial,
+            progress,
+            firstRoster,
+            0f);
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            progress,
+            firstRoster,
+            VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds);
+        Assert.False(display.Visible);
+
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            progress,
+            replacementRoster,
+            VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds);
+
+        Assert.True(display.Visible);
+        Assert.Equal(replacementRoster, display.EpisodeRoster);
+        Assert.Equal(
+            VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds,
+            display.EpisodeStartedAt);
+    }
+
+    [Fact]
+    public void ReadyStateResetsTheDisplayBeforeALaterRegression()
+    {
+        var partial = Evaluate(
+            snapshotReady: true,
+            routingPolicyReady: true,
+            connectedPlayers: 1,
+            expectedPlayers: 2);
+        var ready = Evaluate(
+            snapshotReady: true,
+            routingPolicyReady: true,
+            connectedPlayers: 2,
+            expectedPlayers: 2);
+        var roster = new VoiceConnectionRosterSignature(2, 11, 12);
+        var display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            VoiceConnectionDisplayState.Initial,
+            partial,
+            roster,
+            0f);
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            partial,
+            roster,
+            VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds);
+        Assert.False(display.Visible);
+
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(display, ready, roster, 31f);
+        Assert.False(display.Visible);
+        Assert.False(display.HasConnectingPlayersEpisode);
+
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(display, partial, roster, 32f);
+        Assert.True(display.Visible);
+        Assert.Equal(32f, display.EpisodeStartedAt);
+    }
+
+    [Fact]
+    public void SessionSyncDoesNotRestartAnExpiredPlayerDisplayBudget()
+    {
+        var partial = Evaluate(
+            snapshotReady: true,
+            routingPolicyReady: true,
+            connectedPlayers: 1,
+            expectedPlayers: 2);
+        var syncing = Evaluate(snapshotReady: false, routingPolicyReady: true);
+        var roster = new VoiceConnectionRosterSignature(2, 11, 12);
+        var display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            VoiceConnectionDisplayState.Initial,
+            partial,
+            roster,
+            0f);
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            display,
+            partial,
+            roster,
+            VoiceConnectionStatusPolicy.ConnectingPlayersDisplayTimeoutSeconds);
+        Assert.False(display.Visible);
+
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(display, syncing, roster, 31f);
+        Assert.True(display.Visible);
+        display = VoiceConnectionStatusPolicy.UpdateDisplayState(display, partial, roster, 32f);
+
+        Assert.False(display.Visible);
+        Assert.Equal(0f, display.EpisodeStartedAt);
+    }
+
+    [Fact]
+    public void RetryingAudioRemainsVisibleOutsideThePlayerTimeout()
+    {
+        var retrying = Evaluate(
+            backendAvailable: false,
+            retryingAfterFailure: true,
+            snapshotReady: false);
+
+        var display = VoiceConnectionStatusPolicy.UpdateDisplayState(
+            VoiceConnectionDisplayState.Initial,
+            retrying,
+            default,
+            1000f);
+
+        Assert.True(display.Visible);
+    }
+
+    [Fact]
     public void PersistentHelperFailureClearlyShowsThatVoiceIsRetrying()
     {
         var progress = Evaluate(

@@ -36,7 +36,7 @@ internal static class VoiceHudWarnings
         }
 
         var connection = room.ConnectionProgress;
-        if (connection.IsConnecting)
+        if (room.ShouldShowConnectionProgress)
         {
             // Two animation frames per second keeps the status visibly alive without making the
             // compact text jitter rapidly beside the voice buttons.

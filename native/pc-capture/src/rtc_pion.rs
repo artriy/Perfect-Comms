@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -30,13 +31,14 @@ static TRANSPORT_LIBRARY_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new(
 /// staged beside the helper executable.
 pub fn set_transport_library_path(path: Option<&Path>) {
     let slot = TRANSPORT_LIBRARY_PATH.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = path.map(Path::to_path_buf);
+    *slot.lock() = path.map(Path::to_path_buf);
 }
 
 fn transport_library_path() -> Option<PathBuf> {
     let configured = TRANSPORT_LIBRARY_PATH
         .get()
-        .and_then(|slot| slot.lock().ok()?.clone());
+        .map(|slot| slot.lock().clone())
+        .flatten();
     #[cfg(test)]
     if configured.is_none() && std::env::var_os("PC_REQUIRE_PION").is_some() {
         return std::env::var_os("PC_PION_LIB").map(PathBuf::from);
@@ -227,8 +229,8 @@ impl RtcEngine {
     }
 
     pub fn set_ice_servers(&self, servers: &[crate::proto::IceServer]) {
-        let _control = self.control_gate.lock().unwrap();
-        *self.ice_servers.lock().unwrap() = servers.to_vec();
+        let _control = self.control_gate.lock();
+        *self.ice_servers.lock() = servers.to_vec();
         let Some((backend, handle)) = self.backend_handle() else {
             return;
         };
@@ -258,10 +260,10 @@ impl RtcEngine {
         relay_only: bool,
         generation: u32,
         min_encoder_epoch: u64,
-    ) {
-        let _control = self.control_gate.lock().unwrap();
+    ) -> bool {
+        let _control = self.control_gate.lock();
         let config = {
-            let mut configs = self.peer_configs.lock().unwrap();
+            let mut configs = self.peer_configs.lock();
             let min_encoder_epoch = configs.get(&peer_id).map_or(min_encoder_epoch, |existing| {
                 existing.min_encoder_epoch.max(min_encoder_epoch)
             });
@@ -285,7 +287,7 @@ impl RtcEngine {
                     .unwrap_or("transport-unavailable")
             );
             self.emit_failed(&peer_id, generation);
-            return;
+            return false;
         };
         let status = backend.api.add_peer(
             handle,
@@ -300,32 +302,53 @@ impl RtcEngine {
                 "pc-capture: Pion peer add failed peer={peer_id} generation={generation} status={status}"
             );
             self.emit_failed(&peer_id, generation);
+            return false;
         }
+        true
     }
 
-    pub fn remove_peer(&self, peer_id: &str) {
-        let _control = self.control_gate.lock().unwrap();
-        self.peer_configs.lock().unwrap().remove(peer_id);
+    pub fn remove_peer(&self, peer_id: &str, generation: u32) -> bool {
+        let _control = self.control_gate.lock();
+        if self
+            .peer_configs
+            .lock()
+            .get(peer_id)
+            .is_some_and(|current| current.generation > generation)
+        {
+            return false;
+        }
+        self.peer_configs.lock().remove(peer_id);
         self.encoder_policy.remove_peer(peer_id, None);
         self.network_paths.remove_peer(peer_id, None);
         self.receive_queue.remove_peer(peer_id);
         if let Some((backend, handle)) = self.backend_handle() {
             let status = backend.api.remove_peer(handle, peer_id);
             if status != pion_sys::STATUS_OK {
-                eprintln!("pc-capture: Pion peer remove failed peer={peer_id} status={status}");
+                eprintln!("pc-capture: Pion peer remove failed peer={peer_id} generation={generation} status={status}");
+                return false;
             }
         }
+        true
     }
 
-    pub fn set_remote_sdp(&self, peer_id: &str, sdp_type: &str, sdp: &str) {
-        let _control = self.control_gate.lock().unwrap();
-        let Some(config) = self.peer_configs.lock().unwrap().get(peer_id).copied() else {
-            eprintln!("pc-capture: Pion remote SDP rejected peer={peer_id} reason=missing-peer");
-            return;
+    pub fn set_remote_sdp(
+        &self,
+        peer_id: &str,
+        generation: u32,
+        sdp_type: &str,
+        sdp: &str,
+    ) -> bool {
+        let _control = self.control_gate.lock();
+        let Some(config) = self.peer_configs.lock().get(peer_id).copied() else {
+            eprintln!("pc-capture: Pion remote SDP rejected peer={peer_id} generation={generation} reason=missing-peer");
+            return false;
         };
+        if config.generation != generation {
+            return false;
+        }
         let Some((backend, handle)) = self.backend_handle() else {
             self.emit_failed(peer_id, config.generation);
-            return;
+            return false;
         };
         let status = backend
             .api
@@ -336,15 +359,26 @@ impl RtcEngine {
                 config.generation
             );
             self.emit_failed(peer_id, config.generation);
+            return false;
         }
+        true
     }
 
-    pub fn restart_ice(&self, peer_id: &str, relay_only: bool, create_offer: bool) -> bool {
-        let _control = self.control_gate.lock().unwrap();
-        let Some(config) = self.peer_configs.lock().unwrap().get(peer_id).copied() else {
-            eprintln!("pc-capture: Pion ICE restart rejected peer={peer_id} reason=missing-peer");
+    pub fn restart_ice(
+        &self,
+        peer_id: &str,
+        generation: u32,
+        relay_only: bool,
+        create_offer: bool,
+    ) -> bool {
+        let _control = self.control_gate.lock();
+        let Some(config) = self.peer_configs.lock().get(peer_id).copied() else {
+            eprintln!("pc-capture: Pion ICE restart rejected peer={peer_id} generation={generation} reason=missing-peer");
             return false;
         };
+        if config.generation != generation {
+            return false;
+        }
         let Some((backend, handle)) = self.backend_handle() else {
             self.emit_failed(peer_id, config.generation);
             return false;
@@ -361,7 +395,7 @@ impl RtcEngine {
             self.emit_failed(peer_id, config.generation);
             return false;
         }
-        if let Some(current) = self.peer_configs.lock().unwrap().get_mut(peer_id) {
+        if let Some(current) = self.peer_configs.lock().get_mut(peer_id) {
             if current.generation == config.generation {
                 current.relay_only = relay_only;
             }
@@ -369,15 +403,18 @@ impl RtcEngine {
         true
     }
 
-    pub fn add_ice_candidate(&self, peer_id: &str, candidate: &str) {
-        let _control = self.control_gate.lock().unwrap();
-        let Some(config) = self.peer_configs.lock().unwrap().get(peer_id).copied() else {
-            eprintln!("pc-capture: Pion candidate rejected peer={peer_id} reason=missing-peer");
-            return;
+    pub fn add_ice_candidate(&self, peer_id: &str, generation: u32, candidate: &str) -> bool {
+        let _control = self.control_gate.lock();
+        let Some(config) = self.peer_configs.lock().get(peer_id).copied() else {
+            eprintln!("pc-capture: Pion candidate rejected peer={peer_id} generation={generation} reason=missing-peer");
+            return false;
         };
+        if config.generation != generation {
+            return false;
+        }
         let Some((backend, handle)) = self.backend_handle() else {
             self.emit_failed(peer_id, config.generation);
-            return;
+            return false;
         };
         let status = backend
             .api
@@ -388,7 +425,9 @@ impl RtcEngine {
                 config.generation,
                 candidate.len()
             );
+            return false;
         }
+        true
     }
 
     pub fn send_opus(&self, packet: &[u8], packet_encoder_epoch: u64) {
@@ -408,7 +447,7 @@ impl RtcEngine {
             return;
         };
         let media_sequence = {
-            let mut sequence = self.outbound_media_sequence.lock().unwrap();
+            let mut sequence = self.outbound_media_sequence.lock();
             let value = sequence.wrapping_add(skipped_before_current);
             *sequence = value.wrapping_add(1);
             value
@@ -438,7 +477,6 @@ impl RtcEngine {
             let current = self
                 .peer_configs
                 .lock()
-                .unwrap()
                 .get(&packet.peer_id)
                 .is_some_and(|config| config.generation == packet.generation);
             if current {
@@ -489,7 +527,7 @@ impl RtcEngine {
     }
 
     pub fn ice_servers_snapshot(&self) -> Vec<crate::proto::IceServer> {
-        self.ice_servers.lock().unwrap().clone()
+        self.ice_servers.lock().clone()
     }
 
     #[cfg(test)]
@@ -504,7 +542,6 @@ impl RtcEngine {
     ) {
         self.peer_configs
             .lock()
-            .unwrap()
             .entry(peer_id.to_string())
             .or_insert(PeerConfig {
                 relay_only: false,
@@ -525,7 +562,7 @@ impl RtcEngine {
 impl Drop for RtcEngine {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.poll_thread.lock().unwrap().take() {
+        if let Some(thread) = self.poll_thread.lock().take() {
             let _ = thread.join();
         }
         if let Some(backend) = &self.backend {
@@ -642,7 +679,6 @@ fn poll_thread(args: PollThreadArgs) {
                     let current = args
                         .peer_configs
                         .lock()
-                        .unwrap()
                         .get(peer_id)
                         .is_some_and(|config| config.generation == event.generation);
                     if !current {
@@ -713,7 +749,6 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
     let current = args
         .peer_configs
         .lock()
-        .unwrap()
         .get(&event.peer_id)
         .is_some_and(|config| config.generation == event.generation);
     if event.kind == "error" {
@@ -864,11 +899,20 @@ mod tests {
         let mut connected = false;
         loop {
             match source.try_recv() {
-                Ok(LocalSignal::Sdp { sdp_type, sdp, .. }) => {
-                    destination.set_remote_sdp(destination_peer_id, &sdp_type, &sdp)
+                Ok(LocalSignal::Sdp {
+                    generation,
+                    sdp_type,
+                    sdp,
+                    ..
+                }) => {
+                    destination.set_remote_sdp(destination_peer_id, generation, &sdp_type, &sdp);
                 }
-                Ok(LocalSignal::Candidate { candidate, .. }) => {
-                    destination.add_ice_candidate(destination_peer_id, &candidate)
+                Ok(LocalSignal::Candidate {
+                    generation,
+                    candidate,
+                    ..
+                }) => {
+                    destination.add_ice_candidate(destination_peer_id, generation, &candidate);
                 }
                 Ok(LocalSignal::PeerState { state, .. }) => connected |= state == "connected",
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -881,7 +925,7 @@ mod tests {
     fn stale_generation_packets_are_discarded() {
         let (tx, _rx) = channel();
         let engine = RtcEngine::new(tx);
-        engine.peer_configs.lock().unwrap().insert(
+        engine.peer_configs.lock().insert(
             "peer".to_string(),
             PeerConfig {
                 relay_only: false,

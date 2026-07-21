@@ -1982,6 +1982,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 VoiceDiagnostics.Log("sidecar.handoff.reject", $"op=peer-state reason=session-manager-null client={clientId} generation={generation} state={state}");
                 return;
             }
+            if (state.StartsWith("native-", StringComparison.Ordinal))
+            {
+                manager.OnNativeOperationApplied(clientId, generation, state, nowMs);
+                return;
+            }
             VoiceDiagnostics.Log(
                 "voice.ice.peer-state",
                 $"client={clientId} generation={generation} state={state} policy=automatic-mixed");
@@ -2792,7 +2797,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _rpcTransport!,
                 _rpcSender,
                 relayAvailable: RelayAvailable,
-                requestRelay: RequestRelayCredentials);
+                requestRelay: RequestRelayCredentials
+#if WINDOWS
+                , nativeOperationTimeout: reason => OnSidecarHeartbeatLost("native-operation-timeout " + reason)
+#endif
+            );
         }
 
         var registeredNow = false;
@@ -4529,9 +4538,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void RemovePeer(string socketId)
     {
-#if WINDOWS
-        _voice?.RemovePeer(socketId);
-#endif
         PeerConnection? peer;
         lock (_peerSync)
         {

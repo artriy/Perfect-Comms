@@ -172,11 +172,14 @@ internal sealed class MobileVoiceClient : IDisposable
         lock (_micLock)
             return Control(SidecarProtocol.AddPeerFrame(peerId, isOfferer, generation));
     }
-    public bool RemovePeer(string peerId) => Control(SidecarProtocol.RemovePeerFrame(peerId));
-    public bool RestartIce(string peerId, bool createOffer) =>
-        Control(SidecarProtocol.RestartIceFrame(peerId, createOffer));
-    public bool SetRemoteSdp(string peerId, string sdpType, string sdp) => Control(SidecarProtocol.SetRemoteSdpFrame(peerId, sdpType, sdp));
-    public bool AddIceCandidate(string peerId, string candidate) => Control(SidecarProtocol.AddIceCandidateFrame(peerId, candidate));
+    public bool RemovePeer(string peerId, int generation) =>
+        Control(SidecarProtocol.RemovePeerFrame(peerId, generation));
+    public bool RestartIce(string peerId, int generation, bool createOffer) =>
+        Control(SidecarProtocol.RestartIceFrame(peerId, generation, createOffer));
+    public bool SetRemoteSdp(string peerId, int generation, string sdpType, string sdp) =>
+        Control(SidecarProtocol.SetRemoteSdpFrame(peerId, generation, sdpType, sdp));
+    public bool AddIceCandidate(string peerId, int generation, string candidate) =>
+        Control(SidecarProtocol.AddIceCandidateFrame(peerId, generation, candidate));
     public void SetIceServers(IEnumerable<IceServer> servers) => Control(SidecarProtocol.SetIceServersFrame(servers));
     public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) =>
         Control(SidecarProtocol.SetDspFrame(aec, agc, ns, nsVeryHigh, hpf));
