@@ -8,7 +8,7 @@ public sealed class PerfectCommsConfigStoreTests
     private static readonly BepInPlugin Metadata = new(
         "com.edgetel.perfectcomms",
         "Perfect Comms",
-        "4.1.2");
+        "4.1.3");
 
     [Fact]
     public void GlobalPathLivesUnderUnityPersistentDataDirectory()

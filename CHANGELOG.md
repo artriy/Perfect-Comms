@@ -1,5 +1,31 @@
 # Changelog
 
+## Perfect Comms v4.1.3
+
+Perfect Comms v4.1.3 makes voice recovery more reliable, prevents stalled connection messages from lingering, adds independent controls for optional voice HUD elements, and keeps settings consistent across multiple Among Us installations.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.3/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### More Reliable Voice Connections
+
+- **Repeated reconnects can no longer bury a player's live connection behind stale work.**
+  > <sub>The native voice helper now keeps only the newest generation of peer, SDP, restart, and ICE-candidate work for each player, with bounded candidate storage and explicit applied-operation acknowledgements. If a current operation does not complete promptly, only that client restarts its helper; a confirmed total mesh collapse can no longer defer global recovery forever. Direct peer-to-peer and TURN relay selection are unchanged.</sub>
+
+- **An unreachable player no longer leaves the connecting message onscreen forever.**
+  > <sub>The compact voice HUD gives the current lobby up to 30 seconds to connect, then clears a stalled player-count message while voice recovery continues in the background. A changed lobby roster or a later connection regression starts a fresh bounded status window.</sub>
+
+### More Flexible Voice HUD
+
+- **Voice controls and the speaking bar can now be hidden independently.**
+  > <sub>The voice settings now include separate switches for hiding the microphone, speaker, deafen, and mobile radio controls or hiding the all-players speaking bar. The role-critical Jailor unmute button remains available; disabling either optional HUD feature hides only its related layout and appearance options.</sub>
+
+### Shared Settings Across Installations
+
+- **Perfect Comms settings now follow you across Among Us installations.**
+  > <sub>Perfect Comms stores one user-wide configuration in the game's persistent data folder instead of each installation's BepInEx folder. The first launch migrates the current installation's settings without deleting the old file, and simultaneous clients merge changed settings through locked, atomic writes so unrelated preferences are not overwritten.</sub>
+
 ## Perfect Comms v4.1.2
 
 Perfect Comms v4.1.2 rebuilds desktop capture and playback for more dependable device handling and clearer voice. Microphone stalls now preserve the correct timeline, damaged playback fades or recovers at safe boundaries, and one unstable connection can no longer reduce voice quality for an otherwise healthy lobby.
@@ -32,18 +58,6 @@ Perfect Comms v4.1.2 rebuilds desktop capture and playback for more dependable d
 
 - **One damaged connection no longer lowers quality for everyone.**
   > <sub>Send-quality adaptation now ignores a single isolated bad route when the rest of the lobby is healthy. Multiple genuinely degraded connections still reduce bitrate and increase packet-loss protection when needed.</sub>
-
-- **Repeated reconnects can no longer bury a player's live connection behind stale work.**
-  > <sub>The native voice helper now keeps only the newest generation of peer, SDP, restart, and ICE-candidate work for each player, with bounded candidate storage and explicit applied-operation acknowledgements. If a current operation does not complete promptly, only that client restarts its helper; a confirmed total mesh collapse can no longer defer global recovery forever. Direct peer-to-peer and TURN relay selection are unchanged.</sub>
-
-- **An unreachable player no longer leaves the connecting message onscreen forever.**
-  > <sub>The compact voice HUD gives the current lobby up to 30 seconds to connect, then clears a stalled player-count message while voice recovery continues in the background. A changed lobby roster or a later connection regression starts a fresh bounded status window.</sub>
-
-- **Voice controls and the speaking bar can now be hidden independently.**
-  > <sub>The voice settings now include separate switches for hiding the microphone, speaker, deafen, and mobile radio controls or hiding the all-players speaking bar. The role-critical Jailor unmute button remains available; disabling either optional HUD feature hides only its related layout and appearance options.</sub>
-
-- **Perfect Comms settings now follow you across Among Us installations.**
-  > <sub>Perfect Comms stores one user-wide configuration in the game's persistent data folder instead of each installation's BepInEx folder. The first launch migrates the current installation's settings without deleting the old file, and simultaneous clients merge changed settings through locked, atomic writes so unrelated preferences are not overwritten.</sub>
 
 ### Diagnostics and Validation
 
