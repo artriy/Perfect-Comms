@@ -249,6 +249,7 @@ def route_signal(source: Helper, target: Helper, target_peer_id: str, message: d
             {
                 "op": "set-remote-sdp",
                 "peer_id": target_peer_id,
+                "generation": message.get("generation"),
                 "sdp_type": message.get("sdp_type", ""),
                 "sdp": message.get("sdp", ""),
             }
@@ -258,6 +259,7 @@ def route_signal(source: Helper, target: Helper, target_peer_id: str, message: d
             {
                 "op": "add-ice-candidate",
                 "peer_id": target_peer_id,
+                "generation": message.get("generation"),
                 "candidate": message.get("candidate", ""),
             }
         )
