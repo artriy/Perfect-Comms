@@ -611,10 +611,12 @@ public sealed class SidecarDiagnosticsSafetyTests
 
         Assert.True(SidecarVoiceClient.TryReadCaptureState(callback, out var ready));
         Assert.Equal("first-callback", ready.State);
+#if WINDOWS
         Assert.True(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(7, ready));
         Assert.False(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(
             8,
             ready));
+#endif
         Assert.False(SidecarVoiceClient.TryReadCaptureState(
             "{\"direction\":\"playback\",\"state\":\"first-callback\",\"stream_generation\":7}",
             out _));

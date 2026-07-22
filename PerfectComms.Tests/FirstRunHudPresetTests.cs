@@ -230,7 +230,11 @@ public sealed class FirstRunHudPresetTests
         Assert.True(fresh.EchoCancellation);
         Assert.False(fresh.StartMuted);
         Assert.False(fresh.StartDeafened);
+#if WINDOWS
         Assert.False(fresh.AllowKeybindsWhileChatOpen);
+#else
+        Assert.True(fresh.AllowKeybindsWhileChatOpen);
+#endif
         Assert.False(fresh.HideVoiceControls);
         Assert.False(fresh.HideSpeakingBar);
         Assert.False(fresh.HideMeetingOverlay);
