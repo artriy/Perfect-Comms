@@ -1149,6 +1149,10 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 10-client Pion integration stress test in short mode")
 	}
+	// Ninety same-process ICE agents cannot reliably share a CI runner's mDNS multicast
+	// delivery. Keep this topology test hermetic; the production mDNS default is asserted
+	// independently by TestMulticastDNSModeRequiresExplicitTestOverride.
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
 	started := time.Now()
 	mesh := newTenClientMesh(t)
 	initialSignals := mesh.signalSnapshot()
