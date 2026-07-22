@@ -445,6 +445,7 @@ internal sealed class MobileVoiceClient : IDisposable
         double maxRemoteLoss = 0;
         double minimumOutgoingBitrate = 0;
         bool bandwidthEstimateValid = false;
+        ulong maxSelectedPairChanges = 0;
         var pathClasses = new StringBuilder(128);
         if (root.TryGetProperty("network_paths", out var paths)
             && paths.ValueKind == JsonValueKind.Array)
@@ -462,6 +463,9 @@ internal sealed class MobileVoiceClient : IDisposable
                     if (outgoing > 0 && (minimumOutgoingBitrate <= 0 || outgoing < minimumOutgoingBitrate))
                         minimumOutgoingBitrate = outgoing;
                 }
+                maxSelectedPairChanges = Math.Max(
+                    maxSelectedPairChanges,
+                    ReadUInt64(path, "selected_pair_changes"));
                 if (pathCount <= 16)
                 {
                     if (pathClasses.Length > 0) pathClasses.Append(',');
@@ -471,21 +475,27 @@ internal sealed class MobileVoiceClient : IDisposable
                         .Append(SafeRouteToken(path, "remote_candidate_type"))
                         .Append('/')
                         .Append(SafeRouteToken(path, "candidate_state"))
-                        .Append(ReadBool(path, "relay") ? "/relay" : "/direct");
+                        .Append(ReadBool(path, "relay") ? "/relay" : "/direct")
+                        .Append('/')
+                        .Append(SafeRouteToken(path, "local_candidate_protocol"))
+                        .Append('-')
+                        .Append(SafeRouteToken(path, "remote_candidate_protocol"))
+                        .Append('/')
+                        .Append(SafeRouteToken(path, "ice_connection_state"));
                 }
             }
         }
 
         VoiceDiagnostics.Log("voice.mobile.native",
             $"activePeers={ReadUInt64(receive, "active_peers")} ingressOverflow={ReadUInt64(receive, "ingress_queue_overflow")} ingressDepth={ReadUInt64(receive, "ingress_queue_depth_current")} ingressDepthMax={ReadUInt64(receive, "ingress_queue_depth_max")} ingressPeerDepthMax={ReadUInt64(receive, "ingress_peer_queue_depth_max")} " +
-            $"sequenceGaps={ReadUInt64(receive, "sequence_gaps")} reorderedRecovered={ReadUInt64(receive, "reordered_recovered")} " +
+            $"sequenceGaps={ReadUInt64(receive, "sequence_gaps")} localMediaGapFrames={ReadUInt64(receive, "local_media_gap_frames")} reorderedRecovered={ReadUInt64(receive, "reordered_recovered")} " +
             $"lateDrops={ReadUInt64(receive, "late_drops")} duplicateDrops={ReadUInt64(receive, "duplicate_drops")} encodedOverflowDrops={ReadUInt64(receive, "encoded_overflow_drops")} " +
             $"deadlineLosses={ReadUInt64(receive, "deadline_losses")} dredFrames={ReadUInt64(receive, "dred_frames")} fecFrames={ReadUInt64(receive, "fec_frames")} plcFrames={ReadUInt64(receive, "plc_frames")} " +
             $"decoderResets={ReadUInt64(receive, "decoder_resets")} talkspurtResets={ReadUInt64(receive, "talkspurt_resets")} underruns={ReadUInt64(receive, "underruns")} rebuffers={ReadUInt64(receive, "rebuffers")} " +
             $"targetFrames={ReadUInt64(receive, "target_frames_current_max")} depthFrames={ReadUInt64(receive, "depth_frames_current")} jitterMsMax={ReadFiniteDouble(receive, "rtp_jitter_ms_max"):0.0} " +
             $"encoderLossPercent={ReadUInt64(root, "encoder_packet_loss_percent")} encoderBitrate={ReadUInt64(root, "encoder_bitrate")} encoderGeneration={ReadUInt64(root, "encoder_policy_generation")} " +
             $"rtpTxQueueDropped={ReadUInt64(root, "rtp_tx_queue_dropped")} rtpTxStaleEpochDropped={ReadUInt64(root, "rtp_tx_stale_epoch_dropped")} rtpTxWriteTimeouts={ReadUInt64(root, "rtp_tx_write_timeouts")} rtpTxQueueDepthMax={ReadUInt64(root, "rtp_tx_queue_depth_max")} " +
-            $"paths={pathCount} relayPaths={relayPaths} maxRttMs={maxRttMs:0.0} maxRemoteLoss={maxRemoteLoss:0.000} bandwidthEstimateValid={bandwidthEstimateValid.ToString().ToLowerInvariant()} minOutgoingBitrate={minimumOutgoingBitrate:0} pathClasses=\"{pathClasses}\"");
+            $"paths={pathCount} relayPaths={relayPaths} maxSelectedPairChanges={maxSelectedPairChanges} maxRttMs={maxRttMs:0.0} maxRemoteLoss={maxRemoteLoss:0.000} bandwidthEstimateValid={bandwidthEstimateValid.ToString().ToLowerInvariant()} minOutgoingBitrate={minimumOutgoingBitrate:0} pathClasses=\"{pathClasses}\"");
     }
 
     private static ulong ReadUInt64(JsonElement parent, string property)

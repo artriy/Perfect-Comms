@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,8 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
+	"github.com/pion/interceptor/pkg/nack"
+	"github.com/pion/interceptor/pkg/report"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
@@ -21,6 +24,8 @@ import (
 const (
 	pionABIVersion         = 2
 	outboundQueueCapacity  = 4
+	outboundFreshnessLimit = 120 * time.Millisecond
+	iceEOCSettleDelay      = 3 * time.Second
 	statsInterval          = 2 * time.Second
 	relayAcceptanceMinWait = 2 * time.Second
 	writeTimeout           = 100 * time.Millisecond
@@ -93,6 +98,7 @@ type engine struct {
 	rtp          *rtpQueue
 	privacyFloor atomic.Uint64
 	privacyMu    sync.RWMutex
+	tcpMux       ice.TCPMux
 	closed       atomic.Bool
 	instance     atomic.Uint64
 	counters     transportCounters
@@ -102,10 +108,11 @@ func newEngine() (*engine, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeOpus,
-			ClockRate:   48_000,
-			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			MimeType:     webrtc.MimeTypeOpus,
+			ClockRate:    48_000,
+			Channels:     2,
+			SDPFmtpLine:  "minptime=10;useinbandfec=1",
+			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}},
 		},
 		PayloadType: 111,
 	}, webrtc.RTPCodecTypeAudio); err != nil {
@@ -144,28 +151,59 @@ func newEngine() (*engine, error) {
 	if err = webrtc.ConfigureTWCCHeaderExtensionSender(mediaEngine, registry); err != nil {
 		return nil, fmt.Errorf("twcc header sender: %w", err)
 	}
-	if err = webrtc.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
+	if os.Getenv("PC_PION_TEST_DEFAULT_INTERCEPTORS") == "1" {
+		err = webrtc.RegisterDefaultInterceptors(mediaEngine, registry)
+	} else {
+		err = webrtc.RegisterDefaultInterceptorsWithOptions(
+			mediaEngine,
+			registry,
+			webrtc.WithNackGeneratorOptions(
+				nack.GeneratorInterval(20*time.Millisecond),
+				nack.GeneratorMaxNacksPerPacket(2),
+				nack.GeneratorSize(64),
+			),
+			webrtc.WithNackResponderOptions(nack.ResponderSize(64)),
+			webrtc.WithReportReceiverOptions(report.ReceiverInterval(500*time.Millisecond)),
+			webrtc.WithReportSenderOptions(report.SenderInterval(500*time.Millisecond)),
+		)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("default interceptors: %w", err)
 	}
-
 	settings := webrtc.SettingEngine{}
 	settings.SetICETimeouts(8*time.Second, 15*time.Second, 2*time.Second)
 	settings.SetRelayAcceptanceMinWait(relayAcceptanceMinWait)
 	settings.SetICEMulticastDNSMode(multicastDNSMode())
 	settings.SetICEUseCandidateCheckPriority(true)
+	if os.Getenv("PC_PION_TEST_DISABLE_RENOMINATION") != "1" {
+		if err = settings.SetICERenomination(); err != nil {
+			return nil, fmt.Errorf("ICE renomination: %w", err)
+		}
+	}
+	if os.Getenv("PC_PION_TEST_DISABLE_DTLS_TUNING") != "1" {
+		settings.SetDTLSRetransmissionInterval(500 * time.Millisecond)
+	}
 	// One shared mux per engine keeps host ICE traffic on one port per usable
 	// network family. Each ICE agent still owns its mDNS sockets, and Pion
 	// WebRTC v4.2.17 normal srflx gathering uses one socket per STUN URL.
 	// Prefer dual stack, while retaining an IPv4 fallback for hosts without a
-	// usable IPv6 interface. Active ICE-TCP and TURN TCP/TLS stay enabled.
+	// usable IPv6 interface.
 	muxClosing := &atomic.Bool{}
 	udpMux, networkTypes, err := newSharedUDPMux(muxClosing)
 	if err != nil {
 		return nil, fmt.Errorf("shared udp mux: %w", err)
 	}
 	settings.SetICEUDPMux(udpMux)
+	var tcpMux ice.TCPMux
+	if os.Getenv("PC_PION_TEST_DISABLE_TCP_MUX") != "1" {
+		candidateMux, tcpErr := newSharedTCPMux(muxClosing)
+		if tcpErr == nil {
+			tcpMux = candidateMux
+			settings.SetICETCPMux(tcpMux)
+			networkTypes = append(networkTypes, webrtc.NetworkTypeTCP4, webrtc.NetworkTypeTCP6)
+		}
+	}
 	settings.SetNetworkTypes(networkTypes)
-
 	return &engine{
 		peers:      make(map[string]*peer),
 		iceServers: defaultICEServers(),
@@ -176,6 +214,7 @@ func newEngine() (*engine, error) {
 		),
 		estimators: estimators,
 		udpMux:     udpMux,
+		tcpMux:     tcpMux,
 		muxClosing: muxClosing,
 		rtp:        newRTPQueue(),
 	}, nil
@@ -207,18 +246,38 @@ func newSharedUDPMux(closing *atomic.Bool) (ice.UDPMux, []webrtc.NetworkType, er
 	if err == nil {
 		return mux, []webrtc.NetworkType{
 			webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6,
-			webrtc.NetworkTypeTCP4, webrtc.NetworkTypeTCP6,
 		}, nil
 	}
 	mux, ipv4Err := ice.NewMultiUDPMuxFromPort(0, options(ice.NetworkTypeUDP4)...)
 	if ipv4Err == nil {
-		return mux, []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4}, nil
+		return mux, []webrtc.NetworkType{webrtc.NetworkTypeUDP4}, nil
 	}
 	mux, ipv6Err := ice.NewMultiUDPMuxFromPort(0, options(ice.NetworkTypeUDP6)...)
 	if ipv6Err == nil {
-		return mux, []webrtc.NetworkType{webrtc.NetworkTypeUDP6, webrtc.NetworkTypeTCP6}, nil
+		return mux, []webrtc.NetworkType{webrtc.NetworkTypeUDP6}, nil
 	}
-	return nil, nil, fmt.Errorf("dual stack: %v; IPv4 fallback: %v; IPv6 fallback: %w", err, ipv4Err, ipv6Err)
+	return nil, nil, fmt.Errorf(
+		"dual stack: %v; IPv4 fallback: %v; IPv6 fallback: %w",
+		err,
+		ipv4Err,
+		ipv6Err,
+	)
+}
+
+func newSharedTCPMux(closing *atomic.Bool) (ice.TCPMux, error) {
+	listener, err := net.Listen("tcp", "[::]:0")
+	if err != nil {
+		listener, err = net.Listen("tcp4", "0.0.0.0:0")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ice.NewTCPMuxDefault(ice.TCPMuxParams{
+		Listener:        listener,
+		Logger:          newMuxLogger(closing),
+		ReadBufferSize:  1 << 20,
+		WriteBufferSize: 1 << 20,
+	}), nil
 }
 
 func defaultICEServers() []webrtc.ICEServer {
@@ -452,15 +511,20 @@ func (e *engine) sendOpus(payload []byte, epoch, mediaSequence uint64) sendResul
 		result.attempted++
 		e.counters.rtpTXAttempts.Add(1)
 		frame := outboundFrame{
-			payload:       append([]byte(nil), payload...),
+			payload:       payload,
 			epoch:         epoch,
 			mediaSequence: mediaSequence,
+			queuedAt:      time.Now(),
 		}
-		select {
-		case p.outbound <- frame:
+		superseded, enqueued := p.enqueueOutbound(frame)
+		if superseded {
+			result.queueFull++
+			e.counters.rtpTXQueueDropped.Add(1)
+		}
+		if enqueued {
 			result.enqueued++
 			e.counters.recordQueueDepth(uint64(len(p.outbound)))
-		default:
+		} else {
 			result.queueFull++
 			e.counters.rtpTXQueueDropped.Add(1)
 		}
@@ -480,18 +544,41 @@ func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 			break
 		}
 	}
+
 	deadline := time.Now().Add(timeout)
 	for {
 		if e.privacyMu.TryLock() {
 			e.mu.RLock()
+			peers := make([]*peer, 0, len(e.peers))
 			var dropped uint64
 			for _, p := range e.peers {
+				peers = append(peers, p)
 				dropped += uint64(p.purgeOutboundBelow(target))
 			}
 			e.mu.RUnlock()
 			e.privacyMu.Unlock()
 			e.counters.rtpTXStaleEpochDropped.Add(dropped)
-			return true
+
+			for {
+				blocked := blockedPrivacyWriters(peers, target)
+				if len(blocked) == 0 {
+					return true
+				}
+				if timeout <= 0 || !time.Now().Before(deadline) {
+					// Closing one blocked PeerConnection interrupts its TrackLocal write and waits
+					// for that peer's workers only. Other peers and engine control remain live.
+					for _, p := range blocked {
+						p.fail("privacy epoch write deadline exceeded")
+						p.close()
+					}
+					return true
+				}
+				remaining := time.Until(deadline)
+				if remaining > time.Millisecond {
+					remaining = time.Millisecond
+				}
+				time.Sleep(remaining)
+			}
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			return false
@@ -502,6 +589,16 @@ func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 		}
 		time.Sleep(remaining)
 	}
+}
+
+func blockedPrivacyWriters(peers []*peer, epoch uint64) []*peer {
+	blocked := make([]*peer, 0, len(peers))
+	for _, p := range peers {
+		if p.hasRTPWriteBefore(epoch) {
+			blocked = append(blocked, p)
+		}
+	}
+	return blocked
 }
 
 func (e *engine) close() {
@@ -524,10 +621,13 @@ func (e *engine) close() {
 	for _, p := range peers {
 		p.close()
 	}
+	if e.muxClosing != nil {
+		e.muxClosing.Store(true)
+	}
+	if e.tcpMux != nil {
+		_ = e.tcpMux.Close()
+	}
 	if e.udpMux != nil {
-		if e.muxClosing != nil {
-			e.muxClosing.Store(true)
-		}
 		_ = e.udpMux.Close()
 	}
 }

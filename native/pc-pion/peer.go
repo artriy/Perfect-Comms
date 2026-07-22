@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ type outboundFrame struct {
 	payload       []byte
 	epoch         uint64
 	mediaSequence uint64
+	queuedAt      time.Time
 }
 
 type peer struct {
@@ -37,7 +39,12 @@ type peer struct {
 	relayOnly       atomic.Bool
 	active          atomic.Bool
 	sentRTP         atomic.Bool
+	writeInFlight   atomic.Bool
+	writeEpoch      atomic.Uint64
 	remoteFeedback  remoteSenderFeedback
+	iceStateMu      sync.RWMutex
+	iceState        string
+	pairChanges     atomic.Uint64
 	outbound        chan outboundFrame
 	stop            chan struct{}
 	closeOnce       sync.Once
@@ -50,6 +57,8 @@ type peer struct {
 	candidateMu     sync.Mutex
 	holdCandidates  bool
 	localCandidates []string
+	candidateSerial uint64
+	eocPending      bool
 	sequenceBase    uint16
 	timestampBase   uint32
 }
@@ -85,6 +94,9 @@ func newPeer(
 	p.minEpoch.Store(minEpoch)
 	p.relayOnly.Store(relayOnly)
 	p.active.Store(true)
+	if estimator != nil {
+		estimator.OnTargetBitrateChange(p.emitBandwidthEstimate)
+	}
 	return p
 }
 
@@ -97,19 +109,108 @@ func (p *peer) raiseMinEpoch(epoch uint64) {
 	}
 }
 
+// enqueueOutbound keeps conversational audio fresh under temporary writer stalls. When the
+// bounded channel is full, old speech is superseded by the newest frame instead of delaying the
+// newest frame behind audio that is no longer useful.
+func (p *peer) enqueueOutbound(frame outboundFrame) (superseded, enqueued bool) {
+	select {
+	case p.outbound <- frame:
+		return false, true
+	default:
+	}
+
+	select {
+	case <-p.outbound:
+		superseded = true
+	default:
+	}
+	select {
+	case p.outbound <- frame:
+		return superseded, true
+	default:
+		return superseded, false
+	}
+}
+
+func (frame outboundFrame) expired(now time.Time) bool {
+	return !frame.queuedAt.IsZero() && now.Sub(frame.queuedAt) > outboundFreshnessLimit
+}
+
+func (p *peer) setICEState(state string) {
+	p.iceStateMu.Lock()
+	p.iceState = state
+	p.iceStateMu.Unlock()
+}
+
+func (p *peer) pathStatus() (string, uint64) {
+	p.iceStateMu.RLock()
+	state := p.iceState
+	p.iceStateMu.RUnlock()
+	return state, p.pairChanges.Load()
+}
+
+func (p *peer) emitBandwidthEstimate(bitrate int) {
+	if bitrate <= 0 || p.estimator == nil || !p.estimator.hasFeedback() {
+		return
+	}
+	iceState, pairChanges := p.pathStatus()
+	p.emit(controlEvent{
+		Kind: "bandwidth", PeerID: p.id, Generation: p.generation,
+		ICEConnectionState: iceState, SelectedPairChanges: pairChanges,
+		BandwidthEstimateValid: true, AvailableOutgoingBitrate: float64(bitrate),
+	})
+}
+
+func (p *peer) selectedPairEvent(pair *webrtc.ICECandidatePair) controlEvent {
+	state, _ := p.pathStatus()
+	event := controlEvent{
+		Kind: "path", PeerID: p.id, Generation: p.generation,
+		ICEConnectionState: state, SelectedPairChanges: p.pairChanges.Add(1),
+	}
+	if pair == nil || pair.Local == nil || pair.Remote == nil {
+		return event
+	}
+	event.CandidatePairID = fmt.Sprintf("%s-%s", pair.Local.Foundation, pair.Remote.Foundation)
+	event.LocalCandidateType = pair.Local.Typ.String()
+	event.RemoteCandidateType = pair.Remote.Typ.String()
+	event.LocalCandidateProtocol = pair.Local.Protocol.String()
+	event.RemoteCandidateProtocol = pair.Remote.Protocol.String()
+	event.Relay = pair.Local.Typ == webrtc.ICECandidateTypeRelay ||
+		pair.Remote.Typ == webrtc.ICECandidateTypeRelay
+	return event
+}
+
 func (p *peer) start() {
 	p.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		p.emit(controlEvent{
 			Kind: "state", PeerID: p.id, Generation: p.generation, State: state.String(),
 		})
 	})
+	if os.Getenv("PC_PION_TEST_DISABLE_PATH_EVENTS") != "1" {
+		p.pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+			p.setICEState(state.String())
+			p.emit(controlEvent{
+				Kind: "ice-state", PeerID: p.id, Generation: p.generation,
+				ICEConnectionState: state.String(),
+			})
+		})
+		if transport := p.sender.Transport(); transport != nil && transport.ICETransport() != nil {
+			transport.ICETransport().OnSelectedCandidatePairChange(func(pair *webrtc.ICECandidatePair) {
+				p.emit(p.selectedPairEvent(pair))
+			})
+		}
+	}
 	p.pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if !p.engine.isCurrent(p) {
 			return
 		}
 		value := ""
 		if candidate != nil {
-			value = candidate.ToJSON().Candidate
+			init := candidate.ToJSON()
+			if !p.isCurrentLocalCandidate(init) {
+				return
+			}
+			value = init.Candidate
 		}
 		p.emitOrBufferCandidate(value)
 	})
@@ -146,15 +247,43 @@ func (p *peer) emit(event controlEvent) bool {
 	return p.engine.emitPeerControl(p, event)
 }
 
+func (p *peer) isCurrentLocalCandidate(candidate webrtc.ICECandidateInit) bool {
+	if candidate.UsernameFragment == nil {
+		return true
+	}
+	description := p.pc.LocalDescription()
+	if description == nil {
+		return true
+	}
+	for _, field := range strings.Fields(description.SDP) {
+		if ufrag, ok := strings.CutPrefix(field, "a=ice-ufrag:"); ok {
+			return ufrag == *candidate.UsernameFragment
+		}
+	}
+	return true
+}
+
 func (p *peer) holdLocalCandidates() {
 	p.candidateMu.Lock()
 	p.holdCandidates = true
 	p.localCandidates = p.localCandidates[:0]
+	p.candidateSerial++
+	p.eocPending = false
 	p.candidateMu.Unlock()
 }
 
 func (p *peer) emitOrBufferCandidate(candidate string) {
 	p.candidateMu.Lock()
+	p.candidateSerial++
+	serial := p.candidateSerial
+	if candidate == "" {
+		// A shared ICE-TCP mux can report its final passive candidate immediately after Pion's
+		// nil callback. Debounce only EOC; SDP and usable candidates remain immediate.
+		p.eocPending = true
+		p.candidateMu.Unlock()
+		p.scheduleEndOfCandidates(serial)
+		return
+	}
 	if p.holdCandidates {
 		if len(p.localCandidates) >= maxPendingCandidates {
 			p.candidateMu.Unlock()
@@ -162,11 +291,37 @@ func (p *peer) emitOrBufferCandidate(candidate string) {
 			return
 		}
 		p.localCandidates = append(p.localCandidates, candidate)
-		p.candidateMu.Unlock()
-		return
+	} else {
+		p.emit(candidateControlEvent(p.id, p.generation, candidate))
 	}
-	p.emit(candidateControlEvent(p.id, p.generation, candidate))
+	rescheduleEOC := p.eocPending
 	p.candidateMu.Unlock()
+	if rescheduleEOC {
+		p.scheduleEndOfCandidates(serial)
+	}
+}
+
+func (p *peer) scheduleEndOfCandidates(serial uint64) {
+	p.startWorker(func() {
+		timer := time.NewTimer(iceEOCSettleDelay)
+		defer timer.Stop()
+		select {
+		case <-p.stop:
+			return
+		case <-timer.C:
+		}
+		p.candidateMu.Lock()
+		defer p.candidateMu.Unlock()
+		if !p.eocPending || p.candidateSerial != serial {
+			return
+		}
+		if p.holdCandidates {
+			p.localCandidates = append(p.localCandidates, "")
+		} else {
+			p.emit(candidateControlEvent(p.id, p.generation, ""))
+		}
+		p.eocPending = false
+	})
 }
 
 func (p *peer) releaseLocalCandidates() {
@@ -185,6 +340,8 @@ func (p *peer) discardLocalCandidates() {
 	p.candidateMu.Lock()
 	p.localCandidates = p.localCandidates[:0]
 	p.holdCandidates = false
+	p.candidateSerial++
+	p.eocPending = false
 	p.candidateMu.Unlock()
 }
 
@@ -328,22 +485,43 @@ func (p *peer) restartICE(relayOnly, createOffer bool) error {
 	return nil
 }
 
+func (p *peer) beginRTPWrite(epoch uint64) bool {
+	p.engine.privacyMu.RLock()
+	defer p.engine.privacyMu.RUnlock()
+	if !p.engine.isCurrent(p) || epoch < p.engine.privacyFloor.Load() || epoch < p.minEpoch.Load() {
+		return false
+	}
+	p.writeEpoch.Store(epoch)
+	p.writeInFlight.Store(true)
+	return true
+}
+
+func (p *peer) hasRTPWriteBefore(epoch uint64) bool {
+	return p.writeInFlight.Load() && p.writeEpoch.Load() < epoch
+}
+
+func (p *peer) finishRTPWrite() {
+	p.writeInFlight.Store(false)
+}
+
 func (p *peer) writeRTP() {
 	var firstMediaSequence uint64
 	var haveFirst bool
+	nextRTPSequence := p.sequenceBase
 	for {
 		select {
 		case <-p.stop:
 			return
 		case frame := <-p.outbound:
-			p.engine.privacyMu.RLock()
-			if !p.engine.isCurrent(p) || frame.epoch < p.engine.privacyFloor.Load() || frame.epoch < p.minEpoch.Load() {
-				p.engine.privacyMu.RUnlock()
-				p.engine.counters.rtpTXStaleEpochDropped.Add(1)
+			if frame.expired(time.Now()) {
+				p.engine.counters.rtpTXQueueDropped.Add(1)
 				continue
 			}
 			if !p.readyToSendRTP() {
-				p.engine.privacyMu.RUnlock()
+				continue
+			}
+			if !p.beginRTPWrite(frame.epoch) {
+				p.engine.counters.rtpTXStaleEpochDropped.Add(1)
 				continue
 			}
 			if !haveFirst {
@@ -355,15 +533,16 @@ func (p *peer) writeRTP() {
 				Header: rtp.Header{
 					Version:        2,
 					PayloadType:    111,
-					SequenceNumber: p.sequenceBase + uint16(delta),
+					SequenceNumber: nextRTPSequence,
 					Timestamp:      p.timestampBase + uint32(delta*960),
 				},
 				Payload: frame.payload,
 			}
+			nextRTPSequence++
 			started := time.Now()
 			err := p.track.WriteRTP(packet)
 			elapsed := time.Since(started)
-			p.engine.privacyMu.RUnlock()
+			p.finishRTPWrite()
 			if elapsed > writeTimeout {
 				p.engine.counters.rtpTXWriteTimeouts.Add(1)
 			}
@@ -420,11 +599,18 @@ func (p *peer) recordReceiverReports(packets []rtcp.Packet, now time.Time) {
 }
 
 func (p *peer) readRTP(track *webrtc.TrackRemote) {
+	buffer := make([]byte, 1_500)
+	packet := &rtp.Packet{}
 	for {
-		packet, _, err := track.ReadRTP()
+		n, _, err := track.Read(buffer)
 		if err != nil {
 			return
 		}
+		if err = packet.Unmarshal(buffer[:n]); err != nil {
+			continue
+		}
+		// The raw read buffer and parsed packet are reused on the next iteration. Copy only the
+		// payload that crosses into the bounded multi-peer receive queue.
 		payload := append([]byte(nil), packet.Payload...)
 		if !p.engine.enqueuePeerRTP(p, inboundRTP{
 			peerID: p.id, generation: p.generation,
@@ -485,7 +671,9 @@ func (p *peer) close() {
 		p.workersClosed = true
 		p.workerMu.Unlock()
 		close(p.stop)
-		_ = p.pc.Close()
+		if p.pc != nil {
+			_ = p.pc.Close()
+		}
 		p.wg.Wait()
 	})
 }

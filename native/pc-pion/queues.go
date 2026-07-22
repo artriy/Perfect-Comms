@@ -31,6 +31,10 @@ type controlEvent struct {
 	LocalCandidateType       string  `json:"local_candidate_type,omitempty"`
 	RemoteCandidateType      string  `json:"remote_candidate_type,omitempty"`
 	Relay                    bool    `json:"relay,omitempty"`
+	ICEConnectionState       string  `json:"ice_connection_state,omitempty"`
+	LocalCandidateProtocol   string  `json:"local_candidate_protocol,omitempty"`
+	RemoteCandidateProtocol  string  `json:"remote_candidate_protocol,omitempty"`
+	SelectedPairChanges      uint64  `json:"selected_pair_changes,omitempty"`
 	BandwidthEstimateValid   bool    `json:"bandwidth_estimate_valid,omitempty"`
 	AvailableOutgoingBitrate float64 `json:"available_outgoing_bitrate,omitempty"`
 	AvailableIncomingBitrate float64 `json:"available_incoming_bitrate,omitempty"`
@@ -66,7 +70,7 @@ type queuedControl struct {
 }
 
 func refreshableControlKind(kind string) bool {
-	return kind == "stats" || kind == "state"
+	return kind == "stats" || kind == "state" || kind == "bandwidth" || kind == "path" || kind == "ice-state"
 }
 
 func (q *controlQueue) push(event controlEvent) {

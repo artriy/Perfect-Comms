@@ -1,14 +1,15 @@
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::codec::{
     EncoderFeedback, EncoderNetworkController, EncoderPolicySnapshot, MediaReceiveCounters,
 };
 
-const RTP_INGRESS_QUEUE_CAPACITY: usize = 512;
-const RTP_INGRESS_PER_PEER_CAPACITY: usize = 32;
+const RTP_INGRESS_QUEUE_CAPACITY: usize = 2048;
+const RTP_INGRESS_PER_PEER_CAPACITY: usize = 128;
 const RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const ENCODER_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const ENCODER_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(6);
@@ -30,7 +31,7 @@ struct ReceiveQueueState {
     queued: usize,
 }
 
-/// Bounded round-robin RTP ingress. A burst from one peer can consume at most 32 slots and its
+/// Bounded round-robin RTP ingress. A burst from one peer can consume at most 128 slots and its
 /// oldest packet is discarded first, so it cannot starve every other talker in the shared decoder
 /// path. The consumer receives at most one packet per peer before that peer is scheduled again.
 struct SharedReceiveQueue {
@@ -48,7 +49,7 @@ impl SharedReceiveQueue {
 
     fn push(&self, packet: ReceivedPacket) {
         let peer_id = packet.peer_id.clone();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let mut dropped = 0u64;
 
         if state.queued >= RTP_INGRESS_QUEUE_CAPACITY {
@@ -106,7 +107,7 @@ impl SharedReceiveQueue {
     }
 
     fn pop(&self) -> Option<ReceivedPacket> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         while let Some(peer_id) = state.ready.pop_front() {
             let (packet, has_more) = match state.queues.get_mut(&peer_id) {
                 Some(queue) => (queue.pop_front(), !queue.is_empty()),
@@ -131,7 +132,7 @@ impl SharedReceiveQueue {
     }
 
     fn remove_peer(&self, peer_id: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if let Some(queue) = state.queues.remove(peer_id) {
             state.queued = state.queued.saturating_sub(queue.len());
         }
@@ -151,6 +152,10 @@ pub struct PeerNetworkPathSnapshot {
     pub local_candidate_type: String,
     pub remote_candidate_type: String,
     pub relay: bool,
+    pub ice_connection_state: String,
+    pub local_candidate_protocol: String,
+    pub remote_candidate_protocol: String,
+    pub selected_pair_changes: u64,
     pub current_rtt_ms: f64,
     /// True only when Pion's congestion-control estimator produced a real send estimate.
     pub bandwidth_estimate_valid: bool,
@@ -180,7 +185,7 @@ struct SharedNetworkPathCache {
 
 impl SharedNetworkPathCache {
     fn register_peer(&self, peer_id: &str, generation: u32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let changed = state
             .generations
             .insert(peer_id.to_string(), generation)
@@ -196,7 +201,7 @@ impl SharedNetworkPathCache {
     }
 
     fn update(&self, snapshot: PeerNetworkPathSnapshot) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state
             .generations
             .get(&snapshot.peer_id)
@@ -206,8 +211,89 @@ impl SharedNetworkPathCache {
         }
     }
 
+    fn update_selected_path(&self, path: PeerNetworkPathSnapshot) {
+        let mut state = self.state.lock();
+        if !state
+            .generations
+            .get(&path.peer_id)
+            .is_some_and(|generation| *generation == path.generation)
+        {
+            return;
+        }
+        let snapshot = state
+            .snapshots
+            .entry(path.peer_id.clone())
+            .or_insert_with(|| PeerNetworkPathSnapshot {
+                peer_id: path.peer_id.clone(),
+                generation: path.generation,
+                ..PeerNetworkPathSnapshot::default()
+            });
+        let pair_changed = snapshot.candidate_pair_id != path.candidate_pair_id;
+        snapshot.candidate_pair_id = path.candidate_pair_id;
+        snapshot.candidate_state = path.candidate_state;
+        snapshot.local_candidate_type = path.local_candidate_type;
+        snapshot.remote_candidate_type = path.remote_candidate_type;
+        snapshot.local_candidate_protocol = path.local_candidate_protocol;
+        snapshot.remote_candidate_protocol = path.remote_candidate_protocol;
+        snapshot.relay = path.relay;
+        snapshot.ice_connection_state = path.ice_connection_state;
+        snapshot.selected_pair_changes = path.selected_pair_changes;
+        if pair_changed {
+            snapshot.current_rtt_ms = 0.0;
+            snapshot.bandwidth_estimate_valid = false;
+            snapshot.available_outgoing_bitrate = 0.0;
+            snapshot.available_incoming_bitrate = 0.0;
+        }
+    }
+
+    fn update_ice_state(&self, peer_id: &str, generation: u32, ice_state: String) {
+        let mut state = self.state.lock();
+        if !state
+            .generations
+            .get(peer_id)
+            .is_some_and(|current| *current == generation)
+        {
+            return;
+        }
+        let snapshot = state
+            .snapshots
+            .entry(peer_id.to_string())
+            .or_insert_with(|| PeerNetworkPathSnapshot {
+                peer_id: peer_id.to_string(),
+                generation,
+                ..PeerNetworkPathSnapshot::default()
+            });
+        snapshot.ice_connection_state = ice_state;
+    }
+
+    fn update_bandwidth(&self, peer_id: &str, generation: u32, estimate: f64, pair_changes: u64) {
+        let mut state = self.state.lock();
+        if !state
+            .generations
+            .get(peer_id)
+            .is_some_and(|current| *current == generation)
+        {
+            return;
+        }
+        let snapshot = state
+            .snapshots
+            .entry(peer_id.to_string())
+            .or_insert_with(|| PeerNetworkPathSnapshot {
+                peer_id: peer_id.to_string(),
+                generation,
+                ..PeerNetworkPathSnapshot::default()
+            });
+        snapshot.bandwidth_estimate_valid = estimate.is_finite() && estimate > 0.0;
+        snapshot.available_outgoing_bitrate = if snapshot.bandwidth_estimate_valid {
+            estimate
+        } else {
+            0.0
+        };
+        snapshot.selected_pair_changes = pair_changes;
+    }
+
     fn remove_peer(&self, peer_id: &str, generation: Option<u32>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if generation.is_none_or(|generation| {
             state
                 .generations
@@ -220,7 +306,7 @@ impl SharedNetworkPathCache {
     }
 
     fn snapshots(&self) -> Vec<PeerNetworkPathSnapshot> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let mut snapshots: Vec<_> = state
             .snapshots
             .values()
@@ -243,7 +329,9 @@ struct PeerEncoderFeedback {
     sample: EncoderFeedback,
     packets_received: u64,
     rtt_measurements: u64,
-    last_fresh: Option<Instant>,
+    bandwidth_estimate: Option<i32>,
+    last_loss_fresh: Option<Instant>,
+    last_bandwidth_fresh: Option<Instant>,
 }
 
 struct EncoderPolicyState {
@@ -276,7 +364,7 @@ impl Default for SharedEncoderPolicy {
 
 impl SharedEncoderPolicy {
     fn register_peer(&self, peer_id: &str, generation: u32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state
             .peers
             .get(peer_id)
@@ -291,13 +379,15 @@ impl SharedEncoderPolicy {
                 sample: EncoderFeedback::default(),
                 packets_received: 0,
                 rtt_measurements: 0,
-                last_fresh: None,
+                bandwidth_estimate: None,
+                last_loss_fresh: None,
+                last_bandwidth_fresh: None,
             },
         );
     }
 
     fn remove_peer(&self, peer_id: &str, generation: Option<u32>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if generation.is_none_or(|generation| {
             state
                 .peers
@@ -313,11 +403,12 @@ impl SharedEncoderPolicy {
         peer_id: &str,
         generation: u32,
         sample: EncoderFeedback,
+        bandwidth_estimate: Option<i32>,
         packets_received: u64,
         rtt_measurements: u64,
         now: Instant,
     ) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let Some(peer) = state.peers.get_mut(peer_id) else {
             return;
         };
@@ -326,28 +417,65 @@ impl SharedEncoderPolicy {
         }
         let advanced = packets_received > peer.packets_received
             || rtt_measurements > peer.rtt_measurements
-            || peer.last_fresh.is_none();
+            || peer.last_loss_fresh.is_none();
         peer.packets_received = peer.packets_received.max(packets_received);
         peer.rtt_measurements = peer.rtt_measurements.max(rtt_measurements);
         if advanced {
             peer.sample = sample;
-            peer.last_fresh = Some(now);
+            peer.last_loss_fresh = Some(now);
+        }
+        if let Some(estimate) = bandwidth_estimate.filter(|estimate| *estimate > 0) {
+            peer.bandwidth_estimate = Some(estimate);
+            peer.last_bandwidth_fresh = Some(now);
+        }
+    }
+
+    fn update_peer_bandwidth(&self, peer_id: &str, generation: u32, estimate: i32, now: Instant) {
+        let mut state = self.state.lock();
+        if let Some(peer) = state
+            .peers
+            .get_mut(peer_id)
+            .filter(|peer| peer.generation == generation && estimate > 0)
+        {
+            peer.bandwidth_estimate = Some(estimate);
+            peer.last_bandwidth_fresh = Some(now);
+        }
+    }
+
+    fn invalidate_peer_path(&self, peer_id: &str, generation: u32) {
+        let mut state = self.state.lock();
+        if let Some(peer) = state
+            .peers
+            .get_mut(peer_id)
+            .filter(|peer| peer.generation == generation)
+        {
+            peer.last_loss_fresh = None;
+            peer.last_bandwidth_fresh = None;
+            peer.bandwidth_estimate = None;
         }
     }
 
     fn evaluate(&self, now: Instant) {
-        let mut state = self.state.lock().unwrap();
-        let feedback: Vec<EncoderFeedback> = state
-            .peers
-            .values()
-            .filter(|peer| {
-                peer.last_fresh.is_some_and(|fresh| {
-                    now.saturating_duration_since(fresh) <= ENCODER_FEEDBACK_FRESHNESS
-                })
-            })
-            .map(|peer| peer.sample)
-            .collect();
-        let snapshot = state.controller.observe(&feedback);
+        let mut state = self.state.lock();
+        let mut feedback = Vec::with_capacity(state.peers.len());
+        let mut bandwidth_estimates = Vec::with_capacity(state.peers.len());
+        for peer in state.peers.values() {
+            if peer.last_loss_fresh.is_some_and(|fresh| {
+                now.saturating_duration_since(fresh) <= ENCODER_FEEDBACK_FRESHNESS
+            }) {
+                feedback.push(peer.sample);
+            }
+            if peer.last_bandwidth_fresh.is_some_and(|fresh| {
+                now.saturating_duration_since(fresh) <= ENCODER_FEEDBACK_FRESHNESS
+            }) {
+                if let Some(estimate) = peer.bandwidth_estimate {
+                    bandwidth_estimates.push(estimate);
+                }
+            }
+        }
+        let snapshot = state
+            .controller
+            .observe_with_bandwidth(&feedback, &bandwidth_estimates);
         self.packet_loss_percent
             .store(u32::from(snapshot.packet_loss_percent), Ordering::Release);
         self.bitrate

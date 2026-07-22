@@ -112,7 +112,11 @@ func (feedback *remoteSenderFeedback) snapshot() remoteSenderSnapshot {
 }
 
 func (p *peer) statsEvent() (controlEvent, bool) {
-	event := controlEvent{Kind: "stats", PeerID: p.id, Generation: p.generation}
+	iceState, pairChanges := p.pathStatus()
+	event := controlEvent{
+		Kind: "stats", PeerID: p.id, Generation: p.generation,
+		ICEConnectionState: iceState, SelectedPairChanges: pairChanges,
+	}
 	transport := p.sender.Transport()
 	if transport == nil || transport.ICETransport() == nil {
 		return event, true
@@ -123,6 +127,8 @@ func (p *peer) statsEvent() (controlEvent, bool) {
 		event.CandidatePairID = fmt.Sprintf("%s-%s", pair.Local.Foundation, pair.Remote.Foundation)
 		event.LocalCandidateType = pair.Local.Typ.String()
 		event.RemoteCandidateType = pair.Remote.Typ.String()
+		event.LocalCandidateProtocol = pair.Local.Protocol.String()
+		event.RemoteCandidateProtocol = pair.Remote.Protocol.String()
 		event.Relay = pair.Local.Typ == webrtc.ICECandidateTypeRelay ||
 			pair.Remote.Typ == webrtc.ICECandidateTypeRelay
 		if pairStats, ok := iceTransport.GetSelectedCandidatePairStats(); ok {

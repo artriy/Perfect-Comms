@@ -3,7 +3,7 @@ use crate::audio::{
     MicrophoneMonitorConfigChange, MicrophoneMonitorState, PlaybackProgress, ToneSource,
 };
 use crate::codec::{
-    decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
+    decode_with_media_gap_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
     MAX_CONCEAL_FRAMES,
 };
 use crate::diagnostics::{
@@ -1060,6 +1060,7 @@ fn spawn_telemetry_writer(
                     ingress_queue_depth_max: receive.ingress_queue_depth_max,
                     ingress_peer_queue_depth_max: receive.ingress_peer_queue_depth_max,
                     sequence_gaps: receive.sequence_gaps,
+                    local_media_gap_frames: receive.local_media_gap_frames,
                     reordered_recovered: receive.reordered_recovered,
                     late_drops: receive.late_drops,
                     duplicate_drops: receive.duplicate_drops,
@@ -1090,6 +1091,10 @@ fn spawn_telemetry_writer(
                         local_candidate_type: path.local_candidate_type,
                         remote_candidate_type: path.remote_candidate_type,
                         relay: path.relay,
+                        ice_connection_state: path.ice_connection_state,
+                        local_candidate_protocol: path.local_candidate_protocol,
+                        remote_candidate_protocol: path.remote_candidate_protocol,
+                        selected_pair_changes: path.selected_pair_changes,
                         current_rtt_ms: path.current_rtt_ms,
                         bandwidth_estimate_valid: path.bandwidth_estimate_valid,
                         available_outgoing_bitrate: path.available_outgoing_bitrate,
@@ -2263,15 +2268,9 @@ fn run_authenticated_session(
                         ctrl_scheduler.mark_applied(&peer_id, generation);
                         acknowledge("native-peer-added");
                     }
-                    if let Some((sdp_type, sdp)) = pending.remote_sdp.take() {
-                        if !ctrl_scheduler.is_current(&peer_id, generation) {
-                            continue;
-                        }
-                        if !ctrl_rtc.set_remote_sdp(&peer_id, generation, &sdp_type, &sdp) {
-                            continue;
-                        }
-                        acknowledge("native-remote-sdp-applied");
-                    }
+                    // A restart may carry a new ICE policy/server snapshot. Apply it before a
+                    // coalesced remote offer so Pion gathers the answer from that snapshot rather
+                    // than answering first and updating the configuration too late.
                     if let Some((relay_only, create_offer)) = pending.restart.take() {
                         if !ctrl_scheduler.is_current(&peer_id, generation) {
                             continue;
@@ -2280,6 +2279,15 @@ fn run_authenticated_session(
                             continue;
                         }
                         acknowledge("native-ice-restarted");
+                    }
+                    if let Some((sdp_type, sdp)) = pending.remote_sdp.take() {
+                        if !ctrl_scheduler.is_current(&peer_id, generation) {
+                            continue;
+                        }
+                        if !ctrl_rtc.set_remote_sdp(&peer_id, generation, &sdp_type, &sdp) {
+                            continue;
+                        }
+                        acknowledge("native-remote-sdp-applied");
                     }
                     while let Some(candidate) = pending.candidates.pop_front() {
                         if !ctrl_scheduler.is_current(&peer_id, generation) {
@@ -2718,10 +2726,11 @@ fn run_authenticated_session(
                     let last = last_seq.get(&peer).copied();
                     let (frames, advance, report) = {
                         let codec = decoders.get_mut(&peer).unwrap();
-                        decode_with_concealment_report(
+                        decode_with_media_gap_report(
                             codec,
                             last,
                             packet.sequence,
+                            packet.local_media_gap_before,
                             &packet.payload,
                         )
                     };

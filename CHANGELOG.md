@@ -35,6 +35,14 @@ Perfect Comms v4.1.4 makes Push To Talk respond instantly and remain reliable th
 - **Eclipsal and Grenadier muffling now ends when a meeting begins.**
   > <sub>The built-in blind/flash hearing effect is limited to the task world, so a Town of Us modifier retained during a meeting, exile, intro, or lobby transition can no longer keep every incoming voice muffled. Explicit phase-aware listener filters registered by other mods remain available in meetings.</sub>
 
+### More Resilient P2P Voice
+
+- **Direct voice now stays current when a connection stalls or loses packets.**
+  > <sub>Each peer keeps only fresh outbound speech, preserves the real RTP timeline across local capture gaps, and absorbs larger receive bursts without allowing playback delay to grow without bound. Bounded audio NACK, existing Opus FEC/DRED/PLC recovery, faster feedback, and congestion-aware bitrate changes improve recovery on lossy or bandwidth-limited Wi-Fi and mobile links.</sub>
+
+- **P2P paths now adapt sooner when the network changes.**
+  > <sub>ICE can renominate a better candidate pair, direct UDP host traffic shares a bounded socket mux, direct ICE-TCP is available when UDP paths are restricted, and DTLS retries begin sooner. New path, protocol, pair-change, queue, and media-gap diagnostics make weak-link failures distinguishable from local CPU or capture stalls. TURN credentials, relay escalation, and relay selection policy are unchanged.</sub>
+
 ## Perfect Comms v4.1.3
 
 Perfect Comms v4.1.3 makes voice recovery more reliable, prevents stalled connection messages from lingering, adds independent controls for optional voice HUD elements, and keeps settings consistent across multiple Among Us installations.

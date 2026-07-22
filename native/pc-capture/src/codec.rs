@@ -17,7 +17,7 @@ pub const RTP_FRAME_TICKS: u32 = 960;
 /// Encoded packet retention and playout latency are deliberately separate controls. The store is
 /// large enough to absorb a severe burst/reorder event without allowing the normal latency target
 /// to grow beyond 300 ms.
-pub const ENCODED_PACKET_CAPACITY: usize = 32;
+pub const ENCODED_PACKET_CAPACITY: usize = 64;
 pub const MIN_PLAYOUT_FRAMES: usize = 2;
 pub const MAX_PLAYOUT_FRAMES: usize = 15;
 
@@ -31,6 +31,7 @@ const TARGET_DECAY_STABLE_PACKETS: usize = 250;
 pub const DEFAULT_ENCODER_PACKET_LOSS_PERCENT: u8 = 15;
 pub const DEFAULT_ENCODER_BITRATE: i32 = 48_000;
 const ENCODER_POLICY_RECOVERY_WINDOWS: usize = 5;
+const MIN_ADAPTIVE_ENCODER_BITRATE: i32 = 24_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EncoderFeedback {
@@ -80,7 +81,7 @@ impl EncoderNetworkController {
         }
     }
 
-    fn desired(feedback: &[EncoderFeedback]) -> (u8, i32) {
+    fn desired(feedback: &[EncoderFeedback], bandwidth_estimates: &[i32]) -> (u8, i32) {
         let mut losses: Vec<f64> = feedback
             .iter()
             .map(|sample| sample.fraction_lost)
@@ -118,16 +119,43 @@ impl EncoderNetworkController {
         } else {
             DEFAULT_ENCODER_BITRATE
         };
-        (packet_loss_percent, loss_limited)
+        let mut estimates: Vec<i32> = bandwidth_estimates
+            .iter()
+            .copied()
+            .filter(|estimate| *estimate > 0)
+            .collect();
+        estimates.sort_unstable();
+        // One weak outlier should not degrade a larger room, but two constrained paths are
+        // corroboration. For one- and two-peer calls the lowest estimate remains authoritative.
+        let representative_estimate = match estimates.len() {
+            0 => None,
+            1 | 2 => estimates.first().copied(),
+            _ => estimates.get(1).copied(),
+        };
+        let bandwidth_limited =
+            representative_estimate.map_or(DEFAULT_ENCODER_BITRATE, |estimate| {
+                (estimate.saturating_mul(3) / 4)
+                    .clamp(MIN_ADAPTIVE_ENCODER_BITRATE, DEFAULT_ENCODER_BITRATE)
+            });
+        let bitrate = loss_limited.min(bandwidth_limited);
+        (packet_loss_percent, bitrate)
     }
 
     pub fn observe(&mut self, fresh_feedback: &[EncoderFeedback]) -> EncoderPolicySnapshot {
-        // With no fresh RTCP, recover slowly to the safe shipped baseline rather than retaining a
-        // transient bad-route clamp forever or optimistically dropping FEC to 5%.
-        let desired = if fresh_feedback.is_empty() {
+        self.observe_with_bandwidth(fresh_feedback, &[])
+    }
+
+    pub fn observe_with_bandwidth(
+        &mut self,
+        fresh_feedback: &[EncoderFeedback],
+        bandwidth_estimates: &[i32],
+    ) -> EncoderPolicySnapshot {
+        // With no fresh feedback, recover slowly to the safe shipped baseline rather than
+        // retaining a transient bad-route clamp forever or optimistically dropping FEC to 5%.
+        let desired = if fresh_feedback.is_empty() && bandwidth_estimates.is_empty() {
             (DEFAULT_ENCODER_PACKET_LOSS_PERCENT, DEFAULT_ENCODER_BITRATE)
         } else {
-            Self::desired(fresh_feedback)
+            Self::desired(fresh_feedback, bandwidth_estimates)
         };
         let worsened =
             desired.0 > self.current.packet_loss_percent || desired.1 < self.current.bitrate;
@@ -184,6 +212,8 @@ pub struct MediaReceiveSnapshot {
     pub late_drops: u64,
     pub duplicate_drops: u64,
     pub encoded_overflow_drops: u64,
+    pub latency_catchup_drops: u64,
+    pub local_media_gap_frames: u64,
     pub deadline_losses: u64,
     pub dred_frames: u64,
     pub fec_frames: u64,
@@ -219,6 +249,8 @@ pub struct MediaReceiveCounters {
     late_drops: AtomicU64,
     duplicate_drops: AtomicU64,
     encoded_overflow_drops: AtomicU64,
+    latency_catchup_drops: AtomicU64,
+    local_media_gap_frames: AtomicU64,
     deadline_losses: AtomicU64,
     dred_frames: AtomicU64,
     fec_frames: AtomicU64,
@@ -288,6 +320,8 @@ impl MediaReceiveCounters {
             late_drops: self.late_drops.load(Ordering::Relaxed),
             duplicate_drops: self.duplicate_drops.load(Ordering::Relaxed),
             encoded_overflow_drops: self.encoded_overflow_drops.load(Ordering::Relaxed),
+            latency_catchup_drops: self.latency_catchup_drops.load(Ordering::Relaxed),
+            local_media_gap_frames: self.local_media_gap_frames.load(Ordering::Relaxed),
             deadline_losses: self.deadline_losses.load(Ordering::Relaxed),
             dred_frames: self.dred_frames.load(Ordering::Relaxed),
             fec_frames: self.fec_frames.load(Ordering::Relaxed),
@@ -329,6 +363,7 @@ pub struct ReadyEncodedPacket {
     pub payload: Vec<u8>,
     pub reset_decoder: bool,
     pub gap_before: usize,
+    pub local_media_gap_before: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +391,7 @@ pub struct EncodedPacketBuffer {
     highest_extended: Option<u64>,
     expected_extended: Option<u64>,
     highest_timestamp: Option<u32>,
+    last_emitted_timestamp: Option<u32>,
     last_arrival: Option<Instant>,
     jitter_ms: f64,
     /// Desired path cushion derived from variance/lateness.
@@ -382,6 +418,7 @@ impl EncodedPacketBuffer {
             highest_extended: None,
             expected_extended: None,
             highest_timestamp: None,
+            last_emitted_timestamp: None,
             last_arrival: None,
             jitter_ms: 0.0,
             target_frames: MIN_PLAYOUT_FRAMES,
@@ -427,6 +464,7 @@ impl EncodedPacketBuffer {
         self.highest_extended = None;
         self.expected_extended = None;
         self.highest_timestamp = None;
+        self.last_emitted_timestamp = None;
         self.last_arrival = None;
         // Sequence/decoder state belongs to a media generation; the learned path variance does
         // not. Keep the adaptive target across normal talkspurts so every new sentence does not
@@ -445,15 +483,10 @@ impl EncodedPacketBuffer {
         }
     }
 
-    /// A decoder stall must not turn the retention cap into permanent latency. Once a newer
-    /// forward packet arrives to a full store, jump to the newest target-sized tail and restart
-    /// decoder chronology there. The retained tail is at most 300 ms and its first sequence is an
-    /// authoritative floor, so a severely late packet cannot rewind the catch-up while re-priming.
-    fn fast_forward_overflow(&mut self, extended: u64, packet: StoredPacket) {
-        self.packets.insert(extended, packet);
-        let keep = self
-            .target_frames
-            .clamp(MIN_PLAYOUT_FRAMES, MAX_PLAYOUT_FRAMES);
+    /// Jump to the freshest useful tail without asking the stateful decoder to conceal audio
+    /// that is being discarded intentionally. The first retained sequence becomes authoritative.
+    fn fast_forward_to_fresh_tail(&mut self, keep: usize) -> usize {
+        let keep = keep.clamp(MIN_PLAYOUT_FRAMES, MAX_PLAYOUT_FRAMES);
         let drop_count = self.packets.len().saturating_sub(keep);
         for _ in 0..drop_count {
             self.packets.pop_first();
@@ -463,16 +496,40 @@ impl EncodedPacketBuffer {
             .packets
             .first_key_value()
             .map(|(sequence, _)| *sequence);
+        self.last_emitted_timestamp = None;
         self.primed = false;
         self.timeline_started = true;
         self.playout_target_frames = keep;
         self.missing_since = None;
         self.reset_on_next_packet = true;
-        self.metrics
-            .encoded_overflow_drops
-            .fetch_add(drop_count as u64, Ordering::Relaxed);
         self.metrics.decoder_resets.fetch_add(1, Ordering::Relaxed);
         self.publish_gauge();
+        drop_count
+    }
+
+    /// A decoder stall must not turn the retention cap into permanent latency. Once a newer
+    /// forward packet arrives to a full store, jump to the newest target-sized tail and restart
+    /// decoder chronology there. The retained tail is at most 300 ms and its first sequence is an
+    /// authoritative floor, so a severely late packet cannot rewind the catch-up while re-priming.
+    fn fast_forward_overflow(&mut self, extended: u64, packet: StoredPacket) {
+        self.packets.insert(extended, packet);
+        let dropped = self.fast_forward_to_fresh_tail(self.target_frames);
+        self.metrics
+            .encoded_overflow_drops
+            .fetch_add(dropped as u64, Ordering::Relaxed);
+    }
+
+    /// Once playout has started, any queue depth beyond the learned jitter target is scheduler
+    /// debt, not useful network cushion. One packet arriving and one packet playing per cycle
+    /// cannot remove that debt, so discard the stale prefix and restart from a target-sized tail.
+    fn shed_playout_debt(&mut self) {
+        if !self.timeline_started || self.packets.len() <= self.target_frames {
+            return;
+        }
+        let dropped = self.fast_forward_to_fresh_tail(self.target_frames);
+        self.metrics
+            .latency_catchup_drops
+            .fetch_add(dropped as u64, Ordering::Relaxed);
     }
 
     fn observe_network(&mut self, timestamp: u32, arrival: Instant, forward: bool) {
@@ -645,6 +702,7 @@ impl EncodedPacketBuffer {
             return None;
         }
 
+        self.shed_playout_debt();
         if !self.primed {
             if self.packets.len() < self.target_frames {
                 self.publish_gauge();
@@ -716,11 +774,29 @@ impl EncodedPacketBuffer {
             .packets
             .first_key_value()
             .and_then(|(sequence, packet)| (*sequence > next_expected).then_some(packet.arrival));
-        let gap_requires_reset = gap_before > MAX_CONCEAL_FRAMES;
+        let timestamp_gap = self.last_emitted_timestamp.map_or(0, |previous| {
+            let ticks = stored.timestamp.wrapping_sub(previous) as i32;
+            if ticks <= 0 {
+                0
+            } else {
+                (ticks as usize / RTP_FRAME_TICKS as usize).saturating_sub(1)
+            }
+        });
+        let mut local_media_gap_before = timestamp_gap.saturating_sub(gap_before);
+        let gap_requires_reset =
+            gap_before > MAX_CONCEAL_FRAMES || local_media_gap_before > MAX_CONCEAL_FRAMES;
         let reset_decoder = std::mem::take(&mut self.reset_on_next_packet) || gap_requires_reset;
+        if reset_decoder {
+            local_media_gap_before = 0;
+        }
         if gap_requires_reset {
             self.metrics.decoder_resets.fetch_add(1, Ordering::Relaxed);
         }
+        self.metrics.local_media_gap_frames.fetch_add(
+            timestamp_gap.saturating_sub(gap_before) as u64,
+            Ordering::Relaxed,
+        );
+        self.last_emitted_timestamp = Some(stored.timestamp);
         self.publish_gauge();
         Some(ReadyEncodedPacket {
             sequence: stored.sequence,
@@ -730,6 +806,7 @@ impl EncodedPacketBuffer {
             payload: stored.payload,
             reset_decoder,
             gap_before,
+            local_media_gap_before,
         })
     }
 
@@ -866,6 +943,19 @@ pub fn decode_with_concealment_report(
     seq: u16,
     data: &[u8],
 ) -> (Vec<Vec<f32>>, bool, ConcealmentReport) {
+    decode_with_media_gap_report(codec, last, seq, 0, data)
+}
+
+/// Decodes one on-wire RTP packet. `local_media_gap` comes from the RTP timestamp rather than
+/// sequence numbers: the sender intentionally omitted capture frames, so it must advance media
+/// time without making RTCP/NACK treat those local omissions as network packet loss.
+pub fn decode_with_media_gap_report(
+    codec: &mut OpusCodec,
+    last: Option<u16>,
+    seq: u16,
+    local_media_gap: usize,
+    data: &[u8],
+) -> (Vec<Vec<f32>>, bool, ConcealmentReport) {
     let mut frames: Vec<Vec<f32>> = Vec::new();
     let mut report = ConcealmentReport::default();
     let mut pcm = [0f32; FRAME_SIZE];
@@ -884,6 +974,24 @@ pub fn decode_with_concealment_report(
     if delta <= 0 {
         return (frames, false, report);
     }
+    if local_media_gap > MAX_CONCEAL_FRAMES {
+        let _ = codec.reset_decoder();
+        let n = codec.decode(data, &mut pcm);
+        if n > 0 {
+            frames.push(pcm[..n].to_vec());
+            report.decoded_frames += 1;
+        }
+        return (frames, true, report);
+    }
+    for _ in 0..local_media_gap {
+        let mut recovery = [0f32; FRAME_SIZE];
+        let samples = codec.decode_plc(&mut recovery);
+        if samples > 0 {
+            frames.push(recovery[..samples].to_vec());
+            report.plc_frames += 1;
+        }
+    }
+
     let lost = (delta - 1) as usize;
     if lost > 0 && lost <= MAX_CONCEAL_FRAMES {
         let dred_available = matches!(
@@ -1089,6 +1197,23 @@ mod tests {
     }
 
     #[test]
+    fn local_media_gap_uses_plc_without_claiming_network_packet_loss() {
+        let mut codec = OpusCodec::new().expect("opus codec init");
+        let packet = codec.encode(&modulated_tone_frame(0));
+        let (first, advance, _) = decode_with_media_gap_report(&mut codec, None, 100, 0, &packet);
+        assert!(advance);
+        assert_eq!(first.len(), 1);
+
+        let (frames, advance, report) =
+            decode_with_media_gap_report(&mut codec, Some(100), 101, 2, &packet);
+        assert!(advance);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(report.decoded_frames, 1);
+        assert_eq!(report.plc_frames, 2);
+        assert_eq!(report.dred_frames + report.fec_frames, 0);
+    }
+
+    #[test]
     fn concealment_uses_deep_redundancy_before_plc_for_burst_loss() {
         const PACKETS: usize = 100;
         const LOST: usize = 4;
@@ -1124,6 +1249,28 @@ mod tests {
         ));
         let energy: f32 = frames.iter().flatten().map(|sample| sample * sample).sum();
         assert!(energy > 1e-3, "recovered burst was unexpectedly silent");
+    }
+
+    #[test]
+    fn encoded_buffer_infers_local_media_gap_from_timestamp_only() {
+        let metrics = Arc::new(MediaReceiveCounters::default());
+        let mut buffer = EncodedPacketBuffer::new("local-gap", metrics.clone());
+        let start = Instant::now();
+        let mut first = rtp(10, start);
+        first.timestamp = 0;
+        let mut second = rtp(11, start + Duration::from_millis(60));
+        second.timestamp = 3 * RTP_FRAME_TICKS;
+        assert_eq!(buffer.insert(first), PacketInsertOutcome::Accepted);
+        assert_eq!(buffer.insert(second), PacketInsertOutcome::Accepted);
+
+        let first = buffer.pop_ready(start + Duration::from_millis(60)).unwrap();
+        assert_eq!(first.local_media_gap_before, 0);
+        let second = buffer.pop_ready(start + Duration::from_millis(80)).unwrap();
+        assert_eq!(second.gap_before, 0);
+        assert_eq!(second.local_media_gap_before, 2);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.sequence_gaps, 0);
+        assert_eq!(snapshot.local_media_gap_frames, 2);
     }
 
     #[test]
@@ -1172,16 +1319,8 @@ mod tests {
                 PacketInsertOutcome::Accepted
             ));
         }
-        let first = buffer.pop_ready(start + Duration::from_millis(80)).unwrap();
-        let second = buffer
-            .pop_ready(start + Duration::from_millis(100))
-            .unwrap();
-        let third = buffer
-            .pop_ready(start + Duration::from_millis(120))
-            .unwrap();
-        assert_eq!(first.extended_sequence, 131_070);
-        assert_eq!(second.extended_sequence, 131_071);
-        assert_eq!(third.extended_sequence, 131_072);
+        let extended: Vec<_> = buffer.packets.keys().copied().collect();
+        assert_eq!(extended, [131_070, 131_071, 131_072, 131_073]);
     }
 
     #[test]
@@ -1433,6 +1572,8 @@ mod tests {
             packet.timestamp = u32::from(sequence - 10) * RTP_FRAME_TICKS;
             buffer.insert(packet);
         }
+        buffer.target_frames = 4;
+        buffer.playout_target_frames = 4;
         assert_eq!(
             buffer
                 .pop_ready(start + Duration::from_millis(80))
@@ -1512,6 +1653,8 @@ mod tests {
                 start + Duration::from_millis(u64::from(sequence - 10) * 20),
             ));
         }
+        buffer.target_frames = 4;
+        buffer.playout_target_frames = 4;
         assert_eq!(
             buffer
                 .pop_ready(start + Duration::from_millis(200))
@@ -1620,6 +1763,59 @@ mod tests {
     }
 
     #[test]
+    fn encoded_scheduler_stall_converges_to_the_adaptive_target() {
+        let metrics = Arc::new(MediaReceiveCounters::default());
+        let mut buffer = EncodedPacketBuffer::new("scheduler-stall", metrics.clone());
+        let start = Instant::now();
+        for sequence in 0..10u16 {
+            assert_eq!(
+                buffer.insert(rtp(
+                    sequence,
+                    start + Duration::from_millis(u64::from(sequence) * 20),
+                )),
+                PacketInsertOutcome::Accepted
+            );
+        }
+        assert_eq!(buffer.target_frames(), MIN_PLAYOUT_FRAMES);
+
+        let first = buffer
+            .pop_ready(start + Duration::from_millis(200))
+            .expect("initial burst should be ready");
+        assert_eq!(first.sequence, 0);
+        assert_eq!(buffer.depth_frames(), 9);
+
+        let resumed_at = start + Duration::from_millis(200);
+        assert_eq!(
+            buffer.insert(rtp(10, resumed_at)),
+            PacketInsertOutcome::Accepted
+        );
+        let caught_up = buffer
+            .pop_ready(resumed_at)
+            .expect("fresh tail should be ready after catch-up");
+        assert_eq!(caught_up.sequence, 9);
+        assert!(caught_up.reset_decoder);
+        assert_eq!(
+            buffer.depth_frames(),
+            buffer.target_frames().saturating_sub(1)
+        );
+        assert_eq!(metrics.snapshot().latency_catchup_drops, 8);
+
+        for sequence in 11..31u16 {
+            let at = start + Duration::from_millis(u64::from(sequence) * 20);
+            assert_eq!(
+                buffer.insert(rtp(sequence, at)),
+                PacketInsertOutcome::Accepted
+            );
+            let played = buffer.pop_ready(at).expect("steady packet should play");
+            assert_eq!(played.sequence, sequence - 1);
+            assert_eq!(
+                buffer.depth_frames(),
+                buffer.target_frames().saturating_sub(1)
+            );
+        }
+    }
+
+    #[test]
     fn encoded_overflow_fast_forwards_to_a_bounded_fresh_tail() {
         let metrics = Arc::new(MediaReceiveCounters::default());
         let mut buffer = EncodedPacketBuffer::new("overflow", metrics.clone());
@@ -1659,7 +1855,7 @@ mod tests {
         );
 
         // At one arrival and one playout per tick, the receiver remains within the bounded tail
-        // instead of staying a full 32-frame retention window behind forever.
+        // instead of staying a full retention window behind forever.
         for sequence in newest + 1..newest + 20 {
             let at = start + Duration::from_millis(u64::from(sequence) * 20);
             assert_eq!(
@@ -1673,7 +1869,10 @@ mod tests {
         }
 
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.encoded_overflow_drops, 18);
+        assert_eq!(
+            snapshot.encoded_overflow_drops,
+            (ENCODED_PACKET_CAPACITY - MAX_PLAYOUT_FRAMES + 1) as u64
+        );
         assert_eq!(snapshot.decoder_resets, 1);
     }
 
@@ -1905,6 +2104,28 @@ mod tests {
         assert_eq!(recovered.packet_loss_percent, 5);
         assert_eq!(recovered.bitrate, DEFAULT_ENCODER_BITRATE);
         assert_eq!(recovered.generation, 2);
+    }
+
+    #[test]
+    fn encoder_policy_applies_live_gcc_with_headroom_and_mesh_outlier_resistance() {
+        let mut one_peer = EncoderNetworkController::new();
+        let constrained = one_peer.observe_with_bandwidth(&[], &[32_000]);
+        assert_eq!(constrained.bitrate, MIN_ADAPTIVE_ENCODER_BITRATE);
+        assert_eq!(
+            constrained.packet_loss_percent,
+            DEFAULT_ENCODER_PACKET_LOSS_PERCENT
+        );
+
+        let mut mesh = EncoderNetworkController::new();
+        let one_outlier = mesh.observe_with_bandwidth(&[], &[16_000, 64_000, 64_000]);
+        assert_eq!(one_outlier.bitrate, DEFAULT_ENCODER_BITRATE);
+
+        let corroborated = mesh.observe_with_bandwidth(&[], &[16_000, 32_000, 64_000]);
+        assert_eq!(corroborated.bitrate, MIN_ADAPTIVE_ENCODER_BITRATE);
+
+        let mut two_peer = EncoderNetworkController::new();
+        let two_peer_constrained = two_peer.observe_with_bandwidth(&[], &[32_000, 64_000]);
+        assert_eq!(two_peer_constrained.bitrate, MIN_ADAPTIVE_ENCODER_BITRATE);
     }
 
     #[test]

@@ -35,6 +35,42 @@ func queueOnlyEngineAndPeer(peerID string, generation uint32) (*engine, *peer) {
 	return e, p
 }
 
+func TestOutboundQueueOverwritesOldestAndBoundsFrameAge(t *testing.T) {
+	e, p := queueOnlyEngineAndPeer("peer", 1)
+	for sequence := uint64(1); sequence <= outboundQueueCapacity+1; sequence++ {
+		result := e.sendOpus([]byte{byte(sequence)}, 1, sequence)
+		if result.enqueued != 1 {
+			t.Fatalf("send sequence %d = %+v", sequence, result)
+		}
+		if sequence <= outboundQueueCapacity && result.queueFull != 0 {
+			t.Fatalf("queue reported pressure before it was full: %+v", result)
+		}
+		if sequence == outboundQueueCapacity+1 && result.queueFull != 1 {
+			t.Fatalf("replacement did not report one superseded frame: %+v", result)
+		}
+	}
+	if got := len(p.outbound); got != outboundQueueCapacity {
+		t.Fatalf("queue depth = %d, want %d", got, outboundQueueCapacity)
+	}
+	for expected := uint64(2); expected <= outboundQueueCapacity+1; expected++ {
+		frame := <-p.outbound
+		if frame.mediaSequence != expected {
+			t.Fatalf("queued sequence = %d, want %d", frame.mediaSequence, expected)
+		}
+	}
+	if got := e.counters.rtpTXQueueDropped.Load(); got != 1 {
+		t.Fatalf("superseded counter = %d, want 1", got)
+	}
+
+	now := time.Now()
+	if (outboundFrame{queuedAt: now.Add(-outboundFreshnessLimit)}).expired(now) {
+		t.Fatal("frame at freshness boundary was expired")
+	}
+	if !(outboundFrame{queuedAt: now.Add(-outboundFreshnessLimit - time.Millisecond)}).expired(now) {
+		t.Fatal("frame beyond freshness boundary was retained")
+	}
+}
+
 func TestAdvanceEpochPurgesQueuedAudioAndRejectsStaleSends(t *testing.T) {
 	e, p := queueOnlyEngineAndPeer("peer", 1)
 	for _, frame := range []struct {
@@ -83,6 +119,33 @@ func TestAdvanceEpochTimeoutDoesNotLeaveAWaiter(t *testing.T) {
 	}
 	if len(p.outbound) != 0 {
 		t.Fatal("stale frame was not purged after retry")
+	}
+}
+
+func TestAdvanceEpochWaitsForOldWritesAndRetiresOnlyBlockedPeer(t *testing.T) {
+	e, blocked := queueOnlyEngineAndPeer("blocked", 1)
+	current := &peer{
+		engine: e, id: "current", generation: 1, instance: 2,
+		outbound: make(chan outboundFrame, outboundQueueCapacity), stop: make(chan struct{}),
+	}
+	current.active.Store(true)
+	e.peers[current.id] = current
+
+	blocked.writeEpoch.Store(1)
+	blocked.writeInFlight.Store(true)
+	current.writeEpoch.Store(2)
+	current.writeInFlight.Store(true)
+	if !e.advanceEpoch(2, time.Millisecond) {
+		t.Fatal("privacy advance failed instead of isolating the blocked peer")
+	}
+	if blocked.active.Load() {
+		t.Fatal("old-epoch blocked peer remained active")
+	}
+	if !current.active.Load() {
+		t.Fatal("current-epoch writer was retired with the blocked peer")
+	}
+	if !current.hasRTPWriteBefore(3) || current.hasRTPWriteBefore(2) {
+		t.Fatal("per-peer write epoch fence reported the wrong boundary")
 	}
 }
 
@@ -158,6 +221,16 @@ func TestCandidateBufferIsOrderedAndFailsClosedAtBound(t *testing.T) {
 	p.releaseLocalCandidates()
 	wantKinds := []string{"sdp", "candidate", "candidate"}
 	for i, want := range wantKinds {
+		if i == 2 {
+			deadline := time.Now().Add(iceEOCSettleDelay + time.Second)
+			for {
+				_, data := e.control.peek()
+				if data != nil || !time.Now().Before(deadline) {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
 		id, data := e.control.peek()
 		if data == nil {
 			t.Fatalf("missing control event %d", i)

@@ -111,6 +111,10 @@ struct PionControlEvent {
     local_candidate_type: String,
     remote_candidate_type: String,
     relay: bool,
+    ice_connection_state: String,
+    local_candidate_protocol: String,
+    remote_candidate_protocol: String,
+    selected_pair_changes: u64,
     bandwidth_estimate_valid: bool,
     available_outgoing_bitrate: f64,
     available_incoming_bitrate: f64,
@@ -462,7 +466,8 @@ impl RtcEngine {
 
     pub fn advance_encoder_epoch(&self, epoch: u64) -> bool {
         let Some((backend, handle)) = self.backend_handle() else {
-            return false;
+            // No transport can retain encoded media when the Pion backend never loaded.
+            return true;
         };
         backend.api.advance_epoch(
             handle,
@@ -793,6 +798,52 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
                 state: event.state,
             });
         }
+        "ice-state" => {
+            args.network_paths.update_ice_state(
+                &event.peer_id,
+                event.generation,
+                event.ice_connection_state,
+            );
+        }
+        "path" => {
+            args.network_paths
+                .update_selected_path(PeerNetworkPathSnapshot {
+                    peer_id: event.peer_id.clone(),
+                    generation: event.generation,
+                    candidate_pair_id: event.candidate_pair_id,
+                    candidate_state: event.candidate_state,
+                    local_candidate_type: event.local_candidate_type,
+                    remote_candidate_type: event.remote_candidate_type,
+                    relay: event.relay,
+                    ice_connection_state: event.ice_connection_state,
+                    local_candidate_protocol: event.local_candidate_protocol,
+                    remote_candidate_protocol: event.remote_candidate_protocol,
+                    selected_pair_changes: event.selected_pair_changes,
+                    ..PeerNetworkPathSnapshot::default()
+                });
+            args.encoder_policy
+                .invalidate_peer_path(&event.peer_id, event.generation);
+        }
+        "bandwidth" => {
+            if event.bandwidth_estimate_valid {
+                if let Some(estimate) = encoder_target_bitrate(event.available_outgoing_bitrate) {
+                    let now = Instant::now();
+                    args.network_paths.update_bandwidth(
+                        &event.peer_id,
+                        event.generation,
+                        event.available_outgoing_bitrate,
+                        event.selected_pair_changes,
+                    );
+                    args.encoder_policy.update_peer_bandwidth(
+                        &event.peer_id,
+                        event.generation,
+                        estimate,
+                        now,
+                    );
+                    args.encoder_policy.evaluate(now);
+                }
+            }
+        }
         "stats" => {
             let snapshot = PeerNetworkPathSnapshot {
                 peer_id: event.peer_id.clone(),
@@ -802,6 +853,10 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
                 local_candidate_type: event.local_candidate_type,
                 remote_candidate_type: event.remote_candidate_type,
                 relay: event.relay,
+                ice_connection_state: event.ice_connection_state,
+                local_candidate_protocol: event.local_candidate_protocol,
+                remote_candidate_protocol: event.remote_candidate_protocol,
+                selected_pair_changes: event.selected_pair_changes,
                 current_rtt_ms: finite_nonnegative(event.current_rtt_ms),
                 bandwidth_estimate_valid: event.bandwidth_estimate_valid,
                 available_outgoing_bitrate: finite_nonnegative(event.available_outgoing_bitrate),
@@ -820,6 +875,10 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
                 EncoderFeedback {
                     fraction_lost: finite_nonnegative(event.remote_fraction_lost).clamp(0.0, 1.0),
                 },
+                event
+                    .bandwidth_estimate_valid
+                    .then(|| encoder_target_bitrate(event.available_outgoing_bitrate))
+                    .flatten(),
                 event.remote_packets_received,
                 event.remote_rtt_measurements,
                 Instant::now(),
@@ -835,6 +894,10 @@ fn finite_nonnegative(value: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn encoder_target_bitrate(value: f64) -> Option<i32> {
+    (value.is_finite() && value > 0.0).then(|| value.min(i32::MAX as f64).round() as i32)
 }
 
 fn counter_delta(previous: u64, current: u64) -> u64 {

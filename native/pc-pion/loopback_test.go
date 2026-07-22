@@ -13,9 +13,11 @@ import (
 )
 
 type signalingTrace struct {
-	kinds  []string
-	offers []string
-	eoc    int
+	kinds           []string
+	offers          []string
+	eoc             int
+	candidates      []string
+	candidateFilter func(string) bool
 }
 
 func pumpSignaling(source *engine, target *peer, trace *signalingTrace) (int, error) {
@@ -46,9 +48,14 @@ func pumpSignaling(source *engine, target *peer, trace *signalingTrace) (int, er
 			if event.Candidate == nil {
 				return processed, errorsForLoopback("candidate event omitted candidate field")
 			}
+			if *event.Candidate != "" && trace.candidateFilter != nil &&
+				!trace.candidateFilter(*event.Candidate) {
+				continue
+			}
 			if *event.Candidate == "" {
 				trace.eoc++
 			}
+			trace.candidates = append(trace.candidates, *event.Candidate)
 			if err := target.addICECandidate(*event.Candidate); err != nil {
 				return processed, fmt.Errorf("apply candidate: %w", err)
 			}
@@ -96,8 +103,15 @@ func waitForLoopback(
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	t.Fatalf("loopback timeout: left=%s right=%s left-events=%v right-events=%v",
-		leftPeer.pc.ConnectionState(), rightPeer.pc.ConnectionState(), leftTrace.kinds, rightTrace.kinds)
+	t.Fatalf(
+		"loopback timeout: left=%s/%s right=%s/%s ufrags left=%q/%q right=%q/%q candidates left=%q right=%q left-events=%v right-events=%v",
+		leftPeer.pc.ConnectionState(), leftPeer.pc.ICEConnectionState(),
+		rightPeer.pc.ConnectionState(), rightPeer.pc.ICEConnectionState(),
+		descriptionUfrag(leftPeer.pc.LocalDescription()), descriptionUfrag(leftPeer.pc.RemoteDescription()),
+		descriptionUfrag(rightPeer.pc.LocalDescription()), descriptionUfrag(rightPeer.pc.RemoteDescription()),
+		leftTrace.candidates, rightTrace.candidates,
+		leftTrace.kinds, rightTrace.kinds,
+	)
 }
 
 func waitForRTP(t *testing.T, q *rtpQueue, count int) []inboundRTP {
@@ -133,6 +147,13 @@ func waitForRemoteFeedback(t *testing.T, p *peer, packetsReceived uint64) remote
 	snapshot := p.remoteFeedback.snapshot()
 	t.Fatalf("remote sender feedback timeout: %+v", snapshot)
 	return remoteSenderSnapshot{}
+}
+
+func descriptionUfrag(description *webrtc.SessionDescription) string {
+	if description == nil {
+		return ""
+	}
+	return iceUfrag(description.SDP)
 }
 
 func iceUfrag(sdp string) string {
@@ -225,8 +246,8 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	if packets[0].sequence != leftPeer.sequenceBase {
 		t.Fatalf("first on-wire sequence = %d, want randomized base %d", packets[0].sequence, leftPeer.sequenceBase)
 	}
-	if uint16(packets[1].sequence-packets[0].sequence) != 3 {
-		t.Fatalf("RTP sequence gap = %d, want 3", uint16(packets[1].sequence-packets[0].sequence))
+	if uint16(packets[1].sequence-packets[0].sequence) != 1 {
+		t.Fatalf("RTP sequence gap = %d, want one on-wire packet", uint16(packets[1].sequence-packets[0].sequence))
 	}
 	if uint32(packets[1].timestamp-packets[0].timestamp) != 3*960 {
 		t.Fatalf("RTP timestamp gap = %d, want %d", uint32(packets[1].timestamp-packets[0].timestamp), 3*960)
@@ -242,8 +263,8 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 		t.Fatalf("reverse RTP generation = %d", packet.generation)
 	}
 	feedback := waitForRemoteFeedback(t, leftPeer, 2)
-	if feedback.packetsLost != 2 {
-		t.Fatalf("remote cumulative packets lost = %d, want 2", feedback.packetsLost)
+	if feedback.packetsLost != 0 {
+		t.Fatalf("remote cumulative packets lost = %d, want 0 for a local media-time gap", feedback.packetsLost)
 	}
 	if feedback.fractionLost < 0 || feedback.fractionLost > 1 {
 		t.Fatalf("remote fraction lost = %v, want a valid interval fraction", feedback.fractionLost)
@@ -274,5 +295,87 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	}
 	if packet := waitForRTP(t, left.rtp, 1)[0]; string(packet.payload) != string(postRestartRight) {
 		t.Fatalf("post-restart right payload = %x, want %x", packet.payload, postRestartRight)
+	}
+}
+
+func directTCPCandidate(candidate string) bool {
+	fields := strings.Fields(candidate)
+	return len(fields) >= 3 && strings.EqualFold(fields[2], "tcp")
+}
+
+func TestPionDirectICETCPCarriesRTP(t *testing.T) {
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
+
+	left, err := newEngine()
+	if err != nil {
+		t.Fatalf("new left engine: %v", err)
+	}
+	defer left.close()
+	right, err := newEngine()
+	if err != nil {
+		t.Fatalf("new right engine: %v", err)
+	}
+	defer right.close()
+	if err = left.setICEServers(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = right.setICEServers(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = right.addPeer("left", false, false, 29, 0); err != nil {
+		t.Fatalf("add right peer: %v", err)
+	}
+	if err = left.addPeer("right", true, false, 29, 0); err != nil {
+		t.Fatalf("add left peer: %v", err)
+	}
+
+	leftPeer := left.peer("right")
+	rightPeer := right.peer("left")
+	leftTrace := &signalingTrace{candidateFilter: directTCPCandidate}
+	rightTrace := &signalingTrace{candidateFilter: directTCPCandidate}
+	waitForLoopback(t, left, right, leftPeer, rightPeer, leftTrace, rightTrace, func() bool {
+		return leftPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
+			rightPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
+			leftTrace.eoc > 0 && rightTrace.eoc > 0
+	})
+
+	for name, peer := range map[string]*peer{"left": leftPeer, "right": rightPeer} {
+		transport := peer.sender.Transport()
+		if transport == nil || transport.ICETransport() == nil {
+			t.Fatalf("%s peer has no ICE transport", name)
+		}
+		pair, pairErr := transport.ICETransport().GetSelectedCandidatePair()
+		if pairErr != nil {
+			t.Fatalf("%s selected pair: %v", name, pairErr)
+		}
+		if pair == nil || pair.Local == nil || pair.Remote == nil {
+			t.Fatalf("%s selected pair is incomplete: %+v", name, pair)
+		}
+		if !strings.EqualFold(pair.Local.Protocol.String(), "tcp") ||
+			!strings.EqualFold(pair.Remote.Protocol.String(), "tcp") {
+			t.Fatalf(
+				"%s selected protocols = %s/%s, want tcp/tcp",
+				name, pair.Local.Protocol, pair.Remote.Protocol,
+			)
+		}
+		if pair.Local.Typ == webrtc.ICECandidateTypeRelay ||
+			pair.Remote.Typ == webrtc.ICECandidateTypeRelay {
+			t.Fatalf("%s selected a relay pair: %+v", name, pair)
+		}
+	}
+
+	leftPayload := []byte{0xf8, 0xff, 0xe1}
+	if result := left.sendOpus(leftPayload, 1, 700); result.enqueued != 1 {
+		t.Fatalf("left TCP send = %+v", result)
+	}
+	if packet := waitForRTP(t, right.rtp, 1)[0]; string(packet.payload) != string(leftPayload) {
+		t.Fatalf("right TCP payload = %x, want %x", packet.payload, leftPayload)
+	}
+	rightPayload := []byte{0xf8, 0xff, 0xe2}
+	if result := right.sendOpus(rightPayload, 1, 900); result.enqueued != 1 {
+		t.Fatalf("right TCP send = %+v", result)
+	}
+	if packet := waitForRTP(t, left.rtp, 1)[0]; string(packet.payload) != string(rightPayload) {
+		t.Fatalf("left TCP payload = %x, want %x", packet.payload, rightPayload)
 	}
 }

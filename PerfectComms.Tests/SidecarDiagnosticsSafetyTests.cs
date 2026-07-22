@@ -422,7 +422,9 @@ public sealed class SidecarDiagnosticsSafetyTests
               "peer_id":"peer-7\r\nforged","generation":4,
               "candidate_pair_id":"192.0.2.1:5000-to-198.51.100.2:6000",
               "candidate_state":"succeeded\nforged","local_candidate_type":"relay",
-              "remote_candidate_type":"srflx","relay":true,"current_rtt_ms":247.5,
+              "remote_candidate_type":"srflx","relay":true,"ice_connection_state":"connected",
+              "local_candidate_protocol":"udp","remote_candidate_protocol":"tcp",
+              "selected_pair_changes":3,"current_rtt_ms":247.5,
               "available_outgoing_bitrate":32000,"available_incoming_bitrate":64000,
               "remote_packets_received":91,"remote_packets_lost":7,
               "remote_fraction_lost":0.0714,"remote_report_rtt_ms":260.25,
@@ -434,7 +436,9 @@ public sealed class SidecarDiagnosticsSafetyTests
         var line = Assert.Single(lines);
         Assert.Equal("sidecar.native.network-path", line.Category);
         Assert.Contains("peer=\"peer-7  forged\" generation=4 state=succeeded forged", line.Details);
-        Assert.Contains("localType=relay remoteType=srflx relay=true currentRttMs=247.5", line.Details);
+        Assert.Contains("state=succeeded forged iceState=connected", line.Details);
+        Assert.Contains("localType=relay remoteType=srflx localProtocol=udp remoteProtocol=tcp", line.Details);
+        Assert.Contains("relay=true selectedPairChanges=3 currentRttMs=247.5", line.Details);
         Assert.Contains("remotePacketsLost=7 remoteFractionLost=0.0714", line.Details);
         Assert.DoesNotContain("candidate_pair_id", line.Details);
         Assert.DoesNotContain("192.0.2.1", line.Details);

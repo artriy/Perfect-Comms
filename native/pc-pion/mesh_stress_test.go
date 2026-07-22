@@ -27,6 +27,7 @@ type meshSignalEvent struct {
 	sdpType         string
 	generation      uint32
 	endOfCandidates bool
+	detail          string
 }
 
 type meshSignalTrace struct {
@@ -47,6 +48,7 @@ func (trace *meshSignalTrace) recordDescription(event controlEvent) {
 	}
 	trace.events = append(trace.events, meshSignalEvent{
 		kind: event.Kind, sdpType: event.SDPType, generation: event.Generation,
+		detail: iceUfrag(event.SDP),
 	})
 	trace.descriptionsByGen[event.Generation]++
 	switch event.SDPType {
@@ -73,6 +75,7 @@ func (trace *meshSignalTrace) recordCandidate(event controlEvent) error {
 	}
 	trace.events = append(trace.events, meshSignalEvent{
 		kind: event.Kind, generation: event.Generation, endOfCandidates: *event.Candidate == "",
+		detail: *event.Candidate,
 	})
 	trace.candidatesByGen[event.Generation]++
 	if *event.Candidate == "" {
@@ -279,8 +282,8 @@ func (mesh *tenClientMesh) requireNegotiationDirection(
 			} else {
 				if endOfCandidates != 0 {
 					mesh.t.Fatalf(
-						"negotiation %s -> %s nonempty candidate event %d followed end-of-candidates; events=%+v",
-						mesh.ids[source], mesh.ids[target], index, events,
+						"negotiation %s -> %s candidate event %d ufrag=%q followed end-of-candidates for sdp ufrag=%q",
+						mesh.ids[source], mesh.ids[target], index, event.detail, events[0].detail,
 					)
 				}
 				nonemptyCandidates++
@@ -384,9 +387,9 @@ func (mesh *tenClientMesh) pumpSignaling() (int, error) {
 				case "error":
 					return processed, fmt.Errorf("peer error %s -> %s: %s", mesh.ids[source], mesh.ids[target], event.Message)
 				}
-			case "state", "stats":
-				// State is read directly below; stats are sampled separately after
-				// connection so these refreshable queue events can simply be drained.
+			case "state", "ice-state", "path", "bandwidth", "stats":
+				// Runtime state and telemetry are sampled separately after connection,
+				// so these refreshable queue events can simply be drained.
 			default:
 				return processed, fmt.Errorf("unknown control event kind %q from %s", event.Kind, mesh.ids[source])
 			}

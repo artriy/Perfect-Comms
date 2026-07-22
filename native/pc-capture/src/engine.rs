@@ -1,5 +1,5 @@
 use crate::codec::{
-    decode_with_concealment_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec, FRAME_SIZE,
+    decode_with_media_gap_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec, FRAME_SIZE,
     MAX_CONCEAL_FRAMES,
 };
 use crate::dsp::{Dsp, DspConfig};
@@ -335,7 +335,13 @@ impl Engine {
             let last = state.last_seq.get(&peer).copied();
             let (frames, advance, report) = {
                 let codec = state.decoders.get_mut(&peer).unwrap();
-                decode_with_concealment_report(codec, last, packet.sequence, &packet.payload)
+                decode_with_media_gap_report(
+                    codec,
+                    last,
+                    packet.sequence,
+                    packet.local_media_gap_before,
+                    &packet.payload,
+                )
             };
             if let Some(buffer) = state.encoded.get(&peer) {
                 buffer.record_decode(report);
@@ -803,6 +809,7 @@ mod tests {
         let receive = crate::codec::MediaReceiveSnapshot {
             active_peers: 1,
             sequence_gaps: 3,
+            local_media_gap_frames: 4,
             dred_frames: 2,
             rtp_jitter_ms_max: 27.5,
             ..Default::default()
@@ -815,6 +822,10 @@ mod tests {
             local_candidate_type: "relay".to_string(),
             remote_candidate_type: "srflx".to_string(),
             relay: true,
+            ice_connection_state: "connected".to_string(),
+            local_candidate_protocol: "udp".to_string(),
+            remote_candidate_protocol: "udp".to_string(),
+            selected_pair_changes: 2,
             current_rtt_ms: 212.5,
             bandwidth_estimate_valid: true,
             available_outgoing_bitrate: 64_000.0,
@@ -842,7 +853,14 @@ mod tests {
         assert!(!json.contains("203.0.113.5"));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["capture_media_gap_frames"], 7);
+        assert_eq!(
+            value["network_paths"][0]["ice_connection_state"],
+            "connected"
+        );
+        assert_eq!(value["network_paths"][0]["local_candidate_protocol"], "udp");
+        assert_eq!(value["network_paths"][0]["selected_pair_changes"], 2);
         assert_eq!(value["opus_gap_placeholders"], 1);
+        assert_eq!(value["media_receive"]["local_media_gap_frames"], 4);
         assert_eq!(value["opus_discontinuity_resets"], 1);
         assert_eq!(value["network_paths"][0]["relay"], true);
         assert_eq!(value["network_paths"][0]["current_rtt_ms"], 212.5);
@@ -915,6 +933,10 @@ struct MobileNetworkPathStats {
     local_candidate_type: String,
     remote_candidate_type: String,
     relay: bool,
+    ice_connection_state: String,
+    local_candidate_protocol: String,
+    remote_candidate_protocol: String,
+    selected_pair_changes: u64,
     current_rtt_ms: f64,
     bandwidth_estimate_valid: bool,
     available_outgoing_bitrate: f64,
@@ -956,6 +978,7 @@ fn mobile_diagnostics_json(
         ingress_queue_depth_max: receive.ingress_queue_depth_max,
         ingress_peer_queue_depth_max: receive.ingress_peer_queue_depth_max,
         sequence_gaps: receive.sequence_gaps,
+        local_media_gap_frames: receive.local_media_gap_frames,
         reordered_recovered: receive.reordered_recovered,
         late_drops: receive.late_drops,
         duplicate_drops: receive.duplicate_drops,
@@ -982,6 +1005,10 @@ fn mobile_diagnostics_json(
             local_candidate_type: path.local_candidate_type,
             remote_candidate_type: path.remote_candidate_type,
             relay: path.relay,
+            ice_connection_state: path.ice_connection_state,
+            local_candidate_protocol: path.local_candidate_protocol,
+            remote_candidate_protocol: path.remote_candidate_protocol,
+            selected_pair_changes: path.selected_pair_changes,
             current_rtt_ms: path.current_rtt_ms,
             bandwidth_estimate_valid: path.bandwidth_estimate_valid,
             available_outgoing_bitrate: path.available_outgoing_bitrate,
