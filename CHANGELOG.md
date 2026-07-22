@@ -1,5 +1,40 @@
 # Changelog
 
+## Perfect Comms v4.1.4
+
+Perfect Comms v4.1.4 makes Push To Talk respond instantly and remain reliable through results-to-lobby transitions, adds Push to Mute, makes chat keybind blocking and connection status optional, expands first-time setup, and prevents stale task-role muffling during meetings.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.4/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Faster, More Reliable Talk Controls
+
+- **Push To Talk no longer reopens the microphone on every press.**
+  > <sub>While connected in Push To Talk mode, Perfect Comms keeps capture ready but discards microphone samples before encoding or transmission until the key is held. Pressing the key opens the native transmit gate immediately; changing devices, permissions, or a failed capture still uses the existing recovery path.</sub>
+
+- **Push To Talk now stays held between the results screen and the lobby.**
+  > <sub>Continuous EndGame-to-lobby scene changes no longer masquerade as privacy boundaries and close the transmit gate while its key is still down. Chat, settings panels, rebinding, focus loss, leaving the lobby, and joining a new voice session still require a fresh press before transmission can resume.</sub>
+
+- **Chat keybind blocking is now optional.**
+  > <sub>Perfect Comms still blocks all desktop voice shortcuts while chat is open by default. Enable Allow Keybinds In Chat in first-time setup's Choose How You Talk step or Allow Keybinds While Chat Is Open in Voice Settings > Keybinds to keep them active while typing; settings panels, rebinding, focus loss, and voice-session boundaries remain fail-closed.</sub>
+
+- **A new Push To Mute shortcut provides momentary microphone muting.**
+  > <sub>Assign the unbound Push To Mute key in first-time setup or Voice Settings. The microphone stays muted while the shortcut is held, then returns to its prior mute state when released.</sub>
+
+### Cleaner Status and First-Time Setup
+
+- **Routine connection progress now stays in the lobby and can be hidden.**
+  > <sub>Starting, syncing, and player-count progress appears only while assembling the lobby session. With Voice Connection Status enabled, retrying-audio status remains visible during active games, meetings, and other phases; disabling it hides both routine progress and retry status, while separate unavailable-device warnings remain available.</sub>
+
+- **First-time setup now includes every optional voice HUD visibility choice.**
+  > <sub>The guided HUD step can hide the voice controls, lobby connection status, speaking bar, or meeting speaking overlay before the first save. Compact switches keep every label readable, and the live preview stays between those choices and the navigation footer. The miniature preview preserves the live HUD's row and column topology while scaling it to the setup card, so Top Middle's 15-player layout remains two balanced rows. Hiding the speaking bar also hides its layout picker and preview until the bar is shown again.</sub>
+
+### Clear Meeting Audio
+
+- **Eclipsal and Grenadier muffling now ends when a meeting begins.**
+  > <sub>The built-in blind/flash hearing effect is limited to the task world, so a Town of Us modifier retained during a meeting, exile, intro, or lobby transition can no longer keep every incoming voice muffled. Explicit phase-aware listener filters registered by other mods remain available in meetings.</sub>
+
 ## Perfect Comms v4.1.3
 
 Perfect Comms v4.1.3 makes voice recovery more reliable, prevents stalled connection messages from lingering, adds independent controls for optional voice HUD elements, and keeps settings consistent across multiple Among Us installations.

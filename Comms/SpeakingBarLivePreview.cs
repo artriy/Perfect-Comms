@@ -24,14 +24,15 @@ internal sealed class SpeakingBarLivePreview
     private const float DefaultViewportY = 34f;
     private const float DefaultRevealSlide = 28f;
     private const float EmbeddedCardWidth = 424f;
-    private const float EmbeddedCardHeight = 342f;
-    private const float EmbeddedHeaderHeight = 52f;
-    private const float EmbeddedViewportMaxWidth = 380f;
-    private const float EmbeddedViewportMaxHeight = 213.75f;
-    private const float EmbeddedViewportY = 2f;
+    private const float EmbeddedCardHeight = 262f;
+    private const float EmbeddedHeaderHeight = 44f;
+    private const float EmbeddedViewportMaxWidth = 264f;
+    private const float EmbeddedViewportMaxHeight = 148.5f;
+    private const float EmbeddedViewportY = 12f;
     private const float EmbeddedRevealSlide = 12f;
     private const float PixelsPerWorldUnit = 36f;
     private const int SlotsPerPrewarmTick = 3;
+    internal static Vector2 EmbeddedCardSize => new(EmbeddedCardWidth, EmbeddedCardHeight);
 
     private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.5f);
     private static readonly Color32 SpeakingGreen = new(46, 204, 113, 255);
@@ -645,7 +646,9 @@ internal sealed class SpeakingBarLivePreview
             maxItemsPerLine: singleLane
                 ? _slots.Count
                 : SpeakingBarLayoutPolicy.PreferredMaxItemsPerLine,
-            requiredLineCount: singleLane ? 1 : null);
+            requiredLineCount: SpeakingBarLivePreviewLayoutPolicy.RequiredLineCount(
+                _slots.Count,
+                singleLane));
 
         var primaryDirection = SpeakingBarLayoutPolicy.ResolvePrimaryDirection(
             settings.ManualLayout,

@@ -20,8 +20,7 @@ internal interface IVoiceBackend : IDisposable
     // caller-owned buffer instead of allocating a fresh List/array (and LINQ) on every access.
     void AppendRemoteOverlayStates(List<VoiceRemoteOverlayState> buffer);
 
-    void SetMute(bool mute);
-    void ToggleMute();
+    void SetMicrophonePolicy(bool mute, bool keepCaptureWarm);
     void SetLoopBack(bool loopBack, bool delayed, float gain);
     void SetMasterVolume(float volume);
     void SetMicVolume(float volume);

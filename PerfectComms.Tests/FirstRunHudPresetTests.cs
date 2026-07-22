@@ -202,7 +202,13 @@ public sealed class FirstRunHudPresetTests
             EchoCancellation = false,
             StartMuted = true,
             StartDeafened = true,
+            AllowKeybindsWhileChatOpen = true,
+            HideVoiceControls = true,
+            HideSpeakingBar = true,
+            HideMeetingOverlay = true,
+            HideConnectionStatus = true,
             ToggleMute = new FirstRunSetupBinding(KeyCode.Q, KeyCode.None, VoiceModifierMatch.Exact),
+            PushToMute = new FirstRunSetupBinding(KeyCode.H, KeyCode.None, VoiceModifierMatch.Exact),
             PushToTalk = new FirstRunSetupBinding(KeyCode.Mouse4, KeyCode.None, VoiceModifierMatch.Exact),
             ToggleSpeaker = new FirstRunSetupBinding(KeyCode.E, KeyCode.None, VoiceModifierMatch.Exact),
             OpenVoiceSettings = new FirstRunSetupBinding(KeyCode.F2, KeyCode.None, VoiceModifierMatch.Exact),
@@ -224,9 +230,16 @@ public sealed class FirstRunHudPresetTests
         Assert.True(fresh.EchoCancellation);
         Assert.False(fresh.StartMuted);
         Assert.False(fresh.StartDeafened);
+        Assert.False(fresh.AllowKeybindsWhileChatOpen);
+        Assert.False(fresh.HideVoiceControls);
+        Assert.False(fresh.HideSpeakingBar);
+        Assert.False(fresh.HideMeetingOverlay);
+        Assert.False(fresh.HideConnectionStatus);
 
         Assert.Equal(new FirstRunSetupBinding(
             KeyCode.M, KeyCode.LeftShift, VoiceModifierMatch.EitherSide), fresh.ToggleMute);
+        Assert.Equal(new FirstRunSetupBinding(
+            KeyCode.None, KeyCode.None, VoiceModifierMatch.Exact), fresh.PushToMute);
         Assert.Equal(new FirstRunSetupBinding(
             KeyCode.C, KeyCode.None, VoiceModifierMatch.Exact), fresh.PushToTalk);
         Assert.Equal(new FirstRunSetupBinding(
@@ -276,4 +289,29 @@ public sealed class FirstRunHudPresetTests
         Assert.True(fresh.SpeakerSelectionChanged);
 #endif
     }
+
+    [Fact]
+    public void FirstRunRejectsPushToMuteConflicts()
+    {
+        var draft = new FirstRunSetupDraft
+        {
+            ToggleMute = new FirstRunSetupBinding(
+                KeyCode.M, KeyCode.LeftShift, VoiceModifierMatch.EitherSide),
+            PushToMute = new FirstRunSetupBinding(
+                KeyCode.H, KeyCode.None, VoiceModifierMatch.Exact),
+            PushToTalk = new FirstRunSetupBinding(
+                KeyCode.H, KeyCode.None, VoiceModifierMatch.Exact),
+            ToggleSpeaker = new FirstRunSetupBinding(
+                KeyCode.N, KeyCode.LeftShift, VoiceModifierMatch.EitherSide),
+            OpenVoiceSettings = new FirstRunSetupBinding(
+                KeyCode.F10, KeyCode.None, VoiceModifierMatch.Exact),
+        };
+
+        string? issue = VoiceFirstRunSetup.BindingValidationIssue(draft);
+
+        Assert.NotNull(issue);
+        Assert.Contains("Push to Mute", issue);
+        Assert.Contains("Push to Talk", issue);
+    }
+
 }

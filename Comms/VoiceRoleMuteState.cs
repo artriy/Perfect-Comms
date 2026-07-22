@@ -179,19 +179,29 @@ internal static partial class VoiceRoleMuteState
         return IsHypnotisedHysteriaActive(GetModifier(local, _hypnotisedModifierType));
     }
 
-    internal static bool IsLocalListenerAudioMuffled()
+    internal static bool IsLocalListenerAudioMuffled(VoiceGamePhase phase)
     {
         var settings = VoiceRoomSettingsState.Current;
-        if (settings.MuffleBlindedOrFlashedHearing && IsLocalListenerBlindedOrFlashed() ||
-            settings.MuffleHypnotizedDuringHysteria && IsLocalListenerHypnotizedDuringHysteria())
+        if (settings.MuffleBlindedOrFlashedHearing
+            && ShouldApplyBlindedOrFlashedMuffle(phase)
+            && IsLocalListenerBlindedOrFlashed())
+            return true;
+        if (settings.MuffleHypnotizedDuringHysteria
+            && IsLocalListenerHypnotizedDuringHysteria())
             return true;
 
-        // Third-party mod listener filters (PerfectComms.Api Primitive: RegisterListenerFilter).
-        return VoiceModRegistry.LocalListenerMuffled(PlayerControl.LocalPlayer);
+        // Third-party filters receive the authoritative routing phase and remain free to opt into
+        // meetings or exile. Only the built-in task-world blindness effect is phase-restricted.
+        return VoiceModRegistry.LocalListenerMuffled(PlayerControl.LocalPlayer, phase);
     }
 
-    internal static VoiceProximityResult ApplyLocalListenerAudioMuffle(VoiceProximityResult result)
-        => result.Audible && IsLocalListenerAudioMuffled()
+    internal static bool ShouldApplyBlindedOrFlashedMuffle(VoiceGamePhase phase)
+        => phase == VoiceGamePhase.Tasks;
+
+    internal static VoiceProximityResult ApplyLocalListenerAudioMuffle(
+        VoiceProximityResult result,
+        VoiceGamePhase phase)
+        => result.Audible && IsLocalListenerAudioMuffled(phase)
             ? result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle }
             : result;
 

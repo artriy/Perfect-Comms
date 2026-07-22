@@ -21,6 +21,12 @@ internal static class VoiceHudWarnings
         return _cached;
     }
 
+    internal static void Invalidate()
+    {
+        _nextRefreshTime = 0f;
+        _cached = string.Empty;
+    }
+
     private static string ComputeWarning()
     {
         var room = VoiceChatRoom.Current;
@@ -36,7 +42,13 @@ internal static class VoiceHudWarnings
         }
 
         var connection = room.ConnectionProgress;
-        if (room.ShouldShowConnectionProgress)
+        bool showConnectionStatus =
+            VoiceSettings.Instance?.ShowVoiceConnectionStatus.Value ?? true;
+        if (room.ShouldShowConnectionProgress &&
+            VoiceConnectionStatusPolicy.ShouldPresent(
+                connection,
+                VoiceSceneState.ResolvePhase(),
+                showConnectionStatus))
         {
             // Two animation frames per second keeps the status visibly alive without making the
             // compact text jitter rapidly beside the voice buttons.

@@ -44,7 +44,7 @@ public sealed class SidecarVoiceHostTests
         Assert.Equal(string.Empty, failure);
         Assert.Equal(0, secondClient.HandlerCount);
         Assert.True(second.EnsureStarted("mic-b", "spk-b"));
-        Assert.Equal(9, secondClient.HandlerCount);
+        Assert.Equal(10, secondClient.HandlerCount);
         Assert.Equal(1, firstClient.StartCount);
         Assert.Equal(1, secondClient.StartCount);
         Assert.Equal(2, createCount);
@@ -146,7 +146,7 @@ public sealed class SidecarVoiceHostTests
         var second = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
         Assert.True(second.EnsureStarted("mic", "spk"));
         Assert.Equal(2, created);
-        Assert.Equal(9, secondClient.HandlerCount);
+        Assert.Equal(10, secondClient.HandlerCount);
         second.Dispose();
     }
 
@@ -200,6 +200,7 @@ public sealed class SidecarVoiceHostTests
             (_, _, _) => { },
             (_, _) => { },
             _ => { },
+            _ => { },
             _ => { });
 
     private sealed class FakeSidecarVoiceClient : ISidecarVoiceClient
@@ -213,6 +214,7 @@ public sealed class SidecarVoiceHostTests
         private Action<float, bool>? _onLevel;
         private Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? _onPeerLevels;
         private Action<SidecarPlaybackState>? _onPlaybackState;
+        private Action<SidecarCaptureState>? _onCaptureState;
 
         public event Action<float[], int>? OnFrame { add => _onFrame += value; remove => _onFrame -= value; }
         public event Action<string>? OnDead { add => _onDead += value; remove => _onDead -= value; }
@@ -222,6 +224,7 @@ public sealed class SidecarVoiceHostTests
         public event Action<string, int, string>? OnPeerState { add => _onPeerState += value; remove => _onPeerState -= value; }
         public event Action<float, bool>? OnLevel { add => _onLevel += value; remove => _onLevel -= value; }
         public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels { add => _onPeerLevels += value; remove => _onPeerLevels -= value; }
+        public event Action<SidecarCaptureState>? OnCaptureState { add => _onCaptureState += value; remove => _onCaptureState -= value; }
         public event Action<SidecarPlaybackState>? OnPlaybackState { add => _onPlaybackState += value; remove => _onPlaybackState -= value; }
 
         public CaptureHealth Health { get; private set; } = CaptureHealth.Dead;
@@ -240,7 +243,7 @@ public sealed class SidecarVoiceHostTests
 
         public int HandlerCount =>
             Count(_onFrame) + Count(_onDead) + Count(_onRecoverableError) + Count(_onLocalSdp) + Count(_onLocalCandidate) +
-            Count(_onPeerState) + Count(_onLevel) + Count(_onPeerLevels) + Count(_onPlaybackState);
+            Count(_onPeerState) + Count(_onLevel) + Count(_onPeerLevels) + Count(_onCaptureState) + Count(_onPlaybackState);
 
         public bool Start(string? micDevice, string? spkDevice)
         {
@@ -253,12 +256,13 @@ public sealed class SidecarVoiceHostTests
 
         private int StartCountBacking;
 
-        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, IEnumerable<IceServer>? iceServers) => true;
+        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, bool micWarm, IEnumerable<IceServer>? iceServers) => true;
         public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
         public void SetSynthetic(bool enabled) => SyntheticCalls.Add(enabled);
         public void SetMonitor(bool enabled, bool delayed, float gain) { }
         public void SetInput(float gain, float vadThreshold, float noiseGateThreshold) { }
         public void SetMicActive(bool active) => MicActiveCalls.Add(active);
+        public void SetMicWarm() { }
         public void SelectMicDevice(string deviceId) { }
         public bool SelectOutputDevice(string deviceId)
         {

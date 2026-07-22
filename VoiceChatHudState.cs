@@ -94,6 +94,7 @@ public static partial class VoiceChatHudState
     private const float CompactStatusFallbackHalfWidthViewport = 0.145f;
     private const float CompactStatusFallbackHalfHeightViewport = 0.065f;
     private static bool _micMuted;
+    private static bool _pushToMuteHeld;
     private static bool _teamRadioHeld;
     private static bool _keyboardTeamRadioHeld;
     private static VoiceTeamRadioChannel _teamRadioChannel = VoiceTeamRadioChannel.None;
@@ -202,6 +203,7 @@ public static partial class VoiceChatHudState
         _teamRadioChannel = VoiceTeamRadioChannel.None;
         _pushToTalkHeld = false;
         _keyboardPushToTalkHeld = false;
+        _pushToMuteHeld = false;
 #if ANDROID
         ResetAndroidTouchState();
 #endif
@@ -226,6 +228,7 @@ public static partial class VoiceChatHudState
         _teamRadioChannel = VoiceTeamRadioChannel.None;
         _pushToTalkHeld = false;
         _keyboardPushToTalkHeld = false;
+        _pushToMuteHeld = false;
 #if ANDROID
         ResetAndroidTouchState();
 #endif
@@ -235,13 +238,14 @@ public static partial class VoiceChatHudState
         InvalidateAudioPolicyCache();
     }
 
-    internal static void ReleaseTransmitHoldsFailClosed()
+    internal static void ReleaseTransmitHoldsFailClosed(bool pushToMuteHeld)
     {
-        bool changed = _teamRadioHeld || _pushToTalkHeld;
+        bool changed = _teamRadioHeld || _pushToTalkHeld || _pushToMuteHeld != pushToMuteHeld;
         _teamRadioHeld = false;
         _keyboardTeamRadioHeld = false;
         _pushToTalkHeld = false;
         _keyboardPushToTalkHeld = false;
+        _pushToMuteHeld = pushToMuteHeld;
 #if ANDROID
         ResetAndroidTouchState();
 #endif
@@ -1157,19 +1161,23 @@ public static partial class VoiceChatHudState
             // A mod callback or a Unity object invalidated mid-read must not abort the room update.
             // Fail closed only for gameplay role/policy phases; speaker playback remains untouched.
             var phase = snapshot?.Phase ?? VoiceGamePhase.Unknown;
+            var pushToTalkMode = false;
             var pushToTalkMuted = false;
             try
             {
-                pushToTalkMuted = VoiceSettings.Instance?.MicMode.Value == VoiceMicMode.PushToTalk
-                                  && !_pushToTalkHeld;
+                pushToTalkMode = VoiceSettings.Instance?.MicMode.Value == VoiceMicMode.PushToTalk;
+                pushToTalkMuted = pushToTalkMode && !_pushToTalkHeld;
             }
             catch { }
-            VoiceChatRoom.Current?.SetMute(CombineTransmitMute(
-                _speakerMuted,
-                _micMuted,
-                pushToTalkMuted,
-                ShouldFailClosedWithoutLocalIdentity(phase),
-                policyMuted: false));
+            VoiceChatRoom.Current?.SetMicrophonePolicy(
+                CombineTransmitMute(
+                    _speakerMuted,
+                    _micMuted,
+                    _pushToMuteHeld,
+                    pushToTalkMuted,
+                    ShouldFailClosedWithoutLocalIdentity(phase),
+                    policyMuted: false),
+                keepCaptureWarm: pushToTalkMode);
             if (DateTime.UtcNow >= _nextAudioPolicyErrorLogUtc)
             {
                 _nextAudioPolicyErrorLogUtc = DateTime.UtcNow.AddSeconds(2);
@@ -1251,12 +1259,15 @@ public static partial class VoiceChatHudState
         }
 
         bool policyMuted = IsLocalRoomPolicyVoiceBlocked(phase, localDead);
-        VoiceChatRoom.Current?.SetMute(CombineTransmitMute(
-            _speakerMuted,
-            _micMuted,
-            pushToTalkMuted,
-            roleMuted,
-            policyMuted));
+        VoiceChatRoom.Current?.SetMicrophonePolicy(
+            CombineTransmitMute(
+                _speakerMuted,
+                _micMuted,
+                _pushToMuteHeld,
+                pushToTalkMuted,
+                roleMuted,
+                policyMuted),
+            keepCaptureWarm: pushToTalkMode);
     }
 
     private static bool IsSnapshotRoleVoiceBlocked(VoicePlayerSnapshot local, VoiceGamePhase phase)
@@ -1276,10 +1287,11 @@ public static partial class VoiceChatHudState
     internal static bool CombineTransmitMute(
         bool speakerMuted,
         bool manualMuted,
+        bool pushToMuteMuted,
         bool pushToTalkMuted,
         bool roleMuted,
         bool policyMuted)
-        => speakerMuted || manualMuted || pushToTalkMuted || roleMuted || policyMuted;
+        => speakerMuted || manualMuted || pushToMuteMuted || pushToTalkMuted || roleMuted || policyMuted;
 
     internal static void ResetAudioPolicyCache()
     {
@@ -1321,7 +1333,7 @@ public static partial class VoiceChatHudState
     }
 
     private static bool IsManualMuteActive()
-        => _micMuted && !IsPushToTalkMode();
+        => _pushToMuteHeld || (_micMuted && !IsPushToTalkMode());
 
     internal static void ToggleMutePublic()
     {
@@ -1335,6 +1347,16 @@ public static partial class VoiceChatHudState
         InvalidateAudioPolicyCache();
         ApplyMicState();
         if (_micMuted) MeetingSpeakingIndicatorPatch.ClearLocalIndicator();
+        RefreshButtonVisuals();
+    }
+
+    internal static void UpdatePushToMuteHeld(bool held)
+    {
+        if (_pushToMuteHeld == held) return;
+        _pushToMuteHeld = held;
+        InvalidateAudioPolicyCache();
+        ApplyMicState();
+        if (held) MeetingSpeakingIndicatorPatch.ClearLocalIndicator();
         RefreshButtonVisuals();
     }
 

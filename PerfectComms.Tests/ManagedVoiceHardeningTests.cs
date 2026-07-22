@@ -30,21 +30,77 @@ public sealed class ManagedVoiceHardeningTests
 #endif
 
     [Theory]
-    [InlineData(true, false, false, false, false)]
-    [InlineData(false, false, false, false, true)]
-    [InlineData(true, true, false, false, true)]
-    [InlineData(true, false, true, false, true)]
-    [InlineData(true, false, false, true, true)]
+    [InlineData(true, false, false, false, false, false)]
+    [InlineData(false, false, false, false, false, true)]
+    [InlineData(true, true, false, false, false, true)]
+    [InlineData(true, false, true, false, false, true)]
+    [InlineData(true, false, false, true, false, true)]
+    [InlineData(true, false, false, true, true, false)]
+    [InlineData(true, false, true, true, true, true)]
     public void PrivacyBoundariesSuppressAllVoiceInput(
         bool focused,
         bool rebinding,
         bool modalOpen,
         bool chatOpen,
+        bool allowKeybindsWhileChatOpen,
         bool expected)
     {
         Assert.Equal(expected, VoiceChatPatches.ShouldSuppressVoiceInput(
-            focused, rebinding, modalOpen, chatOpen));
+            focused,
+            rebinding,
+            modalOpen,
+            chatOpen,
+            allowKeybindsWhileChatOpen));
     }
+
+    [Theory]
+    [InlineData("OnlineGame", "EndGame", true)]
+    [InlineData("EndGame", "OnlineGame", true)]
+    [InlineData("OnlineGame", "OnlineGame", true)]
+    [InlineData("MainMenu", "OnlineGame", false)]
+    [InlineData("EndGame", "MainMenu", false)]
+    [InlineData("MatchMaking", "EndGame", false)]
+    public void OnlyContinuousVoiceSceneHandoffsPreserveHeldTransmitInput(
+        string previousScene,
+        string nextScene,
+        bool expected)
+        => Assert.Equal(expected,
+            VoiceChatPlugin.VoiceSceneInputPolicy.ShouldPreserveHeldTransmitInputs(
+                previousScene,
+                nextScene));
+
+    [Theory]
+    [InlineData("OnlineGame", "EndGame", "MainMenu", "", "OnlineGame")]
+    [InlineData("", "EndGame", "OnlineGame", "", "OnlineGame")]
+    [InlineData("", "EndGame", "EndGame", "OnlineGame", "OnlineGame")]
+    [InlineData("", "OnlineGame", "OnlineGame", "MainMenu", "MainMenu")]
+    [InlineData("", "OnlineGame", "OnlineGame", "", "")]
+    public void MissingEventPreviousSceneUsesCachedTransitionOrder(
+        string eventPreviousScene,
+        string nextScene,
+        string cachedActiveScene,
+        string sceneBeforeLoad,
+        string expected)
+        => Assert.Equal(expected,
+            VoiceChatPlugin.VoiceSceneInputPolicy.ResolvePreviousSceneName(
+                eventPreviousScene,
+                nextScene,
+                cachedActiveScene,
+                sceneBeforeLoad));
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, true)]
+    public void ModalAndSessionBoundariesOverrideSceneHoldContinuity(
+        bool preserveHeldTransmitInputs,
+        bool panelWasOpen,
+        bool expectedRelease)
+        => Assert.Equal(expectedRelease,
+            VoiceChatPlugin.VoiceSceneInputPolicy.ShouldReleaseHeldTransmitInputs(
+                preserveHeldTransmitInputs,
+                panelWasOpen));
 
     [Theory]
     [InlineData(true, true, true, true, false, true)]
@@ -119,6 +175,21 @@ public sealed class ManagedVoiceHardeningTests
         }
     }
 
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Unknown, false)]
+    [InlineData((int)VoiceGamePhase.Menu, false)]
+    [InlineData((int)VoiceGamePhase.Lobby, false)]
+    [InlineData((int)VoiceGamePhase.Intro, false)]
+    [InlineData((int)VoiceGamePhase.Tasks, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, false)]
+    [InlineData((int)VoiceGamePhase.Exile, false)]
+    [InlineData((int)VoiceGamePhase.EndGame, false)]
+    public void BuiltInBlindMuffleAppliesOnlyDuringTasks(int phaseValue, bool expected)
+        => Assert.Equal(
+            expected,
+            VoiceRoleMuteState.ShouldApplyBlindedOrFlashedMuffle(
+                (VoiceGamePhase)phaseValue));
+
     [Fact]
     public void JoinGuardVersionMatchesBuiltPluginVersion()
     {
@@ -150,20 +221,22 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Theory]
-    [InlineData(true, false, false, false, false)]
-    [InlineData(false, true, false, false, false)]
-    [InlineData(false, false, true, false, false)]
-    [InlineData(false, false, false, true, false)]
-    [InlineData(false, false, false, false, true)]
+    [InlineData(true, false, false, false, false, false)]
+    [InlineData(false, true, false, false, false, false)]
+    [InlineData(false, false, true, false, false, false)]
+    [InlineData(false, false, false, true, false, false)]
+    [InlineData(false, false, false, false, true, false)]
+    [InlineData(false, false, false, false, false, true)]
     public void EveryIndependentTransmitBlockMutesCaptureButNotTheSpeaker(
         bool speakerMuted,
         bool manualMuted,
+        bool pushToMuteMuted,
         bool pushToTalkMuted,
         bool roleMuted,
         bool policyMuted)
     {
         Assert.True(VoiceChatHudState.CombineTransmitMute(
-            speakerMuted, manualMuted, pushToTalkMuted, roleMuted, policyMuted));
+            speakerMuted, manualMuted, pushToMuteMuted, pushToTalkMuted, roleMuted, policyMuted));
     }
 
     [Fact]
@@ -175,6 +248,7 @@ public sealed class ManagedVoiceHardeningTests
         Assert.True(VoiceChatHudState.CombineTransmitMute(
             speakerMuted: true,
             manualMuted: false,
+            pushToMuteMuted: false,
             pushToTalkMuted: false,
             roleMuted: false,
             policyMuted: false));
@@ -348,8 +422,9 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(14, SidecarVoiceClient.Proto);
+        Assert.Equal(15, SidecarVoiceClient.Proto);
         Assert.Equal(5, SidecarProtocol.MobileAbi);
+        Assert.Equal("warm", DecodeControl(SidecarProtocol.WarmFrame()).GetProperty("op").GetString());
     }
 
     [Theory]

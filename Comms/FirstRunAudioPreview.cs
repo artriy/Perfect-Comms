@@ -420,6 +420,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
             (_, _, _) => { },
             OnLevel,
             _ => { },
+            _ => { },
             OnPlaybackState);
         _lease = SidecarVoiceHost.TryAcquire(callbacks, out string failure);
         if (_lease == null)
@@ -569,6 +570,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 (_, _, _) => { },
                 (_, _, _) => { },
                 OnLevel,
+                _ => { },
                 _ => { },
                 OnPlaybackState);
             _lease = SidecarVoiceHost.TryAcquire(callbacks, out string failure);

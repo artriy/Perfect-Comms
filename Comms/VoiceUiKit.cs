@@ -84,17 +84,33 @@ internal static class VoiceUiKit
         VoiceFirstRunSetup.IsOpen || VoiceSettingsPanel.IsOpen ||
         HostSettingsPanel.IsOpen || VoiceVolumeMenu.IsOpen;
 
-    internal static void ClosePersistentPanels(string reason)
+    internal static void ClosePersistentPanels(string reason, bool preserveHeldTransmitInputs)
     {
         // These panels live on the persistent overlay canvas, so scene destruction cannot close
-        // them for us. Close every settings surface at a scene/session boundary and release any
-        // transmit hold captured before the modal appeared.
+        // them for us. A modal that was actually open remains a privacy boundary even during a
+        // continuous EndGame/lobby handoff; every panel also releases holds when it opens, and this
+        // snapshot keeps the close path independently fail-closed.
+        bool releaseHeldTransmitInputs =
+            global::VoiceChatPlugin.VoiceSceneInputPolicy.ShouldReleaseHeldTransmitInputs(
+                preserveHeldTransmitInputs,
+                AnyPanelOpen);
         try { VoiceFirstRunSetup.ForceClose(); } catch { }
         try { VoiceSettingsPanel.ForceClose(); } catch { }
         try { HostSettingsPanel.ForceClose(); } catch { }
         try { VoiceVolumeMenu.ForceClose(); } catch { }
-        try { VoiceChatPatches.ReleaseHeldTransmitInputs(); } catch { }
-        try { VoiceDiagnostics.Log("voice.ui.panels_closed", $"reason={reason}"); } catch { }
+        try
+        {
+            if (releaseHeldTransmitInputs)
+                VoiceChatPatches.ReleaseHeldTransmitInputs();
+        }
+        catch { }
+        try
+        {
+            VoiceDiagnostics.Log(
+                "voice.ui.panels_closed",
+                $"reason={reason} transmitHolds={(releaseHeldTransmitInputs ? "released" : "preserved")}");
+        }
+        catch { }
     }
 
     private static bool _swallowActive;
@@ -1147,10 +1163,13 @@ internal static class VoiceUiKit
         private Image _knobImg = null!;
         private Image _knobShadow = null!;
         private float _knobT;
+        private bool _stacked;
 
         public ToggleRow(Func<bool> get, Action<bool> set) { _get = get; _set = set; }
 
-        protected override float LabelColW => Mathf.Round(PaneW - EdgePad * 2f - ColGap - 66f);
+        protected override float LabelColW => _stacked
+            ? Mathf.Round(PaneW - 24f)
+            : Mathf.Round(PaneW - EdgePad * 2f - ColGap - 66f);
 
         public ToggleRow Build(
             RectTransform pane,
@@ -1158,14 +1177,42 @@ internal static class VoiceUiKit
             float width,
             float y,
             float height,
-            string? helpText = null)
+            string? helpText = null,
+            bool stacked = false)
         {
+            _stacked = stacked;
             BuildBase(pane, label, width, y, height, helpText);
+            if (_stacked)
+            {
+                Title.fontSizeMin = 15f;
+                Title.rectTransform.Anchor(
+                    new Vector2(0f, 1f),
+                    new Vector2(0f, 1f),
+                    new Vector2(0f, 1f));
+                Title.rectTransform.sizeDelta =
+                    new Vector2(Title.rectTransform.sizeDelta.x, 20f);
+                Title.rectTransform.anchoredPosition = new Vector2(12f, 0f);
+            }
 
             var trackRt = Rect("Track", Root);
-            trackRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            trackRt.sizeDelta = new Vector2(66f, 34f);
-            trackRt.anchoredPosition = new Vector2(ControlLeft, 0f);
+            if (_stacked)
+            {
+                trackRt.Anchor(
+                    new Vector2(0.5f, 0f),
+                    new Vector2(0.5f, 0f),
+                    new Vector2(0.5f, 0f));
+                trackRt.sizeDelta = new Vector2(66f, 34f);
+                trackRt.anchoredPosition = Vector2.zero;
+            }
+            else
+            {
+                trackRt.Anchor(
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f));
+                trackRt.sizeDelta = new Vector2(66f, 34f);
+                trackRt.anchoredPosition = new Vector2(ControlLeft, 0f);
+            }
 
             _glow = GlowImage("TrackGlow", trackRt, Clear);
             _glow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));

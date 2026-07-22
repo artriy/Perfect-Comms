@@ -588,5 +588,35 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.False(SidecarVoiceClient.TryReadPlaybackState(
             "{\"direction\":\"capture\",\"state\":\"stream-started\",\"stream_generation\":1}",
             out _));
+
+    }
+
+    [Fact]
+    public void CaptureMediaStateParserExposesWarmReadinessWithoutAcceptingPlayback()
+    {
+        const string warm = """
+            {"op":"media-state","direction":"capture","state":"command-accepted",
+             "action":"warm","stream_generation":7,"running":true,"changed":false}
+            """;
+        const string callback = """
+            {"op":"media-state","direction":"capture","state":"first-callback",
+             "stream_generation":7,"running":true}
+            """;
+
+        Assert.True(SidecarVoiceClient.TryReadCaptureState(warm, out var acknowledgement));
+        Assert.Equal("warm", acknowledgement.Action);
+        Assert.Equal((ulong)7, acknowledgement.StreamGeneration);
+        Assert.True(acknowledgement.Running);
+        Assert.False(acknowledgement.Changed);
+
+        Assert.True(SidecarVoiceClient.TryReadCaptureState(callback, out var ready));
+        Assert.Equal("first-callback", ready.State);
+        Assert.True(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(7, ready));
+        Assert.False(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(
+            8,
+            ready));
+        Assert.False(SidecarVoiceClient.TryReadCaptureState(
+            "{\"direction\":\"playback\",\"state\":\"first-callback\",\"stream_generation\":7}",
+            out _));
     }
 }

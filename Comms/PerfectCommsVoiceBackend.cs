@@ -210,6 +210,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
     private volatile bool _microphoneRequested;
     private volatile bool _sidecarCaptureAwaitingFirstLevel;
+    private ulong _sidecarCaptureStreamGeneration;
     private long _sidecarCaptureSourceGeneration;
     private long _sidecarCaptureProvenGeneration;
     private long _sidecarCaptureAttemptGeneration;
@@ -784,6 +785,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
     }
     private volatile bool _mute;
+    private volatile bool _keepCaptureWarm;
     public bool Mute => _mute;
     public float LocalLevel => _localLevel;
     public bool LocalSpeaking => _localSpeaking;
@@ -933,28 +935,33 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return false;
     }
 
-    public void SetMute(bool mute)
+    public void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
-        if (_mute == mute) return;
+#if !WINDOWS
+        keepCaptureWarm = false;
+#endif
+        if (_mute == mute && _keepCaptureWarm == keepCaptureWarm) return;
 #if WINDOWS
         SidecarVoiceLease? sidecarVoice;
         long sidecarSessionGeneration;
         long captureSourceGeneration;
+        bool captureWasWarm;
         bool resumeSidecarDirectly;
         lock (_voiceSync)
         {
             sidecarVoice = _voice;
             sidecarSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
             captureSourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
+            captureWasWarm = _keepCaptureWarm;
             resumeSidecarDirectly = !mute && _microphoneReady && _voiceReady && sidecarVoice != null;
-            if (!mute && captureSourceGeneration > 0)
+            if (!mute && !captureWasWarm && captureSourceGeneration > 0)
                 DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: true);
         }
 #endif
+        _keepCaptureWarm = keepCaptureWarm;
         _mute = mute;
         if (mute)
         {
-
             _localLevel = 0f;
             _localSpeaking = false;
         }
@@ -963,23 +970,37 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _btMuteReleaseRequested = false;
         if (mute)
         {
-            lock (_voiceSync)
+            if (keepCaptureWarm)
             {
-                captureSourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
-                if (captureSourceGeneration > 0)
-                    DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: false);
+                _microphoneRequested = true;
+                if (sidecarVoice != null)
+                    sidecarVoice.SetMicWarm();
+                else
+                    QueueMicrophoneTransition(true, "ptt-warm");
             }
-            sidecarVoice?.SetMicActive(false);
+            else
+            {
+                lock (_voiceSync)
+                {
+                    captureSourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
+                    if (captureSourceGeneration > 0)
+                        DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: false);
+                }
+                sidecarVoice?.SetMicActive(false);
+            }
         }
         else if (resumeSidecarDirectly && sidecarVoice != null)
         {
             sidecarVoice.SetMicActive(true);
-            lock (_voiceSync)
+            if (!captureWasWarm)
             {
-                resumeSidecarDirectly = IsCurrentVoiceSessionLocked(
-                    sidecarVoice,
-                    sidecarSessionGeneration)
-                    && ArmSidecarCaptureEvidenceLocked(captureSourceGeneration, captureActive: true);
+                lock (_voiceSync)
+                {
+                    resumeSidecarDirectly = IsCurrentVoiceSessionLocked(
+                        sidecarVoice,
+                        sidecarSessionGeneration)
+                        && ArmSidecarCaptureEvidenceLocked(captureSourceGeneration, captureActive: true);
+                }
             }
         }
         if (!mute && !resumeSidecarDirectly)
@@ -993,9 +1014,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         else if (mute) _mobileVoice?.SetMicActive(false);
         else StartAndroidMicrophone("unmuted");
 #endif
-        VoiceDiagnostics.Log("voice.mute", $"mute={Mute} micReady={_microphoneReady} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)}");
+        VoiceDiagnostics.Log(
+            "voice.mute",
+            $"mute={Mute} captureWarm={_keepCaptureWarm.ToString().ToLowerInvariant()} micReady={_microphoneReady} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)}");
     }
-    public void ToggleMute() => SetMute(!Mute);
     private volatile bool _loopBack;
     private volatile bool _loopBackDelayed;
     private volatile float _loopBackGain = 1f;
@@ -1250,8 +1272,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         if (Mute)
         {
-            QueueMicrophoneTransition(false, "set-muted");
-            VoiceDiagnostics.Log("voice.mic", $"ready=false muted=true device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)}");
+            QueueMicrophoneTransition(_keepCaptureWarm, _keepCaptureWarm ? "set-warm" : "set-muted", restartSidecar);
+            VoiceDiagnostics.Log(
+                "voice.mic",
+                $"ready={_microphoneReady} muted=true captureWarm={_keepCaptureWarm.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} callbacks={Volatile.Read(ref _micCallbacks)} bytes={Volatile.Read(ref _micBytes)}");
             return;
         }
 
@@ -1552,6 +1576,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 OnHelperPeerState,
                 (peak, speaking) => OnSidecarLevel(sessionGeneration, peak, speaking),
                 OnSidecarPeerLevels,
+                state => OnSidecarCaptureState(sessionGeneration, state),
                 state => OnSidecarPlaybackState(sessionGeneration, state));
             var voice = SidecarVoiceHost.TryAcquire(callbacks, out var failure);
             if (voice == null)
@@ -1611,6 +1636,84 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 $"code={code} requested={_microphoneRequested} helperReady={_voiceReady} action=native-retry");
             try { VoiceChatHudState.ShowToastThreadSafe("Microphone unavailable - retrying device"); } catch { }
         });
+    }
+
+    internal static bool CaptureStateGenerationMatches(
+        ulong expectedGeneration,
+        SidecarCaptureState state)
+        => expectedGeneration == 0 || state.StreamGeneration == 0 ||
+           expectedGeneration == state.StreamGeneration;
+
+    private void OnSidecarCaptureState(long sessionGeneration, SidecarCaptureState state)
+    {
+        bool readyChanged = false;
+        lock (_voiceSync)
+        {
+            if (_disposed ||
+                sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
+                _voice == null)
+                return;
+
+            if (state.State == "command-accepted")
+            {
+                if (state.Action == "stop")
+                {
+                    _sidecarCaptureStreamGeneration = state.StreamGeneration;
+                    readyChanged = _microphoneReady;
+                    _microphoneReady = false;
+                    _sidecarCaptureAwaitingFirstLevel = false;
+                }
+                else if (state.Action is "start" or "warm" && state.Changed)
+                {
+                    _sidecarCaptureStreamGeneration = state.StreamGeneration;
+                    readyChanged = _microphoneReady;
+                    _microphoneReady = false;
+                    _sidecarCaptureAwaitingFirstLevel = false;
+                }
+            }
+            else if (state.State is "starting" or "stream-started")
+            {
+                if (state.StreamGeneration == 0)
+                    return;
+                _sidecarCaptureStreamGeneration = state.StreamGeneration;
+                readyChanged = _microphoneReady;
+                _microphoneReady = false;
+                _sidecarCaptureAwaitingFirstLevel = false;
+            }
+            else if (state.State == "first-callback")
+            {
+                if (!state.Running ||
+                    !CaptureStateGenerationMatches(_sidecarCaptureStreamGeneration, state) ||
+                    !_microphoneRequested ||
+                    (Mute && !_keepCaptureWarm))
+                    return;
+
+                _sidecarCaptureStreamGeneration = state.StreamGeneration;
+                Volatile.Write(
+                    ref _sidecarCaptureProvenGeneration,
+                    Volatile.Read(ref _sidecarCaptureSourceGeneration));
+                _sidecarCaptureAwaitingFirstLevel = false;
+                readyChanged = !_microphoneReady;
+                _microphoneReady = true;
+            }
+            else if (state.State is "stopped" or "error")
+            {
+                if (!CaptureStateGenerationMatches(_sidecarCaptureStreamGeneration, state))
+                    return;
+                readyChanged = _microphoneReady;
+                _microphoneReady = false;
+                _sidecarCaptureAwaitingFirstLevel = false;
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        if (readyChanged)
+            VoiceDiagnostics.Log(
+                "voice.mic.state",
+                $"state={state.State} action={state.Action} ready={_microphoneReady.ToString().ToLowerInvariant()} generation={state.StreamGeneration} captureWarm={_keepCaptureWarm.ToString().ToLowerInvariant()}");
     }
 
     internal static bool SpeakerPlaybackStateMatchesRequest(
@@ -2160,6 +2263,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         string currentSpk;
         long configuredSpeakerRevision;
         bool micActive;
+        bool micWarm;
         long sourceGeneration;
         var staleBeforeConfiguration = false;
         lock (_voiceSync)
@@ -2176,6 +2280,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 currentSpk = _lastSpeakerDeviceName;
                 configuredSpeakerRevision = Volatile.Read(ref _speakerSelectionRevision);
                 micActive = !Mute && _microphoneRequested;
+                micWarm = Mute && _keepCaptureWarm && _microphoneRequested;
                 sourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
                 // Initial configuration is a stop/select/synthetic/start command group. Disarm before
                 // sending it so no callback queued by a pre-configuration producer can mark it ready.
@@ -2188,6 +2293,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 currentSpk = string.Empty;
                 configuredSpeakerRevision = 0;
                 micActive = false;
+                micWarm = false;
                 sourceGeneration = 0;
             }
         }
@@ -2210,6 +2316,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _noiseGateThreshold,
             _captureOptions.SyntheticMicToneEnabled,
             micActive,
+            micWarm,
             pendingIce);
 
         if (configured)
@@ -2287,7 +2394,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 // A fresh native GameState starts empty. Force the first mixer snapshot through
                 // even if the previous helper sent the same fingerprint less than one second ago.
                 _gameStateSendGate.Reset();
-                ArmSidecarCaptureEvidenceLocked(sourceGeneration, micActive);
+                if (micActive && !_microphoneReady)
+                    ArmSidecarCaptureEvidenceLocked(sourceGeneration, captureActive: true);
                 StartVoicePump();
                 if (outputDevices.Length > 0)
                     VoiceChatLocalSettings.SetSpkDevicesFromSidecar(outputDevices);
@@ -2595,8 +2703,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 voice = _voice;
                 sessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
                 sourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
-                if (voice != null)
-                    DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: !Mute);
+                if (voice != null && !Mute)
+                    DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: true);
             }
             if (voice != null)
             {
@@ -2607,7 +2715,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 voice.SelectMicDevice(_lastMicDeviceName);
                 voice.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
                 voice.SetSynthetic(_captureOptions.SyntheticMicToneEnabled);
-                voice.SetMicActive(!Mute);
+                if (!Mute)
+                    voice.SetMicActive(true);
+                else if (_keepCaptureWarm)
+                    voice.SetMicWarm();
+                else
+                    voice.SetMicActive(false);
             }
             var voiceHealth = voice?.Health ?? CaptureHealth.Dead;
             lock (_voiceSync)
@@ -2618,7 +2731,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                                         && voiceHealth == CaptureHealth.Healthy;
                 if (currentAndHealthy)
                 {
-                    ArmSidecarCaptureEvidenceLocked(sourceGeneration, captureActive: !Mute);
+                    if (!Mute && !_microphoneReady)
+                        ArmSidecarCaptureEvidenceLocked(sourceGeneration, captureActive: true);
                 }
                 else if (sourceGeneration == Volatile.Read(ref _sidecarCaptureSourceGeneration))
                 {
@@ -2627,7 +2741,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 }
             }
             Interlocked.Exchange(ref _speakerTopologyFastUntilTicks, (DateTime.UtcNow + SpeakerTopologyFastWindow).Ticks);
-            VoiceDiagnostics.Log("voice.mic", $"ready={_microphoneReady} requested=true reason={reason} capture={(_captureOptions.SyntheticMicToneEnabled ? "sidecar-synthetic" : "sidecar")} restart={restartCapture.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00} vad={_vadThreshold:0.0000}");
+            VoiceDiagnostics.Log("voice.mic", $"ready={_microphoneReady} requested=true reason={reason} capture={(_captureOptions.SyntheticMicToneEnabled ? "sidecar-synthetic" : "sidecar")} restart={restartCapture.ToString().ToLowerInvariant()} captureWarm={_keepCaptureWarm.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} captureFormat=\"48000Hz/float/mono\" volume={_micVolume:0.00} vad={_vadThreshold:0.0000}");
         }
         catch (Exception ex)
         {
@@ -3659,7 +3773,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
     private void MaybeReleaseBluetoothMutedMicrophone()
     {
-        if (!Mute || !_microphoneReady || !_btProfileConflict || _btMuteReleaseRequested) return;
+        if (!Mute || _keepCaptureWarm || !_microphoneReady || !_btProfileConflict || _btMuteReleaseRequested) return;
         if (_muteSinceUtc == DateTime.MinValue || DateTime.UtcNow - _muteSinceUtc < BtMutedMicReleaseDelay) return;
         _btMuteReleaseRequested = true;
         VoiceDiagnostics.Log("voice.mic", $"reason=muted-bt-release device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)}");
@@ -3854,7 +3968,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             result = VoiceProximityCalculator.ApplyExternalAudioEffects(result, target, snapshot.Phase);
             if (snapshot.Phase != VoiceGamePhase.EndGame &&
                 result.Audible &&
-                VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame())
+                VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame(snapshot.Phase))
                 result = result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)

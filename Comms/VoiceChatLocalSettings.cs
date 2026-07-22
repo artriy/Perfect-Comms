@@ -268,6 +268,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<bool> EchoCancellationEnabled { get; }
     public ConfigEntry<bool> StartMuted { get; }
     public ConfigEntry<bool> StartDeafened { get; }
+    public ConfigEntry<bool> AllowKeybindsWhileChatOpen { get; }
     public ConfigEntry<MicDeviceEnum> MicrophoneDeviceIndex { get; }
 #if WINDOWS
     public ConfigEntry<SpkDeviceEnum> SpeakerDeviceIndex { get; }
@@ -275,6 +276,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> ButtonPositionX { get; }
     public ConfigEntry<float> ButtonPositionY { get; }
     public ConfigEntry<bool> ShowMuteDeafenStatusAlerts { get; }
+    public ConfigEntry<bool> ShowVoiceConnectionStatus { get; }
     public ConfigEntry<bool> DisableVoiceControlsHud { get; }
     public ConfigEntry<VoiceControlsLayout> VoiceControlsLayout { get; }
     public ConfigEntry<bool> DisableSpeakingBar { get; }
@@ -467,6 +469,13 @@ public class VoiceChatLocalSettings
         StartDeafened = config.Bind("Audio", "StartDeafened", false,
             new ConfigDescription("Starts each voice session deafened: voice playback is muted and microphone transmission is paused until you undeafen."));
 
+        AllowKeybindsWhileChatOpen = config.Bind(
+            "Keybinds",
+            "AllowKeybindsWhileChatOpen",
+            false,
+            new ConfigDescription(
+                "Lets Perfect Comms shortcuts run while Among Us chat is open. Printable shortcuts can both trigger their action and type into the message."));
+
         _savedMicDeviceId = config.Bind("Audio", "MicDeviceId", "",
             "Stable microphone device identifier. Display names are stored separately and are not used for selection.");
         _savedMicDeviceName = config.Bind("Audio", "MicDeviceName", "",
@@ -579,6 +588,9 @@ public class VoiceChatLocalSettings
 
         ShowMuteDeafenStatusAlerts = config.Bind("UI", "ShowMuteDeafenStatusAlerts", true,
             new ConfigDescription("Shows a small persistent HUD reminder while the microphone is muted or voice playback is deafened."));
+
+        ShowVoiceConnectionStatus = config.Bind("UI", "ShowVoiceConnectionStatus", true,
+            new ConfigDescription("Shows voice connection progress in the lobby and active retry failures in other phases."));
 
         DisableVoiceControlsHud = config.Bind("UI", "DisableVoiceControlsHud", false,
             new ConfigDescription("Hides the microphone, speaker, and mobile radio controls while keeping their keybinds and the Jailor unmute button active."));
@@ -1652,6 +1664,10 @@ public class VoiceChatLocalSettings
                 VoiceChatRoom.Current?.SetSpeaker(id);
         }
 #endif
+        else if (configEntry == ShowVoiceConnectionStatus)
+        {
+            VoiceHudWarnings.Invalidate();
+        }
         else if (configEntry == DisableVoiceControlsHud ||
                  configEntry == ButtonPositionX || configEntry == ButtonPositionY ||
                  configEntry == VoiceControlsLayout)

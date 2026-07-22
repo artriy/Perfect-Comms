@@ -99,6 +99,7 @@ public class VoiceChatRoom
     // backend observes this value before opening a microphone, so StartMuted/PTT/deafen state can
     // never race an early OnGameJoined transport bootstrap.
     public bool Mute  { get; private set; } = true;
+    private bool _keepCaptureWarm;
     public int  SampleRate => AudioHelpers.ClockRate;
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
     private bool _voiceRoutingPolicyReady;
@@ -333,10 +334,14 @@ public class VoiceChatRoom
 
     public void RebuildCaptureSupervisor() => _perfectCommsVoice?.RebuildCaptureSupervisor();
 
-    public void SetMute(bool mute)
+    internal void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
+#if !WINDOWS
+        keepCaptureWarm = false;
+#endif
         bool wasMuted = Mute;
         Mute = mute;
+        _keepCaptureWarm = keepCaptureWarm;
 #if ANDROID
         if (!mute && !Application.HasUserAuthorization(UserAuthorization.Microphone))
         {
@@ -347,15 +352,16 @@ public class VoiceChatRoom
         }
         else
         {
-            _voiceBackend?.SetMute(mute);
+            _voiceBackend?.SetMicrophonePolicy(mute, keepCaptureWarm);
         }
 #else
-        _voiceBackend?.SetMute(mute);
+        _voiceBackend?.SetMicrophonePolicy(mute, keepCaptureWarm);
 #endif
         if (!mute && wasMuted)
             StartBootstrapWindow("local unmuted");
     }
 
+    public void SetMute(bool mute) => SetMicrophonePolicy(mute, _keepCaptureWarm);
     public void ToggleMute() => SetMute(!Mute);
     public bool SetLoopBack(bool enabled, bool delayed = false, float gain = 1f)
     {
@@ -419,7 +425,7 @@ public class VoiceChatRoom
         if (Volatile.Read(ref _closed) != 0 || !ReferenceEquals(Current, this) || Mute)
             return;
         StartMicNow(deviceName);
-        _voiceBackend?.SetMute(false);
+        _voiceBackend?.SetMicrophonePolicy(false, keepCaptureWarm: false);
     }
 #endif
 
@@ -1205,7 +1211,7 @@ public class VoiceChatRoom
         {
             VoiceDiagnostics.DebugError($"[VC] HUD prewarm failed during transport bootstrap: {ex.Message}");
         }
-        backend.SetMute(Mute);
+        backend.SetMicrophonePolicy(Mute, _keepCaptureWarm);
         backend.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(settings?.MasterVolume.Value ?? 1f));
         backend.SetNoiseGate(
             ApplyMicSensitivity(settings?.NoiseGateThreshold.Value ?? 0.003f, settings?.MicSensitivity.Value ?? 1f),
@@ -2018,7 +2024,11 @@ public class VoiceChatRoom
         RunCleanupStep("hud-session-reset", VoiceChatHudState.EndVoiceSession);
         RunCleanupStep("scene-state-reset", VoiceSceneState.Reset);
         if (clearUi)
-            RunCleanupStep("persistent-panels", () => VoiceUiKit.ClosePersistentPanels($"session:{reason}"));
+            RunCleanupStep(
+                "persistent-panels",
+                () => VoiceUiKit.ClosePersistentPanels(
+                    $"session:{reason}",
+                    preserveHeldTransmitInputs: false));
     }
 
     private void TryUpdateLocalProfile()  => UpdateLocalProfile(false);

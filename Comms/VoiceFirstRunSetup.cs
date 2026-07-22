@@ -66,6 +66,7 @@ internal static class VoiceFirstRunSetup
     private static TextMeshProUGUI? _promptMessage;
     private static VoiceUiKit.Row? _pushToTalkRow;
     private static CanvasGroup? _pushToTalkGroup;
+    private static bool _builtHudSpeakingBarHidden;
 
     private static int _page;
     private static int _inputLockedUntilFrame;
@@ -202,7 +203,7 @@ internal static class VoiceFirstRunSetup
         _pageAppear = Mathf.MoveTowards(_pageAppear, 1f, dt / 0.20f);
         _hudReveal = Mathf.MoveTowards(
             _hudReveal,
-            !_completed && _page == HudPage ? 1f : 0f,
+            !_completed && _page == HudPage && _draft?.HideSpeakingBar != true ? 1f : 0f,
             dt / 0.28f);
 
         // Keep local audio cleanup and Android tone completion running even while the close
@@ -513,6 +514,13 @@ internal static class VoiceFirstRunSetup
             .Build(talk, "Start deafened", leftW, -207f, 54f,
                 "Join each voice room with playback muted and microphone transmission paused until you undeafen."));
 
+#if WINDOWS
+        AddRow(new VoiceUiKit.ToggleRow(
+                () => _draft.AllowKeybindsWhileChatOpen,
+                value => _draft.AllowKeybindsWhileChatOpen = value)
+            .Build(talk, "Allow keybinds in chat", leftW, -261f, 54f,
+                "Keeps Perfect Comms shortcuts active while typing. Printable shortcut keys can also type into chat."));
+#else
         var modeNotice = BuildInlineNotice(talk, 20f, -270f, leftW - 40f, 59f,
             "", VoiceUiKit.Accent);
         _micModeHelpText = modeNotice.GetComponentInChildren<TextMeshProUGUI>();
@@ -521,20 +529,24 @@ internal static class VoiceFirstRunSetup
             _micModeHelpText.enableWordWrapping = true;
             _micModeHelpText.overflowMode = TextOverflowModes.Overflow;
         }
+#endif
 
 #if WINDOWS
         AddCardTitle(binds, "Keyboard shortcuts", "Select a shortcut, then press a key or chord.");
-        AddBindingRow(binds, rightW, -63f, "Mute / unmute microphone",
+        AddBindingRow(binds, rightW, -62f, "Mute / unmute microphone",
             () => _draft.ToggleMute, v => _draft.ToggleMute = v,
             null);
-        _pushToTalkRow = AddBindingRow(binds, rightW, -128f, "Push to Talk (hold)",
+        AddBindingRow(binds, rightW, -116f, "Push to Mute",
+            () => _draft.PushToMute, v => _draft.PushToMute = v,
+            "Your microphone stays muted only while this shortcut is held.");
+        _pushToTalkRow = AddBindingRow(binds, rightW, -170f, "Push to Talk (hold)",
             () => _draft.PushToTalk, v => _draft.PushToTalk = v,
             "Required only when Push to Talk mode is selected.");
         _pushToTalkGroup = _pushToTalkRow.Root.gameObject.AddComponent<CanvasGroup>();
-        AddBindingRow(binds, rightW, -193f, "Deafen / undeafen",
+        AddBindingRow(binds, rightW, -224f, "Deafen / undeafen",
             () => _draft.ToggleSpeaker, v => _draft.ToggleSpeaker = v,
             null);
-        AddBindingRow(binds, rightW, -258f, "Open voice menu",
+        AddBindingRow(binds, rightW, -278f, "Open voice menu",
             () => _draft.OpenVoiceSettings, v => _draft.OpenVoiceSettings = v,
             null);
 #else
@@ -550,20 +562,81 @@ internal static class VoiceFirstRunSetup
         if (_pageRoot == null || _shell == null || _draft == null) return;
         _hudDescriptionText = BuildPageHeading(
             "Choose your HUD",
-            "Hover a layout to preview it live. Select one to use it.");
+            "Choose what appears in game, then preview a speaking-bar layout.");
         EnsureHudPreview();
 
-        const float previewW = 424f;
+        const float visibilityGap = 10f;
+        const float visibilityCardH = 62f;
+        float visibilityW = (ContentWidth - visibilityGap * 3f) / 4f;
+
+        var controlsVisibility = BuildCard(
+            _pageRoot, "ControlsVisibility", 0f, ContentTopY,
+            visibilityW, visibilityCardH);
+        AddRow(new VoiceUiKit.ToggleRow(
+                () => _draft.HideVoiceControls,
+                value => _draft.HideVoiceControls = value)
+            .Build(controlsVisibility, "Hide controls", visibilityW, -4f, 54f,
+                "Hides the microphone, deafen, and radio controls. Keyboard shortcuts still work.",
+                stacked: true));
+
+        var barVisibility = BuildCard(
+            _pageRoot, "SpeakingBarVisibility", visibilityW + visibilityGap, ContentTopY,
+            visibilityW, visibilityCardH);
+        AddRow(new VoiceUiKit.ToggleRow(
+                () => _draft.HideSpeakingBar,
+                value => _draft.HideSpeakingBar = value)
+            .Build(barVisibility, "Hide speaking bar", visibilityW, -4f, 54f,
+                "Hides the in-game speaking bar and its layout preview.",
+                stacked: true));
+
+        var meetingVisibility = BuildCard(
+            _pageRoot, "MeetingOverlayVisibility",
+            (visibilityW + visibilityGap) * 2f, ContentTopY,
+            visibilityW, visibilityCardH);
+        AddRow(new VoiceUiKit.ToggleRow(
+                () => _draft.HideMeetingOverlay,
+                value => _draft.HideMeetingOverlay = value)
+            .Build(meetingVisibility, "Hide meeting overlay", visibilityW, -4f, 54f,
+                "Hides the colored speaking glow around meeting cards.",
+                stacked: true));
+
+        var connectionVisibility = BuildCard(
+            _pageRoot, "ConnectionStatusVisibility",
+            (visibilityW + visibilityGap) * 3f, ContentTopY,
+            visibilityW, visibilityCardH);
+        AddRow(new VoiceUiKit.ToggleRow(
+                () => _draft.HideConnectionStatus,
+                value => _draft.HideConnectionStatus = value)
+            .Build(connectionVisibility, "Hide connection status", visibilityW, -4f, 54f,
+                "Hides lobby connection progress and active retry messages.",
+                stacked: true));
+
+        _builtHudSpeakingBarHidden = _draft.HideSpeakingBar;
+        if (_draft.HideSpeakingBar)
+        {
+            BuildInlineNotice(
+                _pageRoot,
+                120f,
+                ContentTopY - 164f,
+                ContentWidth - 240f,
+                92f,
+                "The speaking bar is hidden. Turn off Hide speaking bar to choose and preview a layout.",
+                SetupTextSecondary);
+            return;
+        }
+
+        float previewW = SpeakingBarLivePreview.EmbeddedCardSize.x;
         const float previewGap = 18f;
+        const float layoutTopY = ContentTopY - 76f;
         float pickerW = ContentWidth - previewW - previewGap;
 
         AddText(_pageRoot, "MOST COMMON", 16f, VoiceUiKit.Accent,
             TextAlignmentOptions.Left, FontStyles.Bold,
-            new Vector2(1f, ContentTopY), new Vector2(pickerW - 2f, 20f));
+            new Vector2(1f, layoutTopY), new Vector2(pickerW - 2f, 20f));
 
         const float commonGap = 8f;
-        const float commonCardH = 56f;
-        const float commonY = ContentTopY - 24f;
+        const float commonCardH = 44f;
+        const float commonY = layoutTopY - 22f;
         float commonCardW = (pickerW - commonGap * 2f) / 3f;
         for (int i = 0; i < FirstRunHudPresets.CommonCount; i++)
         {
@@ -577,15 +650,15 @@ internal static class VoiceFirstRunSetup
             HudCards.Add(card);
         }
 
-        const float moreLabelY = commonY - commonCardH - 8f;
+        const float moreLabelY = commonY - commonCardH - 6f;
         AddText(_pageRoot, "MORE LAYOUTS", 16f, SetupTextSecondary,
             TextAlignmentOptions.Left, FontStyles.Bold,
             new Vector2(1f, moreLabelY), new Vector2(pickerW - 2f, 20f));
 
         const float moreGapX = 10f;
-        const float moreGapY = 6f;
-        const float moreCardH = 45f;
-        const float moreY = moreLabelY - 26f;
+        const float moreGapY = 5f;
+        const float moreCardH = 34f;
+        const float moreY = moreLabelY - 22f;
         float moreCardW = (pickerW - moreGapX) * 0.5f;
         for (int i = FirstRunHudPresets.CommonCount; i < FirstRunHudPresets.All.Count; i++)
         {
@@ -637,21 +710,27 @@ internal static class VoiceFirstRunSetup
 #else
             _draft.MicMode == VoiceMicMode.PushToTalk
                 ? "PTT: " + _draft.PushToTalk.Label
-                : "Mute mic: " + _draft.ToggleMute.Label,
-            "Voice menu: " + _draft.OpenVoiceSettings.Label,
+                : "Mute toggle: " + _draft.ToggleMute.Label,
+            $"Push to Mute: {_draft.PushToMute.Label} / Menu: {_draft.OpenVoiceSettings.Label}",
 #endif
             $"Start muted: {YesNo(_draft.StartMuted)} / Start deafened: {YesNo(_draft.StartDeafened)}",
         }, () => GoTo(ControlsPage));
 
-        string hudName = _draft.SelectedHudPreset >= 0
-            ? FirstRunHudPresets.All[_draft.SelectedHudPreset].Name
-            : "Custom layout";
+        string hudName = _draft.HideSpeakingBar
+            ? "Speaking bar hidden"
+            : _draft.SelectedHudPreset >= 0
+                ? FirstRunHudPresets.All[_draft.SelectedHudPreset].Name
+                : "Custom layout";
         BuildSummaryCard((w + gap) * 2f, w, "HUD", new[]
         {
             hudName,
-            HudPlacementSummary(_draft.Hud),
-            $"Scale {Mathf.RoundToInt(_draft.Hud.Scale * 100f)}%",
-            _draft.Hud.Backdrop ? "Backdrop on" : "Backdrop off",
+            $"Controls {ShownHidden(_draft.HideVoiceControls)} / Connection status {ShownHidden(_draft.HideConnectionStatus)}",
+            _draft.HideSpeakingBar
+                ? $"Meeting glow {ShownHidden(_draft.HideMeetingOverlay)} / Speaking bar hidden"
+                : $"Meeting glow {ShownHidden(_draft.HideMeetingOverlay)} / {HudPlacementSummary(_draft.Hud)}",
+            _draft.HideSpeakingBar
+                ? "Layout can be restored from HUD settings"
+                : $"Scale {Mathf.RoundToInt(_draft.Hud.Scale * 100f)}% / Backdrop {(_draft.Hud.Backdrop ? "on" : "off")}",
         }, () => GoTo(HudPage));
 
         string? issue = SetupValidationIssue();
@@ -973,6 +1052,11 @@ internal static class VoiceFirstRunSetup
 
     private static void TickHudCards(float dt)
     {
+        if (_draft != null && _builtHudSpeakingBarHidden != _draft.HideSpeakingBar)
+        {
+            BuildPage();
+            return;
+        }
         _hoveredHudSettings = null;
         _hoveredHudDescription = null;
         for (int i = 0; i < HudCards.Count; i++) HudCards[i].Tick(dt);
@@ -995,13 +1079,15 @@ internal static class VoiceFirstRunSetup
             _hudPreviewHost.sizeDelta = new Vector2(-ContentSideInset * 2f, 0f);
             _hudPreviewHost.anchoredPosition = Vector2.zero;
 
-            const float previewWidth = 424f;
-            const float previewHeight = 342f;
+            Vector2 previewSize = SpeakingBarLivePreview.EmbeddedCardSize;
+            float previewWidth = previewSize.x;
+            float previewHeight = previewSize.y;
             const float previewGap = 18f;
+            const float layoutTopY = ContentTopY - 76f;
             float pickerWidth = ContentWidth - previewWidth - previewGap;
             var center = new Vector2(
                 pickerWidth + previewGap + previewWidth * 0.5f - ContentWidth * 0.5f,
-                ContentTopY - previewHeight * 0.5f);
+                layoutTopY - previewHeight * 0.5f);
             _hudPreview = new SpeakingBarLivePreview(_hudPreviewHost, center, embedded: true);
         }
         catch (Exception ex)
@@ -1024,11 +1110,17 @@ internal static class VoiceFirstRunSetup
         float reveal = Smooth(_hudReveal);
         try
         {
+            if (_draft.HideSpeakingBar)
+            {
+                _hudPreview.SetPresentation(0f, shouldRender: false);
+                return;
+            }
             var settings = _hoveredHudSettings ?? _draft.Hud;
             if (!_hudPreview.IsWarmupReady)
                 _hudPreview.Prewarm(settings, dt);
-            _hudPreview.SetPresentation(reveal, render && reveal > 0.01f);
-            if (render && reveal > 0.01f)
+            bool visible = render && reveal > 0.01f;
+            _hudPreview.SetPresentation(reveal, visible);
+            if (visible)
                 _hudPreview.Tick(settings, dt);
         }
         catch (Exception ex)
@@ -1220,7 +1312,7 @@ internal static class VoiceFirstRunSetup
                 () => set(new FirstRunSetupBinding(KeyCode.None, KeyCode.None, VoiceModifierMatch.Exact)),
                 () => get().Modifier,
                 () => get().ModifierMatch)
-            .Build(parent, label, width, y, 65f, help));
+            .Build(parent, label, width, y, 54f, help));
     }
 
     private static void BuildSummaryCard(
@@ -1379,6 +1471,7 @@ internal static class VoiceFirstRunSetup
     }
 
     private static string YesNo(bool value) => value ? "Yes" : "No";
+    private static string ShownHidden(bool hidden) => hidden ? "hidden" : "shown";
 
     private static string FriendlyPosition(SpeakingBarPosition position) => position switch
     {
@@ -1423,12 +1516,21 @@ internal static class VoiceFirstRunSetup
         if (_draft.MicMode == VoiceMicMode.PushToTalk && _draft.PushToTalk.Key == KeyCode.None)
             return "Choose a Push to Talk shortcut before saving, or switch to Open Mic.";
 
+        string? bindingIssue = BindingValidationIssue(_draft);
+        if (bindingIssue != null) return bindingIssue;
+#endif
+        return null;
+    }
+
+    internal static string? BindingValidationIssue(FirstRunSetupDraft draft)
+    {
         var bindings = new (string Name, FirstRunSetupBinding Binding)[]
         {
-            ("Mute microphone", _draft.ToggleMute),
-            ("Push to Talk", _draft.PushToTalk),
-            ("Mute playback", _draft.ToggleSpeaker),
-            ("Open voice menu", _draft.OpenVoiceSettings),
+            ("Mute microphone", draft.ToggleMute),
+            ("Push to Mute", draft.PushToMute),
+            ("Push to Talk", draft.PushToTalk),
+            ("Mute playback", draft.ToggleSpeaker),
+            ("Open voice menu", draft.OpenVoiceSettings),
         };
         for (int i = 0; i < bindings.Length; i++)
         for (int j = i + 1; j < bindings.Length; j++)
@@ -1436,7 +1538,6 @@ internal static class VoiceFirstRunSetup
             if (!BindingsConflict(bindings[i].Binding, bindings[j].Binding)) continue;
             return $"{bindings[i].Name} and {bindings[j].Name} use the same shortcut. Edit Controls before saving.";
         }
-#endif
         return null;
     }
 

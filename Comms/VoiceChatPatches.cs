@@ -7,6 +7,7 @@ namespace VoiceChatPlugin.VoiceChat;
 public static class VoiceChatPatches
 {
     private static bool _pushToTalkInputHeld;
+    private static bool _pushToMuteInputHeld;
     private static bool _radioInputHeld;
     private static bool _transmitReleaseRequired;
     private static int _lastMuteToggleFrame = -1;
@@ -16,6 +17,8 @@ public static class VoiceChatPatches
     private static int _lastRadioChannelCycleFrame = -1;
     private static int _lastMicModeToggleFrame = -1;
     private static int _lastPushToTalkPollFrame = -1;
+    private static int _lastPushToMutePollFrame = -1;
+    private static int _lastTeamRadioPollFrame = -1;
     private static System.DateTime _lastKbErrorLogUtc;
     private static VoiceAliveDeadMixFocus _aliveDeadMixFocus;
 
@@ -33,6 +36,17 @@ public static class VoiceChatPatches
 
     [HarmonyPostfix, HarmonyPatch(typeof(KeyboardJoystick), nameof(KeyboardJoystick.Update))]
     static void KeyboardUpdate_Post()
+        => ProcessKeybinds("keyboard");
+
+    /// <summary>
+    /// Scene construction and EndGame do not guarantee a gameplay joystick, while the voice room
+    /// deliberately remains alive. Poll the complete keybind state machine from the persistent
+    /// manager in both voice scenes. Per-frame guards make the duplicate joystick path harmless.
+    /// </summary>
+    internal static void UpdateKeybindsFromFrameDriver()
+        => ProcessKeybinds("frame-driver");
+
+    private static void ProcessKeybinds(string source)
     {
         try
         {
@@ -47,59 +61,52 @@ public static class VoiceChatPatches
             VoiceChatKeybinds.ToggleMute.FireIfPressed();
             VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
             VoiceChatKeybinds.VolumeMenu.FireIfPressed();
-            UpdateAliveDeadMixHold();
-            VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
-            VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
-            VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
 
-            bool canUseRadio = VoiceChatHudState.CanUseTeamRadioInput();
-            bool held = false;
-            bool down = false;
-            bool up = false;
-            if (canUseRadio)
-            {
-                var radioHold = ReadHold(VoiceChatKeybinds.TeamRadio.IsHeld(), ref _radioInputHeld);
-                held = radioHold.Held;
-                down = radioHold.Down;
-                up = radioHold.Up;
-            }
-            else
-            {
-                _radioInputHeld = false;
-            }
-
-            VoiceChatHudState.UpdateTeamRadioHold(held, down, up);
-
-            UpdatePushToTalkHold();
-        }
-        catch (System.Exception ex)
-        {
-            HandleTransmitInputFailure("keyboard", ex);
-        }
-    }
-
-    /// <summary>
-    /// EndGame has no gameplay joystick to guarantee KeyboardJoystick.Update ticks, but capture and
-    /// the voice room deliberately remain alive. Poll the PTT hold from the persistent VC manager so
-    /// the results screen has the same fail-closed input semantics as OnlineGame. The frame guard in
-    /// UpdatePushToTalkHold makes this harmless if a platform still happens to tick the joystick.
-    /// </summary>
-    internal static void UpdatePushToTalkFromFrameDriver()
-    {
-        try
-        {
-            if (ShouldSuppressVoiceInput())
+            // Player Volumes opens in this pipeline. Its Show() release must remain authoritative;
+            // never reread a still-held PTT/radio key later in the same frame and reopen capture.
+            if (VoiceUiKit.AnyPanelOpen)
             {
                 ReleaseHeldTransmitInputs();
                 return;
             }
-            if (!CanResumeHeldTransmitInput()) return;
+
+            UpdateAliveDeadMixHold();
+            VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
+            VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
+            VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
+            UpdateTeamRadioHold();
+            UpdatePushToMuteHold();
             UpdatePushToTalkHold();
         }
         catch (System.Exception ex)
         {
-            HandleTransmitInputFailure("frame-driver", ex);
+            HandleTransmitInputFailure(source, ex);
         }
+    }
+
+    private static void UpdateTeamRadioHold()
+    {
+        int frame = Time.frameCount;
+        if (_lastTeamRadioPollFrame == frame) return;
+        _lastTeamRadioPollFrame = frame;
+
+        bool canUseRadio = VoiceChatHudState.CanUseTeamRadioInput();
+        bool held = false;
+        bool down = false;
+        bool up = false;
+        if (canUseRadio)
+        {
+            var radioHold = ReadHold(VoiceChatKeybinds.TeamRadio.IsHeld(), ref _radioInputHeld);
+            held = radioHold.Held;
+            down = radioHold.Down;
+            up = radioHold.Up;
+        }
+        else
+        {
+            _radioInputHeld = false;
+        }
+
+        VoiceChatHudState.UpdateTeamRadioHold(held, down, up);
     }
 
     private static bool CanResumeHeldTransmitInput()
@@ -109,7 +116,8 @@ public static class VoiceChatPatches
         // A hold that crossed a privacy boundary (chat/modal/focus/rebind/session) must be
         // physically released before it can arm again. Otherwise closing chat while the key
         // is still down immediately resumes capture without a new user action.
-        if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld())
+        if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld() ||
+            VoiceChatKeybinds.PushToMute.IsHeld())
         {
             ReleaseHeldTransmitInputs();
             return false;
@@ -135,6 +143,17 @@ public static class VoiceChatPatches
         bool held = ReadHold(VoiceChatKeybinds.PushToTalk.IsHeld(), ref _pushToTalkInputHeld).Held;
         VoiceChatHudState.UpdatePushToTalkHeld(held);
     }
+    private static void UpdatePushToMuteHold()
+    {
+        int frame = Time.frameCount;
+        if (_lastPushToMutePollFrame == frame) return;
+        _lastPushToMutePollFrame = frame;
+
+        bool held = ReadHold(
+            VoiceChatKeybinds.PushToMute.IsHeld(),
+            ref _pushToMuteInputHeld).Held;
+        VoiceChatHudState.UpdatePushToMuteHeld(held);
+    }
 
     private static void HandleTransmitInputFailure(string source, System.Exception ex)
     {
@@ -146,15 +165,20 @@ public static class VoiceChatPatches
         if ((now - _lastKbErrorLogUtc).TotalSeconds < 5) return;
 
         _lastKbErrorLogUtc = now;
-        VoiceDiagnostics.DebugError($"[VC] {source} radio/PTT update failed: {ex.Message}");
+        VoiceDiagnostics.DebugError($"[VC] {source} hold-input update failed: {ex.Message}");
     }
 
     internal static void ReleaseHeldTransmitInputs()
     {
+        // Transmit-opening holds are always dropped. An already-active Push To Mute remains
+        // fail-closed only while its physical key is still down, including across chat/modals.
+        bool preservePushToMute = _pushToMuteInputHeld &&
+                                  VoiceChatKeybinds.PushToMute.IsHeld();
         _transmitReleaseRequired = true;
         _radioInputHeld = false;
         _pushToTalkInputHeld = false;
-        VoiceChatHudState.ReleaseTransmitHoldsFailClosed();
+        _pushToMuteInputHeld = preservePushToMute;
+        VoiceChatHudState.ReleaseTransmitHoldsFailClosed(preservePushToMute);
         SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
     }
 
@@ -170,15 +194,28 @@ public static class VoiceChatPatches
             Application.isFocused,
             VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
             VoiceUiKit.AnyPanelOpen,
-            chatOpen);
+            chatOpen,
+            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true);
     }
 
     internal static bool ShouldSuppressVoiceInput(
         bool applicationFocused,
         bool rebindCapturing,
         bool modalOpen,
-        bool chatOpen)
-        => !applicationFocused || rebindCapturing || modalOpen || chatOpen;
+        bool chatOpen,
+        bool allowKeybindsWhileChatOpen)
+        => !applicationFocused || rebindCapturing || modalOpen ||
+           ShouldBlockKeybindsForChat(chatOpen, allowKeybindsWhileChatOpen);
+
+    internal static bool ShouldBlockKeybindsForChat(bool chatOpen)
+        => ShouldBlockKeybindsForChat(
+            chatOpen,
+            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true);
+
+    internal static bool ShouldBlockKeybindsForChat(
+        bool chatOpen,
+        bool allowKeybindsWhileChatOpen)
+        => chatOpen && !allowKeybindsWhileChatOpen;
 
     internal static bool ShouldIgnoreToggleKeybinds()
         => ShouldSuppressVoiceInput();

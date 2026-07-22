@@ -108,6 +108,7 @@ internal static class SidecarProtocol
         => EncodeControl($"{{\"op\":\"select-output-device\",\"id\":{JsonString(id)}}}");
 
     public static byte[] StartFrame() => EncodeControl("{\"op\":\"start\"}");
+    public static byte[] WarmFrame() => EncodeControl("{\"op\":\"warm\"}");
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
     public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
 

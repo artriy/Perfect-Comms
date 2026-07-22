@@ -133,7 +133,13 @@ internal sealed class FirstRunSetupDraft
     internal bool EchoCancellation;
     internal bool StartMuted;
     internal bool StartDeafened;
+    internal bool AllowKeybindsWhileChatOpen;
+    internal bool HideVoiceControls;
+    internal bool HideSpeakingBar;
+    internal bool HideMeetingOverlay;
+    internal bool HideConnectionStatus;
     internal FirstRunSetupBinding ToggleMute;
+    internal FirstRunSetupBinding PushToMute;
     internal FirstRunSetupBinding PushToTalk;
     internal FirstRunSetupBinding ToggleSpeaker;
     internal FirstRunSetupBinding OpenVoiceSettings;
@@ -177,8 +183,19 @@ internal sealed class FirstRunSetupDraft
             EchoCancellation = true,
             StartMuted = false,
             StartDeafened = false,
+#if WINDOWS
+            AllowKeybindsWhileChatOpen = false,
+#else
+            AllowKeybindsWhileChatOpen = existing.AllowKeybindsWhileChatOpen,
+#endif
+            HideVoiceControls = false,
+            HideSpeakingBar = false,
+            HideMeetingOverlay = false,
+            HideConnectionStatus = false,
             ToggleMute = new FirstRunSetupBinding(
                 KeyCode.M, KeyCode.LeftShift, VoiceModifierMatch.EitherSide),
+            PushToMute = new FirstRunSetupBinding(
+                KeyCode.None, KeyCode.None, VoiceModifierMatch.Exact),
             PushToTalk = new FirstRunSetupBinding(
                 KeyCode.C, KeyCode.None, VoiceModifierMatch.Exact),
             ToggleSpeaker = new FirstRunSetupBinding(
@@ -217,7 +234,13 @@ internal sealed class FirstRunSetupDraft
             EchoCancellation = settings.EchoCancellationEnabled.Value,
             StartMuted = settings.StartMuted.Value,
             StartDeafened = settings.StartDeafened.Value,
+            AllowKeybindsWhileChatOpen = settings.AllowKeybindsWhileChatOpen.Value,
+            HideVoiceControls = settings.DisableVoiceControlsHud.Value,
+            HideSpeakingBar = settings.DisableSpeakingBar.Value,
+            HideMeetingOverlay = !settings.MeetingSpeakingOverlay.Value,
+            HideConnectionStatus = !settings.ShowVoiceConnectionStatus.Value,
             ToggleMute = FirstRunSetupBinding.From(VoiceChatKeybinds.ToggleMute),
+            PushToMute = FirstRunSetupBinding.From(VoiceChatKeybinds.PushToMute),
             PushToTalk = FirstRunSetupBinding.From(VoiceChatKeybinds.PushToTalk),
             ToggleSpeaker = FirstRunSetupBinding.From(VoiceChatKeybinds.ToggleSpeaker),
             OpenVoiceSettings = FirstRunSetupBinding.From(VoiceChatKeybinds.OpenVoiceMenu),
@@ -323,6 +346,11 @@ internal sealed class FirstRunSetupDraft
         settings.EchoCancellationEnabled.Value = EchoCancellation;
         settings.StartMuted.Value = StartMuted;
         settings.StartDeafened.Value = StartDeafened;
+        settings.AllowKeybindsWhileChatOpen.Value = AllowKeybindsWhileChatOpen;
+        settings.DisableVoiceControlsHud.Value = HideVoiceControls;
+        settings.DisableSpeakingBar.Value = HideSpeakingBar;
+        settings.MeetingSpeakingOverlay.Value = !HideMeetingOverlay;
+        settings.ShowVoiceConnectionStatus.Value = !HideConnectionStatus;
 
         ApplyMicrophoneIfResolved(settings);
 #if WINDOWS
@@ -341,6 +369,7 @@ internal sealed class FirstRunSetupDraft
         settings.SpeakingBarBackdrop.Value = Hud.Backdrop;
 
         ToggleMute.ApplyTo(VoiceChatKeybinds.ToggleMute);
+        PushToMute.ApplyTo(VoiceChatKeybinds.PushToMute);
         PushToTalk.ApplyTo(VoiceChatKeybinds.PushToTalk);
         ToggleSpeaker.ApplyTo(VoiceChatKeybinds.ToggleSpeaker);
         OpenVoiceSettings.ApplyTo(VoiceChatKeybinds.OpenVoiceMenu);

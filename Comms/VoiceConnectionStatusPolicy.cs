@@ -138,6 +138,17 @@ internal static class VoiceConnectionStatusPolicy
         return new VoiceConnectionDisplayState(true, roster, startedAt, visible);
     }
 
+    internal static bool ShouldPresent(
+        VoiceConnectionProgress progress,
+        VoiceGamePhase phase,
+        bool enabled)
+    {
+        if (!enabled || !progress.IsConnecting)
+            return false;
+        return progress.Stage == VoiceConnectionStage.RetryingAudio ||
+               phase == VoiceGamePhase.Lobby;
+    }
+
     internal static string BuildText(VoiceConnectionProgress progress, int animationFrame)
     {
         if (!progress.IsConnecting) return string.Empty;

@@ -281,6 +281,21 @@ public sealed class SpeakingBarLayoutPolicyTests
         Assert.False(solution.FitsRequestedScale);
     }
 
+    [Theory]
+    [InlineData(15, false, 2)]
+    [InlineData(15, true, 1)]
+    [InlineData(10, false, 2)]
+    [InlineData(9, false, 1)]
+    public void MiniaturePreviewPreservesLiveHudTopology(
+        int itemCount,
+        bool singleLane,
+        int expectedLineCount)
+    {
+        Assert.Equal(
+            expectedLineCount,
+            SpeakingBarLivePreviewLayoutPolicy.RequiredLineCount(itemCount, singleLane));
+    }
+
     private static int[] LineSizes(int itemCount, int safeCapacity = int.MaxValue)
     {
         int lineCount = SpeakingBarLayoutPolicy.GetLineCount(itemCount, safeCapacity);

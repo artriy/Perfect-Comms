@@ -743,6 +743,14 @@ impl CaptureProducer {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        self.ensure_running("start")
+    }
+
+    fn warm(&mut self) -> Result<(), String> {
+        self.ensure_running("warm")
+    }
+
+    fn ensure_running(&mut self, action_name: &str) -> Result<(), String> {
         let command_seq = self.diagnostics.next_command();
         let action = self.lifecycle.start();
         let acknowledged_generation = if action == ProducerAction::Start {
@@ -755,7 +763,7 @@ impl CaptureProducer {
             MediaStateEvent {
                 direction: "capture".to_string(),
                 state: "command-accepted".to_string(),
-                action: "start".to_string(),
+                action: action_name.to_string(),
                 command_seq,
                 stream_generation: acknowledged_generation,
                 open_attempt: self.diagnostics.current_open_attempt(),
@@ -2188,6 +2196,7 @@ fn run_authenticated_session(
         media_diagnostics.capture.clone(),
         media_event_tx.clone(),
     );
+    let mut capture_warm_enabled = false;
     let input = Arc::new(Mutex::new(InputConfig::default()));
     let telemetry = Arc::new(TelemetryMailbox::default());
     let telemetry_stop = Arc::new(AtomicBool::new(false));
@@ -2923,11 +2932,39 @@ fn run_authenticated_session(
                     }
                     InboundOp::Start => {
                         capture_transmit_enabled.store(false, Ordering::Release);
+                        ring_consumer.discard_all();
+                        if !capture_warm_enabled {
+                            let epoch = match encoder_privacy.request() {
+                                Ok(epoch) => epoch,
+                                Err(error) => {
+                                    eprintln!(
+                                        "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                    );
+                                    break 'control;
+                                }
+                            };
+                            if let Err(error) =
+                                encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
+                            {
+                                eprintln!(
+                                    "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                        }
+                        if let Err(error) = producer.start() {
+                            eprintln!("pc-capture: critical media failure: capture start: {error}");
+                            break 'control;
+                        }
+                        capture_transmit_enabled.store(true, Ordering::Release);
+                    }
+                    InboundOp::Warm => {
+                        capture_transmit_enabled.store(false, Ordering::Release);
                         let epoch = match encoder_privacy.request() {
                             Ok(epoch) => epoch,
                             Err(error) => {
                                 eprintln!(
-                                    "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                    "pc-capture: critical media failure: capture warm privacy boundary: {error}"
                                 );
                                 break 'control;
                             }
@@ -2937,18 +2974,19 @@ fn run_authenticated_session(
                             encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
                         {
                             eprintln!(
-                                "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                "pc-capture: critical media failure: capture warm privacy boundary: {error}"
                             );
                             break 'control;
                         }
-                        if let Err(error) = producer.start() {
-                            eprintln!("pc-capture: critical media failure: capture start: {error}");
+                        if let Err(error) = producer.warm() {
+                            eprintln!("pc-capture: critical media failure: capture warm: {error}");
                             break 'control;
                         }
-                        capture_transmit_enabled.store(true, Ordering::Release);
+                        capture_warm_enabled = true;
                     }
                     InboundOp::Stop => {
                         capture_transmit_enabled.store(false, Ordering::Release);
+                        capture_warm_enabled = false;
                         if !monitor_state.enabled() {
                             if let Err(error) = producer.stop() {
                                 eprintln!(
@@ -3049,7 +3087,9 @@ fn run_authenticated_session(
                                     &counters,
                                     &playback_supervision,
                                 );
-                            } else if !capture_transmit_enabled.load(Ordering::Acquire) {
+                            } else if !capture_transmit_enabled.load(Ordering::Acquire)
+                                && !capture_warm_enabled
+                            {
                                 if let Err(error) = producer.stop() {
                                     eprintln!(
                                     "pc-capture: critical media failure: monitor capture stop: {error}"
@@ -4018,13 +4058,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":14,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":15,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":14,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":15,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -4118,6 +4158,16 @@ mod tests {
                 .stream_generation,
             1
         );
+        producer.warm().unwrap();
+        producer.start().unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            diagnostics
+                .snapshot(monotonic_ns(), 1, RING_CAPACITY as u64, 0, 0)
+                .stream_generation,
+            1,
+            "warm capture must stay open when transmission starts"
+        );
         producer.stop().unwrap();
         assert_eq!(ring_consumer.len(), 0);
 
@@ -4161,7 +4211,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":14,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":15,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -4217,7 +4267,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":14,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":15,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -4226,7 +4276,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 14);
+                assert_eq!(v["proto"], 15);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -4242,11 +4292,13 @@ mod tests {
             .write_all(&encode_control(r#"{"op":"ping"}"#))
             .unwrap();
         client
-            .write_all(&encode_control(r#"{"op":"start"}"#))
+            .write_all(&encode_control(r#"{"op":"warm"}"#))
             .unwrap();
 
         let mut got_pong = false;
-        let mut got_level = false;
+        let mut got_warm_callback = false;
+        let mut warm_generation = 0;
+        let mut got_level_while_warm = false;
         for _ in 0..400 {
             match read_frame(&mut reader).unwrap() {
                 Frame::Control(s) => {
@@ -4256,20 +4308,65 @@ mod tests {
                         assert!(v["capTs"].as_u64().unwrap() > 0);
                     }
                     if v["op"] == "level" {
-                        got_level = true;
-                        assert!(v["peak"].is_number());
-                        assert!(v["speaking"].is_boolean());
+                        got_level_while_warm = true;
+                    }
+                    if v["op"] == "media-state"
+                        && v["direction"] == "capture"
+                        && v["state"] == "first-callback"
+                    {
+                        got_warm_callback = true;
+                        warm_generation = v["stream_generation"].as_u64().unwrap();
                     }
                 }
                 Frame::Audio(_) => {}
                 Frame::AudioOut(_) => {}
             }
-            if got_pong && got_level {
+            if got_pong && got_warm_callback {
                 break;
             }
         }
         assert!(got_pong, "never got pong");
-        assert!(got_level, "never got level");
+        assert!(got_warm_callback, "warm capture never produced a callback");
+        assert!(
+            !got_level_while_warm,
+            "warm capture emitted transmit telemetry"
+        );
+
+        client
+            .write_all(&encode_control(r#"{"op":"start"}"#))
+            .unwrap();
+        let mut got_level = false;
+        let mut start_reused_warm_stream = false;
+        for _ in 0..400 {
+            match read_frame(&mut reader).unwrap() {
+                Frame::Control(s) => {
+                    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                    if v["op"] == "level" {
+                        got_level = true;
+                        assert!(v["peak"].is_number());
+                        assert!(v["speaking"].is_boolean());
+                    }
+                    if v["op"] == "media-state"
+                        && v["direction"] == "capture"
+                        && v["state"] == "command-accepted"
+                        && v["action"] == "start"
+                    {
+                        start_reused_warm_stream = !v["changed"].as_bool().unwrap()
+                            && v["stream_generation"].as_u64().unwrap() == warm_generation;
+                    }
+                }
+                Frame::Audio(_) => {}
+                Frame::AudioOut(_) => {}
+            }
+            if got_level && start_reused_warm_stream {
+                break;
+            }
+        }
+        assert!(got_level, "never got level after warm capture transmitted");
+        assert!(
+            start_reused_warm_stream,
+            "Push To Talk start reopened the warm capture stream"
+        );
 
         client
             .write_all(&encode_control(r#"{"op":"stop"}"#))
@@ -4297,7 +4394,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":14,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":15,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -4371,7 +4468,7 @@ mod tests {
         let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         unauthorized
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":14,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":15,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
@@ -4390,7 +4487,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":14,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":15,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

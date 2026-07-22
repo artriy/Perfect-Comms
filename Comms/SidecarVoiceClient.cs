@@ -15,6 +15,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
+    // Protocol 15 separates warm microphone capture from transmission for instant Push To Talk.
     // Protocol 14 generation-scopes every peer operation so stale queued SDP/ICE work cannot
     // mutate a replacement peer. Protocol 13 adds local microphone monitoring with optional
     // delayed playback. Protocol 12 adds coordinated logical ICE restart for network-interface
@@ -25,7 +26,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 14;
+    public const int Proto = 15;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -62,6 +63,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public event Action<float, bool>? OnLevel;
     public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
     public event Action<SidecarPlaybackState>? OnPlaybackState;
+    public event Action<SidecarCaptureState>? OnCaptureState;
     private long _deadNotificationState;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _outputDevices;
@@ -281,6 +283,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         float noiseGateThreshold,
         bool synthetic,
         bool micActive,
+        bool micWarm,
         IEnumerable<IceServer>? iceServers)
     {
         if (!_running)
@@ -328,17 +331,27 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     () => SidecarProtocol.SetIceServersFrame(snapshot),
                     DescribeIceServers(snapshot))) return false;
         }
-        if (micActive && !SendCommand("start", SidecarProtocol.StartFrame, "phase=initial-config")) return false;
+        if (micActive)
+        {
+            if (!SendCommand("start", SidecarProtocol.StartFrame, "phase=initial-config")) return false;
+        }
+        else if (micWarm &&
+                 !SendCommand("warm", SidecarProtocol.WarmFrame, "phase=initial-config")) return false;
 
         VoiceDiagnostics.Log(
             "sidecar.command",
-            $"op=initial-config result=complete micActive={micActive} input={DescribeDeviceForDiagnostics(micDevice)} output={DescribeDeviceForDiagnostics(outputDevice)}");
+            $"op=initial-config result=complete micActive={micActive} micWarm={micWarm} input={DescribeDeviceForDiagnostics(micDevice)} output={DescribeDeviceForDiagnostics(outputDevice)}");
         return true;
     }
 
     public void SetMicActive(bool active)
     {
         SendCommand(active ? "start" : "stop", active ? SidecarProtocol.StartFrame : SidecarProtocol.StopFrame, $"micActive={active}");
+    }
+
+    public void SetMicWarm()
+    {
+        SendCommand("warm", SidecarProtocol.WarmFrame, "micWarm=true");
     }
 
     public void SelectMicDevice(string deviceId)
@@ -1222,6 +1235,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         VoiceDiagnostics.Log(
             "sidecar.native.media-state",
             $"managedGeneration={managedGeneration} {details}");
+        if (TryReadCaptureState(json, out var captureState))
+        {
+            try { OnCaptureState?.Invoke(captureState); }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log(
+                    "sidecar.event",
+                    $"op=media-state event=handler-failed direction=capture error={ExceptionDiagnostic(ex)}");
+            }
+        }
         if (TryReadPlaybackState(json, out var playbackState))
         {
             try { OnPlaybackState?.Invoke(playbackState); }
@@ -1231,6 +1254,32 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     "sidecar.event",
                     $"op=media-state event=handler-failed direction=playback error={ExceptionDiagnostic(ex)}");
             }
+        }
+    }
+
+    internal static bool TryReadCaptureState(string json, out SidecarCaptureState state)
+    {
+        state = default;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!string.Equals(ReadString(root, "direction"), "capture", StringComparison.Ordinal) ||
+                !TryReadU64(root, "stream_generation", out ulong streamGeneration))
+                return false;
+            string eventState = ReadString(root, "state");
+            if (string.IsNullOrEmpty(eventState)) return false;
+            state = new SidecarCaptureState(
+                eventState,
+                ReadString(root, "action"),
+                streamGeneration,
+                ReadBool(root, "running"),
+                ReadBool(root, "changed"));
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
         }
     }
 

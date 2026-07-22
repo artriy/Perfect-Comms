@@ -18,6 +18,13 @@ internal readonly record struct SidecarPlaybackState(
     string Error = "",
     string ErrorCode = "");
 
+internal readonly record struct SidecarCaptureState(
+    string State,
+    string Action,
+    ulong StreamGeneration,
+    bool Running,
+    bool Changed);
+
 /// <summary>
 /// The narrow surface the process-lifetime host needs from the desktop helper client. Keeping
 /// this seam explicit lets the lease/ownership rules be tested without launching pc-capture.
@@ -33,6 +40,7 @@ internal interface ISidecarVoiceClient : IDisposable
     event Action<float, bool>? OnLevel;
     event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
     event Action<SidecarPlaybackState>? OnPlaybackState;
+    event Action<SidecarCaptureState>? OnCaptureState;
 
     CaptureHealth Health { get; }
     IReadOnlyList<VoiceDeviceInfo> OutputDevices { get; }
@@ -50,12 +58,14 @@ internal interface ISidecarVoiceClient : IDisposable
         float noiseGateThreshold,
         bool synthetic,
         bool micActive,
+        bool micWarm,
         IEnumerable<IceServer>? iceServers);
     void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf);
     void SetSynthetic(bool enabled);
     void SetMonitor(bool enabled, bool delayed, float gain);
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
+    void SetMicWarm();
     void SelectMicDevice(string deviceId);
     bool SelectOutputDevice(string deviceId);
     void SendOutputTestFrame(float[] interleavedStereo);
@@ -80,6 +90,7 @@ internal sealed class SidecarVoiceCallbacks
         Action<string, int, string> onPeerState,
         Action<float, bool> onLevel,
         Action<IReadOnlyList<SidecarProtocol.PeerLevel>> onPeerLevels,
+        Action<SidecarCaptureState> onCaptureState,
         Action<SidecarPlaybackState> onPlaybackState)
     {
         OnFrame = onFrame ?? throw new ArgumentNullException(nameof(onFrame));
@@ -90,6 +101,7 @@ internal sealed class SidecarVoiceCallbacks
         OnPeerState = onPeerState ?? throw new ArgumentNullException(nameof(onPeerState));
         OnLevel = onLevel ?? throw new ArgumentNullException(nameof(onLevel));
         OnPeerLevels = onPeerLevels ?? throw new ArgumentNullException(nameof(onPeerLevels));
+        OnCaptureState = onCaptureState ?? throw new ArgumentNullException(nameof(onCaptureState));
         OnPlaybackState = onPlaybackState ?? throw new ArgumentNullException(nameof(onPlaybackState));
     }
 
@@ -101,6 +113,7 @@ internal sealed class SidecarVoiceCallbacks
     internal Action<string, int, string> OnPeerState { get; }
     internal Action<float, bool> OnLevel { get; }
     internal Action<IReadOnlyList<SidecarProtocol.PeerLevel>> OnPeerLevels { get; }
+    internal Action<SidecarCaptureState> OnCaptureState { get; }
     internal Action<SidecarPlaybackState> OnPlaybackState { get; }
 }
 
@@ -124,6 +137,7 @@ internal sealed class SidecarVoiceLease : IDisposable
     private readonly Action<string, int, string> _peerStateForwarder;
     private readonly Action<float, bool> _levelForwarder;
     private readonly Action<IReadOnlyList<SidecarProtocol.PeerLevel>> _peerLevelsForwarder;
+    private readonly Action<SidecarCaptureState> _captureStateForwarder;
     private readonly Action<SidecarPlaybackState> _playbackStateForwarder;
 
     internal SidecarVoiceLease(SidecarVoiceHostCore host, long id, SidecarVoiceCallbacks callbacks)
@@ -139,6 +153,7 @@ internal sealed class SidecarVoiceLease : IDisposable
         _peerStateForwarder = (peer, generation, state) => { if (IsActive) _callbacks.OnPeerState(peer, generation, state); };
         _levelForwarder = (peak, speaking) => { if (IsActive) _callbacks.OnLevel(peak, speaking); };
         _peerLevelsForwarder = levels => { if (IsActive) _callbacks.OnPeerLevels(levels); };
+        _captureStateForwarder = state => { if (IsActive) _callbacks.OnCaptureState(state); };
         _playbackStateForwarder = state => { if (IsActive) _callbacks.OnPlaybackState(state); };
     }
 
@@ -157,6 +172,7 @@ internal sealed class SidecarVoiceLease : IDisposable
         client.OnPeerState += _peerStateForwarder;
         client.OnLevel += _levelForwarder;
         client.OnPeerLevels += _peerLevelsForwarder;
+        client.OnCaptureState += _captureStateForwarder;
         client.OnPlaybackState += _playbackStateForwarder;
     }
 
@@ -170,6 +186,7 @@ internal sealed class SidecarVoiceLease : IDisposable
         client.OnPeerState -= _peerStateForwarder;
         client.OnLevel -= _levelForwarder;
         client.OnPeerLevels -= _peerLevelsForwarder;
+        client.OnCaptureState -= _captureStateForwarder;
         client.OnPlaybackState -= _playbackStateForwarder;
     }
 
@@ -205,10 +222,11 @@ internal sealed class SidecarVoiceLease : IDisposable
         float noiseGateThreshold,
         bool synthetic,
         bool micActive,
+        bool micWarm,
         IEnumerable<IceServer>? iceServers)
         => _host.Use(this, client => client.TryConfigureInitialCapture(
             micDevice, outputDevice, aec, agc, ns, nsVeryHigh, hpf, gain, vadThreshold, noiseGateThreshold,
-            synthetic, micActive, iceServers), false);
+            synthetic, micActive, micWarm, iceServers), false);
 
     public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf)
         => _host.Use(this, client => client.SetDsp(aec, agc, ns, nsVeryHigh, hpf));
@@ -220,6 +238,8 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.Use(this, client => client.SetInput(gain, vadThreshold, noiseGateThreshold));
     public void SetMicActive(bool active)
         => _host.Use(this, client => client.SetMicActive(active));
+    public void SetMicWarm()
+        => _host.Use(this, client => client.SetMicWarm());
     public void SelectMicDevice(string deviceId)
         => _host.Use(this, client => client.SelectMicDevice(deviceId));
     public bool SelectOutputDevice(string deviceId)

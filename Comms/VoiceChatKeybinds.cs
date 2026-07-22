@@ -13,6 +13,7 @@ public static class VoiceChatKeybinds
     private static VoiceKeybind[] _allBindings = Array.Empty<VoiceKeybind>();
 
     public static VoiceKeybind ToggleMute { get; private set; } = null!;
+    public static VoiceKeybind PushToMute { get; private set; } = null!;
     public static VoiceKeybind TeamRadio { get; private set; } = null!;
     public static VoiceKeybind CycleTeamRadioChannel { get; private set; } = null!;
     public static VoiceKeybind ImpostorRadio => TeamRadio;
@@ -31,6 +32,10 @@ public static class VoiceChatKeybinds
         const string s = "Keybinds";
         ToggleMute = new VoiceKeybind(config, s, "Mute / Unmute Mic", KeyCode.M,
             helpText: "Toggles whether your microphone sends voice.");
+        // Preserve the original persisted key so existing preview-build bindings survive the rename.
+        PushToMute = new VoiceKeybind(
+            config, s, "Push To Mute", "Hold To Mute", KeyCode.None,
+            helpText: "Mutes your microphone only while the key is held; releasing restores your previous mute state.");
         TeamRadio = new VoiceKeybind(config, s, "Team Radio (Hold)", KeyCode.V,
             helpText: "While held, transmits over your selected private team channel when your role and the host settings allow it.");
         CycleTeamRadioChannel = new VoiceKeybind(config, s, "Cycle Team Radio Channel", KeyCode.G,
@@ -62,6 +67,7 @@ public static class VoiceChatKeybinds
         _allBindings = new[]
         {
             ToggleMute,
+            PushToMute,
             TeamRadio,
             CycleTeamRadioChannel,
             PushToTalk,

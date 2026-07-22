@@ -132,7 +132,7 @@ jobs:
       - name: Verify helper has no private MSVC runtime dependency
         run: python scripts/verify-release-assets.py --pe-no-private-runtime Libs/pc-capture/${{ matrix.dest }}
       - name: Verify linked Cubeb backend inventory
-        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 14
+        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 15
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -228,7 +228,7 @@ jobs:
       - name: Verify static Cubeb and Linux audio runtime contract
         run: python3 scripts/verify-release-assets.py --elf-cubeb-runtime Libs/pc-capture/pc-capture-linux-x64
       - name: Verify linked Cubeb backend inventory
-        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 14
+        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 15
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-linux-x64

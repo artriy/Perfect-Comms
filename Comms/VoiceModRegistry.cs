@@ -750,10 +750,12 @@ internal static class VoiceModRegistry
     }
 
     // Any registered listener filter returning true muffles all incoming audio for the local player.
-    internal static bool LocalListenerMuffled(PlayerControl? local)
+    internal static bool LocalListenerMuffled(
+        PlayerControl? local,
+        VoiceGamePhase routingPhase)
     {
         if (local == null || _listenerFilters.Count == 0) return false;
-        VoicePhaseKind phase = VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase());
+        VoicePhaseKind phase = VoiceModBridge.ToApiPhase(routingPhase);
         bool isDead = SafeIsDead(local);
         isDead |= (ResolvePlayerTraits(
             local,

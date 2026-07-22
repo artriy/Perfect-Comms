@@ -15,6 +15,7 @@ internal static class VoiceProximityCalculator
     private static bool _listenerBlindValue;
     private static int _listenerMuffleFrame = -1;
     private static bool _listenerMuffleValue;
+    private static VoiceGamePhase _listenerMufflePhase = VoiceGamePhase.Unknown;
 
     internal static Func<bool>? LocalListenerBlindedOrFlashedProvider
     {
@@ -32,6 +33,7 @@ internal static class VoiceProximityCalculator
         _lastUnimpairedLocalLightRadius = 0f;
         _listenerBlindFrame = -1;
         _listenerMuffleFrame = -1;
+        _listenerMufflePhase = VoiceGamePhase.Unknown;
     }
 
     public static VoiceProximityResult CalculateLobby(
@@ -647,12 +649,14 @@ internal static class VoiceProximityCalculator
     // PerfectCommsVoiceBackend evaluates listener muffle once per remote route. Cache the
     // reflection-heavy local modifier check for the whole Unity frame; route-specific audio shape
     // remains untouched.
-    internal static bool IsLocalListenerAudioMuffledThisFrame()
+    internal static bool IsLocalListenerAudioMuffledThisFrame(VoiceGamePhase phase)
     {
         int frame = Time.frameCount;
-        if (_listenerMuffleFrame == frame) return _listenerMuffleValue;
+        if (_listenerMuffleFrame == frame && _listenerMufflePhase == phase)
+            return _listenerMuffleValue;
         _listenerMuffleFrame = frame;
-        _listenerMuffleValue = VoiceRoleMuteState.IsLocalListenerAudioMuffled();
+        _listenerMufflePhase = phase;
+        _listenerMuffleValue = VoiceRoleMuteState.IsLocalListenerAudioMuffled(phase);
         return _listenerMuffleValue;
     }
 

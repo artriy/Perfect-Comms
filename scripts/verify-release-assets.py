@@ -2230,8 +2230,8 @@ def main() -> int:
     parser.add_argument(
         "--expected-protocol",
         type=int,
-        default=14,
-        help="protocol expected from --helper-build-info (default: 14)",
+        default=15,
+        help="protocol expected from --helper-build-info (default: 15)",
     )
     args = parser.parse_args()
     root = args.root.resolve()

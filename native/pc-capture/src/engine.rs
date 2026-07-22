@@ -585,6 +585,7 @@ impl Engine {
             | InboundOp::SelectDevice { .. }
             | InboundOp::SelectOutputDevice { .. }
             | InboundOp::SetMonitor { .. }
+            | InboundOp::Warm
             | InboundOp::Ping => {}
         }
     }

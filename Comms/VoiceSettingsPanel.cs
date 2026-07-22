@@ -738,9 +738,11 @@ public static class VoiceSettingsPanel
 
     private static void BuildKeybinds(List<Entry> defs, VoiceChatLocalSettings s)
     {
+        Toggle(defs, "Allow Keybinds While Chat Is Open", s.AllowKeybindsWhileChatOpen);
         Rebind(defs, VoiceChatKeybinds.OpenVoiceMenu);
         Rebind(defs, VoiceChatKeybinds.OpenHostVoiceSettings);
         Rebind(defs, VoiceChatKeybinds.ToggleMute);
+        Rebind(defs, VoiceChatKeybinds.PushToMute);
         Rebind(defs, VoiceChatKeybinds.PushToTalk);
         Rebind(defs, VoiceChatKeybinds.TeamRadio);
         Rebind(defs, VoiceChatKeybinds.CycleTeamRadioChannel);
@@ -795,6 +797,8 @@ public static class VoiceSettingsPanel
         Slider(defs, "Button Position Y", s.ButtonPositionY, Pct, showVoiceControls);
         Slider(defs, "Button Scale", s.OverlayScale, Num2, showVoiceControls);
         Toggle(defs, "Mute / Deafen Status Reminder", s.ShowMuteDeafenStatusAlerts,
+            showVoiceControls);
+        Toggle(defs, "Voice Connection Status", s.ShowVoiceConnectionStatus,
             showVoiceControls);
 
         Section(defs, "SPEAKING BAR");

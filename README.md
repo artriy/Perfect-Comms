@@ -92,13 +92,23 @@ Defaults below. Every key is rebindable in **Voice Settings**.
 | Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
 | Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
 | Team radio (hold) | `V` | | Toggle open mic / push to talk | Unbound |
+| Push to Mute | Unbound | | | |
 | Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
+
+Desktop voice keybinds are blocked while chat is open by default. Enable **Voice
+Settings > Keybinds > Allow Keybinds While Chat Is Open** to keep them active
+while typing; settings panels, key rebinding, and focus loss still suppress them.
 
 On Android, hold the mic button to transmit in push-to-talk mode. For Team
 Radio, tap its button to cycle channels or hold it to transmit. To keep a small
 **Muted** / **Deafened** reminder visible, enable **Voice Settings > HUD > Mute /
 Deafen Status Reminder**. Deafening mutes Perfect Comms playback and pauses your
 microphone transmission until you undeafen.
+
+Desktop Push To Talk keeps the selected microphone capture stream ready while a
+voice session is connected, but discards samples before encoding or transmission
+until `C` is held. This removes device-start delay; the operating system can
+therefore show the microphone as in use between presses.
 
 <br>
 

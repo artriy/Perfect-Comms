@@ -320,6 +320,30 @@ public sealed class VoiceConnectionStatusPolicyTests
     }
 
     [Theory]
+    [InlineData(0, 2, true, true)]
+    [InlineData(2, 2, true, true)]
+    [InlineData(3, 2, true, true)]
+    [InlineData(0, 4, true, false)]
+    [InlineData(2, 5, true, false)]
+    [InlineData(3, 7, true, false)]
+    [InlineData(1, 4, true, true)]
+    [InlineData(1, 2, false, false)]
+    [InlineData(4, 2, true, false)]
+    public void ConnectionStatusVisibilitySeparatesLobbyAssemblyFromActiveFailures(
+        int stageValue,
+        int phaseValue,
+        bool enabled,
+        bool expected)
+    {
+        var progress = new VoiceConnectionProgress((VoiceConnectionStage)stageValue, 0, 1);
+        var phase = (VoiceGamePhase)phaseValue;
+
+        Assert.Equal(
+            expected,
+            VoiceConnectionStatusPolicy.ShouldPresent(progress, phase, enabled));
+    }
+
+    [Theory]
     [InlineData(0, 0)]
     [InlineData(3, 3)]
     public void SoloOrCompleteLobbyIsReady(int connectedPlayers, int expectedPlayers)

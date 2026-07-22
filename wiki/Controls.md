@@ -2,7 +2,7 @@
 
 Open **Voice Settings** from the Among Us Options menu. On desktop, you can also press `F10`. These settings are local: they change your own microphone, playback, controls, and HUD without changing the host's lobby rules.
 
-On a new install, Perfect Comms first opens a guided setup for audio devices and tests, talk controls, a live HUD layout preview, and a final review. You can run it again at any time from **Advanced > First-Time Setup**.
+On a new install, Perfect Comms first opens a guided setup for audio devices and tests, talk controls (including whether keybinds remain active while chat is open), a live HUD layout preview, and a final review. You can run it again at any time from **Advanced > First-Time Setup**.
 
 The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top Left, Top Right, Left Stack, Right Stack, Bottom Center, and Minimal.
 
@@ -43,6 +43,7 @@ The Android build uses touch controls and does not show this keyboard tab. On de
 | Open voice menu | `F10` |
 | Open host voice settings | `F11` |
 | Mute / unmute mic | `Shift+M` |
+| Push to Mute | Unbound |
 | Push to talk (hold) | `C` |
 | Team radio (hold) | `V` |
 | Cycle team radio channel | `G` |
@@ -52,6 +53,10 @@ The Android build uses touch controls and does not show this keyboard tab. On de
 | Alive louder / dead quieter (hold) | Unbound |
 | Alive quieter / dead louder (hold) | Unbound |
 | Refresh voice connection | `F7` |
+
+Perfect Comms blocks all desktop voice keybinds while chat is open by default, preventing a typing key from also muting, transmitting, or opening a voice panel. Enable **Allow Keybinds While Chat Is Open** to keep every Perfect Comms shortcut active while typing. Settings panels, active key rebinding, and application focus loss always suppress keybinds regardless of this setting.
+
+Desktop Push To Talk keeps the selected capture stream ready while a voice session is connected, but discards samples before encoding or transmission until the binding is held. This removes hardware-start delay; the operating system can show the microphone as in use between presses.
 
 The settings icon beside either alive/dead focus binding expands that binding's independent **Alive Players** and **Dead Players** levels:
 
@@ -69,15 +74,18 @@ Exact left/right modifiers are supported. Press and release a modifier to bind i
 
 | Setting | Default | What it controls |
 | :--- | :---: | :--- |
+| **Disable Voice Controls HUD** | Off | Hides the microphone, speaker, deafen, and radio controls without disabling their keyboard shortcuts or the Jailor unmute action. |
 | **Controls Layout** | Vertical | Places the microphone, speaker, and role controls vertically or horizontally. |
 | **Button Position X / Y** | 99% / 10% | Moves the voice controls around the screen. |
 | **Button Scale** | 130% | Changes the size of the voice HUD buttons. |
 | **Mute / Deafen Status Reminder** | On | Keeps a small persistent reminder visible while muted or deafened. |
+| **Voice Connection Status** | On | Shows routine starting, syncing, and player-count progress in the lobby and retry status in any phase. Turn it off to hide all connection-progress messages; separate device warnings remain available. |
 
 ### Speaking bar
 
 | Setting | Default | What it controls |
 | :--- | :---: | :--- |
+| **Disable Speaking Bar** | Off | Hides the speaking bar and its dependent layout, appearance, and preview settings. |
 | **Show All Players** | Off | Keeps a stable slot for every connected player instead of showing only current speakers. |
 | **Live Preview** | Off | Moves the settings panel aside and shows an isolated 15-player preview while you edit. It turns itself off when you close settings, leave the HUD tab, or restart the game. |
 | **Speaking Bar Position** | Top Middle | Chooses a top, middle-side, or bottom screen preset. |
@@ -98,7 +106,7 @@ Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at th
 
 ## Advanced tab
 
-- **First-Time Setup > Run Setup Again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes.
+- **First-Time Setup > Run Setup Again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes. The Controls step can allow desktop keybinds while chat is open. The HUD step exposes Hide controls, Hide connection status, Hide speaking bar, and Hide meeting overlay; hiding the speaking bar hides its preset picker and live preview.
 - **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It resets off on every game launch.
 - **Diagnostics** writes detailed voice and microphone-calibration logs. It resets off on launch; leave it off unless you are investigating a problem.
 
@@ -113,6 +121,7 @@ Press `Shift+B` to open **Player Volumes**. Each other player has a persistent l
 ### Desktop
 
 - **Push to talk (`C`)** transmits only while held when Mic Mode is Push To Talk.
+- **Push to Mute (unbound)** temporarily mutes the microphone while held and restores the prior mute state when released.
 - **Team radio (`V`)** transmits on the selected eligible team channel; **Cycle (`G`)** changes channel.
 - **Refresh voice (`F7`)** rebuilds only your local voice session and has a 10-second cooldown.
 - **Deafen (`Shift+N`)** mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.

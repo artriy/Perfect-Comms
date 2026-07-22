@@ -121,7 +121,7 @@ public static partial class VoiceChatHudState
         // Close every transmit source before discarding finger ownership so capture cannot latch.
         if (_touchPushToTalkHeld || _touchTeamRadioHeld
             || _micTouchFingerId >= 0 || _radioTouchFingerId >= 0)
-            ReleaseTransmitHoldsFailClosed();
+            ReleaseTransmitHoldsFailClosed(pushToMuteHeld: false);
 
         BestEffortDestroy(ref _radioTouchButtonObj);
         _radioTouchButton = null;

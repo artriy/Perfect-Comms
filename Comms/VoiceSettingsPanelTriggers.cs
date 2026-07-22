@@ -12,23 +12,39 @@ public static class VoiceSettingsPanelTriggers
     [HarmonyPatch(typeof(KeyboardJoystick), nameof(KeyboardJoystick.Update))]
     [HarmonyPostfix]
     static void PerfectComms_PanelHotkeys()
+        => UpdatePanelHotkeys(allowWithoutHudManager: false);
+
+    internal static void UpdatePanelHotkeysFromFrameDriver()
+        => UpdatePanelHotkeys(allowWithoutHudManager: true);
+
+    private static void UpdatePanelHotkeys(bool allowWithoutHudManager)
     {
         VoiceUiKit.Tick();
 
-        if (VoiceUiKit.RebindRow.ShouldSuppressKeybinds) return;
+        if (!Application.isFocused || VoiceUiKit.RebindRow.ShouldSuppressKeybinds) return;
 
-        if (!HudManager.InstanceExists) return;
+        bool chatOpen = false;
+        if (HudManager.InstanceExists)
+        {
+            var chat = HudManager.Instance.Chat;
+            chatOpen = chat != null && chat.IsOpenOrOpening;
+        }
+        else if (!allowWithoutHudManager)
+        {
+            return;
+        }
 
-        var chat = HudManager.Instance.Chat;
-        if (chat != null && chat.IsOpenOrOpening) return;
+        if (VoiceChatPatches.ShouldBlockKeybindsForChat(chatOpen)) return;
 
-        if (VoiceChatKeybinds.OpenVoiceMenu.WasPressedThisFrame() && _lastClientFrame != Time.frameCount)
+        if (VoiceChatKeybinds.OpenVoiceMenu.WasPressedThisFrame() &&
+            _lastClientFrame != Time.frameCount)
         {
             _lastClientFrame = Time.frameCount;
             VoiceSettingsPanel.Toggle();
         }
 
-        if (VoiceChatKeybinds.OpenHostVoiceSettings.WasPressedThisFrame() && _lastHostFrame != Time.frameCount)
+        if (VoiceChatKeybinds.OpenHostVoiceSettings.WasPressedThisFrame() &&
+            _lastHostFrame != Time.frameCount)
         {
             _lastHostFrame = Time.frameCount;
             HostSettingsPanel.Toggle();

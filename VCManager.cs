@@ -5,6 +5,39 @@ using VoiceChatPlugin.VoiceChat;
 
 namespace VoiceChatPlugin;
 
+internal static class VoiceSceneInputPolicy
+{
+    private static bool IsContinuousVoiceScene(string sceneName)
+        => sceneName is "OnlineGame" or "EndGame";
+
+    internal static bool ShouldPreserveHeldTransmitInputs(
+        string previousSceneName,
+        string nextSceneName)
+        => IsContinuousVoiceScene(previousSceneName) && IsContinuousVoiceScene(nextSceneName);
+
+    internal static string ResolvePreviousSceneName(
+        string eventPreviousSceneName,
+        string nextSceneName,
+        string cachedActiveSceneName,
+        string sceneNameBeforeLoad)
+    {
+        if (!string.IsNullOrEmpty(eventPreviousSceneName))
+            return eventPreviousSceneName;
+        if (!string.IsNullOrEmpty(cachedActiveSceneName) &&
+            cachedActiveSceneName != nextSceneName)
+            return cachedActiveSceneName;
+        if (!string.IsNullOrEmpty(sceneNameBeforeLoad) &&
+            sceneNameBeforeLoad != nextSceneName)
+            return sceneNameBeforeLoad;
+        return "";
+    }
+
+    internal static bool ShouldReleaseHeldTransmitInputs(
+        bool preserveHeldTransmitInputs,
+        bool panelWasOpen)
+        => !preserveHeldTransmitInputs || panelWasOpen;
+}
+
 internal class VCManager : MonoBehaviour
 {
     private static bool _sceneHookRegistered;
@@ -14,6 +47,10 @@ internal class VCManager : MonoBehaviour
     // string across the IL2CPP boundary on every access; doing that per-frame in Update() was a steady
     // GC contributor. We update this only on scene load / active-scene change instead.
     private static string _activeSceneName = "";
+    // sceneLoaded can precede activeSceneChanged. Preserve the old cache until the latter decides
+    // whether the transition is a privacy boundary.
+    private static string _sceneNameBeforeLoad = "";
+
 
     static VCManager()
     {
@@ -36,20 +73,38 @@ internal class VCManager : MonoBehaviour
 
     private static void OnActiveSceneChanged(Scene previous, Scene next)
     {
+        string previousSceneName = VoiceSceneInputPolicy.ResolvePreviousSceneName(
+            previous.name,
+            next.name,
+            _activeSceneName,
+            _sceneNameBeforeLoad);
+        _sceneNameBeforeLoad = "";
         _activeSceneName = next.name;
         VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
         VoiceChatRoom.NotifyScenePhaseBoundary();
-        VoiceUiKit.ClosePersistentPanels($"active-scene:{previous.name}->{next.name}");
+        VoiceUiKit.ClosePersistentPanels(
+            $"active-scene:{previousSceneName}->{next.name}",
+            preserveHeldTransmitInputs:
+                VoiceSceneInputPolicy.ShouldPreserveHeldTransmitInputs(
+                    previousSceneName,
+                    next.name));
     }
 
     private static void OnSceneLoaded(Scene scene, LoadSceneMode _)
     {
         // Among Us transitions are single-mode loads, so the loaded scene becomes the active one.
         // Refresh the cache here too in case activeSceneChanged ordering differs across the boundary.
+        if (_activeSceneName != scene.name)
+            _sceneNameBeforeLoad = _activeSceneName;
         _activeSceneName = scene.name;
         VoiceSceneState.SetEndGameSceneHint(_activeSceneName == "EndGame");
         VoiceChatRoom.NotifyScenePhaseBoundary();
-        VoiceUiKit.ClosePersistentPanels($"scene-loaded:{scene.name}");
+        // activeSceneChanged owns the privacy-boundary decision. This callback may run before or
+        // after it, so it closes persistent UI without turning the second notification into a
+        // spurious held-key release. Session creation/closure independently releases every hold.
+        VoiceUiKit.ClosePersistentPanels(
+            $"scene-loaded:{scene.name}",
+            preserveHeldTransmitInputs: true);
         VoiceFirstRunSetup.CloseForSceneChange();
         EnsureManagerObject();
         switch (scene.name)
@@ -102,8 +157,8 @@ internal class VCManager : MonoBehaviour
                 VoiceJoinGuard.Tick();
                 VoiceFrameProfiler.Tick();
                 long vcTicks = VoiceFrameProfiler.Begin();
-                if (_activeSceneName == "EndGame")
-                    VoiceChatPatches.UpdatePushToTalkFromFrameDriver();
+                VoiceChatPatches.UpdateKeybindsFromFrameDriver();
+                VoiceSettingsPanelTriggers.UpdatePanelHotkeysFromFrameDriver();
                 long hudTicks = VoiceFrameProfiler.Begin();
                 SafeUpdateHud();
                 VoiceFrameProfiler.End("hud", hudTicks);

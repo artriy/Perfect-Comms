@@ -86,6 +86,21 @@ internal static class SpeakingBarPreviewRoster
     }
 }
 
+/// <summary>
+/// Keeps the miniature preview's topology aligned with the live HUD. The preview viewport may
+/// uniformly shrink that topology to fit, but its smaller canvas must not create extra rows or
+/// columns that would not exist in game.
+/// </summary>
+internal static class SpeakingBarLivePreviewLayoutPolicy
+{
+    internal static int? RequiredLineCount(int itemCount, bool singleLane)
+    {
+        int preferredLineCount = SpeakingBarLayoutPolicy.GetLineCount(itemCount);
+        if (preferredLineCount == 0) return null;
+        return singleLane ? 1 : preferredLineCount;
+    }
+}
+
 internal readonly record struct SpeakingBarPreviewWorkspace(
     float Scale,
     float SettingsOffsetX,

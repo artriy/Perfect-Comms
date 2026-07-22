@@ -932,6 +932,26 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
     }
 
     [Fact]
+    public void ContextualListenerFilterRemainsAvailableDuringMeeting()
+    {
+        PlayerControl listener = FakePlayer();
+        VoicePhaseKind? observedPhase = null;
+        PerfectCommsApi.RegisterContextualListenerFilter(
+            NewModId("meeting-listener-filter"),
+            context =>
+            {
+                observedPhase = context.Phase;
+                return new VoiceListenerFilterResult(true);
+            });
+
+        Assert.True(VoiceModRegistry.ResolveListenerMuffled(
+            listener,
+            VoicePhaseKind.Meeting,
+            isDead: false));
+        Assert.Equal(VoicePhaseKind.Meeting, observedPhase);
+    }
+
+    [Fact]
     public void ContextualAndLegacyListenerFiltersResolveAndMuffleAnAudibleRoute()
     {
         PlayerControl listenerControl = FakePlayer();
