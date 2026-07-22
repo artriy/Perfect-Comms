@@ -105,11 +105,6 @@ Radio, tap its button to cycle channels or hold it to transmit. To keep a small
 Deafen Status Reminder**. Deafening mutes Perfect Comms playback and pauses your
 microphone transmission until you undeafen.
 
-Desktop Push To Talk keeps the selected microphone capture stream ready while a
-voice session is connected, but discards samples before encoding or transmission
-until `C` is held. This removes device-start delay; the operating system can
-therefore show the microphone as in use between presses.
-
 <br>
 
 ## Install
