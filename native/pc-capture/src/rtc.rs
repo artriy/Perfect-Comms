@@ -334,6 +334,16 @@ struct PeerEncoderFeedback {
     last_bandwidth_fresh: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PeerEncoderFeedbackUpdate {
+    generation: u32,
+    sample: EncoderFeedback,
+    bandwidth_estimate: Option<i32>,
+    packets_received: u64,
+    rtt_measurements: u64,
+    now: Instant,
+}
+
 struct EncoderPolicyState {
     controller: EncoderNetworkController,
     peers: HashMap<String, PeerEncoderFeedback>,
@@ -398,35 +408,26 @@ impl SharedEncoderPolicy {
         }
     }
 
-    fn update_peer(
-        &self,
-        peer_id: &str,
-        generation: u32,
-        sample: EncoderFeedback,
-        bandwidth_estimate: Option<i32>,
-        packets_received: u64,
-        rtt_measurements: u64,
-        now: Instant,
-    ) {
+    fn update_peer(&self, peer_id: &str, update: PeerEncoderFeedbackUpdate) {
         let mut state = self.state.lock();
         let Some(peer) = state.peers.get_mut(peer_id) else {
             return;
         };
-        if peer.generation != generation {
+        if peer.generation != update.generation {
             return;
         }
-        let advanced = packets_received > peer.packets_received
-            || rtt_measurements > peer.rtt_measurements
+        let advanced = update.packets_received > peer.packets_received
+            || update.rtt_measurements > peer.rtt_measurements
             || peer.last_loss_fresh.is_none();
-        peer.packets_received = peer.packets_received.max(packets_received);
-        peer.rtt_measurements = peer.rtt_measurements.max(rtt_measurements);
+        peer.packets_received = peer.packets_received.max(update.packets_received);
+        peer.rtt_measurements = peer.rtt_measurements.max(update.rtt_measurements);
         if advanced {
-            peer.sample = sample;
-            peer.last_loss_fresh = Some(now);
+            peer.sample = update.sample;
+            peer.last_loss_fresh = Some(update.now);
         }
-        if let Some(estimate) = bandwidth_estimate.filter(|estimate| *estimate > 0) {
+        if let Some(estimate) = update.bandwidth_estimate.filter(|estimate| *estimate > 0) {
             peer.bandwidth_estimate = Some(estimate);
-            peer.last_bandwidth_fresh = Some(now);
+            peer.last_bandwidth_fresh = Some(update.now);
         }
     }
 

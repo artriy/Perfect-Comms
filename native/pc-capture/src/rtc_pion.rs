@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use super::{
-    LocalSignal, NativeCounters, PeerNetworkPathSnapshot, ReceivedPacket, SharedEncoderPolicy,
-    SharedNetworkPathCache, SharedReceiveQueue, ENCODER_STATS_INTERVAL,
-    RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT,
+    LocalSignal, NativeCounters, PeerEncoderFeedbackUpdate, PeerNetworkPathSnapshot,
+    ReceivedPacket, SharedEncoderPolicy, SharedNetworkPathCache, SharedReceiveQueue,
+    ENCODER_STATS_INTERVAL, RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT,
 };
 use crate::codec::{
     EncoderFeedback, EncoderPolicySnapshot, MediaReceiveCounters, MediaReceiveSnapshot,
@@ -871,17 +871,20 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
             args.network_paths.update(snapshot);
             args.encoder_policy.update_peer(
                 &event.peer_id,
-                event.generation,
-                EncoderFeedback {
-                    fraction_lost: finite_nonnegative(event.remote_fraction_lost).clamp(0.0, 1.0),
+                PeerEncoderFeedbackUpdate {
+                    generation: event.generation,
+                    sample: EncoderFeedback {
+                        fraction_lost: finite_nonnegative(event.remote_fraction_lost)
+                            .clamp(0.0, 1.0),
+                    },
+                    bandwidth_estimate: event
+                        .bandwidth_estimate_valid
+                        .then(|| encoder_target_bitrate(event.available_outgoing_bitrate))
+                        .flatten(),
+                    packets_received: event.remote_packets_received,
+                    rtt_measurements: event.remote_rtt_measurements,
+                    now: Instant::now(),
                 },
-                event
-                    .bandwidth_estimate_valid
-                    .then(|| encoder_target_bitrate(event.available_outgoing_bitrate))
-                    .flatten(),
-                event.remote_packets_received,
-                event.remote_rtt_measurements,
-                Instant::now(),
             );
         }
         other => eprintln!("pc-capture: unknown Pion control event kind={other}"),
