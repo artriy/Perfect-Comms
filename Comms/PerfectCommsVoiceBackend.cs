@@ -1206,6 +1206,21 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
            && nowTimestamp >= acceptAfterTimestamp
            && priorConfirmationCount + 1 >= SidecarFreshLevelConfirmationsRequired;
 
+    internal static bool ShouldAcceptSidecarLevelForCaptureAttempt(
+        long attemptGeneration,
+        long provenAttemptGeneration,
+        long confirmationGeneration,
+        int priorConfirmationCount,
+        long nowTimestamp,
+        long acceptAfterTimestamp)
+        => IsCaptureSourceProven(attemptGeneration, provenAttemptGeneration)
+           || ShouldPromoteSidecarLevel(
+               attemptGeneration,
+               confirmationGeneration,
+               priorConfirmationCount,
+               nowTimestamp,
+               acceptAfterTimestamp);
+
     internal static bool IsCurrentVoiceStart(
         long taskGeneration,
         long currentGeneration,
@@ -1644,6 +1659,23 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         => expectedGeneration == 0 || state.StreamGeneration == 0 ||
            expectedGeneration == state.StreamGeneration;
 
+    internal static long CaptureAttemptProvenByFirstCallback(
+        long attemptGeneration,
+        ulong expectedStreamGeneration,
+        SidecarCaptureState state,
+        bool microphoneRequested,
+        bool muted,
+        bool keepCaptureWarm)
+        => attemptGeneration > 0
+           && state.State == "first-callback"
+           && state.Running
+           && CaptureStateGenerationMatches(expectedStreamGeneration, state)
+           && microphoneRequested
+           && (!muted || keepCaptureWarm)
+            ? attemptGeneration
+            : 0;
+
+
     private void OnSidecarCaptureState(long sessionGeneration, SidecarCaptureState state)
     {
         bool readyChanged = false;
@@ -1682,13 +1714,20 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             else if (state.State == "first-callback")
             {
-                if (!state.Running ||
-                    !CaptureStateGenerationMatches(_sidecarCaptureStreamGeneration, state) ||
-                    !_microphoneRequested ||
-                    (Mute && !_keepCaptureWarm))
+                var provenAttemptGeneration = CaptureAttemptProvenByFirstCallback(
+                    Volatile.Read(ref _sidecarCaptureAttemptGeneration),
+                    _sidecarCaptureStreamGeneration,
+                    state,
+                    _microphoneRequested,
+                    Mute,
+                    _keepCaptureWarm);
+                if (provenAttemptGeneration == 0)
                     return;
 
                 _sidecarCaptureStreamGeneration = state.StreamGeneration;
+                Volatile.Write(
+                    ref _sidecarCaptureProvenAttemptGeneration,
+                    provenAttemptGeneration);
                 Volatile.Write(
                     ref _sidecarCaptureProvenGeneration,
                     Volatile.Read(ref _sidecarCaptureSourceGeneration));
@@ -2153,16 +2192,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
             var acceptAfter = Volatile.Read(ref _sidecarCaptureAcceptAfterTimestamp);
-            var promotesAttempt = IsCaptureSourceProven(
-                                      attemptGeneration,
-                                      Volatile.Read(ref _sidecarCaptureProvenAttemptGeneration))
-                                  || ShouldPromoteSidecarLevel(
-                                      attemptGeneration,
-                                      attemptGeneration,
-                                      priorConfirmationCount,
-                                      now,
-                                      acceptAfter);
-            if (now < acceptAfter || attemptGeneration <= 0)
+            var promotesAttempt = ShouldAcceptSidecarLevelForCaptureAttempt(
+                attemptGeneration,
+                Volatile.Read(ref _sidecarCaptureProvenAttemptGeneration),
+                attemptGeneration,
+                priorConfirmationCount,
+                now,
+                acceptAfter);
+            if (attemptGeneration <= 0 || (!promotesAttempt && now < acceptAfter))
             {
                 _localLevel = 0f;
                 _localSpeaking = false;

@@ -103,6 +103,31 @@ public sealed class VoiceRoomLifetimeGateTests
                 explicitDisconnect));
     }
 
+    [Theory]
+    [InlineData(55, 44, (int)VoiceGamePhase.EndGame, false, false, 55)]
+    [InlineData(0, 55, (int)VoiceGamePhase.EndGame, false, true, 55)]
+    [InlineData(0, 55, (int)VoiceGamePhase.Tasks, false, true, 0)]
+    [InlineData(0, 55, (int)VoiceGamePhase.EndGame, true, true, 0)]
+    [InlineData(0, 55, (int)VoiceGamePhase.EndGame, false, false, 0)]
+    [InlineData(0, 0, (int)VoiceGamePhase.EndGame, false, true, 0)]
+    public void OnlyConfirmedEndGameSessionBridgesTransientMissingGameId(
+        int currentGameId,
+        int retainedSnapshotGameId,
+        int retainedPhase,
+        bool explicitDisconnect,
+        bool retainedSessionConfirmed,
+        int expectedGameId)
+    {
+        Assert.Equal(
+            expectedGameId,
+            VoiceRoomLifetimeGate.ResolveSnapshotSessionGameId(
+                currentGameId,
+                retainedSnapshotGameId,
+                (VoiceGamePhase)retainedPhase,
+                explicitDisconnect,
+                retainedSessionConfirmed));
+    }
+
     [Fact]
     public void TransitionRefreshPolicyRetainsOnlyAUsableSameSessionPreviousSnapshot()
     {

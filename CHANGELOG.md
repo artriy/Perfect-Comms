@@ -2,7 +2,7 @@
 
 ## Perfect Comms v4.1.5
 
-Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes ICE and signaling recovery bounded and explicit, adapts reliably to a persistently weak path, and adds the diagnostics needed to distinguish transport faults from local audio stalls.
+Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes ICE and signaling recovery bounded and explicit, adapts reliably to a persistently weak path, improves transport diagnostics, and makes living and ghost speaking avatars match Among Us cosmetics more faithfully.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.5/assets/brand/divider.svg" alt="divider" width="900">
@@ -23,6 +23,20 @@ Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes
 
 - **Signaling recovery stays bounded under repeated failures.**
   > <sub>Per-peer SDP, ICE-candidate, and restart work is generation-fenced, coalesced, and capped so current operations supersede stale work. Explicit acknowledgements and bounded recovery windows prevent a stalled helper or signaling backlog from accumulating obsolete work indefinitely.</sub>
+
+- **Results-to-lobby voice no longer dips when Among Us briefly clears the lobby id.**
+  > <sub>The already-authenticated EndGame session is retained across the short same-lobby GameId gap instead of publishing a one-frame deaf mixer state. Explicit disconnects, new lobby ids, and every non-EndGame missing-id state still fail closed.</sub>
+
+- **Healthy desktop microphone capture no longer receives a needless watchdog restart after startup.**
+  > <sub>The helper's generation-matched first native capture callback now proves the active capture attempt, so its continuing level cadence is counted immediately instead of being misclassified as three empty health windows.</sub>
+
+### More Faithful Speaking Avatars
+
+- **Ghost speakers now use the game's complete ghost body and cosmetic geometry.**
+  > <sub>Publicly known deaths switch the speaking avatar to Among Us' ghost artwork at the correct scale, preserve layered hats and visors, and cache one stable post-death pose so an animated cosmetic cannot jump when a fading voice slot reappears. Hidden task-phase deaths remain private.</sub>
+
+- **Living cosmetics preserve their intended depth and facing-specific artwork.**
+  > <sub>Back cosmetic layers remain behind the body, while asymmetric hats, skins, and visors use their dedicated left-facing idle art instead of mirroring the right-facing frame. Speaking avatars remain static rather than replaying world movement animations.</sub>
 
 ### Better Voice Diagnostics
 

@@ -110,6 +110,27 @@ public sealed class CaptureSupervisorSampleHealthTests
     }
 
     [Fact]
+    public void FirstNativeCallbackProofBypassesTheQueuedLevelGuard()
+    {
+        const long attempt = 12;
+
+        Assert.True(PerfectCommsVoiceBackend.ShouldAcceptSidecarLevelForCaptureAttempt(
+            attemptGeneration: attempt,
+            provenAttemptGeneration: attempt,
+            confirmationGeneration: attempt,
+            priorConfirmationCount: 0,
+            nowTimestamp: 0,
+            acceptAfterTimestamp: long.MaxValue));
+        Assert.False(PerfectCommsVoiceBackend.ShouldAcceptSidecarLevelForCaptureAttempt(
+            attemptGeneration: attempt,
+            provenAttemptGeneration: 0,
+            confirmationGeneration: attempt,
+            priorConfirmationCount: 0,
+            nowTimestamp: 0,
+            acceptAfterTimestamp: long.MaxValue));
+    }
+
+    [Fact]
     public void PreGuardOrPreviousAttemptLevelsCannotProveCurrentCapture()
     {
         Assert.False(PerfectCommsVoiceBackend.ShouldPromoteSidecarLevel(

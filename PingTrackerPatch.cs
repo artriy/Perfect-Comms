@@ -504,17 +504,38 @@ public static class PingTrackerPatch
                         slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
                         cosmeticsRefreshed = true;
                     }
+                    else if (cosmeticRefresh == SpeakingBarGhostCosmeticRefresh.Ghost)
+                    {
+                        // Capture the live hierarchy immediately, even while Among Us is still swapping
+                        // currentBodySprite to GhostSprite. Deferring this made hats/visors render at the
+                        // living icon's larger fixed scale, then visibly shrink near the end of an utterance.
+                        bool ghostCosmeticsReady =
+                            CrewmateAvatarRenderer.IsLiveGhostBodyApplied(player);
+                        CrewmateAvatarRenderer.TryRefreshPublicGhostCosmetics(slot.IconGO, player);
+                        slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
+                        if (ghostCosmeticsReady)
+                            slot.PublicGhostCosmeticRefreshFrames = 0;
+                        cosmeticsRefreshed = true;
+                    }
                     else if (retryGhostCosmetics)
                     {
                         slot.PublicGhostCosmeticRefreshFrames--;
-                        bool ghostCosmeticsReady =
+                        bool ghostBodyReady =
                             CrewmateAvatarRenderer.IsLiveGhostBodyApplied(player);
-                        if (ghostCosmeticsReady || slot.PublicGhostCosmeticRefreshFrames <= 0)
+                        if (ghostBodyReady)
                         {
-                            CrewmateAvatarRenderer.TryRefreshPublicGhostCosmetics(slot.IconGO, player);
-                            slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
+                            bool requiresBodyRefresh =
+                                CrewmateAvatarRenderer.RequiresLiveGhostBodyRefresh(player);
+                            if (requiresBodyRefresh)
+                                CrewmateAvatarRenderer.TryRefreshPublicGhostBody(slot.IconGO, player);
                             slot.PublicGhostCosmeticRefreshFrames = 0;
-                            cosmeticsRefreshed = true;
+                            cosmeticsRefreshed = requiresBodyRefresh;
+                        }
+                        else if (slot.PublicGhostCosmeticRefreshFrames <= 0)
+                        {
+                            // The first ghost-state frame already captured stable cosmetics and a
+                            // canonical body fallback. Stop polling if the game never swaps its body.
+                            slot.PublicGhostCosmeticRefreshFrames = 0;
                         }
                     }
                     if (cosmeticsRefreshed)
@@ -1802,15 +1823,15 @@ public static class PingTrackerPatch
 
     private static void ApplyAvatarFacing(GameObject icon)
     {
-        var scale = icon.transform.localScale;
-        float width = Mathf.Abs(scale.x);
-        scale.x = SpeakingBarLayoutPolicy.ResolveAvatarFacesLeft(
+        bool facesLeft = SpeakingBarLayoutPolicy.ResolveAvatarFacesLeft(
             _manualLayout,
             _barPosition,
-            _manualAvatarFacing)
-            ? -width
-            : width;
+            _manualAvatarFacing);
+        var scale = icon.transform.localScale;
+        float width = Mathf.Abs(scale.x);
+        scale.x = facesLeft ? -width : width;
         icon.transform.localScale = scale;
+        CrewmateAvatarRenderer.SetAvatarFacing(icon, facesLeft);
     }
 
     private static void PositionSlot(
@@ -2239,6 +2260,7 @@ public static class PingTrackerPatch
         public int Compare(byte left, byte right)
             => SpeakingBarRosterPolicy.ComparePlayerIds(left, right, _publiclyDead);
     }
+
 
     private class SpeakerSlot
     {

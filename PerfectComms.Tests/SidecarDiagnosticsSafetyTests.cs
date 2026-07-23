@@ -655,6 +655,34 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.False(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(
             8,
             ready));
+        Assert.Equal(12, PerfectCommsVoiceBackend.CaptureAttemptProvenByFirstCallback(
+            attemptGeneration: 12,
+            expectedStreamGeneration: 7,
+            ready,
+            microphoneRequested: true,
+            muted: false,
+            keepCaptureWarm: false));
+        Assert.Equal(12, PerfectCommsVoiceBackend.CaptureAttemptProvenByFirstCallback(
+            attemptGeneration: 12,
+            expectedStreamGeneration: 7,
+            ready,
+            microphoneRequested: true,
+            muted: true,
+            keepCaptureWarm: true));
+        Assert.Equal(0, PerfectCommsVoiceBackend.CaptureAttemptProvenByFirstCallback(
+            attemptGeneration: 12,
+            expectedStreamGeneration: 8,
+            ready,
+            microphoneRequested: true,
+            muted: false,
+            keepCaptureWarm: false));
+        Assert.Equal(0, PerfectCommsVoiceBackend.CaptureAttemptProvenByFirstCallback(
+            attemptGeneration: 12,
+            expectedStreamGeneration: 7,
+            ready,
+            microphoneRequested: true,
+            muted: true,
+            keepCaptureWarm: false));
 #endif
         Assert.False(SidecarVoiceClient.TryReadCaptureState(
             "{\"direction\":\"playback\",\"state\":\"first-callback\",\"stream_generation\":7}",

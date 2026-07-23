@@ -493,8 +493,14 @@ public class VoiceChatRoom
             _snapshotRefreshTimer = StateRefreshInterval;
             long __snapTicks = VoiceFrameProfiler.Begin();
             var refreshedSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive);
-            var currentGameId = ResolveCurrentGameId();
+            var observedGameId = ResolveCurrentGameId();
             var explicitDisconnect = VoiceRoomLifetimeGate.IsExplicitDisconnectLatched;
+            var currentGameId = VoiceRoomLifetimeGate.ResolveSnapshotSessionGameId(
+                observedGameId,
+                _snapshotGameId,
+                CurrentSnapshot?.Phase,
+                explicitDisconnect,
+                VoiceRoomLifetimeGate.IsConfirmedJoinedGame(_snapshotGameId));
             var previousRetainable = VoiceRoomLifetimeGate.CanRetainSnapshot(
                 CurrentSnapshot != null,
                 _snapshotGameId,

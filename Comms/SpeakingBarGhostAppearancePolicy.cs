@@ -61,4 +61,19 @@ internal static class SpeakingBarGhostAppearancePolicy
 
         return SpeakingBarGhostCosmeticRefresh.None;
     }
+
+    /// <summary>
+    /// Selects the cosmetic renderer set atomically with the body artwork. Until an exact post-ghost
+    /// snapshot exists, living hats/visors remain usable while the living skin is suppressed.
+    /// </summary>
+    internal static bool ShouldShowCosmetic(
+        bool useGhostBody,
+        bool hasExactGhostCosmetics,
+        bool ghostLayer,
+        bool skinLayer)
+    {
+        if (!useGhostBody) return !ghostLayer;
+        if (hasExactGhostCosmetics) return ghostLayer;
+        return !ghostLayer && !skinLayer;
+    }
 }

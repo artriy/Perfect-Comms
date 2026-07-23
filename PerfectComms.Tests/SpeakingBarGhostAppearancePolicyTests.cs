@@ -1,3 +1,4 @@
+using VoiceChatPlugin;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
@@ -109,5 +110,64 @@ public sealed class SpeakingBarGhostAppearancePolicyTests
                 hasAppliedRequest,
                 appliedPubliclyDead,
                 requestedPubliclyDead));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false, true)]
+    [InlineData(false, true, false, true, true)]
+    [InlineData(false, true, true, false, false)]
+    [InlineData(true, false, false, false, true)]
+    [InlineData(true, false, false, true, false)]
+    [InlineData(true, false, true, false, false)]
+    [InlineData(true, true, false, false, false)]
+    [InlineData(true, true, true, false, true)]
+    public void CosmeticVisibilitySwitchesWholeSetsAndSuppressesFallbackSkin(
+        bool useGhostBody,
+        bool hasExactGhostCosmetics,
+        bool ghostLayer,
+        bool skinLayer,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            SpeakingBarGhostAppearancePolicy.ShouldShowCosmetic(
+                useGhostBody,
+                hasExactGhostCosmetics,
+                ghostLayer,
+                skinLayer));
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(4, 9)]
+    [InlineData(-8, 3)]
+    public void GhostSortingPreservesEverySourceRendererDelta(int bodyOrder, int cosmeticOrder)
+    {
+        int mappedBody = CrewmateAvatarRenderer.MapGhostSortingOrder(bodyOrder, bodyOrder);
+        int mappedCosmetic = CrewmateAvatarRenderer.MapGhostSortingOrder(cosmeticOrder, bodyOrder);
+
+        Assert.Equal(cosmeticOrder - bodyOrder, mappedCosmetic - mappedBody);
+    }
+
+    [Fact]
+    public void LivingBackCosmeticsRenderBehindTheBody()
+    {
+        Assert.True(CrewmateAvatarRenderer.BackCosmeticOrder < CrewmateAvatarRenderer.BodyOrder);
+    }
+
+    [Theory]
+    [InlineData(-1f, 1f)]
+    [InlineData(-0.5f, 0.5f)]
+    [InlineData(0.75f, 0.75f)]
+    public void LivingCosmeticCaptureRemovesTheSourceFacingSign(float sourceScale, float expected)
+    {
+        Assert.Equal(expected, CrewmateAvatarRenderer.CanonicalCosmeticScaleX(sourceScale));
+    }
+
+    [Fact]
+    public void VanillaGhostFallbackMatchesLivingHudFootprint()
+    {
+        Assert.Equal(1f, CrewmateAvatarRenderer.VanillaGhostFallbackScale);
+        Assert.Equal(2f, CrewmateAvatarRenderer.GhostHudNormalizationScale);
     }
 }

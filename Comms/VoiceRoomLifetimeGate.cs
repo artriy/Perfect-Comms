@@ -72,6 +72,29 @@ internal static class VoiceRoomLifetimeGate
            && !explicitDisconnectLatched;
 
     /// <summary>
+    /// Among Us briefly clears GameId while rebuilding the same lobby after EndGame. Keep using the
+    /// already-confirmed session id only for that transition; every other zero GameId remains a
+    /// fail-closed boundary.
+    /// </summary>
+    internal static int ResolveSnapshotSessionGameId(
+        int currentGameId,
+        int retainedSnapshotGameId,
+        VoiceGamePhase? retainedPhase,
+        bool explicitDisconnectLatched,
+        bool retainedSessionConfirmed)
+    {
+        if (currentGameId != 0)
+            return currentGameId;
+
+        return !explicitDisconnectLatched
+               && retainedSessionConfirmed
+               && retainedSnapshotGameId != 0
+               && retainedPhase == VoiceGamePhase.EndGame
+            ? retainedSnapshotGameId
+            : 0;
+    }
+
+    /// <summary>
     /// Rejects transition-frame snapshots that have lost the authenticated local identity or
     /// player roster. Such snapshots are non-null but cannot route voice safely and must not
     /// replace a still-usable snapshot from the same live session.
