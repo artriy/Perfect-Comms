@@ -31,6 +31,9 @@ const (
 	writeTimeout           = 100 * time.Millisecond
 	privacyDrainTimeout    = 500 * time.Millisecond
 	maxPendingCandidates   = 64
+	tcpReadPacketCapacity  = 64
+	tcpWriteBufferCapacity = 0
+	tcpFirstSTUNTimeout    = 5 * time.Second
 )
 
 type iceServerJSON struct {
@@ -40,27 +43,46 @@ type iceServerJSON struct {
 }
 
 // feedbackAwareEstimator distinguishes GCC's configured startup bitrate from an estimate backed
-// by actual transport-wide congestion-control feedback.
+// by transport-wide congestion-control feedback received on the currently selected path.
 type feedbackAwareEstimator struct {
 	cc.BandwidthEstimator
-	feedback atomic.Bool
+	pathEpoch     atomic.Uint64
+	feedbackEpoch atomic.Uint64
 }
 
-func (e *feedbackAwareEstimator) WriteRTCP(packets []rtcp.Packet, attributes interceptor.Attributes) error {
-	if err := e.BandwidthEstimator.WriteRTCP(packets, attributes); err != nil {
-		return err
-	}
+func hasCongestionControlFeedback(packets []rtcp.Packet) bool {
 	for _, packet := range packets {
 		switch packet.(type) {
 		case *rtcp.TransportLayerCC, *rtcp.CCFeedbackReport:
-			e.feedback.Store(true)
+			return true
 		}
+	}
+	return false
+}
+
+func (e *feedbackAwareEstimator) WriteRTCP(packets []rtcp.Packet, attributes interceptor.Attributes) error {
+	pathEpoch := e.pathEpoch.Load()
+	hasFeedback := hasCongestionControlFeedback(packets)
+	if err := e.BandwidthEstimator.WriteRTCP(packets, attributes); err != nil {
+		return err
+	}
+	// Feedback that began processing before a path invalidation must not validate the new path.
+	// Storing the observed epoch is safe if invalidation races this store: hasFeedback compares it
+	// with the incremented path epoch and still reports invalid.
+	if hasFeedback && e.pathEpoch.Load() == pathEpoch {
+		e.feedbackEpoch.Store(pathEpoch + 1)
 	}
 	return nil
 }
 
+func (e *feedbackAwareEstimator) invalidateFeedback() {
+	if e != nil {
+		e.pathEpoch.Add(1)
+	}
+}
+
 func (e *feedbackAwareEstimator) hasFeedback() bool {
-	return e != nil && e.feedback.Load()
+	return e != nil && e.feedbackEpoch.Load() == e.pathEpoch.Load()+1
 }
 
 type transportCounters struct {
@@ -92,6 +114,7 @@ type engine struct {
 	iceServers   []webrtc.ICEServer
 	api          *webrtc.API
 	estimators   chan *feedbackAwareEstimator
+	epochGates   chan *epochGate
 	udpMux       ice.UDPMux
 	muxClosing   *atomic.Bool
 	control      controlQueue
@@ -148,41 +171,29 @@ func newEngine() (*engine, error) {
 		}
 	})
 	registry.Add(congestionController)
+	epochGateFactory := newEpochGateFactory()
+	// Register the gate before the responder so the responder's cached-packet writer
+	// retains the gate in its downstream path.
+	registry.Add(epochGateFactory)
 	if err = webrtc.ConfigureTWCCHeaderExtensionSender(mediaEngine, registry); err != nil {
 		return nil, fmt.Errorf("twcc header sender: %w", err)
 	}
-	if os.Getenv("PC_PION_TEST_DEFAULT_INTERCEPTORS") == "1" {
-		err = webrtc.RegisterDefaultInterceptors(mediaEngine, registry)
-	} else {
-		err = webrtc.RegisterDefaultInterceptorsWithOptions(
-			mediaEngine,
-			registry,
-			webrtc.WithNackGeneratorOptions(
-				nack.GeneratorInterval(20*time.Millisecond),
-				nack.GeneratorMaxNacksPerPacket(2),
-				nack.GeneratorSize(64),
-			),
-			webrtc.WithNackResponderOptions(nack.ResponderSize(64)),
-			webrtc.WithReportReceiverOptions(report.ReceiverInterval(500*time.Millisecond)),
-			webrtc.WithReportSenderOptions(report.SenderInterval(500*time.Millisecond)),
-		)
-	}
+	err = webrtc.RegisterDefaultInterceptorsWithOptions(
+		mediaEngine,
+		registry,
+		webrtc.WithNackGeneratorOptions(
+			nack.GeneratorInterval(20*time.Millisecond),
+			nack.GeneratorMaxNacksPerPacket(2),
+			nack.GeneratorSize(epochGateHistorySize),
+		),
+		webrtc.WithNackResponderOptions(nack.ResponderSize(epochGateHistorySize)),
+		webrtc.WithReportReceiverOptions(report.ReceiverInterval(500*time.Millisecond)),
+		webrtc.WithReportSenderOptions(report.SenderInterval(500*time.Millisecond)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("default interceptors: %w", err)
 	}
-	settings := webrtc.SettingEngine{}
-	settings.SetICETimeouts(8*time.Second, 15*time.Second, 2*time.Second)
-	settings.SetRelayAcceptanceMinWait(relayAcceptanceMinWait)
-	settings.SetICEMulticastDNSMode(multicastDNSMode())
-	settings.SetICEUseCandidateCheckPriority(true)
-	if os.Getenv("PC_PION_TEST_DISABLE_RENOMINATION") != "1" {
-		if err = settings.SetICERenomination(); err != nil {
-			return nil, fmt.Errorf("ICE renomination: %w", err)
-		}
-	}
-	if os.Getenv("PC_PION_TEST_DISABLE_DTLS_TUNING") != "1" {
-		settings.SetDTLSRetransmissionInterval(500 * time.Millisecond)
-	}
+	settings := newSettingEngine()
 	// One shared mux per engine keeps host ICE traffic on one port per usable
 	// network family. Each ICE agent still owns its mDNS sockets, and Pion
 	// WebRTC v4.2.17 normal srflx gathering uses one socket per STUN URL.
@@ -213,6 +224,7 @@ func newEngine() (*engine, error) {
 			webrtc.WithSettingEngine(settings),
 		),
 		estimators: estimators,
+		epochGates: epochGateFactory.created,
 		udpMux:     udpMux,
 		tcpMux:     tcpMux,
 		muxClosing: muxClosing,
@@ -227,6 +239,18 @@ func multicastDNSMode() ice.MulticastDNSMode {
 		return ice.MulticastDNSModeDisabled
 	}
 	return ice.MulticastDNSModeQueryAndGather
+}
+
+func newSettingEngine() webrtc.SettingEngine {
+	settings := webrtc.SettingEngine{}
+	settings.SetICETimeouts(8*time.Second, 15*time.Second, 2*time.Second)
+	settings.SetRelayAcceptanceMinWait(relayAcceptanceMinWait)
+	settings.SetICEMulticastDNSMode(multicastDNSMode())
+	settings.SetICEUseCandidateCheckPriority(true)
+	if os.Getenv("PC_PION_TEST_DISABLE_DTLS_TUNING") != "1" {
+		settings.SetDTLSRetransmissionInterval(500 * time.Millisecond)
+	}
+	return settings
 }
 
 func newSharedUDPMux(closing *atomic.Bool) (ice.UDPMux, []webrtc.NetworkType, error) {
@@ -272,11 +296,13 @@ func newSharedTCPMux(closing *atomic.Bool) (ice.TCPMux, error) {
 	if err != nil {
 		return nil, err
 	}
+	trackedListener := newTrackingTCPListener(listener, tcpFirstSTUNTimeout)
 	return ice.NewTCPMuxDefault(ice.TCPMuxParams{
-		Listener:        listener,
-		Logger:          newMuxLogger(closing),
-		ReadBufferSize:  1 << 20,
-		WriteBufferSize: 1 << 20,
+		Listener:             trackedListener,
+		Logger:               newMuxLogger(closing),
+		ReadBufferSize:       tcpReadPacketCapacity,
+		WriteBufferSize:      tcpWriteBufferCapacity,
+		FirstStunBindTimeout: tcpFirstSTUNTimeout,
 	}), nil
 }
 
@@ -388,11 +414,11 @@ func (e *engine) addPeerLocked(id string, offerer, relayOnly bool, generation ui
 	existing := e.peers[id]
 	e.mu.RUnlock()
 	if existing != nil && existing.generation == generation {
-		existing.raiseMinEpoch(minEpoch)
-		e.privacyMu.Lock()
-		dropped := existing.purgeOutboundBelow(existing.minEpoch.Load())
-		e.privacyMu.Unlock()
-		e.counters.rtpTXStaleEpochDropped.Add(uint64(dropped))
+		target := existing.raiseMinEpoch(minEpoch)
+		if !e.advancePeerEpoch(existing, target, privacyDrainTimeout) || !existing.active.Load() {
+			e.removePeerLocked(id)
+			return errors.New("peer privacy epoch drain failed")
+		}
 		return nil
 	}
 	if existing != nil {
@@ -408,14 +434,32 @@ func (e *engine) addPeerLocked(id string, offerer, relayOnly bool, generation ui
 			_ = stale.Close()
 		default:
 		}
+		select {
+		case stale := <-e.epochGates:
+			_ = stale.Close()
+		default:
+		}
 		return fmt.Errorf("new peer connection: %w", err)
 	}
 	var estimator *feedbackAwareEstimator
 	select {
 	case estimator = <-e.estimators:
 	case <-time.After(time.Second):
+		select {
+		case stale := <-e.epochGates:
+			_ = stale.Close()
+		default:
+		}
 		_ = pc.Close()
 		return errors.New("pion congestion estimator unavailable")
+	}
+	var gate *epochGate
+	select {
+	case gate = <-e.epochGates:
+	case <-time.After(time.Second):
+		_ = estimator.Close()
+		_ = pc.Close()
+		return errors.New("privacy epoch gate unavailable")
 	}
 	track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType:    webrtc.MimeTypeOpus,
@@ -432,7 +476,7 @@ func (e *engine) addPeerLocked(id string, offerer, relayOnly bool, generation ui
 		_ = pc.Close()
 		return fmt.Errorf("add opus track: %w", err)
 	}
-	p := newPeer(e, id, generation, e.instance.Add(1), minEpoch, relayOnly, pc, track, sender, estimator)
+	p := newPeer(e, id, generation, e.instance.Add(1), minEpoch, relayOnly, pc, track, sender, estimator, gate)
 	e.mu.Lock()
 	if e.closed.Load() {
 		e.mu.Unlock()
@@ -532,6 +576,31 @@ func (e *engine) sendOpus(payload []byte, epoch, mediaSequence uint64) sendResul
 	return result
 }
 
+func (e *engine) advancePeerEpoch(p *peer, target uint64, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if e.privacyMu.TryLock() {
+			dropped := p.purgeOutboundBelow(target)
+			e.privacyMu.Unlock()
+			e.counters.rtpTXStaleEpochDropped.Add(uint64(dropped))
+			break
+		}
+		if timeout <= 0 || !time.Now().Before(deadline) {
+			return false
+		}
+		sleepUntilPrivacyDeadline(deadline)
+	}
+
+	peers := []*peer{p}
+	if !waitForPrivacyWriters(peers, target, deadline, timeout, blockedOriginalWriters) {
+		return false
+	}
+	if p.epochGate != nil {
+		p.epochGate.advanceEpoch(target)
+	}
+	return waitForPrivacyWriters(peers, target, deadline, timeout, blockedGateWriters)
+}
+
 func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 	target := epoch
 	for {
@@ -546,10 +615,11 @@ func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 	}
 
 	deadline := time.Now().Add(timeout)
+	var peers []*peer
 	for {
 		if e.privacyMu.TryLock() {
 			e.mu.RLock()
-			peers := make([]*peer, 0, len(e.peers))
+			peers = make([]*peer, 0, len(e.peers))
 			var dropped uint64
 			for _, p := range e.peers {
 				peers = append(peers, p)
@@ -558,43 +628,83 @@ func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 			e.mu.RUnlock()
 			e.privacyMu.Unlock()
 			e.counters.rtpTXStaleEpochDropped.Add(dropped)
-
-			for {
-				blocked := blockedPrivacyWriters(peers, target)
-				if len(blocked) == 0 {
-					return true
-				}
-				if timeout <= 0 || !time.Now().Before(deadline) {
-					// Closing one blocked PeerConnection interrupts its TrackLocal write and waits
-					// for that peer's workers only. Other peers and engine control remain live.
-					for _, p := range blocked {
-						p.fail("privacy epoch write deadline exceeded")
-						p.close()
-					}
-					return true
-				}
-				remaining := time.Until(deadline)
-				if remaining > time.Millisecond {
-					remaining = time.Millisecond
-				}
-				time.Sleep(remaining)
-			}
+			break
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			return false
 		}
-		remaining := time.Until(deadline)
-		if remaining > time.Millisecond {
-			remaining = time.Millisecond
+		sleepUntilPrivacyDeadline(deadline)
+	}
+
+	// Originals publish writeInFlight while holding privacyMu, before recording their
+	// packet in the gate. The published floor prevents any new old-epoch admission,
+	// so all gate floors can advance once this fixed snapshot has drained.
+	if !waitForPrivacyWriters(peers, target, deadline, timeout, blockedOriginalWriters) {
+		return false
+	}
+	for _, p := range peers {
+		if p.epochGate != nil {
+			p.epochGate.advanceEpoch(target)
 		}
-		time.Sleep(remaining)
+	}
+
+	// Gate advancement rejects new stale NACKs. Writes already admitted by a gate
+	// remain part of the privacy boundary until their downstream call returns.
+	return waitForPrivacyWriters(peers, target, deadline, timeout, blockedGateWriters)
+}
+
+type privacyWriterBlocker func([]*peer, uint64) []*peer
+
+func waitForPrivacyWriters(
+	peers []*peer,
+	epoch uint64,
+	deadline time.Time,
+	timeout time.Duration,
+	blockedWriters privacyWriterBlocker,
+) bool {
+	for {
+		blocked := blockedWriters(peers, epoch)
+		if len(blocked) == 0 {
+			return true
+		}
+		if timeout <= 0 || !time.Now().Before(deadline) {
+			// A closed peer is the privacy boundary when its transport write cannot
+			// drain; no later write can enter its closed epoch gate.
+			for _, p := range blocked {
+				p.fail("privacy epoch write deadline exceeded")
+				p.close()
+			}
+			// close waits for peer workers, but an interceptor-owned NACK write may
+			// still be downstream. Never report success until the affected phase
+			// confirms that its old write is gone.
+			return len(blockedWriters(peers, epoch)) == 0
+		}
+		sleepUntilPrivacyDeadline(deadline)
 	}
 }
 
-func blockedPrivacyWriters(peers []*peer, epoch uint64) []*peer {
+func sleepUntilPrivacyDeadline(deadline time.Time) {
+	remaining := time.Until(deadline)
+	if remaining > time.Millisecond {
+		remaining = time.Millisecond
+	}
+	time.Sleep(remaining)
+}
+
+func blockedOriginalWriters(peers []*peer, epoch uint64) []*peer {
 	blocked := make([]*peer, 0, len(peers))
 	for _, p := range peers {
-		if p.hasRTPWriteBefore(epoch) {
+		if p.writeInFlight.Load() && p.writeEpoch.Load() < epoch {
+			blocked = append(blocked, p)
+		}
+	}
+	return blocked
+}
+
+func blockedGateWriters(peers []*peer, epoch uint64) []*peer {
+	blocked := make([]*peer, 0, len(peers))
+	for _, p := range peers {
+		if p.epochGate != nil && p.epochGate.hasWriteBefore(epoch) {
 			blocked = append(blocked, p)
 		}
 	}

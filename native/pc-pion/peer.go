@@ -35,9 +35,11 @@ type peer struct {
 	track           *webrtc.TrackLocalStaticRTP
 	sender          *webrtc.RTPSender
 	estimator       *feedbackAwareEstimator
+	epochGate       *epochGate
 	minEpoch        atomic.Uint64
 	relayOnly       atomic.Bool
 	active          atomic.Bool
+	closeCompleted  atomic.Bool
 	sentRTP         atomic.Bool
 	writeInFlight   atomic.Bool
 	writeEpoch      atomic.Uint64
@@ -51,6 +53,7 @@ type peer struct {
 	workerMu        sync.Mutex
 	workersClosed   bool
 	wg              sync.WaitGroup
+	rtpTransitionMu sync.RWMutex
 	signalMu        sync.Mutex
 	remoteSet       bool
 	pendingICE      []webrtc.ICECandidateInit
@@ -83,15 +86,19 @@ func newPeer(
 	track *webrtc.TrackLocalStaticRTP,
 	sender *webrtc.RTPSender,
 	estimator *feedbackAwareEstimator,
+	epochGate *epochGate,
 ) *peer {
 	sequence, timestamp := randomRTPBases()
 	p := &peer{
 		engine: engine, id: id, generation: generation, instance: instance,
-		pc: pc, track: track, sender: sender, estimator: estimator,
+		pc: pc, track: track, sender: sender, estimator: estimator, epochGate: epochGate,
 		outbound: make(chan outboundFrame, outboundQueueCapacity),
 		stop:     make(chan struct{}), sequenceBase: sequence, timestampBase: timestamp,
 	}
 	p.minEpoch.Store(minEpoch)
+	if p.epochGate != nil {
+		p.epochGate.advanceEpoch(minEpoch)
+	}
 	p.relayOnly.Store(relayOnly)
 	p.active.Store(true)
 	if estimator != nil {
@@ -100,11 +107,14 @@ func newPeer(
 	return p
 }
 
-func (p *peer) raiseMinEpoch(epoch uint64) {
+func (p *peer) raiseMinEpoch(epoch uint64) uint64 {
 	for {
 		current := p.minEpoch.Load()
-		if epoch <= current || p.minEpoch.CompareAndSwap(current, epoch) {
-			return
+		if epoch <= current {
+			return current
+		}
+		if p.minEpoch.CompareAndSwap(current, epoch) {
+			return epoch
 		}
 	}
 }
@@ -150,10 +160,13 @@ func (p *peer) pathStatus() (string, uint64) {
 }
 
 func (p *peer) emitBandwidthEstimate(bitrate int) {
-	if bitrate <= 0 || p.estimator == nil || !p.estimator.hasFeedback() {
+	if bitrate <= 0 || p.estimator == nil {
 		return
 	}
 	iceState, pairChanges := p.pathStatus()
+	if !p.estimator.hasFeedback() {
+		return
+	}
 	p.emit(controlEvent{
 		Kind: "bandwidth", PeerID: p.id, Generation: p.generation,
 		ICEConnectionState: iceState, SelectedPairChanges: pairChanges,
@@ -162,6 +175,7 @@ func (p *peer) emitBandwidthEstimate(bitrate int) {
 }
 
 func (p *peer) selectedPairEvent(pair *webrtc.ICECandidatePair) controlEvent {
+	p.estimator.invalidateFeedback()
 	state, _ := p.pathStatus()
 	event := controlEvent{
 		Kind: "path", PeerID: p.id, Generation: p.generation,
@@ -366,6 +380,10 @@ func (p *peer) createOfferLocked(restart bool) error {
 	if !p.engine.isCurrent(p) {
 		return errors.New("stale peer")
 	}
+	if restart {
+		p.rtpTransitionMu.Lock()
+		defer p.rtpTransitionMu.Unlock()
+	}
 	p.holdLocalCandidates()
 	offer, err := p.pc.CreateOffer(&webrtc.OfferOptions{
 		OfferAnswerOptions: trickleOptions(),
@@ -407,6 +425,10 @@ func (p *peer) setRemoteSDP(sdpType, sdp string) error {
 		return fmt.Errorf("invalid SDP type %q", sdpType)
 	}
 	isOffer := typ == webrtc.SDPTypeOffer
+	if isOffer {
+		p.rtpTransitionMu.Lock()
+		defer p.rtpTransitionMu.Unlock()
+	}
 	if isOffer {
 		p.holdLocalCandidates()
 	}
@@ -497,7 +519,13 @@ func (p *peer) beginRTPWrite(epoch uint64) bool {
 }
 
 func (p *peer) hasRTPWriteBefore(epoch uint64) bool {
-	return p.writeInFlight.Load() && p.writeEpoch.Load() < epoch
+	if p.closeCompleted.Load() {
+		return false
+	}
+	if p.writeInFlight.Load() && p.writeEpoch.Load() < epoch {
+		return true
+	}
+	return p.epochGate != nil && p.epochGate.hasWriteBefore(epoch)
 }
 
 func (p *peer) finishRTPWrite() {
@@ -517,11 +545,14 @@ func (p *peer) writeRTP() {
 				p.engine.counters.rtpTXQueueDropped.Add(1)
 				continue
 			}
+			p.rtpTransitionMu.RLock()
 			if !p.readyToSendRTP() {
+				p.rtpTransitionMu.RUnlock()
 				continue
 			}
 			if !p.beginRTPWrite(frame.epoch) {
 				p.engine.counters.rtpTXStaleEpochDropped.Add(1)
+				p.rtpTransitionMu.RUnlock()
 				continue
 			}
 			if !haveFirst {
@@ -539,15 +570,26 @@ func (p *peer) writeRTP() {
 				Payload: frame.payload,
 			}
 			nextRTPSequence++
+			if p.epochGate != nil && !p.epochGate.recordOriginal(&packet.Header, packet.Payload, frame.epoch) {
+				p.finishRTPWrite()
+				p.engine.counters.rtpTXStaleEpochDropped.Add(1)
+				p.rtpTransitionMu.RUnlock()
+				continue
+			}
 			started := time.Now()
 			err := p.track.WriteRTP(packet)
 			elapsed := time.Since(started)
 			p.finishRTPWrite()
+			p.rtpTransitionMu.RUnlock()
 			if elapsed > writeTimeout {
 				p.engine.counters.rtpTXWriteTimeouts.Add(1)
 			}
 			if err != nil {
-				p.engine.counters.rtpTXErrors.Add(1)
+				if p.active.Load() {
+					p.engine.counters.rtpTXErrors.Add(1)
+				} else {
+					p.engine.counters.rtpTXStaleEpochDropped.Add(1)
+				}
 			} else {
 				p.sentRTP.Store(true)
 				p.engine.counters.rtpTXOK.Add(1)
@@ -558,6 +600,14 @@ func (p *peer) writeRTP() {
 
 func (p *peer) readyToSendRTP() bool {
 	if p.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+		return false
+	}
+	transport := p.sender.Transport()
+	if transport == nil || transport.ICETransport() == nil {
+		return false
+	}
+	pair, err := transport.ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Local == nil || pair.Remote == nil {
 		return false
 	}
 	for _, encoding := range p.sender.GetParameters().Encodings {
@@ -674,7 +724,11 @@ func (p *peer) close() {
 		if p.pc != nil {
 			_ = p.pc.Close()
 		}
+		if p.epochGate != nil {
+			_ = p.epochGate.Close()
+		}
 		p.wg.Wait()
+		p.closeCompleted.Store(true)
 	})
 }
 

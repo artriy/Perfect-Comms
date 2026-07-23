@@ -916,6 +916,7 @@ pub struct MediaReceiveStats {
     pub late_drops: u64,
     pub duplicate_drops: u64,
     pub encoded_overflow_drops: u64,
+    pub latency_catchup_drops: u64,
     pub deadline_losses: u64,
     pub dred_frames: u64,
     pub fec_frames: u64,
@@ -1474,6 +1475,10 @@ mod tests {
             playback_underrun_pairs: 100,
             playback_output_nonzero_samples: 8_000,
             playback_output_peak: 0.4,
+            media_receive: MediaReceiveStats {
+                latency_catchup_drops: 37,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let value: serde_json::Value = serde_json::from_str(&stats_json(&stats)).unwrap();
@@ -1501,6 +1506,7 @@ mod tests {
         assert_eq!(value["mix_silent_rounds"], 1);
         assert_eq!(value["mix_peak"], 0.5);
         assert_eq!(value["mix_rms"], 0.125);
+        assert_eq!(value["media_receive"]["latency_catchup_drops"], 37);
         assert_eq!(value["dsp_config_generation"], 3);
         assert_eq!(value["dsp_requested_aec"], true);
         assert_eq!(value["dsp_requested_agc"], true);
@@ -1566,8 +1572,12 @@ mod tests {
 
     #[test]
     fn native_stats_deserialize_defaults_additive_fields_from_old_payloads() {
-        let stats: NativeStatsSnapshot = serde_json::from_str(r#"{"capture_frames":7}"#).unwrap();
+        let stats: NativeStatsSnapshot =
+            serde_json::from_str(r#"{"capture_frames":7,"media_receive":{"active_peers":2}}"#)
+                .unwrap();
         assert_eq!(stats.capture_frames, 7);
+        assert_eq!(stats.media_receive.active_peers, 2);
+        assert_eq!(stats.media_receive.latency_catchup_drops, 0);
         assert_eq!(stats.aec_capture_path_ms, 0);
         assert!(!stats.aec_timing_complete);
         assert!(stats.aec_fallback_reason.is_empty());

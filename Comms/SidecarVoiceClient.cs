@@ -1458,6 +1458,22 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
            $"dspAppliedAec={FormatOptionalBool(root, "dsp_applied_aec")} dspAppliedAgc={FormatOptionalBool(root, "dsp_applied_agc")} dspAppliedNs={FormatOptionalBool(root, "dsp_applied_ns")} dspAppliedNsVeryHigh={FormatOptionalBool(root, "dsp_applied_ns_very_high")} dspAppliedHpf={FormatOptionalBool(root, "dsp_applied_hpf")} " +
            $"inputGain={FormatOptionalDouble(root, "input_gain", "0.#########")} vadThreshold={FormatOptionalDouble(root, "input_vad_threshold", "0.#########")} noiseGateThreshold={FormatOptionalDouble(root, "input_noise_gate_threshold", "0.#########")}";
 
+    internal static bool TryDescribeNativeMediaReceiveForDiagnostics(string json, out string details)
+    {
+        details = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            details = DescribeNativeMediaReceiveForDiagnostics(doc.RootElement);
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     private static string DescribeNativeMediaReceiveForDiagnostics(JsonElement root)
     {
         if (!root.TryGetProperty("media_receive", out var receive) ||
@@ -1466,7 +1482,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         return "mediaReceivePresent=true " +
                $"mediaPeers={FormatOptionalU64(receive, "active_peers")} ingressOverflow={FormatOptionalU64(receive, "ingress_queue_overflow")} ingressDepth={FormatOptionalU64(receive, "ingress_queue_depth_current")} ingressDepthMax={FormatOptionalU64(receive, "ingress_queue_depth_max")} ingressPeerDepthMax={FormatOptionalU64(receive, "ingress_peer_queue_depth_max")} " +
                $"sequenceGaps={FormatOptionalU64(receive, "sequence_gaps")} localMediaGapFrames={FormatOptionalU64(receive, "local_media_gap_frames")} reorderedRecovered={FormatOptionalU64(receive, "reordered_recovered")} lateDrops={FormatOptionalU64(receive, "late_drops")} duplicateDrops={FormatOptionalU64(receive, "duplicate_drops")} encodedOverflowDrops={FormatOptionalU64(receive, "encoded_overflow_drops")} deadlineLosses={FormatOptionalU64(receive, "deadline_losses")} " +
-               $"dredFrames={FormatOptionalU64(receive, "dred_frames")} fecFrames={FormatOptionalU64(receive, "fec_frames")} plcFrames={FormatOptionalU64(receive, "plc_frames")} decoderResets={FormatOptionalU64(receive, "decoder_resets")} talkspurtResets={FormatOptionalU64(receive, "talkspurt_resets")} underruns={FormatOptionalU64(receive, "underruns")} rebuffers={FormatOptionalU64(receive, "rebuffers")} " +
+               $"dredFrames={FormatOptionalU64(receive, "dred_frames")} fecFrames={FormatOptionalU64(receive, "fec_frames")} plcFrames={FormatOptionalU64(receive, "plc_frames")} decoderResets={FormatOptionalU64(receive, "decoder_resets")} talkspurtResets={FormatOptionalU64(receive, "talkspurt_resets")} underruns={FormatOptionalU64(receive, "underruns")} rebuffers={FormatOptionalU64(receive, "rebuffers")} latencyCatchupDrops={FormatOptionalU64(receive, "latency_catchup_drops")} " +
                $"targetFramesMax={FormatOptionalU64(receive, "target_frames_max")} targetFramesCurrentMax={FormatOptionalU64(receive, "target_frames_current_max")} depthFramesMax={FormatOptionalU64(receive, "depth_frames_max")} depthFramesCurrent={FormatOptionalU64(receive, "depth_frames_current")} rtpJitterMsMax={FormatOptionalDouble(receive, "rtp_jitter_ms_max", "0.###")}";
     }
 

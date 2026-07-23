@@ -347,6 +347,10 @@ internal sealed class PeerSessionManager
     private const long PendingRemoteCandidateTtlMs = 12000;
     private const long FailedLocalSignalRetryIntervalMs = 500;
     private const long IceRestartOfferTimeoutMs = 5000;
+    private const long InitialRecoveryBackoffMs = 8000;
+    private const long SecondRecoveryBackoffMs = 16000;
+    private const long ThirdRecoveryBackoffMs = 32000;
+    private const long MaxRecoveryBackoffMs = 60000;
     private const int MaxPendingLocalCandidates = 64;
     internal const long NativeOperationAckTimeoutMs = 3000;
     private const long FailedTransportCommandRetryIntervalMs = 500;
@@ -409,6 +413,13 @@ internal sealed class PeerSessionManager
         public bool IceRestartRequestPending;
         public long IceRestartRequestStartedMs;
         public long LastIceRestartRequestMs;
+        public bool IceRestartRequestSent;
+        public long NextIceRestartRequestRetryMs;
+        public int RecoveryAttempt;
+        public long NextRecoveryEpochMs;
+        public bool RecoveryHelloSent;
+        public bool RecoveryRestartSent;
+        public long NextRecoverySignalRetryMs;
         public long LocalCandidatesAttempted;
         public long RemoteCandidatesReceived;
         public long RemoteCandidatesForwarded;
@@ -514,10 +525,11 @@ internal sealed class PeerSessionManager
                 return true;
             if (peer.IceRestartRequestPending)
             {
-                var restartWaitElapsedMs = nowMs - peer.IceRestartRequestStartedMs;
-                if (peer.IceRestartRequestStartedMs > 0
-                    && restartWaitElapsedMs >= 0
-                    && restartWaitElapsedMs < IceRestartOfferTimeoutMs)
+                if (peer.IceRestartRequestSent
+                    && !HasElapsed(peer.IceRestartRequestStartedMs, nowMs, IceRestartOfferTimeoutMs))
+                    return true;
+                if (!peer.IceRestartRequestSent
+                    && !IsDeadlineDue(peer.NextIceRestartRequestRetryMs, nowMs))
                     return true;
             }
             if (peer.State is not (PeerState.Offering or PeerState.Answering or PeerState.Connected))
@@ -683,16 +695,18 @@ internal sealed class PeerSessionManager
             LogReject("recover", clientId, peer, "already-established");
             return false;
         }
-        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        if (IsWithinInterval(peer.LastReinitMs, nowMs, ReinitThrottleMs))
         {
             LogReject("recover", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
             return false;
         }
+        if (!TryBeginRecoveryEpoch(clientId, peer, nowMs, "targeted-recovery"))
+            return false;
 
-        if (peer.State is PeerState.Idle or PeerState.Greeted)
+        if ((peer.State is PeerState.Idle or PeerState.Greeted) && !peer.RestartRequested)
         {
             peer.LastReinitMs = nowMs;
-            LogEvent("recover", clientId, peer, "action=resend-hello");
+            LogEvent("recover", clientId, peer, "action=resend-discovery-hello");
             return SendHello(clientId, peer, nowMs, force: true, reason: "targeted-recovery");
         }
 
@@ -753,29 +767,46 @@ internal sealed class PeerSessionManager
                 && peer.Added
                 && peer.State == PeerState.Established)
             {
-                if (peer.IceRestartRequestStartedMs > 0
-                    && nowMs >= peer.IceRestartRequestStartedMs
-                    && nowMs - peer.IceRestartRequestStartedMs >= IceRestartOfferTimeoutMs)
+                if (peer.IceRestartRequestSent
+                    && HasElapsed(peer.IceRestartRequestStartedMs, nowMs, IceRestartOfferTimeoutMs))
                 {
+                    var waitMs = ElapsedMs(peer.IceRestartRequestStartedMs, nowMs);
                     LogEvent(
                         "ice-restart",
                         pair.Key,
                         peer,
-                        $"mode=recreate reason=restart-offer-timeout waitMs={nowMs - peer.IceRestartRequestStartedMs}");
+                        $"mode=recreate reason=restart-offer-timeout waitMs={waitMs}");
+                    if (peer.RecoveryAttempt == 0)
+                        BeginRecoveryEpoch(pair.Key, peer, nowMs, "restart-offer-timeout");
                     Reinitiate(pair.Key, peer, nowMs);
                     continue;
                 }
-                if (peer.LastIceRestartRequestMs == 0
-                    || nowMs - peer.LastIceRestartRequestMs >= FailedLocalSignalRetryIntervalMs)
+                if (!peer.IceRestartRequestSent
+                    && IsDeadlineDue(peer.NextIceRestartRequestRetryMs, nowMs))
                 {
-                    peer.LastIceRestartRequestMs = nowMs;
-                    SendSignal(
+                    var sent = SendSignal(
                         pair.Key,
                         peer,
                         SignalMsgType.IceRestartRequest,
                         ControlPayload(peer, SignalMsgType.IceRestartRequest),
-                        "ice-restart-request-retry");
+                        "ice-restart-request-writer-retry");
+                    peer.LastIceRestartRequestMs = nowMs;
+                    if (sent)
+                        peer.IceRestartRequestStartedMs = nowMs;
+                    peer.IceRestartRequestSent = sent;
+                    peer.NextIceRestartRequestRetryMs = sent
+                        ? 0
+                        : SaturatingAdd(nowMs, FailedLocalSignalRetryIntervalMs);
                 }
+            }
+            if (peer.RestartRequested)
+            {
+                RetryRecoverySignals(pair.Key, peer, nowMs);
+                if (peer.RecoveryHelloSent
+                    && peer.RecoveryRestartSent
+                    && TryBeginRecoveryEpoch(pair.Key, peer, nowMs, "answerer-recovery-timeout"))
+                    RecoverPeer(pair.Key, peer, nowMs);
+                continue;
             }
             if (peer.State is PeerState.Idle or PeerState.Greeted)
             {
@@ -784,7 +815,7 @@ internal sealed class PeerSessionManager
                 var retryInterval = acknowledgementPending || firstHelloFailed
                     ? FailedHelloAckRetryIntervalMs
                     : HelloRetryIntervalMs(peer.UnansweredHelloCount);
-                if (peer.LastHelloSentMs != 0 && nowMs - peer.LastHelloSentMs < retryInterval) continue;
+                if (IsWithinInterval(peer.LastHelloSentMs, nowMs, retryInterval)) continue;
                 var reason = acknowledgementPending
                     ? "remote-hello-ack-retry"
                     : firstHelloFailed ? "initial-hello-send-retry" : "hello-resend-timeout";
@@ -805,27 +836,27 @@ internal sealed class PeerSessionManager
                 {
                     TryStartSession(pair.Key, peer, nowMs);
                 }
-                if (peer.RestartRequested)
-                    SendSignal(pair.Key, peer, SignalMsgType.Restart, ControlPayload(peer, SignalMsgType.Restart), "restart-resend-with-hello");
             }
             else if (peer.State is PeerState.Offering or PeerState.Answering or PeerState.Connected)
             {
                 RetryPendingLocalSignals(pair.Key, peer, nowMs);
                 if (peer.LastProgressMs == 0) continue;
-                if (nowMs - peer.LastProgressMs < HandshakeTimeoutFor(peer)) continue;
-                if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                if (!HasElapsed(peer.LastProgressMs, nowMs, HandshakeTimeoutFor(peer))) continue;
+                if (IsWithinInterval(peer.LastReinitMs, nowMs, ReinitThrottleMs)) continue;
                 LogEvent("timeout", pair.Key, peer, $"kind=handshake nowMs={nowMs} lastProgressMs={peer.LastProgressMs}");
-                RecoverPeer(pair.Key, peer, nowMs);
+                if (TryBeginRecoveryEpoch(pair.Key, peer, nowMs, "handshake-timeout"))
+                    RecoverPeer(pair.Key, peer, nowMs);
             }
             else if (peer.State == PeerState.Established && peer.DegradedSinceMs != 0)
             {
                 // Backstop for a peer stuck in ICE "disconnected" that never escalates to "failed"
                 // (so OnPeerConnectionLost never fires): re-initiate after a grace period that lets
-                // transient blips self-heal. The reinit throttle below prevents re-offer storms.
-                if (nowMs - peer.DegradedSinceMs < DisconnectedGraceMs) continue;
-                if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs) continue;
+                // transient blips self-heal.
+                if (!HasElapsed(peer.DegradedSinceMs, nowMs, DisconnectedGraceMs)) continue;
+                if (IsWithinInterval(peer.LastReinitMs, nowMs, ReinitThrottleMs)) continue;
                 LogEvent("timeout", pair.Key, peer, $"kind=degraded nowMs={nowMs} degradedSinceMs={peer.DegradedSinceMs}");
-                RecoverPeer(pair.Key, peer, nowMs);
+                if (TryBeginRecoveryEpoch(pair.Key, peer, nowMs, "degraded-timeout"))
+                    RecoverPeer(pair.Key, peer, nowMs);
             }
         }
     }
@@ -852,6 +883,9 @@ internal sealed class PeerSessionManager
         peer.IceRestartRequestPending = false;
         peer.IceRestartRequestStartedMs = 0;
         peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartRequestSent = false;
+        peer.NextIceRestartRequestRetryMs = 0;
+        ResetRecoveryState(peer);
         LogEvent("peer-connected", clientId, peer, "accepted=true");
     }
 
@@ -862,13 +896,14 @@ internal sealed class PeerSessionManager
             LogGenerationReject("peer-lost", clientId, generation);
             return;
         }
-        if (peer.LastReinitMs != 0 && nowMs - peer.LastReinitMs < ReinitThrottleMs)
+        if (IsWithinInterval(peer.LastReinitMs, nowMs, ReinitThrottleMs))
         {
             LogReject("peer-lost", clientId, peer, "reinit-throttled", $"nowMs={nowMs} lastReinitMs={peer.LastReinitMs}");
             return;
         }
         LogEvent("peer-lost", clientId, peer, $"nowMs={nowMs} action=recover");
-        RecoverPeer(clientId, peer, nowMs);
+        if (TryBeginRecoveryEpoch(clientId, peer, nowMs, "peer-lost"))
+            RecoverPeer(clientId, peer, nowMs);
     }
 
     // ICE reported "disconnected" (a transient/soft drop, not "failed"). Mark when it began so
@@ -1017,7 +1052,11 @@ internal sealed class PeerSessionManager
             LogReject("recover", clientId, peer, peer.Incompatible ? "protocol-incompatible" : "hello-not-received");
             return;
         }
-        LogEvent("recover", clientId, peer, $"begin=true nowMs={nowMs}");
+        LogEvent(
+            "recover",
+            clientId,
+            peer,
+            $"begin=true attempt={peer.RecoveryAttempt} nextEpochMs={peer.NextRecoveryEpochMs} nowMs={nowMs}");
         peer.RelayRequested = true;
         if (RelayAvailable())
         {
@@ -1054,6 +1093,132 @@ internal sealed class PeerSessionManager
 
     private static long HandshakeTimeoutFor(PeerEntry peer)
         => peer.RelayCapable ? RelayHandshakeTimeoutMs : DirectHandshakeTimeoutMs;
+
+    private static long RecoveryBackoffMs(int recoveryAttempt)
+        => recoveryAttempt switch
+        {
+            <= 1 => InitialRecoveryBackoffMs,
+            2 => SecondRecoveryBackoffMs,
+            3 => ThirdRecoveryBackoffMs,
+            _ => MaxRecoveryBackoffMs,
+        };
+
+    private bool TryBeginRecoveryEpoch(int clientId, PeerEntry peer, long nowMs, string reason)
+    {
+        if (peer.RecoveryAttempt > 0 && !IsDeadlineDue(peer.NextRecoveryEpochMs, nowMs))
+        {
+            LogReject(
+                "recover",
+                clientId,
+                peer,
+                "backoff-active",
+                $"attempt={peer.RecoveryAttempt} nextEpochMs={peer.NextRecoveryEpochMs} nowMs={nowMs} reason={reason}");
+            return false;
+        }
+        BeginRecoveryEpoch(clientId, peer, nowMs, reason);
+        return true;
+    }
+
+    private void BeginRecoveryEpoch(int clientId, PeerEntry peer, long nowMs, string reason)
+    {
+        peer.RecoveryAttempt = Math.Min(peer.RecoveryAttempt + 1, 4);
+        var delayMs = RecoveryBackoffMs(peer.RecoveryAttempt);
+        peer.NextRecoveryEpochMs = SaturatingAdd(nowMs, delayMs);
+        peer.RecoveryHelloSent = false;
+        peer.RecoveryRestartSent = false;
+        peer.NextRecoverySignalRetryMs = 0;
+        LogEvent(
+            "recover",
+            clientId,
+            peer,
+            $"epoch=begin attempt={peer.RecoveryAttempt} delayMs={delayMs} nextEpochMs={peer.NextRecoveryEpochMs} reason={reason}");
+    }
+
+    private void SendRecoverySignals(int clientId, PeerEntry peer, long nowMs, string reason)
+    {
+        if (!peer.RecoveryHelloSent)
+        {
+            var helloSent = SendHello(
+                clientId,
+                peer,
+                nowMs,
+                force: true,
+                reason: $"{reason}-hello");
+            if (!peer.RestartRequested)
+                return;
+            peer.RecoveryHelloSent = helloSent;
+        }
+
+        if (!peer.RecoveryRestartSent)
+        {
+            peer.RecoveryRestartSent = SendSignal(
+                clientId,
+                peer,
+                SignalMsgType.Restart,
+                ControlPayload(peer, SignalMsgType.Restart),
+                $"{reason}-restart");
+        }
+
+        peer.NextRecoverySignalRetryMs = peer.RecoveryHelloSent && peer.RecoveryRestartSent
+            ? 0
+            : SaturatingAdd(nowMs, FailedLocalSignalRetryIntervalMs);
+    }
+
+    private void RetryRecoverySignals(int clientId, PeerEntry peer, long nowMs)
+    {
+        if (peer.RecoveryHelloSent && peer.RecoveryRestartSent)
+            return;
+        if (!IsDeadlineDue(peer.NextRecoverySignalRetryMs, nowMs))
+            return;
+        SendRecoverySignals(clientId, peer, nowMs, "recovery-writer-retry");
+    }
+
+    // SDP exchange alone does not prove that the media path recovered. Only Established or an
+    // authenticated remote-session replacement calls this; roster removal discards the PeerEntry.
+    private static void ResetRecoveryState(PeerEntry peer)
+    {
+        peer.RecoveryAttempt = 0;
+        peer.RelayRequested = false;
+        peer.LastRelayRequestMs = 0;
+        peer.RestartRequested = false;
+        peer.NextRecoveryEpochMs = 0;
+        peer.RecoveryHelloSent = false;
+        peer.RecoveryRestartSent = false;
+        peer.NextRecoverySignalRetryMs = 0;
+    }
+
+    private static bool IsWithinInterval(long startedAtMs, long nowMs, long intervalMs)
+        => startedAtMs > 0
+           && nowMs >= startedAtMs
+           && !HasElapsed(startedAtMs, nowMs, intervalMs);
+
+    private static bool HasElapsed(long startedAtMs, long nowMs, long intervalMs)
+    {
+        if (nowMs < startedAtMs)
+            return false;
+        var deadlineMs = SaturatingAdd(startedAtMs, intervalMs);
+        return nowMs >= deadlineMs;
+    }
+
+    private static long ElapsedMs(long startedAtMs, long nowMs)
+    {
+        var nonNegativeStartedAtMs = Math.Max(0, startedAtMs);
+        var nonNegativeNowMs = Math.Max(0, nowMs);
+        return nonNegativeNowMs >= nonNegativeStartedAtMs
+            ? nonNegativeNowMs - nonNegativeStartedAtMs
+            : 0;
+    }
+
+    private static bool IsDeadlineDue(long deadlineMs, long nowMs)
+        => deadlineMs <= 0 || nowMs >= deadlineMs;
+
+    private static long SaturatingAdd(long nowMs, long delayMs)
+    {
+        var nonNegativeNowMs = Math.Max(0, nowMs);
+        return nonNegativeNowMs >= long.MaxValue - delayMs
+            ? long.MaxValue
+            : nonNegativeNowMs + delayMs;
+    }
 
     private void RestartWithMixedIce(int clientId, PeerEntry peer, long nowMs, string reason)
     {
@@ -1092,9 +1257,24 @@ internal sealed class PeerSessionManager
             return;
         }
 
-        peer.LastIceRestartRequestMs = nowMs;
+        if (peer.IceRestartRequestPending)
+        {
+            if (peer.IceRestartRequestSent)
+            {
+                LogEvent("ice-restart", clientId, peer, $"mode=in-place role=answerer action=await-offer reason={reason}");
+                return;
+            }
+            if (!IsDeadlineDue(peer.NextIceRestartRequestRetryMs, nowMs))
+            {
+                LogEvent("ice-restart", clientId, peer, $"mode=in-place role=answerer action=await-writer-retry reason={reason}");
+                return;
+            }
+        }
         if (!peer.IceRestartRequestPending)
-            peer.IceRestartRequestStartedMs = nowMs;
+        {
+            peer.IceRestartRequestStartedMs = 0;
+            peer.IceRestartRequestSent = false;
+        }
         peer.IceRestartRequestPending = true;
         var sent = SendSignal(
             clientId,
@@ -1102,6 +1282,13 @@ internal sealed class PeerSessionManager
             SignalMsgType.IceRestartRequest,
             ControlPayload(peer, SignalMsgType.IceRestartRequest),
             reason);
+        peer.LastIceRestartRequestMs = nowMs;
+        if (sent)
+            peer.IceRestartRequestStartedMs = nowMs;
+        peer.IceRestartRequestSent = sent;
+        peer.NextIceRestartRequestRetryMs = sent
+            ? 0
+            : SaturatingAdd(nowMs, FailedLocalSignalRetryIntervalMs);
         LogEvent("ice-restart", clientId, peer, $"mode=in-place role=answerer requestSent={Bool(sent)} reason={reason}");
     }
 
@@ -1116,6 +1303,8 @@ internal sealed class PeerSessionManager
         peer.IceRestartRequestPending = false;
         peer.IceRestartRequestStartedMs = 0;
         peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartRequestSent = false;
+        peer.NextIceRestartRequestRetryMs = 0;
         peer.IceRestartInProgress = true;
         peer.LastProgressMs = nowMs;
         SetState(clientId, peer, PeerState.Offering, "ice-restart-local-offerer");
@@ -1142,6 +1331,8 @@ internal sealed class PeerSessionManager
             LogReject("reinitiate", clientId, peer, peer.Incompatible ? "protocol-incompatible" : "hello-not-received");
             return;
         }
+        if (peer.RecoveryAttempt == 0)
+            BeginRecoveryEpoch(clientId, peer, nowMs, "reinitiate");
         var previousGeneration = peer.Generation;
         var previousNegotiationId = peer.NegotiationId;
         ClearPendingLocalSignals(peer);
@@ -1150,6 +1341,8 @@ internal sealed class PeerSessionManager
         peer.IceRestartRequestPending = false;
         peer.IceRestartRequestStartedMs = 0;
         peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartRequestSent = false;
+        peer.NextIceRestartRequestRetryMs = 0;
         peer.Generation = NextGeneration();
         peer.LastReinitMs = nowMs;
         peer.DegradedSinceMs = 0;
@@ -1195,8 +1388,10 @@ internal sealed class PeerSessionManager
             peer.RestartRequested = true;
             SetState(clientId, peer, PeerState.Greeted, "reinitiate-request-remote-offer");
             peer.LastProgressMs = 0;
-            SendHello(clientId, peer, nowMs, force: true, reason: "reinitiate-answerer-hello");
-            SendSignal(clientId, peer, SignalMsgType.Restart, ControlPayload(peer, SignalMsgType.Restart), "reinitiate-answerer-restart");
+            peer.RecoveryHelloSent = false;
+            peer.RecoveryRestartSent = false;
+            peer.NextRecoverySignalRetryMs = 0;
+            SendRecoverySignals(clientId, peer, nowMs, "reinitiate-answerer");
         }
     }
 
@@ -1759,7 +1954,10 @@ internal sealed class PeerSessionManager
                                    && previousRemoteSessionId > 0
                                    && previousRemoteSessionId != remoteSessionId;
         if (remoteSessionChanged)
+        {
             RetireRemoteSession(peer, previousRemoteSessionId);
+            ResetRecoveryState(peer);
+        }
         peer.Incompatible = false;
         peer.RemoteProtocolVersion = version;
         peer.RemoteSessionId = remoteSessionId;
@@ -2501,6 +2699,8 @@ internal sealed class PeerSessionManager
         peer.IceRestartRequestPending = false;
         peer.IceRestartRequestStartedMs = 0;
         peer.LastIceRestartRequestMs = 0;
+        peer.IceRestartRequestSent = false;
+        peer.NextIceRestartRequestRetryMs = 0;
         peer.IceRestartInProgress = keptNativePeer;
         peer.LastReinitMs = nowMs;
         peer.LastProgressMs = nowMs;

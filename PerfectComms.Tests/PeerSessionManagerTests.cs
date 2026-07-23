@@ -908,6 +908,25 @@ public sealed class PeerSessionManagerTests
 
     private static int HelloCount(MockSender sender) => sender.Sent.Count(m => m.Type == SignalMsgType.Hello);
 
+    private static void AssertRecoveryEpochSignalCounts(MockSender sender, int expectedEpochs)
+    {
+        Xunit.Assert.Equal(expectedEpochs, HelloCount(sender));
+        Xunit.Assert.Equal(
+            expectedEpochs,
+            sender.Sent.Count(message => message.Type == SignalMsgType.Restart));
+    }
+
+    private static void AssertOffererGenerationCount(
+        PeerSessionManager manager,
+        MockTransport transport,
+        long nowMs,
+        int expectedAdds)
+    {
+        manager.Tick(nowMs);
+        Xunit.Assert.Equal(expectedAdds, transport.Added.Count);
+        Xunit.Assert.Equal(expectedAdds - 1, transport.Removed.Count);
+    }
+
     private static PeerState StateOf(PeerSessionManager manager, int clientId)
     {
         Xunit.Assert.True(manager.TryGetPeerState(clientId, out var state));
@@ -1219,16 +1238,21 @@ public sealed class PeerSessionManagerTests
         var manager = new PeerSessionManager(3, transport, sender);
 
         manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+        var initialGeneration = transport.AddedGenerations.Last();
         Xunit.Assert.Equal(new[] { 7 }, transport.Added);
 
-        manager.OnPeerConnectionLost(7, transport.AddedGenerations.Last(), 5000);
+        manager.OnPeerConnectionLost(7, initialGeneration, 5000);
+        var firstRecoveryGeneration = transport.AddedGenerations.Last();
         Xunit.Assert.Equal(new[] { 7, 7 }, transport.Added);
+        Xunit.Assert.NotEqual(initialGeneration, firstRecoveryGeneration);
 
-        manager.OnPeerConnectionLost(7, transport.AddedGenerations.Last(), 5100);
+        manager.OnPeerConnectionLost(7, firstRecoveryGeneration, 12_999);
         Xunit.Assert.Equal(new[] { 7, 7 }, transport.Added);
+        Xunit.Assert.Equal(firstRecoveryGeneration, transport.AddedGenerations.Last());
 
-        manager.OnPeerConnectionLost(7, transport.AddedGenerations.Last(), 5000 + 3000);
+        manager.OnPeerConnectionLost(7, firstRecoveryGeneration, 13_000);
         Xunit.Assert.Equal(new[] { 7, 7, 7 }, transport.Added);
+        Xunit.Assert.NotEqual(firstRecoveryGeneration, transport.AddedGenerations.Last());
     }
 
     [Fact]
@@ -1327,6 +1351,239 @@ public sealed class PeerSessionManagerTests
 
         Xunit.Assert.Equal(addsBeforeRestart + 1, transport.Added.Count);
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
+    }
+
+    [Fact]
+    public void SuccessfulIceRestartRequestIsNotRepeatedDuringFiveSecondResponseWait()
+    {
+        var transport = new MockTransport();
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(7, transport, sender);
+        manager.OnSignal(3, SignalMsgType.Hello, CompatHello(), 1000);
+        manager.OnSignal(3, SignalMsgType.Offer, ScopedSdp(42, "offer", "INITIAL_OFFER"), 1100);
+        var generation = transport.LatestGeneration(3);
+        manager.OnLocalSdp(3, generation, "answer", "INITIAL_ANSWER", 1200);
+        manager.OnPeerConnected(3, generation);
+        sender.Sent.Clear();
+
+        Xunit.Assert.Equal(1, manager.RestartIceAfterNetworkChange(5000));
+        Xunit.Assert.Equal(1, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+
+        foreach (var nowMs in new long[] { 5499, 5500, 6000, 7500, 9999 })
+        {
+            manager.Tick(nowMs);
+            Xunit.Assert.Equal(1, sender.Sent.Count(message =>
+                message.Type == SignalMsgType.IceRestartRequest));
+        }
+    }
+
+    [Fact]
+    public void FailedIceRestartRequestSendRetriesAtFiveHundredMillisecondsUntilAccepted()
+    {
+        var transport = new MockTransport();
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(7, transport, sender);
+        manager.OnSignal(3, SignalMsgType.Hello, CompatHello(), 1000);
+        manager.OnSignal(3, SignalMsgType.Offer, ScopedSdp(42, "offer", "INITIAL_OFFER"), 1100);
+        var generation = transport.LatestGeneration(3);
+        manager.OnLocalSdp(3, generation, "answer", "INITIAL_ANSWER", 1200);
+        manager.OnPeerConnected(3, generation);
+        sender.Sent.Clear();
+
+        var acceptRequest = false;
+        sender.TrySend = (_, type, _) =>
+            type != SignalMsgType.IceRestartRequest || acceptRequest;
+        Xunit.Assert.Equal(1, manager.RestartIceAfterNetworkChange(5000));
+        Xunit.Assert.Equal(1, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+
+        manager.Tick(5499);
+        Xunit.Assert.Equal(1, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+        manager.Tick(5500);
+        Xunit.Assert.Equal(2, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+        manager.Tick(5999);
+        Xunit.Assert.Equal(2, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+
+        acceptRequest = true;
+        manager.Tick(6000);
+        Xunit.Assert.Equal(3, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+        manager.Tick(6500);
+        manager.Tick(9999);
+        Xunit.Assert.Equal(3, sender.Sent.Count(message => message.Type == SignalMsgType.IceRestartRequest));
+    }
+
+    [Fact]
+    public void AnswererFallbackRecoveryEpochsUseEightSixteenThirtyTwoThenSixtySecondDelays()
+    {
+        var transport = new MockTransport();
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(7, transport, sender);
+        manager.OnSignal(3, SignalMsgType.Hello, CompatHello(), 1000);
+        manager.OnSignal(3, SignalMsgType.Offer, ScopedSdp(42, "offer", "INITIAL_OFFER"), 1100);
+        var generation = transport.LatestGeneration(3);
+        manager.OnLocalSdp(3, generation, "answer", "INITIAL_ANSWER", 1200);
+        manager.OnPeerConnected(3, generation);
+        sender.Sent.Clear();
+
+        Xunit.Assert.Equal(1, manager.RestartIceAfterNetworkChange(5000));
+        manager.Tick(9999);
+        Xunit.Assert.Equal(0, HelloCount(sender));
+        Xunit.Assert.Equal(0, sender.Sent.Count(message => message.Type == SignalMsgType.Restart));
+
+        manager.Tick(10000);
+        AssertRecoveryEpochSignalCounts(sender, 1);
+        manager.Tick(12999);
+        manager.Tick(13000);
+        manager.Tick(17999);
+        AssertRecoveryEpochSignalCounts(sender, 1);
+
+        manager.Tick(18000);
+        AssertRecoveryEpochSignalCounts(sender, 2);
+        manager.Tick(33999);
+        AssertRecoveryEpochSignalCounts(sender, 2);
+        manager.Tick(34000);
+        AssertRecoveryEpochSignalCounts(sender, 3);
+        manager.Tick(65999);
+        AssertRecoveryEpochSignalCounts(sender, 3);
+        manager.Tick(66000);
+        AssertRecoveryEpochSignalCounts(sender, 4);
+        manager.Tick(125999);
+        AssertRecoveryEpochSignalCounts(sender, 4);
+        manager.Tick(126000);
+        AssertRecoveryEpochSignalCounts(sender, 5);
+        manager.Tick(185999);
+        AssertRecoveryEpochSignalCounts(sender, 5);
+        manager.Tick(186000);
+        AssertRecoveryEpochSignalCounts(sender, 6);
+    }
+
+    [Fact]
+    public void OffererFreshGenerationsUseEightSixteenThirtyTwoThenSixtySecondDelays()
+    {
+        var transport = new MockTransport();
+        var manager = new PeerSessionManager(3, transport, new MockSender());
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+
+        AssertOffererGenerationCount(manager, transport, 8999, 1);
+        AssertOffererGenerationCount(manager, transport, 9000, 2);
+        AssertOffererGenerationCount(manager, transport, 16999, 2);
+        AssertOffererGenerationCount(manager, transport, 17000, 3);
+        AssertOffererGenerationCount(manager, transport, 32999, 3);
+        AssertOffererGenerationCount(manager, transport, 33000, 4);
+        AssertOffererGenerationCount(manager, transport, 64999, 4);
+        AssertOffererGenerationCount(manager, transport, 65000, 5);
+        AssertOffererGenerationCount(manager, transport, 124999, 5);
+        AssertOffererGenerationCount(manager, transport, 125000, 6);
+        AssertOffererGenerationCount(manager, transport, 184999, 6);
+        AssertOffererGenerationCount(manager, transport, 185000, 7);
+    }
+
+    [Theory]
+    [InlineData(1_000L, 9_000L, 16_999L, 17_000L)]
+    [InlineData(long.MaxValue - 12_000L, long.MaxValue - 4_000L, long.MaxValue - 1L, long.MaxValue)]
+    public void RecoveryEpochDeadlineIsDueAtTheExactOrdinaryAndSaturatedBoundary(
+        long initialMs,
+        long firstRecoveryMs,
+        long beforeSecondRecoveryMs,
+        long secondRecoveryMs)
+    {
+        var transport = new MockTransport();
+        var manager = new PeerSessionManager(3, transport, new MockSender());
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), initialMs);
+
+        manager.Tick(firstRecoveryMs);
+        Xunit.Assert.Equal(2, transport.Added.Count);
+
+        Xunit.Assert.False(manager.TryRecoverPeer(7, beforeSecondRecoveryMs));
+        Xunit.Assert.Equal(2, transport.Added.Count);
+
+        Xunit.Assert.True(manager.TryRecoverPeer(7, secondRecoveryMs));
+        Xunit.Assert.Equal(3, transport.Added.Count);
+    }
+
+    [Fact]
+    public void SuccessfulLocalSdpAndCandidatesDoNotResetRecoveryEpochBackoff()
+    {
+        var transport = new MockTransport();
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(3, transport, sender);
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+
+        void EmitCurrentGeneration(long nowMs)
+        {
+            var generation = transport.LatestGeneration(7);
+            manager.OnLocalSdp(7, generation, "offer", $"OFFER_G{generation}", nowMs);
+            manager.OnLocalCandidate(7, generation, $"CANDIDATE_G{generation}", nowMs);
+        }
+
+        EmitCurrentGeneration(1000);
+        var recoveryEpochs = new long[] { 9000, 17000, 33000, 65000, 125000, 185000 };
+        for (var index = 0; index < recoveryEpochs.Length; index++)
+        {
+            var epochMs = recoveryEpochs[index];
+            AssertOffererGenerationCount(manager, transport, epochMs - 1, index + 1);
+            AssertOffererGenerationCount(manager, transport, epochMs, index + 2);
+            EmitCurrentGeneration(epochMs);
+        }
+
+        Xunit.Assert.Equal(7, sender.Sent.Count(message => message.Type == SignalMsgType.Offer));
+        Xunit.Assert.Equal(7, sender.Sent.Count(message => message.Type == SignalMsgType.Candidate));
+        Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void RecoveryContinuesPastSixtySecondCapAndEstablishesWhenResponsesResume(
+        int remoteProtocolVersion)
+    {
+        var transport = new MockTransport();
+        var sender = new MockSender();
+        var manager = new PeerSessionManager(3, transport, sender);
+        var hello = remoteProtocolVersion == 4 ? V4CompatHello() : CompatHello();
+        manager.OnSignal(7, SignalMsgType.Hello, hello, 1000);
+
+        long EmitCurrentOffer(long nowMs)
+        {
+            var generation = transport.LatestGeneration(7);
+            manager.OnLocalSdp(7, generation, "offer", $"OFFER_G{generation}", nowMs);
+            var offer = sender.Sent.Last(message => message.Type == SignalMsgType.Offer);
+            Xunit.Assert.True(SignalPayload.TryReadScopedSdp(
+                offer.Payload,
+                out _,
+                out var negotiationId,
+                out _,
+                out _));
+            return negotiationId;
+        }
+
+        EmitCurrentOffer(1000);
+        foreach (var nowMs in new long[] { 9000, 17000, 33000, 65000, 125000, 185000 })
+        {
+            manager.Tick(nowMs);
+            EmitCurrentOffer(nowMs);
+        }
+
+        Xunit.Assert.Equal(7, transport.Added.Count);
+        Xunit.Assert.Equal(6, transport.Removed.Count);
+        var currentGeneration = transport.LatestGeneration(7);
+        var currentOffer = sender.Sent.Last(message => message.Type == SignalMsgType.Offer);
+        Xunit.Assert.True(SignalPayload.TryReadScopedSdp(
+            currentOffer.Payload,
+            out _,
+            out var currentNegotiation,
+            out _,
+            out _));
+
+        manager.OnSignal(
+            7,
+            SignalMsgType.Answer,
+            ScopedSdp(currentNegotiation, "answer", "RECOVERED_ANSWER"),
+            185100);
+        manager.OnPeerConnected(7, currentGeneration);
+
+        Xunit.Assert.Equal(PeerState.Established, StateOf(manager, 7));
+        manager.Tick(245000);
+        Xunit.Assert.Equal(7, transport.Added.Count);
     }
 
     [Fact]
@@ -1495,6 +1752,57 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(new[] { 7 }, transport.Removed);
         Xunit.Assert.Equal(new[] { 7 }, transport.Added);
         Xunit.Assert.Equal(new[] { false }, transport.AddedRelayOnly);
+    }
+
+    [Fact]
+    public void AuthenticatedRemoteSessionReplacementCancelsPredecessorRelayIntentAndThrottle()
+    {
+        const long firstSession = 0x1111;
+        const long replacementSession = 0x2222;
+        var relayAvailable = false;
+        var requested = new List<int>();
+        var transport = new MockTransport();
+        var manager = new PeerSessionManager(
+            3,
+            transport,
+            new MockSender(),
+            relayAvailable: () => relayAvailable,
+            requestRelay: requested.Add);
+
+        manager.OnSignal(
+            7,
+            SignalMsgType.Hello,
+            SignalPayload.Hello(
+                PeerSessionManager.ProtocolVersion,
+                PeerSessionManager.MinCompatibleVersion,
+                firstSession),
+            1000);
+        var predecessorGeneration = transport.LatestGeneration(7);
+        manager.OnPeerConnected(7, predecessorGeneration);
+        manager.OnPeerConnectionLost(7, predecessorGeneration, 5000);
+        Xunit.Assert.Equal(new[] { 7 }, requested);
+
+        manager.OnSignal(
+            7,
+            SignalMsgType.Hello,
+            SignalPayload.Hello(
+                PeerSessionManager.ProtocolVersion,
+                PeerSessionManager.MinCompatibleVersion,
+                replacementSession),
+            6000);
+        var replacementGeneration = transport.LatestGeneration(7);
+        var addsAfterReplacement = transport.Added.Count;
+        var removesAfterReplacement = transport.Removed.Count;
+
+        relayAvailable = true;
+        Xunit.Assert.False(manager.EscalatePeer(7, 7000));
+        Xunit.Assert.Equal(addsAfterReplacement, transport.Added.Count);
+        Xunit.Assert.Equal(removesAfterReplacement, transport.Removed.Count);
+        Xunit.Assert.Equal(replacementGeneration, transport.LatestGeneration(7));
+
+        relayAvailable = false;
+        manager.OnPeerConnectionLost(7, replacementGeneration, 9000);
+        Xunit.Assert.Equal(new[] { 7, 7 }, requested);
     }
 
     [Fact]
@@ -1688,8 +1996,10 @@ public sealed class PeerSessionManagerTests
         var hellosBefore = HelloCount(sender);
         Xunit.Assert.True(manager.TryRecoverPeer(7, 5000));
         Xunit.Assert.Equal(hellosBefore + 1, HelloCount(sender));
-        Xunit.Assert.False(manager.TryRecoverPeer(7, 7999));
-        Xunit.Assert.True(manager.TryRecoverPeer(7, 8000));
+        Xunit.Assert.False(manager.TryRecoverPeer(7, 12_999));
+        Xunit.Assert.Equal(hellosBefore + 1, HelloCount(sender));
+        Xunit.Assert.True(manager.TryRecoverPeer(7, 13_000));
+        Xunit.Assert.Equal(hellosBefore + 2, HelloCount(sender));
 
         var firstGeneration = transport.LatestGeneration(9);
         Xunit.Assert.True(manager.TryRecoverPeer(9, 5000));

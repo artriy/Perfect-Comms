@@ -62,11 +62,13 @@ public sealed class PeerSessionManagerMeshTests
     {
         public readonly List<(int Target, SignalMsgType Type, byte[] Payload)> Sent = new();
         public Action<int, SignalMsgType, byte[]>? Forward;
+        public Func<int, SignalMsgType, byte[], bool>? ShouldDeliver;
 
         public bool Send(int targetClientId, SignalMsgType type, byte[] payload)
         {
             Sent.Add((targetClientId, type, payload));
-            Forward?.Invoke(targetClientId, type, payload);
+            if (ShouldDeliver?.Invoke(targetClientId, type, payload) != false)
+                Forward?.Invoke(targetClientId, type, payload);
             return true;
         }
     }
@@ -136,6 +138,47 @@ public sealed class PeerSessionManagerMeshTests
         AssertStableLinks(mesh, stableGenerations);
     }
 
+    [Fact]
+    public void PartitionedEdgeRecoveryNeverChangesHealthyEdgeGenerations()
+    {
+        var mesh = new Mesh(3);
+        mesh.NotifyFullRoster();
+        mesh.CompletePair(1, 2, "INITIAL");
+        mesh.CompletePair(1, 3, "INITIAL");
+        mesh.CompletePair(2, 3, "INITIAL");
+
+        var healthyGenerations = new Dictionary<(int Local, int Remote), int>
+        {
+            [(1, 2)] = mesh.Transports[1].LatestGeneration(2),
+            [(2, 1)] = mesh.Transports[2].LatestGeneration(1),
+            [(2, 3)] = mesh.Transports[2].LatestGeneration(3),
+            [(3, 2)] = mesh.Transports[3].LatestGeneration(2),
+        };
+        mesh.PartitionEdge(1, 3);
+        mesh.NowMs = 5_000;
+        mesh.Managers[1].OnPeerConnectionLost(
+            3,
+            mesh.Transports[1].LatestGeneration(3),
+            mesh.NowMs);
+        mesh.Managers[3].OnPeerConnectionLost(
+            1,
+            mesh.Transports[3].LatestGeneration(1),
+            mesh.NowMs);
+
+        foreach (var nowMs in new long[] { 9_999, 10_000, 12_999, 13_000, 28_999, 29_000, 60_999, 61_000, 120_999, 121_000 })
+        {
+            mesh.NowMs = nowMs;
+            foreach (var manager in mesh.Managers.Values)
+                manager.Tick(nowMs);
+            AssertStableLinks(mesh, healthyGenerations);
+        }
+
+        Assert.True(mesh.Transports[1].Added.Count(id => id == 3) > 1);
+        Assert.True(mesh.Senders[3].Sent.Count(message =>
+            message.Target == 1
+            && message.Type == SignalMsgType.Restart) > 1);
+    }
+
     private sealed class Mesh
     {
         public Mesh(int clientCount)
@@ -150,6 +193,7 @@ public sealed class PeerSessionManagerMeshTests
         public Dictionary<int, MeshTransport> Transports { get; } = new();
         public Dictionary<int, MeshSender> Senders { get; } = new();
         public long NowMs { get; set; } = 1000;
+        private readonly HashSet<(int Source, int Target)> _partitionedEdges = new();
 
         public void InstallClient(int clientId)
         {
@@ -161,6 +205,13 @@ public sealed class PeerSessionManagerMeshTests
             Managers[clientId] = manager;
             sender.Forward = (target, type, payload) =>
                 Managers[target].OnSignal(clientId, type, payload, NowMs);
+            sender.ShouldDeliver = (target, _, _) => !_partitionedEdges.Contains((clientId, target));
+        }
+
+        public void PartitionEdge(int firstClientId, int secondClientId)
+        {
+            _partitionedEdges.Add((firstClientId, secondClientId));
+            _partitionedEdges.Add((secondClientId, firstClientId));
         }
 
         public void NotifyFullRoster()

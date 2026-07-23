@@ -125,6 +125,7 @@ type tenClientMesh struct {
 	allEngines         []*engine
 	ids                []string
 	indexByID          map[string]int
+	candidateFilter    func(string) bool
 	traces             [tenClientMeshSize][tenClientMeshSize]meshSignalTrace
 	generations        [tenClientMeshSize][tenClientMeshSize]uint32
 	lastPackets        [tenClientMeshSize][tenClientMeshSize]inboundRTP
@@ -135,13 +136,14 @@ type tenClientMesh struct {
 	deadline           time.Time
 }
 
-func newTenClientMesh(t *testing.T) *tenClientMesh {
+func newTenClientMesh(t *testing.T, candidateFilter func(string) bool) *tenClientMesh {
 	t.Helper()
 	mesh := &tenClientMesh{
 		t:                 t,
 		clients:           make([]*engine, tenClientMeshSize),
 		ids:               make([]string, tenClientMeshSize),
 		indexByID:         make(map[string]int, tenClientMeshSize),
+		candidateFilter:   candidateFilter,
 		nextMediaSequence: 1,
 		deadline:          time.Now().Add(tenClientTestBudget),
 	}
@@ -381,6 +383,10 @@ func (mesh *tenClientMesh) pumpSignaling() (int, error) {
 					if err := trace.recordCandidate(event); err != nil {
 						return processed, fmt.Errorf("candidate %s -> %s: %w", mesh.ids[source], mesh.ids[target], err)
 					}
+					if *event.Candidate != "" && mesh.candidateFilter != nil &&
+						!mesh.candidateFilter(*event.Candidate) {
+						continue
+					}
 					if err := targetPeer.addICECandidate(*event.Candidate); err != nil {
 						return processed, fmt.Errorf("apply candidate %s -> %s: %w", mesh.ids[source], mesh.ids[target], err)
 					}
@@ -597,6 +603,49 @@ func (mesh *tenClientMesh) selectedPairSummary() (map[string]int, error) {
 	}
 	return result, nil
 }
+func (mesh *tenClientMesh) requireSelectedProtocol(allowed ...string) {
+	mesh.t.Helper()
+	want := make([]string, len(allowed))
+	for i, protocol := range allowed {
+		want[i] = protocol + "/" + protocol
+	}
+	for source := range tenClientMeshSize {
+		for target := range tenClientMeshSize {
+			if source == target {
+				continue
+			}
+			current := mesh.clients[source].peer(mesh.ids[target])
+			if current == nil || current.sender.Transport() == nil || current.sender.Transport().ICETransport() == nil {
+				mesh.t.Fatalf("%s -> %s has no ICE transport", mesh.ids[source], mesh.ids[target])
+			}
+			pair, err := current.sender.Transport().ICETransport().GetSelectedCandidatePair()
+			if err != nil {
+				mesh.t.Fatalf("selected pair %s -> %s: %v", mesh.ids[source], mesh.ids[target], err)
+			}
+			if pair == nil || pair.Local == nil || pair.Remote == nil {
+				mesh.t.Fatalf("%s -> %s has no selected candidate pair", mesh.ids[source], mesh.ids[target])
+			}
+			localProtocol := pair.Local.Protocol.String()
+			remoteProtocol := pair.Remote.Protocol.String()
+			protocolAllowed := false
+			if strings.EqualFold(localProtocol, remoteProtocol) {
+				for _, protocol := range allowed {
+					if strings.EqualFold(localProtocol, protocol) {
+						protocolAllowed = true
+						break
+					}
+				}
+			}
+			if !protocolAllowed {
+				mesh.t.Fatalf(
+					"%s -> %s selected protocols = %q/%q (candidate types %s/%s), want one of %s",
+					mesh.ids[source], mesh.ids[target],
+					localProtocol, remoteProtocol, pair.Local.Typ, pair.Remote.Typ, strings.Join(want, ", "),
+				)
+			}
+		}
+	}
+}
 
 func formatPairSummary(summary map[string]int) string {
 	keys := make([]string, 0, len(summary))
@@ -744,12 +793,12 @@ func (mesh *tenClientMesh) exerciseMedia(stage byte, frames int) time.Duration {
 				wantPerClient, wantPerClient, wantPerClient, wantBytesPerClient,
 			)
 		}
-		if after.txErrors != before[i].txErrors || after.txQueueDropped != before[i].txQueueDropped ||
+		if after.txErrors != 0 || after.txQueueDropped != before[i].txQueueDropped ||
 			after.txStaleDropped != before[i].txStaleDropped || after.txWriteTimeouts != before[i].txWriteTimeouts {
 			mesh.t.Fatalf(
-				"stage %d client %d error counter delta: errors=%d queue_dropped=%d stale=%d timeouts=%d",
+				"stage %d client %d error counters: errors=%d queue_dropped_delta=%d stale_delta=%d timeouts_delta=%d",
 				stage, i,
-				after.txErrors-before[i].txErrors, after.txQueueDropped-before[i].txQueueDropped,
+				after.txErrors, after.txQueueDropped-before[i].txQueueDropped,
 				after.txStaleDropped-before[i].txStaleDropped, after.txWriteTimeouts-before[i].txWriteTimeouts,
 			)
 		}
@@ -1154,7 +1203,7 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	// independently by TestMulticastDNSModeRequiresExplicitTestOverride.
 	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
 	started := time.Now()
-	mesh := newTenClientMesh(t)
+	mesh := newTenClientMesh(t, nil)
 	initialSignals := mesh.signalSnapshot()
 	mesh.addInitialPeers()
 	connectDuration := mesh.waitFor("initial full mesh", 30*time.Second, func() bool {
@@ -1165,6 +1214,7 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mesh.requireSelectedProtocol("udp", "tcp")
 	initialUfrags := mesh.latestPairUfrags(tenClientInitialGeneration, "initial")
 	for lower := 0; lower < tenClientMeshSize; lower++ {
 		for higher := lower + 1; higher < tenClientMeshSize; higher++ {
@@ -1178,6 +1228,7 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mesh.requireSelectedProtocol("udp", "tcp")
 	postRestartMediaDuration := mesh.exerciseMedia(2, 2)
 
 	churnDuration := mesh.churnClient(tenClientMeshSize - 1)
@@ -1185,6 +1236,7 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mesh.requireSelectedProtocol("udp", "tcp")
 	postChurnMediaDuration := mesh.exerciseMedia(3, 2)
 
 	t.Logf(
@@ -1199,4 +1251,20 @@ func TestPionTenClientFullMeshStress(t *testing.T) {
 	t.Logf("10-client mesh candidate pairs: initial=[%s] restart=[%s] churn=[%s]",
 		formatPairSummary(initialPairs), formatPairSummary(restartPairs), formatPairSummary(churnPairs))
 	t.Logf("10-client mesh delivered 630/630 expected RTP packets in %s", time.Since(started).Round(time.Millisecond))
+}
+
+func TestPionTenClientFullMeshForcedTCPRTP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 10-client Pion ICE-TCP integration stress test in short mode")
+	}
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
+	mesh := newTenClientMesh(t, directTCPCandidate)
+	initialSignals := mesh.signalSnapshot()
+	mesh.addInitialPeers()
+	mesh.waitFor("forced TCP full mesh", 30*time.Second, func() bool {
+		return mesh.allConnectedAndReady() && mesh.allInitialEOC()
+	})
+	mesh.requireAllPairNegotiations(initialSignals, tenClientInitialGeneration)
+	mesh.requireSelectedProtocol("tcp")
+	mesh.exerciseMedia(4, 1)
 }

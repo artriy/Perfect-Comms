@@ -1243,6 +1243,7 @@ class Mesh:
             "decode_errors",
             "playback_errors",
             "playback_callback_errors",
+            "rtp_tx_errors",
         )
         totals = {
             field: sum(int(stats.get(field, 0)) for stats in self.latest_stats.values())
@@ -1280,9 +1281,7 @@ class Mesh:
                 drops=overflow_drops,
                 packets=received_packets,
             )
-        rtp_tx_errors = sum(
-            int(stats.get("rtp_tx_errors", 0)) for stats in self.latest_stats.values()
-        )
+        rtp_tx_errors = totals["rtp_tx_errors"]
         rtp_tx_queue_dropped = sum(
             int(stats.get("rtp_tx_queue_dropped", 0))
             for stats in self.latest_stats.values()

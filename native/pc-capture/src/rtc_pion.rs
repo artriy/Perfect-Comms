@@ -144,6 +144,25 @@ pub struct RtcEngine {
     poll_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+fn advance_encoder_epoch_if_ready<F>(
+    backend_handle: Option<Option<u64>>,
+    poll_healthy: bool,
+    epoch: u64,
+    advance: F,
+) -> bool
+where
+    F: FnOnce(u64, u64) -> bool,
+{
+    match backend_handle {
+        // A backend that never loaded cannot retain encoded media, so absence is a safe no-op.
+        None => true,
+        Some(Some(handle)) if poll_healthy => advance(handle, epoch),
+        // Once loaded, a stopped poller or closed engine must fail closed: callers may publish the
+        // new privacy epoch only after the live backend confirms its drain.
+        Some(_) => false,
+    }
+}
+
 impl RtcEngine {
     pub fn new(out_local_signal: Sender<LocalSignal>) -> Self {
         Self::new_with_counters(out_local_signal, Arc::new(NativeCounters::default()))
@@ -465,15 +484,23 @@ impl RtcEngine {
     }
 
     pub fn advance_encoder_epoch(&self, epoch: u64) -> bool {
-        let Some((backend, handle)) = self.backend_handle() else {
-            // No transport can retain encoded media when the Pion backend never loaded.
-            return true;
-        };
-        backend.api.advance_epoch(
-            handle,
+        let backend = self.backend.as_deref();
+        advance_encoder_epoch_if_ready(
+            backend.map(PionBackend::handle),
+            self.poll_healthy.load(Ordering::Acquire),
             epoch,
-            RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT.as_millis() as u32,
-        ) == pion_sys::STATUS_OK
+            |handle, epoch| {
+                backend
+                    .expect("a ready encoder-epoch backend must be loaded")
+                    .api
+                    .advance_epoch(
+                        handle,
+                        epoch,
+                        RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT.as_millis() as u32,
+                    )
+                    == pion_sys::STATUS_OK
+            },
+        )
     }
 
     pub fn recv(&self) -> Option<ReceivedPacket> {
@@ -945,6 +972,40 @@ mod tests {
             assert!(healthy.load(Ordering::Acquire));
         }
         assert!(!healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn encoder_epoch_distinguishes_absent_backend_from_unhealthy_poller() {
+        assert!(advance_encoder_epoch_if_ready(
+            None,
+            false,
+            41,
+            |_, _| panic!("absent backend attempted an epoch call"),
+        ));
+        assert!(!advance_encoder_epoch_if_ready(
+            Some(Some(17)),
+            false,
+            42,
+            |_, _| panic!("unhealthy poller attempted an epoch call"),
+        ));
+        assert!(!advance_encoder_epoch_if_ready(
+            Some(None),
+            true,
+            43,
+            |_, _| panic!("closed loaded backend attempted an epoch call"),
+        ));
+
+        let mut applied = None;
+        assert!(advance_encoder_epoch_if_ready(
+            Some(Some(19)),
+            true,
+            44,
+            |handle, epoch| {
+                applied = Some((handle, epoch));
+                true
+            },
+        ));
+        assert_eq!(applied, Some((19, 44)));
     }
 
     #[test]

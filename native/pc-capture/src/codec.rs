@@ -784,7 +784,7 @@ impl EncodedPacketBuffer {
         });
         let mut local_media_gap_before = timestamp_gap.saturating_sub(gap_before);
         let gap_requires_reset =
-            gap_before > MAX_CONCEAL_FRAMES || local_media_gap_before > MAX_CONCEAL_FRAMES;
+            gap_before.saturating_add(local_media_gap_before) > MAX_CONCEAL_FRAMES;
         let reset_decoder = std::mem::take(&mut self.reset_on_next_packet) || gap_requires_reset;
         if reset_decoder {
             local_media_gap_before = 0;
@@ -849,9 +849,9 @@ impl Drop for EncodedPacketBuffer {
     }
 }
 
-// Cap on how many frames we conceal across a single RTP sequence gap. Beyond this a gap is treated
-// as a stream restart (long silence / reconnect), not packet loss, so we don't flood the jitter
-// buffer with concealment after a stall.
+// Cap on total frames concealed across network loss and intentional local-media omissions before
+// one live RTP packet. Beyond this the discontinuity is treated as a stream restart (long silence
+// or reconnect), so a stalled receiver cannot be flooded with synthesized frames.
 pub const MAX_CONCEAL_FRAMES: usize = 5;
 
 pub struct OpusCodec {
@@ -974,7 +974,8 @@ pub fn decode_with_media_gap_report(
     if delta <= 0 {
         return (frames, false, report);
     }
-    if local_media_gap > MAX_CONCEAL_FRAMES {
+    let lost = (delta - 1) as usize;
+    if lost.saturating_add(local_media_gap) > MAX_CONCEAL_FRAMES {
         let _ = codec.reset_decoder();
         let n = codec.decode(data, &mut pcm);
         if n > 0 {
@@ -992,8 +993,7 @@ pub fn decode_with_media_gap_report(
         }
     }
 
-    let lost = (delta - 1) as usize;
-    if lost > 0 && lost <= MAX_CONCEAL_FRAMES {
+    if lost > 0 {
         let dred_available = matches!(
             codec.decoder.parse_dred(data, lost * FRAME_SIZE),
             Ok(DredParseOutcome::Available(_))
@@ -1211,6 +1211,109 @@ mod tests {
         assert_eq!(report.decoded_frames, 1);
         assert_eq!(report.plc_frames, 2);
         assert_eq!(report.dred_frames + report.fec_frames, 0);
+    }
+
+    #[test]
+    fn combined_network_and_local_concealment_budget_is_five_frames() {
+        fn decode_case(network_gap: usize, local_gap: usize) -> ConcealmentReport {
+            let mut codec = OpusCodec::new().expect("opus codec init");
+            let packet = codec.encode(&modulated_tone_frame(0));
+            let (_, advance, _) = decode_with_media_gap_report(&mut codec, None, 100, 0, &packet);
+            assert!(advance);
+            let (frames, advance, report) = decode_with_media_gap_report(
+                &mut codec,
+                Some(100),
+                101u16.wrapping_add(network_gap as u16),
+                local_gap,
+                &packet,
+            );
+            assert!(advance);
+            assert_eq!(
+                frames.len(),
+                report.decoded_frames + report.dred_frames + report.fec_frames + report.plc_frames
+            );
+            report
+        }
+
+        let at_limit = decode_case(3, 2);
+        assert_eq!(at_limit.decoded_frames, 1);
+        assert_eq!(
+            at_limit.dred_frames + at_limit.fec_frames + at_limit.plc_frames,
+            MAX_CONCEAL_FRAMES
+        );
+
+        let over_limit = decode_case(3, 3);
+        assert_eq!(
+            over_limit,
+            ConcealmentReport {
+                decoded_frames: 1,
+                ..ConcealmentReport::default()
+            }
+        );
+
+        let independently_allowed_but_combined_oversized = decode_case(5, 5);
+        assert_eq!(
+            independently_allowed_but_combined_oversized,
+            ConcealmentReport {
+                decoded_frames: 1,
+                ..ConcealmentReport::default()
+            }
+        );
+    }
+
+    #[test]
+    fn encoded_buffer_resets_on_combined_concealment_budget() {
+        fn packet_after_gaps(network_gap: usize, local_gap: usize) -> ReadyEncodedPacket {
+            let metrics = Arc::new(MediaReceiveCounters::default());
+            let mut buffer = EncodedPacketBuffer::new("combined-gap", metrics);
+            let start = Instant::now();
+            let mut first = rtp(100, start);
+            first.timestamp = 0;
+            let mut second = rtp(101, start + Duration::from_millis(20));
+            second.timestamp = RTP_FRAME_TICKS;
+            assert_eq!(buffer.insert(first), PacketInsertOutcome::Accepted);
+            assert_eq!(buffer.insert(second), PacketInsertOutcome::Accepted);
+            assert_eq!(
+                buffer
+                    .pop_ready(start + Duration::from_millis(20))
+                    .expect("production minimum should prime the buffer")
+                    .sequence,
+                100
+            );
+            assert_eq!(
+                buffer
+                    .pop_ready(start + Duration::from_millis(40))
+                    .expect("a primed buffer should drain its available tail")
+                    .sequence,
+                101
+            );
+
+            let sequence = 102u16.wrapping_add(network_gap as u16);
+            let mut current = rtp(sequence, start + Duration::from_millis(40));
+            current.timestamp = (network_gap + local_gap + 2) as u32 * RTP_FRAME_TICKS;
+            assert_eq!(buffer.insert(current), PacketInsertOutcome::Accepted);
+            buffer
+                .pop_ready(start + Duration::from_millis(200))
+                .expect("gap deadline should release current packet")
+        }
+
+        let at_limit = packet_after_gaps(3, 2);
+        assert!(!at_limit.reset_decoder);
+        assert_eq!(at_limit.gap_before, 3);
+        assert_eq!(at_limit.local_media_gap_before, 2);
+
+        let over_limit = packet_after_gaps(3, 3);
+        assert!(over_limit.reset_decoder);
+        assert_eq!(over_limit.gap_before, 3);
+        assert_eq!(over_limit.local_media_gap_before, 0);
+
+        let independently_allowed_but_combined_oversized = packet_after_gaps(5, 5);
+        assert!(independently_allowed_but_combined_oversized.reset_decoder);
+        assert_eq!(independently_allowed_but_combined_oversized.gap_before, 5);
+        assert_eq!(
+            independently_allowed_but_combined_oversized.local_media_gap_before,
+            0
+        );
     }
 
     #[test]

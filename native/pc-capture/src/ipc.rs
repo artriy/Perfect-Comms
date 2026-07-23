@@ -1065,6 +1065,7 @@ fn spawn_telemetry_writer(
                     late_drops: receive.late_drops,
                     duplicate_drops: receive.duplicate_drops,
                     encoded_overflow_drops: receive.encoded_overflow_drops,
+                    latency_catchup_drops: receive.latency_catchup_drops,
                     deadline_losses: receive.deadline_losses,
                     dred_frames: receive.dred_frames,
                     fec_frames: receive.fec_frames,

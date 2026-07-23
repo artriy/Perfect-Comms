@@ -13,6 +13,9 @@ const RTP_INGRESS_PER_PEER_CAPACITY: usize = 128;
 const RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const ENCODER_STATS_INTERVAL: Duration = Duration::from_secs(2);
 const ENCODER_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(6);
+const ENCODER_OUTLIER_QUALIFYING_MEASUREMENTS: u8 = 3;
+const ENCODER_OUTLIER_LOSS_THRESHOLD: f64 = 0.07;
+const ENCODER_OUTLIER_BANDWIDTH_THRESHOLD: i32 = 64_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedPacket {
@@ -324,14 +327,25 @@ impl SharedNetworkPathCache {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct EncoderOutlierLease {
+    generation: u32,
+    path_epoch: u64,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct PeerEncoderFeedback {
     generation: u32,
+    path_epoch: u64,
     sample: EncoderFeedback,
     packets_received: u64,
     rtt_measurements: u64,
     bandwidth_estimate: Option<i32>,
     last_loss_fresh: Option<Instant>,
     last_bandwidth_fresh: Option<Instant>,
+    outlier_measurements: u8,
+    last_outlier_evidence: Option<Instant>,
+    outlier_lease: Option<EncoderOutlierLease>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -386,12 +400,16 @@ impl SharedEncoderPolicy {
             peer_id.to_string(),
             PeerEncoderFeedback {
                 generation,
+                path_epoch: 0,
                 sample: EncoderFeedback::default(),
                 packets_received: 0,
                 rtt_measurements: 0,
                 bandwidth_estimate: None,
                 last_loss_fresh: None,
                 last_bandwidth_fresh: None,
+                outlier_measurements: 0,
+                last_outlier_evidence: None,
+                outlier_lease: None,
             },
         );
     }
@@ -416,18 +434,49 @@ impl SharedEncoderPolicy {
         if peer.generation != update.generation {
             return;
         }
-        let advanced = update.packets_received > peer.packets_received
-            || update.rtt_measurements > peer.rtt_measurements
-            || peer.last_loss_fresh.is_none();
+        let evidence_advanced = update.packets_received > peer.packets_received
+            || update.rtt_measurements > peer.rtt_measurements;
+        let loss_fresh = evidence_advanced || peer.last_loss_fresh.is_none();
         peer.packets_received = peer.packets_received.max(update.packets_received);
         peer.rtt_measurements = peer.rtt_measurements.max(update.rtt_measurements);
-        if advanced {
+        if loss_fresh {
             peer.sample = update.sample;
             peer.last_loss_fresh = Some(update.now);
         }
         if let Some(estimate) = update.bandwidth_estimate.filter(|estimate| *estimate > 0) {
             peer.bandwidth_estimate = Some(estimate);
             peer.last_bandwidth_fresh = Some(update.now);
+        }
+
+        if evidence_advanced {
+            let impaired_loss = update.sample.fraction_lost.is_finite()
+                && update.sample.fraction_lost >= ENCODER_OUTLIER_LOSS_THRESHOLD;
+            let impaired_bandwidth = update.bandwidth_estimate.is_some_and(|estimate| {
+                estimate > 0 && estimate < ENCODER_OUTLIER_BANDWIDTH_THRESHOLD
+            });
+            if impaired_loss || impaired_bandwidth {
+                if peer.last_outlier_evidence.is_none_or(|previous| {
+                    update.now.saturating_duration_since(previous) > ENCODER_FEEDBACK_FRESHNESS
+                }) {
+                    peer.outlier_measurements = 0;
+                }
+                peer.outlier_measurements = peer.outlier_measurements.saturating_add(1);
+                peer.last_outlier_evidence = Some(update.now);
+                if peer.outlier_measurements >= ENCODER_OUTLIER_QUALIFYING_MEASUREMENTS {
+                    peer.outlier_lease = Some(EncoderOutlierLease {
+                        generation: peer.generation,
+                        path_epoch: peer.path_epoch,
+                        expires_at: update
+                            .now
+                            .checked_add(ENCODER_FEEDBACK_FRESHNESS)
+                            .unwrap_or(update.now),
+                    });
+                }
+            } else {
+                peer.outlier_measurements = 0;
+                peer.last_outlier_evidence = None;
+                peer.outlier_lease = None;
+            }
         }
     }
 
@@ -450,27 +499,57 @@ impl SharedEncoderPolicy {
             .get_mut(peer_id)
             .filter(|peer| peer.generation == generation)
         {
+            peer.path_epoch = peer.path_epoch.saturating_add(1);
+            peer.packets_received = 0;
+            peer.rtt_measurements = 0;
             peer.last_loss_fresh = None;
             peer.last_bandwidth_fresh = None;
             peer.bandwidth_estimate = None;
+            peer.outlier_measurements = 0;
+            peer.last_outlier_evidence = None;
+            peer.outlier_lease = None;
         }
     }
 
     fn evaluate(&self, now: Instant) {
         let mut state = self.state.lock();
-        let mut feedback = Vec::with_capacity(state.peers.len());
-        let mut bandwidth_estimates = Vec::with_capacity(state.peers.len());
-        for peer in state.peers.values() {
+        let capacity = state.peers.len().saturating_mul(2);
+        let mut feedback = Vec::with_capacity(capacity);
+        let mut bandwidth_estimates = Vec::with_capacity(capacity);
+        for peer in state.peers.values_mut() {
+            let evidence_expired = peer.last_outlier_evidence.is_some_and(|fresh| {
+                now.saturating_duration_since(fresh) > ENCODER_FEEDBACK_FRESHNESS
+            });
+            let qualified = peer.outlier_lease.is_some_and(|lease| {
+                lease.generation == peer.generation
+                    && lease.path_epoch == peer.path_epoch
+                    && now <= lease.expires_at
+            });
+            if evidence_expired || (peer.outlier_lease.is_some() && !qualified) {
+                peer.outlier_measurements = 0;
+                peer.last_outlier_evidence = None;
+                peer.outlier_lease = None;
+            }
+
             if peer.last_loss_fresh.is_some_and(|fresh| {
                 now.saturating_duration_since(fresh) <= ENCODER_FEEDBACK_FRESHNESS
             }) {
                 feedback.push(peer.sample);
+                if qualified {
+                    // The controller deliberately discards one worst route. Repeating only the
+                    // qualified identity makes its persistent sample the second-worst input while
+                    // retaining the controller's existing degradation/recovery hysteresis.
+                    feedback.push(peer.sample);
+                }
             }
             if peer.last_bandwidth_fresh.is_some_and(|fresh| {
                 now.saturating_duration_since(fresh) <= ENCODER_FEEDBACK_FRESHNESS
             }) {
                 if let Some(estimate) = peer.bandwidth_estimate {
                     bandwidth_estimates.push(estimate);
+                    if qualified {
+                        bandwidth_estimates.push(estimate);
+                    }
                 }
             }
         }
@@ -770,3 +849,276 @@ pub enum LocalSignal {
 #[path = "rtc_pion.rs"]
 mod pion_impl;
 pub use pion_impl::{set_transport_library_path, RtcEngine};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn register_room(policy: &SharedEncoderPolicy) {
+        for peer in ["a", "b", "c"] {
+            policy.register_peer(peer, 1);
+        }
+    }
+
+    fn report(
+        policy: &SharedEncoderPolicy,
+        peer: &str,
+        measurement: u64,
+        loss: f64,
+        bandwidth: i32,
+        now: Instant,
+    ) {
+        policy.update_peer(
+            peer,
+            PeerEncoderFeedbackUpdate {
+                generation: 1,
+                sample: EncoderFeedback {
+                    fraction_lost: loss,
+                },
+                bandwidth_estimate: Some(bandwidth),
+                packets_received: measurement,
+                rtt_measurements: measurement,
+                now,
+            },
+        );
+    }
+
+    fn report_window(
+        policy: &SharedEncoderPolicy,
+        measurement: u64,
+        losses: [f64; 3],
+        bandwidths: [i32; 3],
+        now: Instant,
+    ) {
+        for ((peer, loss), bandwidth) in ["a", "b", "c"].into_iter().zip(losses).zip(bandwidths) {
+            report(policy, peer, measurement, loss, bandwidth, now);
+        }
+        policy.evaluate(now);
+    }
+
+    #[test]
+    fn transient_and_alternating_room_outliers_do_not_degrade_encoder_policy() {
+        let policy = SharedEncoderPolicy::default();
+        register_room(&policy);
+        let start = Instant::now();
+
+        report_window(
+            &policy,
+            1,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start,
+        );
+        assert_eq!(policy.snapshot(), EncoderPolicySnapshot::default());
+        report(
+            &policy,
+            "a",
+            1,
+            0.30,
+            32_000,
+            start + Duration::from_millis(250),
+        );
+        policy.evaluate(start + Duration::from_millis(250));
+        assert!(policy.state.lock().peers.get("a").is_some_and(|peer| {
+            peer.outlier_measurements == 1 && peer.outlier_lease.is_none()
+        }));
+
+        report_window(
+            &policy,
+            2,
+            [0.0, 0.30, 0.0],
+            [96_000, 32_000, 96_000],
+            start + Duration::from_secs(1),
+        );
+        report_window(
+            &policy,
+            3,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(policy.snapshot(), EncoderPolicySnapshot::default());
+        let state = policy.state.lock();
+        assert!(state
+            .peers
+            .values()
+            .all(|peer| peer.outlier_lease.is_none() && peer.outlier_measurements <= 1));
+    }
+
+    #[test]
+    fn persistent_peer_outlier_uses_controller_degradation_and_recovery_hysteresis() {
+        let policy = SharedEncoderPolicy::default();
+        register_room(&policy);
+        let start = Instant::now();
+
+        for measurement in 1..=2 {
+            report_window(
+                &policy,
+                measurement,
+                [0.30, 0.0, 0.0],
+                [32_000, 96_000, 96_000],
+                start + Duration::from_secs(measurement - 1),
+            );
+            assert_eq!(policy.snapshot(), EncoderPolicySnapshot::default());
+        }
+        report_window(
+            &policy,
+            3,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(2),
+        );
+        let degraded = policy.snapshot();
+        assert_eq!(degraded.packet_loss_percent, 30);
+        assert_eq!(degraded.bitrate, 24_000);
+        assert!(policy
+            .state
+            .lock()
+            .peers
+            .get("a")
+            .is_some_and(|peer| peer.outlier_lease.is_some()));
+
+        for recovery_window in 0..4 {
+            let measurement = 4 + recovery_window;
+            report_window(
+                &policy,
+                measurement,
+                [0.0, 0.0, 0.0],
+                [96_000, 96_000, 96_000],
+                start + Duration::from_secs(measurement),
+            );
+            assert_eq!(policy.snapshot(), degraded);
+        }
+        report_window(
+            &policy,
+            8,
+            [0.0, 0.0, 0.0],
+            [96_000, 96_000, 96_000],
+            start + Duration::from_secs(8),
+        );
+        let recovered = policy.snapshot();
+        assert_eq!(recovered.packet_loss_percent, 5);
+        assert_eq!(recovered.bitrate, 48_000);
+    }
+
+    #[test]
+    fn stale_and_path_changed_outlier_evidence_must_requalify() {
+        let start = Instant::now();
+        let stale = SharedEncoderPolicy::default();
+        register_room(&stale);
+        for measurement in 1..=2 {
+            report_window(
+                &stale,
+                measurement,
+                [0.30, 0.0, 0.0],
+                [32_000, 96_000, 96_000],
+                start + Duration::from_secs(measurement - 1),
+            );
+        }
+        stale.evaluate(start + Duration::from_secs(8));
+        assert!(stale.state.lock().peers.get("a").is_some_and(|peer| {
+            peer.outlier_measurements == 0
+                && peer.last_outlier_evidence.is_none()
+                && peer.outlier_lease.is_none()
+        }));
+        report_window(
+            &stale,
+            3,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(8),
+        );
+        assert_eq!(stale.snapshot(), EncoderPolicySnapshot::default());
+
+        report_window(
+            &stale,
+            4,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(9),
+        );
+        report_window(
+            &stale,
+            5,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(10),
+        );
+        assert!(stale
+            .state
+            .lock()
+            .peers
+            .get("a")
+            .is_some_and(|peer| peer.outlier_lease.is_some()));
+        stale.evaluate(start + Duration::from_secs(17));
+        assert!(stale
+            .state
+            .lock()
+            .peers
+            .get("a")
+            .is_some_and(|peer| peer.outlier_lease.is_none()));
+
+        let changed_path = SharedEncoderPolicy::default();
+        register_room(&changed_path);
+        for measurement in 1..=2 {
+            report_window(
+                &changed_path,
+                measurement,
+                [0.30, 0.0, 0.0],
+                [32_000, 96_000, 96_000],
+                start + Duration::from_secs(measurement - 1),
+            );
+        }
+        changed_path.invalidate_peer_path("a", 1);
+        report_window(
+            &changed_path,
+            3,
+            [0.30, 0.0, 0.0],
+            [32_000, 96_000, 96_000],
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(changed_path.snapshot(), EncoderPolicySnapshot::default());
+        assert!(changed_path
+            .state
+            .lock()
+            .peers
+            .get("a")
+            .is_some_and(|peer| {
+                peer.path_epoch == 1
+                    && peer.outlier_measurements == 1
+                    && peer.outlier_lease.is_none()
+            }));
+    }
+
+    #[test]
+    fn generation_replacement_and_removal_discard_outlier_identity_state() {
+        let policy = SharedEncoderPolicy::default();
+        policy.register_peer("peer", 1);
+        let start = Instant::now();
+        for measurement in 1..=ENCODER_OUTLIER_QUALIFYING_MEASUREMENTS {
+            report(
+                &policy,
+                "peer",
+                u64::from(measurement),
+                0.30,
+                32_000,
+                start + Duration::from_secs(u64::from(measurement)),
+            );
+        }
+        assert!(policy
+            .state
+            .lock()
+            .peers
+            .get("peer")
+            .is_some_and(|peer| peer.outlier_lease.is_some()));
+
+        policy.register_peer("peer", 2);
+        assert!(policy.state.lock().peers.get("peer").is_some_and(|peer| {
+            peer.generation == 2 && peer.outlier_measurements == 0 && peer.outlier_lease.is_none()
+        }));
+        policy.remove_peer("peer", Some(1));
+        assert!(policy.state.lock().peers.contains_key("peer"));
+        policy.remove_peer("peer", Some(2));
+        assert!(!policy.state.lock().peers.contains_key("peer"));
+    }
+}

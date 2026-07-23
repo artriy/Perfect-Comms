@@ -1,5 +1,34 @@
 # Changelog
 
+## Perfect Comms v4.1.5
+
+Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes ICE and signaling recovery bounded and explicit, adapts reliably to a persistently weak path, and adds the diagnostics needed to distinguish transport faults from local audio stalls.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.5/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### More Resilient P2P Voice
+
+- **Direct voice now stays current when a connection stalls or loses packets.**
+  > <sub>Each peer retains only a bounded tail of fresh outbound speech, preserves the real RTP timeline across local capture gaps, and absorbs larger receive bursts without allowing playback delay to grow without bound. Bounded audio NACK, Opus FEC/DRED/PLC recovery, faster feedback, and congestion-aware bitrate changes improve recovery on lossy or bandwidth-limited Wi-Fi and mobile links.</sub>
+
+- **A persistently weak route now influences quality without making one transient report penalize the lobby.**
+  > <sub>In larger rooms, the shared encoder still ignores one isolated bad sample, but repeated fresh evidence qualifies a single impaired path so sustained loss or bandwidth pressure receives protection. Degradation remains prompt, while recovery requires consecutive healthy windows to prevent bitrate and packet-loss protection from oscillating.</sub>
+
+### Stable, Bounded Connection Recovery
+
+- **ICE recovery is explicit and stable when network paths change.**
+  > <sub>Generation-fenced ICE restarts preserve current peer state, direct UDP uses a bounded socket mux, and direct ICE-TCP remains available when UDP is restricted. Automatic candidate renomination is intentionally disabled: Perfect Comms does not automatically switch a live connection between direct and relay paths, and TURN credentials and relay selection policy remain unchanged.</sub>
+
+- **Signaling recovery stays bounded under repeated failures.**
+  > <sub>Per-peer SDP, ICE-candidate, and restart work is generation-fenced, coalesced, and capped so current operations supersede stale work. Explicit acknowledgements and bounded recovery windows prevent a stalled helper or signaling backlog from accumulating obsolete work indefinitely.</sub>
+
+### Better Voice Diagnostics
+
+- **Transport problems are easier to separate from capture and playback stalls.**
+  > <sub>Diagnostics now report selected path and protocol details, candidate-pair changes, signaling and media queue pressure, superseded or stale RTP, write timeouts and RTP send errors, local media gaps, receive loss and reordering, and latency catch-up activity.</sub>
+
 ## Perfect Comms v4.1.4
 
 Perfect Comms v4.1.4 makes Push To Talk respond instantly and remain reliable through results-to-lobby transitions, adds Push to Mute, makes chat keybind blocking and connection status optional, expands first-time setup, and prevents stale task-role muffling during meetings.
@@ -34,14 +63,6 @@ Perfect Comms v4.1.4 makes Push To Talk respond instantly and remain reliable th
 
 - **Eclipsal and Grenadier muffling now ends when a meeting begins.**
   > <sub>The built-in blind/flash hearing effect is limited to the task world, so a Town of Us modifier retained during a meeting, exile, intro, or lobby transition can no longer keep every incoming voice muffled. Explicit phase-aware listener filters registered by other mods remain available in meetings.</sub>
-
-### More Resilient P2P Voice
-
-- **Direct voice now stays current when a connection stalls or loses packets.**
-  > <sub>Each peer keeps only fresh outbound speech, preserves the real RTP timeline across local capture gaps, and absorbs larger receive bursts without allowing playback delay to grow without bound. Bounded audio NACK, existing Opus FEC/DRED/PLC recovery, faster feedback, and congestion-aware bitrate changes improve recovery on lossy or bandwidth-limited Wi-Fi and mobile links.</sub>
-
-- **P2P paths now adapt sooner when the network changes.**
-  > <sub>ICE can renominate a better candidate pair, direct UDP host traffic shares a bounded socket mux, direct ICE-TCP is available when UDP paths are restricted, and DTLS retries begin sooner. New path, protocol, pair-change, queue, and media-gap diagnostics make weak-link failures distinguishable from local CPU or capture stalls. TURN credentials, relay escalation, and relay selection policy are unchanged.</sub>
 
 ## Perfect Comms v4.1.3
 

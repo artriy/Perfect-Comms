@@ -218,6 +218,41 @@ public sealed class SidecarDiagnosticsSafetyTests
     }
 
     [Fact]
+    public void MediaReceiveLatencyCatchupDropsAreAdditiveAndSafe()
+    {
+        const string current = """
+            {"media_receive":{"latency_catchup_drops":7}}
+            """;
+        const string missing = """
+            {"media_receive":{}}
+            """;
+        const string invalidValueKind = """
+            {"media_receive":{"latency_catchup_drops":"invalid"}}
+            """;
+        const string malformedJson = "{not-json";
+
+#if ANDROID
+        Assert.True(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(current, out var mobileCurrent));
+        Assert.True(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(missing, out var mobileMissing));
+        Assert.False(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(invalidValueKind, out var mobileInvalid));
+        Assert.False(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(malformedJson, out var mobileMalformed));
+        Assert.Contains("latencyCatchupDrops=7", mobileCurrent);
+        Assert.Contains("latencyCatchupDrops=0", mobileMissing);
+        Assert.Equal(string.Empty, mobileInvalid);
+        Assert.Equal(string.Empty, mobileMalformed);
+#endif
+
+        Assert.True(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(current, out var sidecarCurrent));
+        Assert.True(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(missing, out var sidecarMissing));
+        Assert.False(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(invalidValueKind, out var sidecarInvalid));
+        Assert.False(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(malformedJson, out var sidecarMalformed));
+        Assert.Contains("latencyCatchupDrops=7", sidecarCurrent);
+        Assert.Contains("latencyCatchupDrops=na", sidecarMissing);
+        Assert.Equal(string.Empty, sidecarInvalid);
+        Assert.Equal(string.Empty, sidecarMalformed);
+    }
+
+    [Fact]
     public void NestedMediaDiagnosticsArePrivacySafeBoundedAndPreserveMissingValues()
     {
         const string captureRequested = "Private Capture Device Owner Serial 123";

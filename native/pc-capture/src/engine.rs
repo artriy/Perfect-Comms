@@ -812,6 +812,7 @@ mod tests {
             local_media_gap_frames: 4,
             dred_frames: 2,
             rtp_jitter_ms_max: 27.5,
+            latency_catchup_drops: 5,
             ..Default::default()
         };
         let path = PeerNetworkPathSnapshot {
@@ -866,6 +867,7 @@ mod tests {
         assert_eq!(value["network_paths"][0]["current_rtt_ms"], 212.5);
         assert_eq!(value["media_receive"]["sequence_gaps"], 3);
         assert_eq!(value["media_receive"]["dred_frames"], 2);
+        assert_eq!(value["media_receive"]["latency_catchup_drops"], 5);
     }
 
     #[test]
@@ -983,6 +985,7 @@ fn mobile_diagnostics_json(
         late_drops: receive.late_drops,
         duplicate_drops: receive.duplicate_drops,
         encoded_overflow_drops: receive.encoded_overflow_drops,
+        latency_catchup_drops: receive.latency_catchup_drops,
         deadline_losses: receive.deadline_losses,
         dred_frames: receive.dred_frames,
         fec_frames: receive.fec_frames,

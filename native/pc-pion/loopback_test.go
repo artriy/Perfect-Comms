@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,26 @@ func waitForRTP(t *testing.T, q *rtpQueue, count int) []inboundRTP {
 	return packets
 }
 
+func waitForRTPPayload(t *testing.T, q *rtpQueue, payload []byte) inboundRTP {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		packet, _, ok := q.peek()
+		if !ok {
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
+		if !q.pop(packet.queueID) {
+			continue
+		}
+		if string(packet.payload) == string(payload) {
+			return packet
+		}
+	}
+	t.Fatalf("timed out waiting for RTP payload %x", payload)
+	return inboundRTP{}
+}
+
 func waitForRemoteFeedback(t *testing.T, p *peer, packetsReceived uint64) remoteSenderSnapshot {
 	t.Helper()
 	deadline := time.Now().Add(6 * time.Second)
@@ -176,6 +197,7 @@ func firstIndex(items []string, wanted string) int {
 
 func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
+	t.Setenv("PC_PION_TEST_DISABLE_RENOMINATION", "")
 
 	left, err := newEngine()
 	if err != nil {
@@ -219,6 +241,9 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 			rightPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
 			leftTrace.eoc > 0 && rightTrace.eoc > 0
 	})
+	for name, peer := range map[string]*peer{"left": leftPeer, "right": rightPeer} {
+		requireSelectedProtocol(t, name, peer, "udp")
+	}
 	if firstIndex(leftTrace.kinds, "sdp") < 0 || firstIndex(leftTrace.kinds, "candidate") < firstIndex(leftTrace.kinds, "sdp") {
 		t.Fatalf("left signaling order = %v", leftTrace.kinds)
 	}
@@ -227,6 +252,9 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	}
 	if len(leftTrace.offers) != 1 {
 		t.Fatalf("initial offer count = %d, want 1", len(leftTrace.offers))
+	}
+	if strings.Contains(strings.ToLower(leftTrace.offers[0]), "renomination") {
+		t.Fatal("default ICE offer advertised automatic renomination")
 	}
 	initialUfrag := iceUfrag(leftTrace.offers[0])
 	if initialUfrag == "" {
@@ -272,23 +300,77 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 		t.Fatalf("remote fraction lost = %v, want a valid interval fraction", feedback.fractionLost)
 	}
 
+	initialAnswerUfrag := descriptionUfrag(rightPeer.pc.LocalDescription())
+	if initialAnswerUfrag == "" {
+		t.Fatal("initial answer has no ICE ufrag")
+	}
+	initialLeftEOC := leftTrace.eoc
+	initialRightEOC := rightTrace.eoc
+	baselineAttempts := left.counters.rtpTXAttempts.Load()
+	baselineErrors := left.counters.rtpTXErrors.Load()
+	stopRestartTraffic := make(chan struct{})
+	restartTrafficDone := make(chan struct{})
+	go func() {
+		defer close(restartTrafficDone)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		mediaSequence := uint64(1_000)
+		for {
+			select {
+			case <-stopRestartTraffic:
+				return
+			case <-ticker.C:
+				left.sendOpus([]byte{0xf8, 0xff, 0xf0}, 1, mediaSequence)
+				mediaSequence++
+			}
+		}
+	}()
+	stopTraffic := func() {
+		select {
+		case <-restartTrafficDone:
+			return
+		default:
+			close(stopRestartTraffic)
+			<-restartTrafficDone
+		}
+	}
+	t.Cleanup(stopTraffic)
+	trafficDeadline := time.Now().Add(time.Second)
+	for left.counters.rtpTXAttempts.Load() == baselineAttempts && time.Now().Before(trafficDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if left.counters.rtpTXAttempts.Load() == baselineAttempts {
+		t.Fatal("continuous restart traffic did not reach the RTP writer")
+	}
 	if err = leftPeer.restartICE(false, true); err != nil {
 		t.Fatalf("restart ICE: %v", err)
 	}
 	waitForLoopback(t, left, right, leftPeer, rightPeer, leftTrace, rightTrace, func() bool {
-		return len(leftTrace.offers) >= 2 && leftPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
+		leftLocalUfrag := descriptionUfrag(leftPeer.pc.LocalDescription())
+		rightLocalUfrag := descriptionUfrag(rightPeer.pc.LocalDescription())
+		return len(leftTrace.offers) >= 2 &&
+			leftLocalUfrag != "" && leftLocalUfrag != initialUfrag &&
+			rightLocalUfrag != "" && rightLocalUfrag != initialAnswerUfrag &&
+			descriptionUfrag(rightPeer.pc.RemoteDescription()) == leftLocalUfrag &&
+			descriptionUfrag(leftPeer.pc.RemoteDescription()) == rightLocalUfrag &&
+			leftTrace.eoc > initialLeftEOC && rightTrace.eoc > initialRightEOC &&
+			leftPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
 			rightPeer.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
 	})
+	stopTraffic()
+	if got := left.counters.rtpTXErrors.Load(); got != baselineErrors {
+		t.Fatalf("RTP transmit errors during ICE restart = %d, want %d", got-baselineErrors, 0)
+	}
 	restartUfrag := iceUfrag(leftTrace.offers[1])
 	if restartUfrag == "" || restartUfrag == initialUfrag {
 		t.Fatalf("restart ICE ufrag = %q, initial = %q", restartUfrag, initialUfrag)
 	}
 
 	postRestartLeft := []byte{0xf8, 0xff, 0xfb}
-	if result := left.sendOpus(postRestartLeft, 1, 110); result.enqueued != 1 {
+	if result := left.sendOpus(postRestartLeft, 1, 20_000); result.enqueued != 1 {
 		t.Fatalf("post-restart left send = %+v", result)
 	}
-	if packet := waitForRTP(t, right.rtp, 1)[0]; string(packet.payload) != string(postRestartLeft) {
+	if packet := waitForRTPPayload(t, right.rtp, postRestartLeft); string(packet.payload) != string(postRestartLeft) {
 		t.Fatalf("post-restart left payload = %x, want %x", packet.payload, postRestartLeft)
 	}
 	postRestartRight := []byte{0xf8, 0xff, 0xfa}
@@ -297,6 +379,28 @@ func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	}
 	if packet := waitForRTP(t, left.rtp, 1)[0]; string(packet.payload) != string(postRestartRight) {
 		t.Fatalf("post-restart right payload = %x, want %x", packet.payload, postRestartRight)
+	}
+}
+
+func requireSelectedProtocol(t *testing.T, name string, p *peer, want string) {
+	t.Helper()
+	transport := p.sender.Transport()
+	if transport == nil || transport.ICETransport() == nil {
+		t.Fatalf("%s peer has no ICE transport", name)
+	}
+	pair, err := transport.ICETransport().GetSelectedCandidatePair()
+	if err != nil {
+		t.Fatalf("%s selected pair: %v", name, err)
+	}
+	if pair == nil || pair.Local == nil || pair.Remote == nil {
+		t.Fatalf("%s selected pair is incomplete: %+v", name, pair)
+	}
+	if !strings.EqualFold(pair.Local.Protocol.String(), want) ||
+		!strings.EqualFold(pair.Remote.Protocol.String(), want) {
+		t.Fatalf(
+			"%s selected protocols = %s/%s, want %s/%s",
+			name, pair.Local.Protocol, pair.Remote.Protocol, want, want,
+		)
 	}
 }
 
@@ -379,5 +483,57 @@ func TestPionDirectICETCPCarriesRTP(t *testing.T) {
 	}
 	if packet := waitForRTP(t, left.rtp, 1)[0]; string(packet.payload) != string(rightPayload) {
 		t.Fatalf("left TCP payload = %x, want %x", packet.payload, rightPayload)
+	}
+	if left.counters.rtpTXErrors.Load() != 0 || right.counters.rtpTXErrors.Load() != 0 {
+		t.Fatalf(
+			"TCP transmit errors left=%d right=%d",
+			left.counters.rtpTXErrors.Load(), right.counters.rtpTXErrors.Load(),
+		)
+	}
+}
+
+func TestPionCloseIsNotHeldByTCPPeerWithoutSTUN(t *testing.T) {
+	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
+
+	e, err := newEngine()
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	localAddresser, ok := e.tcpMux.(interface{ LocalAddr() net.Addr })
+	if !ok {
+		e.close()
+		t.Fatalf("TCP mux does not expose its listen address: %T", e.tcpMux)
+	}
+	tcpAddr, ok := localAddresser.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		e.close()
+		t.Fatalf("TCP mux listen address = %T, want *net.TCPAddr", localAddresser.LocalAddr())
+	}
+	dialAddr := *tcpAddr
+	if dialAddr.IP.IsUnspecified() {
+		if dialAddr.IP.To4() != nil {
+			dialAddr.IP = net.IPv4(127, 0, 0, 1)
+		} else {
+			dialAddr.IP = net.IPv6loopback
+		}
+	}
+	conn, err := net.DialTimeout("tcp", dialAddr.String(), time.Second)
+	if err != nil {
+		e.close()
+		t.Fatalf("dial TCP mux: %v", err)
+	}
+	defer conn.Close()
+
+	// Allow the mux to accept the socket and block waiting for its initial STUN packet.
+	time.Sleep(100 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		e.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("engine close blocked on TCP peer that sent no initial STUN")
 	}
 }
