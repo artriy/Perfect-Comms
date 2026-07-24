@@ -1,5 +1,23 @@
 # Changelog
 
+## Perfect Comms v4.1.6
+
+Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen and lets voice HUD elements reach their selected safe-screen edges without invisible padding.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.6/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Reliable Results-Screen Avatars
+
+- **Living speaking avatars keep their bodies on the results screen.**
+  > <sub>When the gameplay scene releases its live player objects, the results HUD rebuilds both living and ghost body artwork from the cached outfit instead of leaving surviving players as cosmetics-only or empty rings.</sub>
+
+### Edge-to-Edge HUD Placement
+
+- **Voice controls and speaking-bar content now reach their selected safe-screen edge.**
+  > <sub>Desktop controls no longer reserve an extra viewport margin or clamp against transparent PNG canvas space. Speaking-bar avatars, rings, and names own the edge instead of the backdrop's decorative padding, and the overlay camera follows the main camera's viewport and aspect.</sub>
+
 ## Perfect Comms v4.1.5
 
 Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes ICE and signaling recovery bounded and explicit, adapts reliably to a persistently weak path, improves transport diagnostics, and makes living and ghost speaking avatars match Among Us cosmetics more faithfully.
@@ -38,13 +56,6 @@ Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes
 - **Living cosmetics preserve their intended depth and facing-specific artwork.**
   > <sub>Back cosmetic layers remain behind the body, while asymmetric hats, skins, and visors use their dedicated left-facing idle art instead of mirroring the right-facing frame. Speaking avatars remain static rather than replaying world movement animations.</sub>
 
-- **Living speaking avatars keep their bodies on the results screen.**
-  > <sub>When the gameplay scene releases its live player objects, the results HUD now rebuilds both living and ghost body artwork from the cached outfit instead of leaving surviving players as cosmetics-only or empty rings.</sub>
-
-### Edge-to-Edge HUD Placement
-
-- **Voice controls and speaking-bar content now reach their selected safe-screen edge.**
-  > <sub>Desktop controls no longer reserve an extra viewport margin or clamp against transparent PNG canvas space. Speaking-bar avatars, rings, and names own the edge instead of the backdrop's decorative padding, and the overlay camera follows the main camera's viewport and aspect.</sub>
 
 ### Better Voice Diagnostics
 
