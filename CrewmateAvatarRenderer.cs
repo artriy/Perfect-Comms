@@ -444,6 +444,9 @@ internal static class CrewmateAvatarRenderer
         root.transform.localScale = Vector3.one * RootScale;
         root.transform.localPosition = Vector3.zero;
 
+        var bodyRenderer = AddSprite(root.transform, AliveBodyName, baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
+        if (outfit.IsRainbow) AddRainbowBodyAnimator(bodyRenderer);
+
         bool ghostBodyReady = outfit.GhostBodyLayers.Count > 0
             ? TryAddGhostBody(
                 root.transform,

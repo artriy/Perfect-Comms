@@ -42,7 +42,6 @@ public static partial class VoiceChatHudState
     private const float TooltipButtonGap = 0.35f;
     private const float TooltipViewportPadding = 0.02f;
     private const float ButtonViewportDepth = 10f;
-    private const float ButtonViewportPadding = 0.015f;
     // Right-edge inset for the jail-unmute button on a meeting card, in multiples of the
     // button's world size. Tuned so the icon sits in the empty area past the name without
     // spilling into the gap between cards. Lower = nearer the right edge.
@@ -552,12 +551,8 @@ public static partial class VoiceChatHudState
             return Vector3.zero;
 
         Rect safe = NormalizedSafeViewportRect();
-        float paddingX = Mathf.Min(ButtonViewportPadding, safe.width * 0.25f);
-        float paddingY = Mathf.Min(ButtonViewportPadding, safe.height * 0.25f);
-        float shiftX = CalculateViewportShift(
-            minX, maxX, safe.xMin + paddingX, safe.xMax - paddingX);
-        float shiftY = CalculateViewportShift(
-            minY, maxY, safe.yMin + paddingY, safe.yMax - paddingY);
+        float shiftX = CalculateViewportShift(minX, maxX, safe.xMin, safe.xMax);
+        float shiftY = CalculateViewportShift(minY, maxY, safe.yMin, safe.yMax);
         if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f))
             return Vector3.zero;
 
@@ -582,7 +577,7 @@ public static partial class VoiceChatHudState
         return 0f;
     }
 
-    private static Rect NormalizedSafeViewportRect()
+    internal static Rect NormalizedSafeViewportRect()
     {
         float screenWidth = Mathf.Max(1f, Screen.width);
         float screenHeight = Mathf.Max(1f, Screen.height);
@@ -2111,7 +2106,7 @@ public static partial class VoiceChatHudState
         go.transform.localPosition = Vector3.zero;
         go.layer = parent.layer;
         var sr = go.AddComponent<SpriteRenderer>();
-        sr.sprite = LoadSprite(resource);
+        sr.sprite = LoadControlSprite(resource);
         sr.sortingLayerName = VCSorting.Layer;
         sr.sortingOrder = ButtonSortOrder;
         return sr;
@@ -2144,6 +2139,67 @@ public static partial class VoiceChatHudState
     }
 
     private static readonly Dictionary<string, Sprite> _spriteCache = new();
+    private static readonly Dictionary<string, Sprite> _controlSpriteCache = new();
+
+    private static Sprite LoadControlSprite(string path)
+    {
+        if (_controlSpriteCache.TryGetValue(path, out var cached)) return cached;
+
+        var source = LoadSprite(path);
+        if (source == null) return null!;
+        try
+        {
+            var texture = source.texture;
+            var pixels = texture.GetPixels32();
+            int minX = texture.width;
+            int minY = texture.height;
+            int maxX = -1;
+            int maxY = -1;
+            for (int y = 0; y < texture.height; y++)
+            {
+                int row = y * texture.width;
+                for (int x = 0; x < texture.width; x++)
+                {
+                    if (pixels[row + x].a == 0) continue;
+                    minX = Math.Min(minX, x);
+                    minY = Math.Min(minY, y);
+                    maxX = Math.Max(maxX, x);
+                    maxY = Math.Max(maxY, y);
+                }
+            }
+
+            if (maxX < minX || maxY < minY)
+            {
+                _controlSpriteCache[path] = source;
+                return source;
+            }
+
+            // Keep one transparent texel for bilinear filtering, while excluding the large
+            // decorative canvas margins from the edge-clamping footprint.
+            minX = Math.Max(0, minX - 1);
+            minY = Math.Max(0, minY - 1);
+            maxX = Math.Min(texture.width - 1, maxX + 1);
+            maxY = Math.Min(texture.height - 1, maxY + 1);
+            float width = maxX - minX + 1;
+            float height = maxY - minY + 1;
+            var rect = new Rect(minX, minY, width, height);
+            var originalPivot = source.rect.position + source.pivot;
+            var pivot = new Vector2(
+                (originalPivot.x - minX) / width,
+                (originalPivot.y - minY) / height);
+            var tight = Sprite.Create(texture, rect, pivot, source.pixelsPerUnit);
+            tight.hideFlags |= HideFlags.HideAndDontSave | HideFlags.DontSaveInEditor;
+            _controlSpriteCache[path] = tight;
+            return tight;
+        }
+        catch
+        {
+            // A non-readable replacement texture is still usable; it simply retains its full
+            // sprite rectangle for clamping.
+            _controlSpriteCache[path] = source;
+            return source;
+        }
+    }
 
     public static Sprite LoadSprite(string path, bool highQuality = false)
     {
@@ -2182,10 +2238,10 @@ public static partial class VoiceChatHudState
 
     private static class Sprites
     {
-        public static Sprite MicOn  => LoadSprite("VoiceChatPlugin.Resources.MicOn.png");
-        public static Sprite MicOff => LoadSprite("VoiceChatPlugin.Resources.MicOff.png");
-        public static Sprite SpkOn  => LoadSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
-        public static Sprite SpkOff => LoadSprite("VoiceChatPlugin.Resources.SpeakerOff.png");
-        public static Sprite JailUnmute => LoadSprite("VoiceChatPlugin.Resources.JailUnmute.png");
+        public static Sprite MicOn  => LoadControlSprite("VoiceChatPlugin.Resources.MicOn.png");
+        public static Sprite MicOff => LoadControlSprite("VoiceChatPlugin.Resources.MicOff.png");
+        public static Sprite SpkOn  => LoadControlSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
+        public static Sprite SpkOff => LoadControlSprite("VoiceChatPlugin.Resources.SpeakerOff.png");
+        public static Sprite JailUnmute => LoadControlSprite("VoiceChatPlugin.Resources.JailUnmute.png");
     }
 }

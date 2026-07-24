@@ -54,6 +54,9 @@ internal static class VCOverlayCamera
         _camera.orthographic = main.orthographic;
         _camera.orthographicSize = main.orthographicSize;
         _camera.fieldOfView = main.fieldOfView;
+        _camera.rect = main.rect;
+        _camera.aspect = main.aspect;
+        _camera.targetDisplay = main.targetDisplay;
         _camera.nearClipPlane = main.nearClipPlane;
         _camera.farClipPlane = main.farClipPlane;
         _camera.depth = main.depth + 1000f;
@@ -90,11 +93,9 @@ public static class PingTrackerPatch
     private const float BackdropPad = SpeakingBarVisualMetrics.BackdropPad;
     private const float NameGap = SpeakingBarVisualMetrics.NameGap;
     private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.5f);
-    // Manual-layout mode: viewport placement + edge clamping, mirroring the voice buttons.
-    private const float ManualViewportDepth   = 10f;
-    // A selected edge is a true edge anchor: the measured outer bound (including an enabled
-    // backdrop) is translated flush to viewport 0/1 while remaining fully on-screen.
-    private const float ManualViewportPadding = 0f;
+    // Viewport placement uses the platform safe area with no extra desktop inset. The measured
+    // speaking content reaches the selected edge; decorative backdrop padding may bleed beyond it.
+    private const float ManualViewportDepth = 10f;
     private static GameObject?       _barRoot;
     private static SortingGroup?     _barSortingGroup; // cached so KeepSpeakingBarOnTop avoids a per-frame GetComponent
     private static SpriteRenderer?   _backdropSR;
@@ -1161,17 +1162,17 @@ public static class PingTrackerPatch
         LayoutSlotsIfDirty();
     }
 
-    // Generalizes VoiceChatHudState.ClampVoiceButtonViewportPositions from the 3 fixed
-    // buttons to N speaker slots: shift the whole bar root so every icon/ring/label stays
-    // inside the viewport padding. Only the root moves; child layout is preserved.
+    // Shift the whole bar root so every icon, ring, and label stays inside the platform safe
+    // viewport. Decorative backdrop padding does not hold the visible speaking content inward.
     private static void ClampSpeakingBarToViewport(Camera cam)
     {
         if (_barRoot == null) return;
         if (!TryComputeSlotViewportBounds(cam, out float minX, out float maxX, out float minY, out float maxY))
             return;
 
-        float shiftX = CalculateManualViewportShift(minX, maxX);
-        float shiftY = CalculateManualViewportShift(minY, maxY);
+        Rect safe = VoiceChatHudState.NormalizedSafeViewportRect();
+        float shiftX = VoiceChatHudState.CalculateViewportShift(minX, maxX, safe.xMin, safe.xMax);
+        float shiftY = VoiceChatHudState.CalculateViewportShift(minY, maxY, safe.yMin, safe.yMax);
         if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f)) return;
 
         var origin  = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ManualViewportDepth));
@@ -1223,12 +1224,6 @@ public static class PingTrackerPatch
                     ref minX, ref maxX, ref minY, ref maxY, ref any);
             }
         }
-        if (_backdropEnabled && _backdropSR != null && _backdropSR.enabled)
-        {
-            var bounds = _backdropSR.bounds;
-            AccumulateBox(cam, bounds.center.x, bounds.center.y, bounds.extents.x, bounds.extents.y,
-                bounds.center.z, ref minX, ref maxX, ref minY, ref maxY, ref any);
-        }
         return any;
     }
 
@@ -1252,23 +1247,6 @@ public static class PingTrackerPatch
         any = true;
     }
 
-    // Same logic as VoiceChatHudState.CalculateViewportShift, including the
-    // "content larger than the allowed area → center it" fallback.
-    private static float CalculateManualViewportShift(float min, float max)
-    {
-        float minAllowed = ManualViewportPadding;
-        float maxAllowed = 1f - ManualViewportPadding;
-        float allowedSize = maxAllowed - minAllowed;
-        float currentSize = max - min;
-
-        if (currentSize > allowedSize)
-            return (minAllowed + maxAllowed) * 0.5f - (min + max) * 0.5f;
-        if (min < minAllowed)
-            return minAllowed - min;
-        if (max > maxAllowed)
-            return maxAllowed - max;
-        return 0f;
-    }
 
     private static void ApplySortingGroup(GameObject go, int order)
     {
@@ -1882,9 +1860,9 @@ public static class PingTrackerPatch
             parentScaleY = Mathf.Max(Mathf.Abs(parentScale.y), 0.0001f);
         }
 
-        float viewportFactor = 1f - 2f * ManualViewportPadding;
-        width = 2f * cam.orthographicSize * cam.aspect * viewportFactor / parentScaleX;
-        height = 2f * cam.orthographicSize * viewportFactor / parentScaleY;
+        Rect safe = VoiceChatHudState.NormalizedSafeViewportRect();
+        width = 2f * cam.orthographicSize * cam.aspect * safe.width / parentScaleX;
+        height = 2f * cam.orthographicSize * safe.height / parentScaleY;
         return width > 0f && height > 0f;
     }
 

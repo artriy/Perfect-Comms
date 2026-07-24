@@ -745,14 +745,12 @@ internal sealed class SpeakingBarLivePreview
             : PresetViewportAnchor(settings.Position);
         float rootX = (anchor.x - 0.5f) * availableWidth;
         float rootY = (anchor.y - 0.5f) * availableHeight;
-        float clampMinX = contentMinX -
-            (settings.Backdrop ? SpeakingBarVisualMetrics.BackdropPad : 0f);
-        float clampMaxX = contentMaxX +
-            (settings.Backdrop ? SpeakingBarVisualMetrics.BackdropPad : 0f);
-        float clampMinY = contentMinY -
-            (settings.Backdrop ? SpeakingBarVisualMetrics.BackdropPad : 0f);
-        float clampMaxY = contentMaxY +
-            (settings.Backdrop ? SpeakingBarVisualMetrics.BackdropPad : 0f);
+        // The visible speaking content owns the selected edge. The backdrop remains padded around
+        // that content and is intentionally allowed to bleed into the preview's clipped boundary.
+        float clampMinX = contentMinX;
+        float clampMaxX = contentMaxX;
+        float clampMinY = contentMinY;
+        float clampMaxY = contentMaxY;
         rootX += CalculateAxisShift(
             rootX + clampMinX * solution.EffectiveScale,
             rootX + clampMaxX * solution.EffectiveScale,
