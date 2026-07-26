@@ -198,6 +198,7 @@ func firstIndex(items []string, wanted string) int {
 func TestPionLoopbackRTPOrderingEOCAndICERestart(t *testing.T) {
 	t.Setenv("PC_PION_TEST_DISABLE_MDNS", "1")
 	t.Setenv("PC_PION_TEST_DISABLE_RENOMINATION", "")
+	t.Setenv("PC_PION_TEST_DISABLE_TCP_MUX", "1")
 
 	left, err := newEngine()
 	if err != nil {
