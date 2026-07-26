@@ -21,7 +21,7 @@ Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen 
 ### Reliable CrossOver Audio Startup
 
 - **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**
-  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command through `start.exe /unix`. An argument-free, signed app broker consumes nonce-bound launch requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
+  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command—or treating a macOS `.app` directory as an executable—through `start.exe /unix`. It uses Wine's direct Unix process bridge to restore the embedded Mach-O's executable mode, remove quarantine, and invoke hidden LaunchServices with separated arguments. The signed, argument-free app broker then consumes nonce-bound requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
 
 ## Perfect Comms v4.1.5
 
