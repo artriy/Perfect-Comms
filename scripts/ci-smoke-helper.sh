@@ -159,7 +159,7 @@ connection = socket.create_connection(("127.0.0.1", handshake["port"]), timeout=
 hello = json.dumps(
     {
         "op": "hello",
-        "proto": int(json.loads(expected_build_info)["proto"]),
+        "proto": int(json.loads(expected_build_info)["protocol"]),
         "token": "ci-broker-token",
     }
 ).encode()
