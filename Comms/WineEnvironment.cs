@@ -68,6 +68,10 @@ internal delegate WineHostActionResult WineMacBrokerActionExecutor(
     string receiptPath,
     string expectedReceipt);
 
+internal delegate int WineUnixProcessExecutor(
+    IReadOnlyList<string> arguments,
+    bool wait);
+
 // Detects Wine/Proton/CrossOver and provides the host-OS/path/process helpers used to launch and
 // clean up the native macOS or Linux audio helper outside the Windows compatibility layer.
 internal static class WineEnvironment
@@ -76,6 +80,20 @@ internal static class WineEnvironment
     // process. Keep the original bounded 15-second allowance while verifying a receipt instead
     // of trusting start.exe's exit status.
     internal const int HostActionTimeoutMs = 15_000;
+    private const uint WineUnixCodePage = 65010;
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int WineUnixSpawnNative(IntPtr arguments, int wait);
+
+    private readonly record struct MacBrokerStartResult(
+        bool Started,
+        int? ExitCode,
+        string FailureKind,
+        string Diagnostic);
+
+    private static readonly Lazy<WineUnixSpawnNative?> WineUnixSpawn = new(
+        ResolveWineUnixSpawn,
+        LazyThreadSafetyMode.ExecutionAndPublication);
     private static readonly Lazy<bool> WineProbe = new(
         DetectWine,
         LazyThreadSafetyMode.ExecutionAndPublication);
@@ -85,6 +103,17 @@ internal static class WineEnvironment
 
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = false)]
     private static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern int WideCharToMultiByte(
+        uint codePage,
+        uint flags,
+        string source,
+        int sourceChars,
+        IntPtr destination,
+        int destinationBytes,
+        IntPtr defaultCharacter,
+        IntPtr usedDefaultCharacter);
 
     // The canonical Wine check: ntdll exports wine_get_version only under Wine.
     public static bool IsWine => WineProbe.Value;
@@ -100,6 +129,25 @@ internal static class WineEnvironment
         catch
         {
             return false;
+        }
+    }
+
+    private static WineUnixSpawnNative? ResolveWineUnixSpawn()
+    {
+        try
+        {
+            var ntdll = GetModuleHandleA("ntdll.dll");
+            if (ntdll == IntPtr.Zero ||
+                GetProcAddress(ntdll, "wine_get_version") == IntPtr.Zero)
+                return null;
+            var address = GetProcAddress(ntdll, "__wine_unix_spawnvp");
+            return address == IntPtr.Zero
+                ? null
+                : Marshal.GetDelegateForFunctionPointer<WineUnixSpawnNative>(address);
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -176,14 +224,6 @@ internal static class WineEnvironment
         return psi;
     }
 
-    internal static ProcessStartInfo BuildMacBrokerStartInfo(string hostApplication)
-    {
-        ThrowIfNullOrWhiteSpace(hostApplication, nameof(hostApplication));
-        var psi = NewHostStartInfo(redirectOutput: true);
-        psi.ArgumentList.Add("/unix");
-        psi.ArgumentList.Add(hostApplication);
-        return psi;
-    }
 
     internal static WineHostActionResult RunVerifiedHostAction(
         string operation,
@@ -222,25 +262,262 @@ internal static class WineEnvironment
         string requestJson,
         string receiptPath,
         string expectedReceipt)
+        => RunVerifiedMacBrokerActionCore(
+            operation,
+            hostApplication,
+            requestPath,
+            requestJson,
+            receiptPath,
+            expectedReceipt,
+            InvokeWineUnixProcess,
+            HostActionTimeoutMs);
+
+    internal static WineHostActionResult RunVerifiedMacBrokerActionForTest(
+        string operation,
+        string hostApplication,
+        string requestPath,
+        string requestJson,
+        string receiptPath,
+        string expectedReceipt,
+        WineUnixProcessExecutor runUnixProcess,
+        int timeoutMs)
+        => RunVerifiedMacBrokerActionCore(
+            operation,
+            hostApplication,
+            requestPath,
+            requestJson,
+            receiptPath,
+            expectedReceipt,
+            runUnixProcess,
+            timeoutMs);
+
+    private static WineHostActionResult RunVerifiedMacBrokerActionCore(
+        string operation,
+        string hostApplication,
+        string requestPath,
+        string requestJson,
+        string receiptPath,
+        string expectedReceipt,
+        WineUnixProcessExecutor runUnixProcess,
+        int timeoutMs)
     {
+        ThrowIfNullOrWhiteSpace(operation, nameof(operation));
         ThrowIfNullOrWhiteSpace(requestPath, nameof(requestPath));
         ThrowIfNullOrWhiteSpace(requestJson, nameof(requestJson));
-        PublishMacBrokerRequest(requestPath, requestJson);
+        ThrowIfNullOrWhiteSpace(receiptPath, nameof(receiptPath));
+        ThrowIfNullOrWhiteSpace(expectedReceipt, nameof(expectedReceipt));
+        ArgumentNullException.ThrowIfNull(runUnixProcess);
+        if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+
+        var stopwatch = Stopwatch.StartNew();
+        var sawInvalidReceipt = false;
+        var startResult = default(MacBrokerStartResult);
         try
         {
-            return RunVerifiedHostActionCore(
-                operation,
-                receiptPath,
-                expectedReceipt,
-                () => BuildMacBrokerStartInfo(hostApplication),
-                static startInfo => Process.Start(startInfo),
-                HostActionTimeoutMs);
+            TryDeleteFile(receiptPath);
+            PublishMacBrokerRequest(requestPath, requestJson);
+            startResult = StartMacBrokerApplication(hostApplication, runUnixProcess);
+            if (!startResult.Started)
+            {
+                return LogHostAction(operation, new WineHostActionResult(
+                    false,
+                    false,
+                    false,
+                    startResult.ExitCode,
+                    startResult.FailureKind,
+                    stopwatch.ElapsedMilliseconds,
+                    startResult.Diagnostic));
+            }
+
+            while (stopwatch.ElapsedMilliseconds < timeoutMs)
+            {
+                if (TryReadReceipt(receiptPath, out var receipt))
+                {
+                    if (string.Equals(receipt, expectedReceipt, StringComparison.Ordinal))
+                    {
+                        return LogHostAction(operation, new WineHostActionResult(
+                            true,
+                            true,
+                            false,
+                            startResult.ExitCode,
+                            string.Empty,
+                            stopwatch.ElapsedMilliseconds,
+                            startResult.Diagnostic));
+                    }
+                    sawInvalidReceipt = true;
+                }
+                Thread.Sleep(25);
+            }
+
+            return LogHostAction(operation, new WineHostActionResult(
+                true,
+                false,
+                true,
+                startResult.ExitCode,
+                sawInvalidReceipt ? "receipt-invalid" : "receipt-missing",
+                stopwatch.ElapsedMilliseconds,
+                startResult.Diagnostic));
+        }
+        catch (Exception ex)
+        {
+            return LogHostAction(operation, new WineHostActionResult(
+                false,
+                false,
+                false,
+                startResult.ExitCode,
+                "mac-dispatch-" + ex.GetType().Name,
+                stopwatch.ElapsedMilliseconds,
+                ex.Message));
         }
         finally
         {
             TryDeleteFile(requestPath);
+            TryDeleteFile(receiptPath);
         }
     }
+
+    private static MacBrokerStartResult StartMacBrokerApplication(
+        string hostApplication,
+        WineUnixProcessExecutor runUnixProcess)
+    {
+        ThrowIfNullOrWhiteSpace(hostApplication, nameof(hostApplication));
+        ArgumentNullException.ThrowIfNull(runUnixProcess);
+        var app = hostApplication.TrimEnd('/');
+        if (!app.StartsWith("/", StringComparison.Ordinal) ||
+            !app.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("The macOS broker path must be an absolute application bundle");
+        }
+
+        var executable = app + "/Contents/MacOS/PerfectCommsAudio";
+        var chmodExit = runUnixProcess(
+            new[] { "/bin/chmod", "u+x", executable },
+            wait: true);
+        if (chmodExit != 0)
+        {
+            return new MacBrokerStartResult(
+                false,
+                chmodExit,
+                "mac-chmod-failed",
+                $"chmodExit={FormatUnixExit(chmodExit)}");
+        }
+
+        string xattrDiagnostic;
+        try
+        {
+            var xattrExit = runUnixProcess(
+                new[] { "/usr/bin/xattr", "-dr", "com.apple.quarantine", app },
+                wait: true);
+            xattrDiagnostic = xattrExit == 0
+                ? string.Empty
+                : $"xattrExit={FormatUnixExit(xattrExit)}";
+        }
+        catch (Exception ex)
+        {
+            // A missing quarantine attribute and older xattr implementations are non-fatal.
+            // LaunchServices plus the nonce receipt remain authoritative.
+            xattrDiagnostic = $"xattrError={ex.GetType().Name}:{ex.Message}";
+        }
+
+        var openExit = runUnixProcess(
+            new[] { "/usr/bin/open", "-g", "-j", "-n", app },
+            wait: false);
+        if (openExit != 0)
+        {
+            return new MacBrokerStartResult(
+                false,
+                openExit,
+                "mac-open-failed",
+                string.IsNullOrEmpty(xattrDiagnostic)
+                    ? $"openExit={FormatUnixExit(openExit)}"
+                    : $"{xattrDiagnostic} openExit={FormatUnixExit(openExit)}");
+        }
+
+        return new MacBrokerStartResult(true, openExit, string.Empty, xattrDiagnostic);
+    }
+
+    private static int InvokeWineUnixProcess(
+        IReadOnlyList<string> arguments,
+        bool wait)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        if (arguments.Count == 0 ||
+            string.IsNullOrWhiteSpace(arguments[0]) ||
+            !arguments[0].StartsWith("/", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A Wine Unix process requires an absolute executable path",
+                nameof(arguments));
+        }
+
+        var spawn = WineUnixSpawn.Value
+            ?? throw new PlatformNotSupportedException(
+                "This CrossOver/Wine version does not expose the Unix process bridge");
+        var nativeArguments = new IntPtr[arguments.Count];
+        var argumentTable = Marshal.AllocHGlobal(checked((arguments.Count + 1) * IntPtr.Size));
+        try
+        {
+            for (var index = 0; index < arguments.Count; index++)
+            {
+                var argument = arguments[index]
+                    ?? throw new ArgumentException("A Wine Unix process argument cannot be null", nameof(arguments));
+                if (argument.IndexOf('\0') >= 0)
+                    throw new ArgumentException("A Wine Unix process argument cannot contain NUL", nameof(arguments));
+                nativeArguments[index] = AllocateWineUnixString(argument);
+                Marshal.WriteIntPtr(argumentTable, index * IntPtr.Size, nativeArguments[index]);
+            }
+            Marshal.WriteIntPtr(argumentTable, arguments.Count * IntPtr.Size, IntPtr.Zero);
+            return spawn(argumentTable, wait ? 1 : 0);
+        }
+        finally
+        {
+            foreach (var argument in nativeArguments)
+            {
+                if (argument != IntPtr.Zero)
+                    Marshal.FreeHGlobal(argument);
+            }
+            Marshal.FreeHGlobal(argumentTable);
+        }
+    }
+
+    private static IntPtr AllocateWineUnixString(string value)
+    {
+        var byteCount = WideCharToMultiByte(
+            WineUnixCodePage,
+            0,
+            value,
+            -1,
+            IntPtr.Zero,
+            0,
+            IntPtr.Zero,
+            IntPtr.Zero);
+        if (byteCount <= 0)
+            throw new InvalidOperationException(
+                $"Could not encode a Wine Unix argument (error {Marshal.GetLastWin32Error()})");
+
+        var buffer = Marshal.AllocHGlobal(byteCount);
+        var written = WideCharToMultiByte(
+            WineUnixCodePage,
+            0,
+            value,
+            -1,
+            buffer,
+            byteCount,
+            IntPtr.Zero,
+            IntPtr.Zero);
+        if (written != byteCount)
+        {
+            Marshal.FreeHGlobal(buffer);
+            throw new InvalidOperationException(
+                $"Could not encode a Wine Unix argument (error {Marshal.GetLastWin32Error()})");
+        }
+        return buffer;
+    }
+
+    private static string FormatUnixExit(int exitCode)
+        => exitCode is >= 0 and <= byte.MaxValue
+            ? exitCode.ToString()
+            : $"0x{unchecked((uint)exitCode):X8}";
 
     internal static void PublishMacBrokerRequest(string requestPath, string requestJson)
     {

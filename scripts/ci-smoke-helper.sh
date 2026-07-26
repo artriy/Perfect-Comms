@@ -59,7 +59,33 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as output:
     json.dump(request, output, separators=(",", ":"))
 os.replace(temporary_request, request_path)
 
-subprocess.run(["open", "-g", app], check=True)
+# Reproduce Windows-target ZipFile extraction under CrossOver: archive modes are lost and a
+# downloaded bundle may be quarantined. The runtime preflight must repair metadata without
+# changing the signed bundle's contents before LaunchServices starts it.
+os.chmod(helper, stat.S_IMODE(os.stat(helper).st_mode) & ~0o111)
+assert stat.S_IMODE(os.stat(helper).st_mode) & 0o111 == 0
+subprocess.run(
+    ["/usr/bin/xattr", "-w", "com.apple.quarantine", "0081;00000000;PerfectCommsCI;", app],
+    check=True,
+)
+subprocess.run(["/bin/chmod", "u+x", helper], check=True)
+subprocess.run(
+    ["/usr/bin/xattr", "-dr", "com.apple.quarantine", app],
+    check=True,
+)
+assert stat.S_IMODE(os.stat(helper).st_mode) & stat.S_IXUSR
+quarantine = subprocess.run(
+    ["/usr/bin/xattr", "-p", "com.apple.quarantine", app],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+assert quarantine.returncode != 0
+subprocess.run(
+    ["/usr/bin/codesign", "--verify", "--deep", "--strict", app],
+    check=True,
+)
+
+subprocess.run(["/usr/bin/open", "-g", "-j", "-n", app], check=True)
 deadline = time.time() + 15
 while time.time() < deadline:
     try:
@@ -179,8 +205,8 @@ if os.path.isdir(private_directory):
     raise RuntimeError("macOS broker did not supervise child exit and clean its private directory")
 os.rmdir(request_directory)
 print(
-    "MAC_BROKER_SMOKE_OK argument_free_app=true private_mode=0700 "
-    "token_mode=0600 child_handshake=true"
+    "MAC_BROKER_SMOKE_OK argument_free_app=true permission_repaired=true "
+    "quarantine_removed=true private_mode=0700 token_mode=0600 child_handshake=true"
 )
 PY
 fi

@@ -198,7 +198,7 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
-    public void MacWineLaunchQueuesArgumentsInRequestAndStartsOnlyApplicationPath()
+    public void MacWineLaunchQueuesArgumentsWithoutSecondHostDispatch()
     {
         var workspace = NewTemporaryDirectory();
         var appDirectory = Path.Combine(workspace, "PerfectCommsAudio.app");
@@ -218,7 +218,6 @@ public sealed class SidecarLauncherCacheTests
         {
             var dispatch = SidecarLauncher.QueueMacBrokerHelperLaunch(
                 helper,
-                static path => path.Replace('\\', '/'),
                 privateDirectory,
                 privateDirectory + "/handshake.json",
                 privateDirectory + "/token",
@@ -226,11 +225,6 @@ public sealed class SidecarLauncherCacheTests
                 control,
                 SidecarLauncher.ExpectedNativeHelperBuildInfoJson(WineHostOs.MacOS));
 
-            Assert.Equal("start.exe", dispatch.StartInfo.FileName);
-            Assert.Equal(
-                new[] { "/unix", appDirectory.Replace('\\', '/') },
-                dispatch.StartInfo.ArgumentList);
-            Assert.DoesNotContain("/bin/sh", dispatch.StartInfo.ArgumentList);
             Assert.True(File.Exists(dispatch.RequestPath));
             using var document = JsonDocument.Parse(File.ReadAllText(dispatch.RequestPath));
             var root = document.RootElement;

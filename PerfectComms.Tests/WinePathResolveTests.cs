@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Diagnostics;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
@@ -156,6 +157,123 @@ public sealed class WinePathResolveTests
         finally
         {
             writer.Join(2000);
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public void MacBrokerPreflightUsesDirectArgumentVectorsAndExactReceipt()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "perfect-comms-mac-dispatch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var request = Path.Combine(directory, "request.json");
+        var receipt = Path.Combine(directory, "receipt");
+        const string expected = "perfect-comms-host-action-v1:mac-test";
+        const string app = "/tmp/Perfect Comms/odd ' $() ; % # 雪.app";
+        var calls = new List<(string[] Arguments, bool Wait)>();
+        try
+        {
+            int RunUnix(IReadOnlyList<string> arguments, bool wait)
+            {
+                calls.Add((new List<string>(arguments).ToArray(), wait));
+                if (arguments[0] == "/usr/bin/xattr")
+                    return 1;
+                if (arguments[0] == "/usr/bin/open")
+                    File.WriteAllText(receipt, expected);
+                return 0;
+            }
+
+            var result = WineEnvironment.RunVerifiedMacBrokerActionForTest(
+                "test-mac-broker",
+                app,
+                request,
+                "{}",
+                receipt,
+                expected,
+                RunUnix,
+                timeoutMs: 1000);
+
+            Assert.True(result.Succeeded, result.DiagnosticSummary);
+            Assert.Contains("xattrExit=1", result.ProcessOutput, StringComparison.Ordinal);
+            Assert.Collection(
+                calls,
+                call =>
+                {
+                    Assert.True(call.Wait);
+                    Assert.Equal(
+                        new[]
+                        {
+                            "/bin/chmod",
+                            "u+x",
+                            app + "/Contents/MacOS/PerfectCommsAudio",
+                        },
+                        call.Arguments);
+                },
+                call =>
+                {
+                    Assert.True(call.Wait);
+                    Assert.Equal(
+                        new[] { "/usr/bin/xattr", "-dr", "com.apple.quarantine", app },
+                        call.Arguments);
+                },
+                call =>
+                {
+                    Assert.False(call.Wait);
+                    Assert.Equal(
+                        new[] { "/usr/bin/open", "-g", "-j", "-n", app },
+                        call.Arguments);
+                });
+            Assert.False(File.Exists(request));
+            Assert.False(File.Exists(receipt));
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public void MacBrokerPreflightFailsClosedWhenExecutableModeCannotBeRestored()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "perfect-comms-mac-dispatch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var request = Path.Combine(directory, "request.json");
+        var receipt = Path.Combine(directory, "receipt");
+        var calls = 0;
+        try
+        {
+            var result = WineEnvironment.RunVerifiedMacBrokerActionForTest(
+                "test-mac-broker-chmod-failure",
+                "/tmp/PerfectCommsAudio.app",
+                request,
+                "{}",
+                receipt,
+                "perfect-comms-host-action-v1:unused",
+                (arguments, wait) =>
+                {
+                    calls++;
+                    Assert.True(wait);
+                    Assert.Equal("/bin/chmod", arguments[0]);
+                    return 13;
+                },
+                timeoutMs: 1000);
+
+            Assert.False(result.Succeeded);
+            Assert.False(result.Started);
+            Assert.Equal("mac-chmod-failed", result.FailureKind);
+            Assert.Equal(13, result.WrapperExitCode);
+            Assert.Equal(1, calls);
+            Assert.False(File.Exists(request));
+            Assert.False(File.Exists(receipt));
+        }
+        finally
+        {
             Directory.Delete(directory, true);
         }
     }

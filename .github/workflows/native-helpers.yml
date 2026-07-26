@@ -326,7 +326,6 @@ jobs:
           fi
           if [[ "${{ matrix.bin }}" == *.zip ]]; then
             cd dl && unzip -o "${{ matrix.bin }}" && cd ..
-            chmod +x dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio
             codesign --verify --deep --strict --verbose=2 dl/PerfectCommsAudio.app
             bash scripts/ci-smoke-helper.sh \
               dl/PerfectCommsAudio.app/Contents/MacOS/PerfectCommsAudio --require-dsp

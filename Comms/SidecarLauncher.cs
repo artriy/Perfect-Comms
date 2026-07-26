@@ -46,9 +46,7 @@ internal readonly record struct WineLaunchControlPaths(
     string ExitPath,
     string CancellationPath);
 
-internal readonly record struct MacBrokerDispatch(
-    ProcessStartInfo StartInfo,
-    string RequestPath);
+internal readonly record struct MacBrokerDispatch(string RequestPath);
 
 internal readonly record struct NativeHelperContractProbeResult(
     bool Started,
@@ -988,7 +986,6 @@ internal static class SidecarLauncher
 
     internal static MacBrokerDispatch QueueMacBrokerHelperLaunch(
         string helperPath,
-        Func<string, string> resolveWineHostPath,
         string hostPrivateDirectory,
         string hostHandshake,
         string? hostToken,
@@ -996,12 +993,6 @@ internal static class SidecarLauncher
         WineLaunchControlPaths hostControl,
         string expectedBuildInfo)
     {
-        ArgumentNullException.ThrowIfNull(resolveWineHostPath);
-        var appDirectory = MacAppDirectory(helperPath)
-            ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
-        var hostApplication = resolveWineHostPath(appDirectory);
-        if (string.IsNullOrWhiteSpace(hostApplication))
-            throw new DirectoryNotFoundException("Could not resolve the macOS helper application path");
         var requestNonce = NewSecureNonce();
         var requestPath = MacBrokerRequestPath(helperPath, requestNonce);
         var arguments = BuildWineRuntimeArguments(
@@ -1017,9 +1008,11 @@ internal static class SidecarLauncher
             hostControl,
             expectedBuildInfo,
             arguments);
-        var startInfo = WineEnvironment.BuildMacBrokerStartInfo(hostApplication);
+        // CreateTemporaryPaths has just started a broker from this exact bundle and verified its
+        // nonce receipt. Publishing is enough; launching the app again would create redundant
+        // brokers and reintroduce the broken start.exe directory dispatch.
         WineEnvironment.PublishMacBrokerRequest(requestPath, requestJson);
-        return new MacBrokerDispatch(startInfo, requestPath);
+        return new MacBrokerDispatch(requestPath);
     }
 
     internal static ProcessStartInfo BuildWineHelperStartInfo(
@@ -1978,7 +1971,7 @@ internal static class SidecarLauncher
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-begin wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\" handshake=\"{SafeDiagnosticField(outPath, 320)}\"");
-            ProcessStartInfo psi;
+            ProcessStartInfo? psi = null;
             if (wine)
             {
                 var launchCandidates = StageWineHelper(helperPath, paths, hostOs);
@@ -2001,14 +1994,12 @@ internal static class SidecarLauncher
                 {
                     var dispatch = QueueMacBrokerHelperLaunch(
                         helperPath,
-                        resolveWineHostPath,
                         hostPrivate,
                         hostOut,
                         hostToken: null,
                         enumerate: true,
                         hostControl,
                         ExpectedNativeHelperBuildInfoJson(hostOs));
-                    psi = dispatch.StartInfo;
                     macBrokerRequestPath = dispatch.RequestPath;
                 }
                 else
@@ -2028,18 +2019,25 @@ internal static class SidecarLauncher
                 var args = BuildArguments(outPath, Environment.ProcessId, wine: false);
                 psi = new ProcessStartInfo(helperPath, $"--enumerate {args}");
             }
-            psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
-            psi.RedirectStandardError = true;
-
-            process = Process.Start(psi);
-            if (process == null)
+            if (psi != null)
             {
-                VoiceDiagnostics.Log("sidecar.launch", "event=enumerate-start-failed reason=process-start-null");
-                return SidecarDeviceEnumerationResult.Failure;
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardError = true;
+
+                process = Process.Start(psi);
+                if (process == null)
+                {
+                    VoiceDiagnostics.Log("sidecar.launch", "event=enumerate-start-failed reason=process-start-null");
+                    return SidecarDeviceEnumerationResult.Failure;
+                }
+                diagnostics = AttachProcessDiagnostics(process, token: string.Empty, purpose: "enumerate");
+                VoiceDiagnostics.Log("sidecar.launch", $"event=enumerate-process-start pid={SafeProcessId(process)}");
             }
-            diagnostics = AttachProcessDiagnostics(process, token: string.Empty, purpose: "enumerate");
-            VoiceDiagnostics.Log("sidecar.launch", $"event=enumerate-process-start pid={SafeProcessId(process)}");
+            else
+            {
+                VoiceDiagnostics.Log("sidecar.launch", "event=enumerate-broker-request-queued");
+            }
             var pollSw = Stopwatch.StartNew();
             while (pollSw.ElapsedMilliseconds < 3000)
             {
@@ -2205,19 +2203,17 @@ internal static class SidecarLauncher
                         : resolveWineHostPath(launchCandidates.StagedDspPath));
                 var hostHandshake = AppendHostPath(hostPrivate, Path.GetFileName(result.HandshakePath));
                 var hostControl = ResolveHostLaunchControl(control, hostPrivate);
-                ProcessStartInfo wpsi;
+                ProcessStartInfo? wpsi = null;
                 if (hostOs == WineHostOs.MacOS)
                 {
                     var dispatch = QueueMacBrokerHelperLaunch(
                         helperPath,
-                        resolveWineHostPath,
                         hostPrivate,
                         hostHandshake,
                         hostToken,
                         enumerate: false,
                         hostControl,
                         ExpectedNativeHelperBuildInfoJson(hostOs));
-                    wpsi = dispatch.StartInfo;
                     macBrokerRequestPath = dispatch.RequestPath;
                 }
                 else
@@ -2232,16 +2228,23 @@ internal static class SidecarLauncher
                         ExpectedNativeHelperBuildInfoJson(hostOs));
                 }
 
-                process = Process.Start(wpsi);
-                if (process == null)
+                if (wpsi != null)
                 {
-                    result.FailureReason = "Process.Start returned null (start.exe missing)";
-                    return result;
+                    process = Process.Start(wpsi);
+                    if (process == null)
+                    {
+                        result.FailureReason = "Process.Start returned null (start.exe missing)";
+                        return result;
+                    }
+                    result.Process = process;
+                    diagnostics = AttachProcessDiagnostics(process, token, "voice-wine");
+                    result.Diagnostics = diagnostics;
+                    VoiceDiagnostics.Log("sidecar.launch", $"event=process-start pid={SafeProcessId(process)} wine=true");
                 }
-                result.Process = process;
-                diagnostics = AttachProcessDiagnostics(process, token, "voice-wine");
-                result.Diagnostics = diagnostics;
-                VoiceDiagnostics.Log("sidecar.launch", $"event=process-start pid={SafeProcessId(process)} wine=true");
+                else
+                {
+                    VoiceDiagnostics.Log("sidecar.launch", "event=broker-request-queued wine=true");
+                }
 
                 if (!PollWineHandshake(
                         result.HandshakePath,
@@ -2473,8 +2476,9 @@ internal static class SidecarLauncher
         }
     }
 
-    private static int SafeProcessId(Process process)
+    private static int SafeProcessId(Process? process)
     {
+        if (process == null) return -1;
         try { return process.Id; }
         catch { return -1; }
     }
