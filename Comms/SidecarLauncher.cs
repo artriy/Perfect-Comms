@@ -46,6 +46,10 @@ internal readonly record struct WineLaunchControlPaths(
     string ExitPath,
     string CancellationPath);
 
+internal readonly record struct MacBrokerDispatch(
+    ProcessStartInfo StartInfo,
+    string RequestPath);
+
 internal readonly record struct NativeHelperContractProbeResult(
     bool Started,
     bool TimedOut,
@@ -66,6 +70,7 @@ internal static class SidecarLauncher
     private const string NativeHelperAudioContract =
         "PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;";
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
+    internal const string MacBrokerRequestDirectoryName = ".perfect-comms-broker-v1";
     internal const int WineHelperExitWaitMs = 4_500;
     internal const string WinePrivateDirectoryScript = """
         set -eu
@@ -895,6 +900,128 @@ internal static class SidecarLauncher
         return $"{arguments} --owner-pid {ownerPid}";
     }
 
+    private static List<string> BuildWineRuntimeArguments(
+        string hostHandshake,
+        string? hostToken,
+        bool enumerate,
+        WineLaunchControlPaths hostControl)
+    {
+        var arguments = new List<string>();
+        if (enumerate)
+            arguments.Add("--enumerate");
+        arguments.Add("--handshake");
+        arguments.Add(hostHandshake);
+        // A nonce-bound native guard makes managed cancellation identity-safe even before the
+        // TCP authentication handshake. It replaces best-effort /bin/kill against a PID that
+        // could have exited and been reused.
+        arguments.Add("--cancel-file");
+        arguments.Add(hostControl.CancellationPath);
+        arguments.Add("--cancel-nonce");
+        arguments.Add(hostControl.Nonce);
+        if (!string.IsNullOrEmpty(hostToken))
+        {
+            arguments.Add("--token-file");
+            arguments.Add(hostToken);
+        }
+        return arguments;
+    }
+
+    internal static string MacBrokerRequestPath(string helperPath, string requestNonce)
+    {
+        ThrowIfNullOrWhiteSpace(requestNonce, nameof(requestNonce));
+        if (!IsSecureNonce(requestNonce))
+            throw new InvalidDataException("A macOS broker request nonce must be 64 hexadecimal characters");
+        var appDirectory = MacAppDirectory(helperPath)
+            ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
+        var bundleDirectory = Path.GetDirectoryName(appDirectory)
+            ?? throw new InvalidDataException("The macOS helper bundle has no containing directory");
+        return Path.Combine(
+            bundleDirectory,
+            MacBrokerRequestDirectoryName,
+            requestNonce + ".json");
+    }
+
+    internal static string BuildMacBrokerPrepareRequestJson(
+        string requestNonce,
+        string hostPrivateDirectory,
+        string hostPendingToken,
+        string hostReceipt,
+        string expectedReceipt,
+        string hostLaunchOwnership)
+        => JsonSerializer.Serialize(new
+        {
+            schema = 1,
+            operation = "prepare-private-directory",
+            request_nonce = requestNonce,
+            private_directory = hostPrivateDirectory,
+            pending_token = hostPendingToken,
+            receipt = hostReceipt,
+            expected_receipt = expectedReceipt,
+            launch_owned = hostLaunchOwnership,
+        });
+
+    internal static string BuildMacBrokerLaunchRequestJson(
+        string requestNonce,
+        string hostPrivateDirectory,
+        string? hostToken,
+        string hostHandshake,
+        WineLaunchControlPaths hostControl,
+        string expectedBuildInfo,
+        IReadOnlyList<string> arguments)
+        => JsonSerializer.Serialize(new
+        {
+            schema = 1,
+            operation = "launch-helper",
+            request_nonce = requestNonce,
+            private_directory = hostPrivateDirectory,
+            token_file = hostToken,
+            handshake_file = hostHandshake,
+            launch_owned = hostControl.OwnershipPath,
+            launch_started = hostControl.StartedPath,
+            launch_failed = hostControl.FailurePath,
+            helper_exited = hostControl.ExitPath,
+            launch_cancelled = hostControl.CancellationPath,
+            launch_nonce = hostControl.Nonce,
+            expected_build_info = expectedBuildInfo,
+            arguments,
+        });
+
+    internal static MacBrokerDispatch QueueMacBrokerHelperLaunch(
+        string helperPath,
+        Func<string, string> resolveWineHostPath,
+        string hostPrivateDirectory,
+        string hostHandshake,
+        string? hostToken,
+        bool enumerate,
+        WineLaunchControlPaths hostControl,
+        string expectedBuildInfo)
+    {
+        ArgumentNullException.ThrowIfNull(resolveWineHostPath);
+        var appDirectory = MacAppDirectory(helperPath)
+            ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
+        var hostApplication = resolveWineHostPath(appDirectory);
+        if (string.IsNullOrWhiteSpace(hostApplication))
+            throw new DirectoryNotFoundException("Could not resolve the macOS helper application path");
+        var requestNonce = NewSecureNonce();
+        var requestPath = MacBrokerRequestPath(helperPath, requestNonce);
+        var arguments = BuildWineRuntimeArguments(
+            hostHandshake,
+            hostToken,
+            enumerate,
+            hostControl);
+        var requestJson = BuildMacBrokerLaunchRequestJson(
+            requestNonce,
+            hostPrivateDirectory,
+            hostToken,
+            hostHandshake,
+            hostControl,
+            expectedBuildInfo,
+            arguments);
+        var startInfo = WineEnvironment.BuildMacBrokerStartInfo(hostApplication);
+        WineEnvironment.PublishMacBrokerRequest(requestPath, requestJson);
+        return new MacBrokerDispatch(startInfo, requestPath);
+    }
+
     internal static ProcessStartInfo BuildWineHelperStartInfo(
         string hostPrivateDirectory,
         WineHelperCandidates hostCandidates,
@@ -934,22 +1061,11 @@ internal static class SidecarLauncher
             hostControl.Nonce,
             expectedBuildInfo,
         };
-        if (enumerate)
-            arguments.Add("--enumerate");
-        arguments.Add("--handshake");
-        arguments.Add(hostHandshake);
-        // A nonce-bound native guard makes managed cancellation identity-safe even before the
-        // TCP authentication handshake. It replaces best-effort /bin/kill against a PID that
-        // could have exited and been reused.
-        arguments.Add("--cancel-file");
-        arguments.Add(hostControl.CancellationPath);
-        arguments.Add("--cancel-nonce");
-        arguments.Add(hostControl.Nonce);
-        if (!string.IsNullOrEmpty(hostToken))
-        {
-            arguments.Add("--token-file");
-            arguments.Add(hostToken);
-        }
+        arguments.AddRange(BuildWineRuntimeArguments(
+            hostHandshake,
+            hostToken,
+            enumerate,
+            hostControl));
         return WineEnvironment.BuildWineShellStartInfo(WineHelperLaunchScript, arguments);
     }
 
@@ -1093,7 +1209,10 @@ internal static class SidecarLauncher
         bool wine,
         Func<string, string> resolveWineHostPath,
         WineHostActionExecutor hostAction,
-        string? wineTemporaryRoot = null)
+        string? wineTemporaryRoot = null,
+        WineHostOs wineHostOs = WineHostOs.Unknown,
+        string? helperPath = null,
+        WineMacBrokerActionExecutor? macBrokerAction = null)
     {
         if (!wine)
             return new SidecarTemporaryPaths(NewHandshakePath(), null, null);
@@ -1129,19 +1248,50 @@ internal static class SidecarLauncher
             var receiptPath = Path.Combine(privateDirectory, ".bootstrap-ready");
             var launchOwnershipPath = Path.Combine(privateDirectory, ".launch-owned");
             var expectedReceipt = "perfect-comms-host-action-v1:" + NewSecureNonce();
-            var result = hostAction(
-                "prepare-private-directory",
-                WinePrivateDirectoryScript,
-                new[]
-                {
+            WineHostActionResult result;
+            if (wineHostOs == WineHostOs.MacOS)
+            {
+                if (string.IsNullOrWhiteSpace(helperPath))
+                    throw new InvalidDataException("The macOS Wine bootstrap requires a helper path");
+                var appDirectory = MacAppDirectory(helperPath)
+                    ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
+                var hostApplication = resolveWineHostPath(appDirectory);
+                if (string.IsNullOrWhiteSpace(hostApplication))
+                    throw new DirectoryNotFoundException("Could not resolve the macOS helper application path");
+                var requestNonce = NewSecureNonce();
+                var requestPath = MacBrokerRequestPath(helperPath, requestNonce);
+                var requestJson = BuildMacBrokerPrepareRequestJson(
+                    requestNonce,
                     hostDirectory,
                     AppendHostPath(hostDirectory, Path.GetFileName(pendingToken)),
                     AppendHostPath(hostDirectory, Path.GetFileName(receiptPath)),
                     expectedReceipt,
-                    AppendHostPath(hostDirectory, Path.GetFileName(launchOwnershipPath)),
-                },
-                receiptPath,
-                expectedReceipt);
+                    AppendHostPath(hostDirectory, Path.GetFileName(launchOwnershipPath)));
+                macBrokerAction ??= WineEnvironment.RunVerifiedMacBrokerAction;
+                result = macBrokerAction(
+                    "prepare-private-directory",
+                    hostApplication,
+                    requestPath,
+                    requestJson,
+                    receiptPath,
+                    expectedReceipt);
+            }
+            else
+            {
+                result = hostAction(
+                    "prepare-private-directory",
+                    WinePrivateDirectoryScript,
+                    new[]
+                    {
+                        hostDirectory,
+                        AppendHostPath(hostDirectory, Path.GetFileName(pendingToken)),
+                        AppendHostPath(hostDirectory, Path.GetFileName(receiptPath)),
+                        expectedReceipt,
+                        AppendHostPath(hostDirectory, Path.GetFileName(launchOwnershipPath)),
+                    },
+                    receiptPath,
+                    expectedReceipt);
+            }
             TryDeleteFile(receiptPath);
             if (!result.Succeeded || !Directory.Exists(privateDirectory) || !File.Exists(pendingToken))
                 throw new UnauthorizedAccessException(
@@ -1397,6 +1547,20 @@ internal static class SidecarLauncher
         foreach (var c in value)
             if (char.IsControl(c)) return true;
         return false;
+    }
+
+    private static bool IsSecureNonce(string value)
+    {
+        if (value.Length != 64) return false;
+        foreach (var c in value)
+        {
+            var hexadecimal =
+                c is >= '0' and <= '9' ||
+                c is >= 'a' and <= 'f' ||
+                c is >= 'A' and <= 'F';
+            if (!hexadecimal) return false;
+        }
+        return true;
     }
 
     private static string NewSecureNonce()
@@ -1781,13 +1945,15 @@ internal static class SidecarLauncher
         bool wine,
         Func<string, string> resolveWineHostPath,
         WineHostActionExecutor? hostAction = null,
-        WineHostOs? wineHostOs = null)
+        WineHostOs? wineHostOs = null,
+        WineMacBrokerActionExecutor? macBrokerAction = null)
     {
         var paths = default(SidecarTemporaryPaths);
         var outPath = string.Empty;
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
         WineLaunchControlPaths? wineControl = null;
+        string? macBrokerRequestPath = null;
         var wineSupervisorOwned = false;
         var wineHelperPid = 0;
         var enumerationSucceeded = false;
@@ -1800,7 +1966,14 @@ internal static class SidecarLauncher
             if (!wine && !TryValidateNativeHelperContract(helperPath, out _))
                 return SidecarDeviceEnumerationResult.Failure;
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
-            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
+            var hostOs = wine ? wineHostOs ?? WineEnvironment.HostOs : WineHostOs.Unknown;
+            paths = CreateTemporaryPaths(
+                wine,
+                resolveWineHostPath,
+                hostAction,
+                wineHostOs: hostOs,
+                helperPath: helperPath,
+                macBrokerAction: macBrokerAction);
             outPath = paths.HandshakePath;
             VoiceDiagnostics.Log(
                 "sidecar.launch",
@@ -1808,7 +1981,6 @@ internal static class SidecarLauncher
             ProcessStartInfo psi;
             if (wine)
             {
-                var hostOs = wineHostOs ?? WineEnvironment.HostOs;
                 var launchCandidates = StageWineHelper(helperPath, paths, hostOs);
                 wineControl = CreateWineLaunchControl(paths);
                 var hostPrivate = resolveWineHostPath(paths.PrivateDirectory!);
@@ -1825,19 +1997,31 @@ internal static class SidecarLauncher
                         : resolveWineHostPath(launchCandidates.StagedDspPath));
                 var hostOut = AppendHostPath(hostPrivate, Path.GetFileName(outPath));
                 var hostControl = ResolveHostLaunchControl(wineControl.Value, hostPrivate);
-                var quarantineTarget = MacAppDirectory(helperPath);
-                var hostQuarantineTarget = quarantineTarget == null
-                    ? null
-                    : resolveWineHostPath(quarantineTarget);
-                psi = BuildWineHelperStartInfo(
-                    hostPrivate,
-                    hostCandidates,
-                    hostOut,
-                    hostToken: null,
-                    enumerate: true,
-                    hostControl,
-                    ExpectedNativeHelperBuildInfoJson(hostOs),
-                    hostQuarantineTarget: hostQuarantineTarget);
+                if (hostOs == WineHostOs.MacOS)
+                {
+                    var dispatch = QueueMacBrokerHelperLaunch(
+                        helperPath,
+                        resolveWineHostPath,
+                        hostPrivate,
+                        hostOut,
+                        hostToken: null,
+                        enumerate: true,
+                        hostControl,
+                        ExpectedNativeHelperBuildInfoJson(hostOs));
+                    psi = dispatch.StartInfo;
+                    macBrokerRequestPath = dispatch.RequestPath;
+                }
+                else
+                {
+                    psi = BuildWineHelperStartInfo(
+                        hostPrivate,
+                        hostCandidates,
+                        hostOut,
+                        hostToken: null,
+                        enumerate: true,
+                        hostControl,
+                        ExpectedNativeHelperBuildInfoJson(hostOs));
+                }
             }
             else
             {
@@ -1906,6 +2090,8 @@ internal static class SidecarLauncher
         {
             if (process != null && !wine)
                 KillQuietly(process);
+            if (macBrokerRequestPath != null)
+                TryDeleteFile(macBrokerRequestPath);
             diagnostics?.Complete("enumerate-finished");
             var wineHelperExited = false;
             if (wineControl is { } control)
@@ -1962,13 +2148,15 @@ internal static class SidecarLauncher
         bool wine,
         Func<string, string> resolveWineHostPath,
         WineHostActionExecutor? hostAction = null,
-        WineHostOs? wineHostOs = null)
+        WineHostOs? wineHostOs = null,
+        WineMacBrokerActionExecutor? macBrokerAction = null)
     {
         var result = new SidecarLaunchResult { Wine = wine };
         var paths = default(SidecarTemporaryPaths);
         Process? process = null;
         SidecarProcessDiagnostics? diagnostics = null;
         string? tokenFile = null;
+        string? macBrokerRequestPath = null;
         var sw = Stopwatch.StartNew();
         try
         {
@@ -1982,7 +2170,14 @@ internal static class SidecarLauncher
                 return result;
             }
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
-            paths = CreateTemporaryPaths(wine, resolveWineHostPath, hostAction);
+            var hostOs = wine ? wineHostOs ?? WineEnvironment.HostOs : WineHostOs.Unknown;
+            paths = CreateTemporaryPaths(
+                wine,
+                resolveWineHostPath,
+                hostAction,
+                wineHostOs: hostOs,
+                helperPath: helperPath,
+                macBrokerAction: macBrokerAction);
             result.HandshakePath = paths.HandshakePath;
             result.TemporaryDirectory = paths.PrivateDirectory;
             result.TemporaryRoot = paths.PrivateRoot;
@@ -1992,7 +2187,6 @@ internal static class SidecarLauncher
             if (wine)
             {
                 tokenFile = CreateWineTokenFile(paths, token);
-                var hostOs = wineHostOs ?? WineEnvironment.HostOs;
                 var launchCandidates = StageWineHelper(helperPath, paths, hostOs);
                 var control = CreateWineLaunchControl(paths);
                 result.WineControl = control;
@@ -2011,19 +2205,32 @@ internal static class SidecarLauncher
                         : resolveWineHostPath(launchCandidates.StagedDspPath));
                 var hostHandshake = AppendHostPath(hostPrivate, Path.GetFileName(result.HandshakePath));
                 var hostControl = ResolveHostLaunchControl(control, hostPrivate);
-                var quarantineTarget = MacAppDirectory(helperPath);
-                var hostQuarantineTarget = quarantineTarget == null
-                    ? null
-                    : resolveWineHostPath(quarantineTarget);
-                var wpsi = BuildWineHelperStartInfo(
-                    hostPrivate,
-                    hostCandidates,
-                    hostHandshake,
-                    hostToken,
-                    enumerate: false,
-                    hostControl,
-                    ExpectedNativeHelperBuildInfoJson(hostOs),
-                    hostQuarantineTarget: hostQuarantineTarget);
+                ProcessStartInfo wpsi;
+                if (hostOs == WineHostOs.MacOS)
+                {
+                    var dispatch = QueueMacBrokerHelperLaunch(
+                        helperPath,
+                        resolveWineHostPath,
+                        hostPrivate,
+                        hostHandshake,
+                        hostToken,
+                        enumerate: false,
+                        hostControl,
+                        ExpectedNativeHelperBuildInfoJson(hostOs));
+                    wpsi = dispatch.StartInfo;
+                    macBrokerRequestPath = dispatch.RequestPath;
+                }
+                else
+                {
+                    wpsi = BuildWineHelperStartInfo(
+                        hostPrivate,
+                        hostCandidates,
+                        hostHandshake,
+                        hostToken,
+                        enumerate: false,
+                        hostControl,
+                        ExpectedNativeHelperBuildInfoJson(hostOs));
+                }
 
                 process = Process.Start(wpsi);
                 if (process == null)
@@ -2129,6 +2336,8 @@ internal static class SidecarLauncher
                     $"event=failed elapsedMs={sw.ElapsedMilliseconds} reason=\"{SafeDiagnosticField(result.FailureReason, 320)}\"");
                 diagnostics?.Complete("launch-failed");
             }
+            if (macBrokerRequestPath != null)
+                TryDeleteFile(macBrokerRequestPath);
             if (tokenFile != null)
             {
                 try { File.Delete(tokenFile); } catch { }

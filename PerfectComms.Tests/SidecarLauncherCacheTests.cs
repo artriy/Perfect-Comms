@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using VoiceChatPlugin;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
@@ -128,6 +129,130 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
+    public void MacWineBootstrapUsesArgumentFreeApplicationBroker()
+    {
+        var workspace = NewTemporaryDirectory();
+        var temporaryRoot = Path.Combine(workspace, "tmp");
+        var bundleRoot = Path.Combine(workspace, "bundle");
+        var appDirectory = Path.Combine(bundleRoot, "PerfectCommsAudio.app");
+        var helper = Path.Combine(appDirectory, "Contents", "MacOS", "PerfectCommsAudio");
+        Directory.CreateDirectory(temporaryRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(helper)!);
+        File.WriteAllText(helper, "mac-helper");
+        var brokerCalls = 0;
+        try
+        {
+            WineHostActionResult PrepareMac(
+                string operation,
+                string hostApplication,
+                string requestPath,
+                string requestJson,
+                string receiptPath,
+                string expectedReceipt)
+            {
+                brokerCalls++;
+                Assert.Equal("prepare-private-directory", operation);
+                Assert.Equal(appDirectory.Replace('\\', '/'), hostApplication);
+                Assert.Equal(
+                    Path.Combine(bundleRoot, SidecarLauncher.MacBrokerRequestDirectoryName),
+                    Path.GetDirectoryName(requestPath));
+                using var document = JsonDocument.Parse(requestJson);
+                var root = document.RootElement;
+                Assert.Equal(1, root.GetProperty("schema").GetInt32());
+                Assert.Equal("prepare-private-directory", root.GetProperty("operation").GetString());
+                Assert.Equal(
+                    root.GetProperty("request_nonce").GetString() + ".json",
+                    Path.GetFileName(requestPath));
+                Assert.Equal(expectedReceipt, root.GetProperty("expected_receipt").GetString());
+
+                var directory = Path.GetDirectoryName(receiptPath)!;
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, ".token.pending"), string.Empty);
+                File.WriteAllText(receiptPath, expectedReceipt);
+                return WineHostActionResult.Verified();
+            }
+
+            var paths = SidecarLauncher.CreateTemporaryPaths(
+                wine: true,
+                static path => path.Replace('\\', '/'),
+                static (_, _, _, _, _) =>
+                    throw new InvalidOperationException("macOS must not dispatch /bin/sh"),
+                temporaryRoot,
+                WineHostOs.MacOS,
+                helper,
+                PrepareMac);
+
+            Assert.Equal(1, brokerCalls);
+            Assert.True(Directory.Exists(paths.PrivateDirectory));
+            Assert.True(File.Exists(Path.Combine(paths.PrivateDirectory!, ".token.pending")));
+            SidecarLauncher.CleanupTemporaryPaths(
+                paths.HandshakePath,
+                paths.PrivateDirectory,
+                paths.PrivateRoot);
+        }
+        finally
+        {
+            if (Directory.Exists(workspace))
+                Directory.Delete(workspace, true);
+        }
+    }
+
+    [Fact]
+    public void MacWineLaunchQueuesArgumentsInRequestAndStartsOnlyApplicationPath()
+    {
+        var workspace = NewTemporaryDirectory();
+        var appDirectory = Path.Combine(workspace, "PerfectCommsAudio.app");
+        var helper = Path.Combine(appDirectory, "Contents", "MacOS", "PerfectCommsAudio");
+        Directory.CreateDirectory(Path.GetDirectoryName(helper)!);
+        File.WriteAllText(helper, "mac-helper");
+        var nonce = new string('A', 64);
+        var privateDirectory = "/tmp/perfect-comms-0123456789abcdef0123456789abcdef";
+        var control = new WineLaunchControlPaths(
+            nonce,
+            privateDirectory + "/.launch-owned",
+            privateDirectory + "/.launch-started",
+            privateDirectory + "/.launch-failed",
+            privateDirectory + "/.helper-exited",
+            privateDirectory + "/.launch-cancelled");
+        try
+        {
+            var dispatch = SidecarLauncher.QueueMacBrokerHelperLaunch(
+                helper,
+                static path => path.Replace('\\', '/'),
+                privateDirectory,
+                privateDirectory + "/handshake.json",
+                privateDirectory + "/token",
+                enumerate: false,
+                control,
+                SidecarLauncher.ExpectedNativeHelperBuildInfoJson(WineHostOs.MacOS));
+
+            Assert.Equal("start.exe", dispatch.StartInfo.FileName);
+            Assert.Equal(
+                new[] { "/unix", appDirectory.Replace('\\', '/') },
+                dispatch.StartInfo.ArgumentList);
+            Assert.DoesNotContain("/bin/sh", dispatch.StartInfo.ArgumentList);
+            Assert.True(File.Exists(dispatch.RequestPath));
+            using var document = JsonDocument.Parse(File.ReadAllText(dispatch.RequestPath));
+            var root = document.RootElement;
+            Assert.Equal("launch-helper", root.GetProperty("operation").GetString());
+            Assert.Equal(privateDirectory + "/token", root.GetProperty("token_file").GetString());
+            var arguments = root.GetProperty("arguments")
+                .EnumerateArray()
+                .Select(element => element.GetString())
+                .ToArray();
+            Assert.Contains("--handshake", arguments);
+            Assert.Contains("--token-file", arguments);
+            Assert.Contains("--cancel-file", arguments);
+            Assert.Contains(nonce, arguments);
+        }
+        finally
+        {
+            if (Directory.Exists(workspace))
+                Directory.Delete(workspace, true);
+        }
+    }
+
+    [Fact]
     public void WineCleanupRejectsPrefixNamedDirectoryOutsideOwningRoot()
     {
         var parent = NewTemporaryDirectory();
@@ -238,7 +363,9 @@ public sealed class SidecarLauncherCacheTests
             Assert.Equal("/unix", psi.ArgumentList[0]);
             Assert.Equal("/bin/sh", psi.ArgumentList[1]);
             Assert.Equal("-c", psi.ArgumentList[2]);
-            Assert.Equal(SidecarLauncher.WineHelperLaunchScript, psi.ArgumentList[3]);
+            Assert.Equal(
+                SidecarLauncher.WineHelperLaunchScript.Replace("\r\n", "\n").Replace('\r', '\n'),
+                psi.ArgumentList[3]);
             Assert.Contains("--handshake", psi.ArgumentList);
             Assert.Contains("--token-file", psi.ArgumentList);
             Assert.Contains("--cancel-file", psi.ArgumentList);

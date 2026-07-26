@@ -18,6 +18,11 @@ Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen 
 - **Voice controls and speaking-bar content now reach their selected safe-screen edge.**
   > <sub>Desktop controls no longer reserve an extra viewport margin or clamp against transparent PNG canvas space. Speaking-bar avatars, rings, and names own the edge instead of the backdrop's decorative padding, and the overlay camera follows the main camera's viewport and aspect.</sub>
 
+### Reliable CrossOver Audio Startup
+
+- **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**
+  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command through `start.exe /unix`. An argument-free, signed app broker consumes nonce-bound launch requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
+
 ## Perfect Comms v4.1.5
 
 Perfect Comms v4.1.5 keeps P2P voice fresh through stalls and packet loss, makes ICE and signaling recovery bounded and explicit, adapts reliably to a persistently weak path, improves transport diagnostics, and makes living and ghost speaking avatars match Among Us cosmetics more faithfully.

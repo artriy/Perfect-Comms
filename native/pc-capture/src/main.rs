@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+mod mac_broker;
+
 use pc_capture::ipc::ServerConfig;
 use pc_capture::{audio, build_info, ipc, proto};
 use std::path::{Path, PathBuf};
@@ -164,6 +167,15 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "macos")]
+    match mac_broker::try_run(&argv) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("pc-capture: macOS launch broker failed: {error}");
+            std::process::exit(1);
+        }
+    }
     let args = match parse_args(&argv) {
         Ok(a) => a,
         Err(e) => {

@@ -124,6 +124,14 @@ with `Info.plist` `NSMicrophoneUsageDescription`, ad-hoc codesigned (`codesign
 Gatekeeper quarantine attribute and sets the exec bit on the extracted bundle,
 so the ad-hoc-signed helper launches and prompts for microphone access via TCC.
 
+When the Windows mod runs through CrossOver on macOS, it opens the signed
+application bundle without command-line arguments. A native broker inside the
+same executable consumes owned, nonce-named requests beside the bundle,
+prepares the mode-`0700` launch directory and mode-`0600` token, and starts the
+argument-bearing audio child directly. This avoids CrossOver opening an
+interactive Terminal and dropping `/bin/sh -c` arguments while preserving the
+existing authenticated cancellation and exit receipts.
+
 Per-target helper binaries ship as side-files in the BepInEx plugin folder and
 as embedded resources. On Windows and Linux, the mod extracts the embedded,
 content-matched Pion library beside the helper; macOS uses the copy already

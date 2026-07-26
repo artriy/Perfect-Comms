@@ -62,6 +62,8 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
   <string>PerfectComms</string>
   <key>CFBundleDisplayName</key>
   <string>PerfectComms</string>
+  <key>LSUIElement</key>
+  <true/>
   <key>CFBundleIconFile</key>
   <string>PerfectCommsAudio</string>
   <key>CFBundlePackageType</key>

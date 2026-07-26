@@ -50,7 +50,9 @@ public sealed class WinePathResolveTests
         Assert.Equal("/unix", psi.ArgumentList[0]);
         Assert.Equal("/bin/sh", psi.ArgumentList[1]);
         Assert.Equal("-c", psi.ArgumentList[2]);
-        Assert.Equal(SidecarLauncher.WinePrivateDirectoryScript, psi.ArgumentList[3]);
+        Assert.Equal(
+            SidecarLauncher.WinePrivateDirectoryScript.Replace("\r\n", "\n").Replace('\r', '\n'),
+            psi.ArgumentList[3]);
         Assert.Equal("perfect-comms-bootstrap", psi.ArgumentList[4]);
         Assert.Equal(oddPath, psi.ArgumentList[5]);
         Assert.DoesNotContain(oddPath, psi.ArgumentList[3], StringComparison.Ordinal);

@@ -24,6 +24,167 @@ else
   exit 1
 fi
 
+if [[ "$(uname -s)" == "Darwin" && "$helper" == *".app/Contents/MacOS/"* ]]; then
+  "$python_cmd" - "$helper" <<'PY'
+import json, os, secrets, socket, stat, struct, subprocess, sys, time
+
+helper = os.path.abspath(sys.argv[1])
+marker = ".app/Contents/MacOS/"
+app = helper.split(marker, 1)[0] + ".app"
+bundle_parent = os.path.dirname(app)
+request_directory = os.path.join(bundle_parent, ".perfect-comms-broker-v1")
+os.makedirs(request_directory, mode=0o755, exist_ok=True)
+os.chmod(request_directory, 0o755)
+
+request_nonce = secrets.token_hex(32)
+private_directory = os.path.join("/tmp", "perfect-comms-" + secrets.token_hex(16))
+pending_token = os.path.join(private_directory, ".token.pending")
+receipt = os.path.join(private_directory, ".bootstrap-ready")
+launch_owned = os.path.join(private_directory, ".launch-owned")
+expected_receipt = "perfect-comms-host-action-v1:" + secrets.token_hex(32)
+request_path = os.path.join(request_directory, request_nonce + ".json")
+temporary_request = request_path + ".tmp"
+request = {
+    "schema": 1,
+    "operation": "prepare-private-directory",
+    "request_nonce": request_nonce,
+    "private_directory": private_directory,
+    "pending_token": pending_token,
+    "receipt": receipt,
+    "expected_receipt": expected_receipt,
+    "launch_owned": launch_owned,
+}
+descriptor = os.open(temporary_request, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+    json.dump(request, output, separators=(",", ":"))
+os.replace(temporary_request, request_path)
+
+subprocess.run(["open", "-g", app], check=True)
+deadline = time.time() + 15
+while time.time() < deadline:
+    try:
+        with open(receipt, encoding="utf-8") as source:
+            if source.read() == expected_receipt:
+                break
+    except OSError:
+        pass
+    time.sleep(0.05)
+else:
+    raise RuntimeError("argument-free macOS app broker did not publish its bootstrap receipt")
+
+assert stat.S_IMODE(os.stat(private_directory).st_mode) == 0o700
+assert stat.S_IMODE(os.stat(pending_token).st_mode) == 0o600
+
+os.remove(pending_token)
+token_file = os.path.join(private_directory, "token")
+descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+    output.write("ci-broker-token")
+handshake_file = os.path.join(private_directory, "handshake.json")
+launch_started = os.path.join(private_directory, ".launch-started")
+launch_failed = os.path.join(private_directory, ".launch-failed")
+helper_exited = os.path.join(private_directory, ".helper-exited")
+launch_cancelled = os.path.join(private_directory, ".launch-cancelled")
+launch_nonce = secrets.token_hex(32)
+launch_request_nonce = secrets.token_hex(32)
+expected_build_info = subprocess.check_output(
+    [helper, "--build-info"], text=True, timeout=5
+).strip()
+arguments = [
+    "--handshake", handshake_file,
+    "--cancel-file", launch_cancelled,
+    "--cancel-nonce", launch_nonce,
+    "--token-file", token_file,
+]
+launch_request = {
+    "schema": 1,
+    "operation": "launch-helper",
+    "request_nonce": launch_request_nonce,
+    "private_directory": private_directory,
+    "token_file": token_file,
+    "handshake_file": handshake_file,
+    "launch_owned": launch_owned,
+    "launch_started": launch_started,
+    "launch_failed": launch_failed,
+    "helper_exited": helper_exited,
+    "launch_cancelled": launch_cancelled,
+    "launch_nonce": launch_nonce,
+    "expected_build_info": expected_build_info,
+    "arguments": arguments,
+}
+launch_request_path = os.path.join(request_directory, launch_request_nonce + ".json")
+temporary_launch_request = launch_request_path + ".tmp"
+descriptor = os.open(
+    temporary_launch_request, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+)
+with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+    json.dump(launch_request, output, separators=(",", ":"))
+os.replace(temporary_launch_request, launch_request_path)
+subprocess.run(["open", "-g", app], check=True)
+
+deadline = time.time() + 15
+handshake = None
+while time.time() < deadline:
+    if os.path.exists(launch_failed):
+        with open(launch_failed, encoding="utf-8") as source:
+            raise RuntimeError("macOS broker launch failed: " + source.read())
+    try:
+        with open(handshake_file, encoding="utf-8") as source:
+            handshake = json.load(source)
+        with open(launch_started, encoding="utf-8") as source:
+            started = source.read()
+        if started == (
+            "perfect-comms-launch-started-v1:"
+            + launch_nonce
+            + ":"
+            + str(handshake["pid"])
+        ):
+            break
+    except (OSError, KeyError, ValueError):
+        handshake = None
+    time.sleep(0.05)
+else:
+    raise RuntimeError("macOS app broker did not start a helper child with a handshake")
+
+def recv_exact(connection, length):
+    body = b""
+    while len(body) < length:
+        chunk = connection.recv(length - len(body))
+        if not chunk:
+            raise RuntimeError("macOS broker child closed during its ready frame")
+        body += chunk
+    return body
+
+connection = socket.create_connection(("127.0.0.1", handshake["port"]), timeout=5)
+hello = json.dumps(
+    {
+        "op": "hello",
+        "proto": int(json.loads(expected_build_info)["proto"]),
+        "token": "ci-broker-token",
+    }
+).encode()
+connection.sendall(bytes([0x01]) + struct.pack("<I", len(hello)) + hello)
+header = recv_exact(connection, 5)
+assert header[0] == 0x01
+body_length = struct.unpack("<I", header[1:])[0]
+body = recv_exact(connection, body_length)
+assert json.loads(body)["op"] == "ready"
+connection.shutdown(socket.SHUT_RDWR)
+connection.close()
+
+deadline = time.time() + 20
+while time.time() < deadline and os.path.isdir(private_directory):
+    time.sleep(0.05)
+if os.path.isdir(private_directory):
+    raise RuntimeError("macOS broker did not supervise child exit and clean its private directory")
+os.rmdir(request_directory)
+print(
+    "MAC_BROKER_SMOKE_OK argument_free_app=true private_mode=0700 "
+    "token_mode=0600 child_handshake=true"
+)
+PY
+fi
+
 "$python_cmd" "$root/scripts/verify-release-assets.py" \
   --helper-build-info "$helper" \
   --expected-protocol "$managed_proto"

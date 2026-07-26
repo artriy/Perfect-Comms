@@ -60,6 +60,14 @@ internal delegate WineHostActionResult WineHostActionExecutor(
     string receiptPath,
     string expectedReceipt);
 
+internal delegate WineHostActionResult WineMacBrokerActionExecutor(
+    string operation,
+    string hostApplication,
+    string requestPath,
+    string requestJson,
+    string receiptPath,
+    string expectedReceipt);
+
 // Detects Wine/Proton/CrossOver and provides the host-OS/path/process helpers used to launch and
 // clean up the native macOS or Linux audio helper outside the Windows compatibility layer.
 internal static class WineEnvironment
@@ -168,6 +176,15 @@ internal static class WineEnvironment
         return psi;
     }
 
+    internal static ProcessStartInfo BuildMacBrokerStartInfo(string hostApplication)
+    {
+        ThrowIfNullOrWhiteSpace(hostApplication, nameof(hostApplication));
+        var psi = NewHostStartInfo(redirectOutput: true);
+        psi.ArgumentList.Add("/unix");
+        psi.ArgumentList.Add(hostApplication);
+        return psi;
+    }
+
     internal static WineHostActionResult RunVerifiedHostAction(
         string operation,
         string script,
@@ -176,10 +193,9 @@ internal static class WineEnvironment
         string expectedReceipt)
         => RunVerifiedHostActionCore(
             operation,
-            script,
-            hostArguments,
             receiptPath,
             expectedReceipt,
+            () => BuildWineShellStartInfo(script, hostArguments),
             static startInfo => Process.Start(startInfo),
             HostActionTimeoutMs);
 
@@ -193,25 +209,75 @@ internal static class WineEnvironment
         int timeoutMs)
         => RunVerifiedHostActionCore(
             operation,
-            script,
-            hostArguments,
             receiptPath,
             expectedReceipt,
+            () => BuildWineShellStartInfo(script, hostArguments),
             startProcess,
             timeoutMs);
 
+    internal static WineHostActionResult RunVerifiedMacBrokerAction(
+        string operation,
+        string hostApplication,
+        string requestPath,
+        string requestJson,
+        string receiptPath,
+        string expectedReceipt)
+    {
+        ThrowIfNullOrWhiteSpace(requestPath, nameof(requestPath));
+        ThrowIfNullOrWhiteSpace(requestJson, nameof(requestJson));
+        PublishMacBrokerRequest(requestPath, requestJson);
+        try
+        {
+            return RunVerifiedHostActionCore(
+                operation,
+                receiptPath,
+                expectedReceipt,
+                () => BuildMacBrokerStartInfo(hostApplication),
+                static startInfo => Process.Start(startInfo),
+                HostActionTimeoutMs);
+        }
+        finally
+        {
+            TryDeleteFile(requestPath);
+        }
+    }
+
+    internal static void PublishMacBrokerRequest(string requestPath, string requestJson)
+    {
+        ThrowIfNullOrWhiteSpace(requestPath, nameof(requestPath));
+        ThrowIfNullOrWhiteSpace(requestJson, nameof(requestJson));
+        var directory = Path.GetDirectoryName(Path.GetFullPath(requestPath));
+        if (string.IsNullOrEmpty(directory))
+            throw new InvalidDataException("The macOS broker request has no containing directory");
+        Directory.CreateDirectory(directory);
+
+        var temporary = requestPath + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllText(
+                temporary,
+                requestJson,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(temporary, requestPath);
+        }
+        finally
+        {
+            TryDeleteFile(temporary);
+        }
+    }
+
     private static WineHostActionResult RunVerifiedHostActionCore(
         string operation,
-        string script,
-        IReadOnlyList<string> hostArguments,
         string receiptPath,
         string expectedReceipt,
+        Func<ProcessStartInfo> buildStartInfo,
         Func<ProcessStartInfo, Process?> startProcess,
         int timeoutMs)
     {
         ThrowIfNullOrWhiteSpace(operation, nameof(operation));
         ThrowIfNullOrWhiteSpace(receiptPath, nameof(receiptPath));
         ThrowIfNullOrWhiteSpace(expectedReceipt, nameof(expectedReceipt));
+        ArgumentNullException.ThrowIfNull(buildStartInfo);
         ArgumentNullException.ThrowIfNull(startProcess);
         if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
         TryDeleteFile(receiptPath);
@@ -223,7 +289,7 @@ internal static class WineEnvironment
         var sawInvalidReceipt = false;
         try
         {
-            process = startProcess(BuildWineShellStartInfo(script, hostArguments));
+            process = startProcess(buildStartInfo());
             if (process == null)
                 return LogHostAction(operation, new WineHostActionResult(
                     false, false, false, null, "wrapper-start-null", stopwatch.ElapsedMilliseconds, string.Empty));
