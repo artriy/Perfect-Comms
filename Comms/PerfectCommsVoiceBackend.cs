@@ -4029,7 +4029,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             result = VoiceProximityCalculator.ApplyExternalAudioEffects(result, target, snapshot.Phase);
             if (snapshot.Phase != VoiceGamePhase.EndGame &&
                 result.Audible &&
-                VoiceProximityCalculator.IsLocalListenerAudioMuffledThisFrame(snapshot.Phase))
+                localPlayer?.External.ListenerMuffled == true)
                 result = result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)

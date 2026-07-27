@@ -31,7 +31,7 @@ git add -A && git commit -m "docs: update Perfect Comms wiki" && git push
 | `Controls.md` | Local settings tabs, controls, and defaults |
 | `Host-Settings.md` | Match-wide host settings tabs |
 | `Mod-Integration.md` | Mod Integration landing and setup |
-| `Mod-Integration-Examples.md` | API 1.1 Role Recipes |
+| `Mod-Integration-Examples.md` | API 1.2 Role Recipes |
 | `Mod-Integration-Gate.md` | Gate, Muffle & Player Traits |
 | `Mod-Integration-Channels.md` | Channels & Pair Routing |
 | `Mod-Integration-Listener-Origin.md` | Listener Origin, Filter & Phase Observer |

@@ -19,13 +19,11 @@ public static class ApiConsumer
                 ? null
                 : new VoiceManagedRadioChannelResult("crew", "Crew", "C"));
         PerfectCommsApi.RegisterAnimatedColorRule(modId, colorId => colorId == 99);
-        PerfectCommsApi.RegisterIntegrationOwner(modId, VoiceIntegrationIds.TouMira);
     }
 
     public static bool SupportsCompletedIntegration()
         => PerfectCommsApi.Supports(
             VoiceApiCapability.ManagedTeamRadio |
             VoiceApiCapability.PersistentHostOptions |
-            VoiceApiCapability.IntegrationOwnership |
             VoiceApiCapability.OverlayAppearance);
 }

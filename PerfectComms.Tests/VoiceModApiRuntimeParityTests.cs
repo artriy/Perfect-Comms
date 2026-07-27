@@ -17,7 +17,6 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         VoiceModRegistry.ClearRemoteSyncedValues();
         VoiceRoomSettingsState.ClearRemote();
         VoiceRoomSettingsState.ApplyRemote(BaseSettings());
-        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = () => false;
         VoiceProximityCalculator.ResetSightState();
     }
 
@@ -28,7 +27,6 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
 
         VoiceModRegistry.ClearRemoteSyncedValues();
         VoiceRoomSettingsState.ClearRemote();
-        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = null;
         VoiceProximityCalculator.ResetSightState();
     }
 
@@ -49,10 +47,11 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             VoiceApiCapability.OverlayPrivacy |
             VoiceApiCapability.ManagedTeamRadio |
             VoiceApiCapability.PersistentHostOptions |
-            VoiceApiCapability.IntegrationOwnership |
-            VoiceApiCapability.OverlayAppearance;
+            VoiceApiCapability.OverlayAppearance |
+            VoiceApiCapability.ListenerTaskGateBypass |
+            VoiceApiCapability.ListenerSightObscuration;
 
-        Assert.Equal("1.1", PerfectCommsApi.ApiVersion);
+        Assert.Equal("1.2", PerfectCommsApi.ApiVersion);
         Assert.Equal(expected, PerfectCommsApi.Capabilities);
         Assert.True(PerfectCommsApi.Supports(expected));
         Assert.False(PerfectCommsApi.Supports(VoiceApiCapability.None));
@@ -866,7 +865,10 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         {
             observedFilter = context;
             return new VoiceListenerFilterResult(
-                context.GetOption("enabled") && context.GetNumberOption("range") > 3f);
+                context.GetOption("enabled") && context.GetNumberOption("range") > 3f)
+            {
+                SightObscured = true,
+            };
         });
         PerfectCommsApi.RegisterVoicePhaseObserver(modId, context => transitions.Add(context));
 
@@ -884,12 +886,15 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.Equal(2, observedOrigin.GetEnumOption("mode"));
         Assert.Equal(3.5f, observedOrigin.GetNumberOption("range"));
 
-        bool listenerMuffled = VoiceModRegistry.ResolveListenerMuffled(
+        VoiceModRegistry.ListenerEffects listenerEffects = VoiceModRegistry.ResolveListenerEffects(
             listener,
             VoicePhaseKind.Exile,
             isDead: true);
-        Assert.True(listenerMuffled);
+        Assert.True(listenerEffects.Muffled);
+        Assert.True(listenerEffects.SightObscured);
         Assert.NotNull(observedFilter);
+        Assert.True(state.ListenerMuffled);
+        Assert.True(state.ListenerSightObscured);
         Assert.True(observedFilter!.GetOption("enabled"));
         Assert.Equal(2, observedFilter.GetEnumOption("mode"));
         Assert.Equal(3.5f, observedFilter.GetNumberOption("range"));
@@ -1000,7 +1005,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             contextualMuffle);
         Assert.True(contextualMuffle);
         Assert.Equal(1, contextualCalls);
-        Assert.Equal(0, legacyCalls);
+        Assert.Equal(1, legacyCalls);
         Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, contextuallyFiltered.FilterMode);
         Assert.Equal(audible.NormalVolume, contextuallyFiltered.NormalVolume);
         Assert.Equal(audible.Pan, contextuallyFiltered.Pan);
@@ -1014,7 +1019,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         VoiceProximityResult legacyFiltered = ApplyResolvedListenerMuffle(audible, legacyMuffle);
         Assert.True(legacyMuffle);
         Assert.Equal(2, contextualCalls);
-        Assert.Equal(1, legacyCalls);
+        Assert.Equal(2, legacyCalls);
         Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, legacyFiltered.FilterMode);
 
         contextualActive = false;
@@ -1252,20 +1257,16 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
     }
 
     [Fact]
-    public void IntegrationOwnershipAndAnimatedColorRulesAreScopedAndGuarded()
+    public void AnimatedColorRulesAreScopedAndGuarded()
     {
-        string modId = NewModId("ownership");
-        string integrationId = "tests.integration." + Guid.NewGuid().ToString("N");
-        PerfectCommsApi.RegisterIntegrationOwner(modId, integrationId);
+        string modId = NewModId("animated-color");
         PerfectCommsApi.RegisterAnimatedColorRule(modId, _ => throw new InvalidOperationException("classifier failure"));
         PerfectCommsApi.RegisterAnimatedColorRule(modId, colorId => colorId == 417);
 
-        Assert.True(VoiceModRegistry.IsIntegrationOwned(integrationId));
         Assert.True(VoiceModRegistry.IsAnimatedColor(417));
         Assert.False(VoiceModRegistry.IsAnimatedColor(418));
 
         PerfectCommsApi.Unregister(modId);
-        Assert.False(VoiceModRegistry.IsIntegrationOwned(integrationId));
         Assert.False(VoiceModRegistry.IsAnimatedColor(417));
     }
 
@@ -1539,25 +1540,10 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             isDead,
             isSpectator,
             isImpostor,
-            IsVampire: false,
-            IsLover: false,
-            LoverPartnerId: byte.MaxValue,
             InVent: false,
             Disconnected: false,
             IsDummy: false,
             IsVisible: true,
-            IsBlackmailed: false,
-            IsJailed: false,
-            JailorId: byte.MaxValue,
-            IsParasiteControlled: false,
-            IsPuppeteerControlled: false,
-            IsBlackmailedNextRound: false,
-            IsSwooped: false,
-            IsMedium: false,
-            HasMediumSpirit: false,
-            MediumSpiritPosition: Vector(x, 0f),
-            IsMediatedGhost: false,
-            MediatingMediumId: byte.MaxValue,
             ControlHearingMode: controlMode,
             ControlledVictimPosition: controlledOrigin,
             ControlledVictimLightRadius: controlledLightRadius,
@@ -1580,7 +1566,6 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             OnlyGhostsCanTalk = false,
             OnlyMeetingOrLobby = false,
             OnlyMeetingOrLobbyAffectsGhosts = false,
-            MediumGhostVoice = (int)MediumGhostVoiceMode.None,
         };
 
     private static Vector2 Vector(float x, float y)

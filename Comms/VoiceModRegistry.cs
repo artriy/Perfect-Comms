@@ -18,6 +18,7 @@ internal static class VoiceModRegistry
     private const int MaxSyncedHostOptions = 256;
 
     private readonly record struct CallbackGroup<T>(string ModId, T[] Callbacks);
+    internal readonly record struct ListenerEffects(bool Muffled, bool SightObscured);
 
     // Registrations are rare; reads run many times per second. Rebuild an immutable callback
     // snapshot on mutation so callbacks may register/unregister (including themselves) without
@@ -74,8 +75,6 @@ internal static class VoiceModRegistry
     private static readonly CallbackMap<Func<VoiceOverlayViewerContext, VoiceOverlayViewerResult>> _overlayViewerRules = new();
     private static readonly CallbackMap<Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult>> _overlaySpeakerRules = new();
     private static readonly CallbackMap<Func<int, bool>> _animatedColorRules = new();
-    private static readonly Dictionary<string, string> _integrationOwnerById = new(StringComparer.Ordinal);
-    private static string[] _ownedIntegrationSnapshot = Array.Empty<string>();
     private static readonly List<GlobalGate> _globalGates = new();
     private static GlobalGate[] _globalGateSnapshot = Array.Empty<GlobalGate>();
 
@@ -214,13 +213,6 @@ internal static class VoiceModRegistry
         _animatedColorRules.Add(modId, isAnimatedColor);
     }
 
-    internal static void AddIntegrationOwner(string modId, string integrationId)
-    {
-        if (string.IsNullOrWhiteSpace(modId) || string.IsNullOrWhiteSpace(integrationId)) return;
-        if (_integrationOwnerById.TryGetValue(integrationId, out var owner) && owner != modId) return;
-        _integrationOwnerById[integrationId] = modId;
-        _ownedIntegrationSnapshot = new List<string>(_integrationOwnerById.Keys).ToArray();
-    }
 
     internal static void AddHostOption(string modId, VoiceHostOption option)
     {
@@ -303,16 +295,6 @@ internal static class VoiceModRegistry
         _overlayViewerRules.Remove(modId);
         _overlaySpeakerRules.Remove(modId);
         _animatedColorRules.Remove(modId);
-        if (_integrationOwnerById.Count > 0)
-        {
-            var owned = new List<string>();
-            foreach (var pair in _integrationOwnerById)
-                if (pair.Value == modId) owned.Add(pair.Key);
-            for (var i = 0; i < owned.Count; i++)
-                _integrationOwnerById.Remove(owned[i]);
-            if (owned.Count > 0)
-                _ownedIntegrationSnapshot = new List<string>(_integrationOwnerById.Keys).ToArray();
-        }
         bool optionInventoryChanged = _boolOptions.Remove(modId);
         optionInventoryChanged |= _enumOptions.Remove(modId);
         optionInventoryChanged |= _numberOptions.Remove(modId);
@@ -330,14 +312,6 @@ internal static class VoiceModRegistry
         if (optionInventoryChanged) OptionRevision++;
     }
 
-    internal static bool IsIntegrationOwned(string integrationId)
-    {
-        if (string.IsNullOrEmpty(integrationId)) return false;
-        var snapshot = _ownedIntegrationSnapshot;
-        for (var i = 0; i < snapshot.Length; i++)
-            if (string.Equals(snapshot[i], integrationId, StringComparison.Ordinal)) return true;
-        return false;
-    }
 
     internal static bool IsAnimatedColor(int colorId)
     {
@@ -717,6 +691,7 @@ internal static class VoiceModRegistry
         Vector2 listenerOrigin = default;
         float listenerLight = -1f;
         bool listenerReplace = true;
+        bool listenerBypassTaskVoiceGates = false;
 
         // Restrictive composition: Mute wins; otherwise every Muffle is retained as a low-pass.
         // Every callback still runs even after a Mute so legacy integrations that refresh shared
@@ -842,12 +817,16 @@ internal static class VoiceModRegistry
                         ? result.LightRadius < 0f ? -1f : result.LightRadius
                         : -1f;
                     listenerReplace = result.Mode == VoiceListenerMode.Replace;
+                    listenerBypassTaskVoiceGates = result.BypassTaskVoiceGates;
                     break;
                 }
                 if (listenerActive) break;
             }
         }
 
+        ListenerEffects listenerEffects = isLocal
+            ? ResolveListenerEffects(player, phase, isDead)
+            : default;
         return new ExternalVoiceState(
             muted,
             muffled,
@@ -858,31 +837,27 @@ internal static class VoiceModRegistry
             listenerOrigin,
             listenerLight,
             listenerReplace,
+            listenerBypassTaskVoiceGates,
+            listenerEffects.Muffled,
+            listenerEffects.SightObscured,
             ExternalVoicePairState.None);
     }
 
-    // Any registered listener filter returning true muffles all incoming audio for the local player.
-    internal static bool LocalListenerMuffled(
-        PlayerControl? local,
-        VoiceGamePhase routingPhase)
-    {
-        if (local == null || _listenerFilters.Count == 0) return false;
-        VoicePhaseKind phase = VoiceModBridge.ToApiPhase(routingPhase);
-        bool isDead = SafeIsDead(local);
-        isDead |= (ResolvePlayerTraits(
-            local,
-            phase,
-            isLocal: true,
-            isDead: isDead) & VoicePlayerTraits.VoiceDead) != 0;
-        return ResolveListenerMuffled(local, phase, isDead);
-    }
 
     internal static bool ResolveListenerMuffled(
         PlayerControl local,
         VoicePhaseKind phase,
         bool isDead)
+        => ResolveListenerEffects(local, phase, isDead).Muffled;
+
+    internal static ListenerEffects ResolveListenerEffects(
+        PlayerControl local,
+        VoicePhaseKind phase,
+        bool isDead)
     {
-        if (local == null || _listenerFilters.Count == 0) return false;
+        if (local == null || _listenerFilters.Count == 0) return default;
+        bool muffled = false;
+        bool sightObscured = false;
         CallbackGroup<Func<VoiceListenerContext, VoiceListenerFilterResult>>[] filterGroups =
             _listenerFilters.Snapshot;
         for (int groupIndex = 0; groupIndex < filterGroups.Length; groupIndex++)
@@ -896,10 +871,11 @@ internal static class VoiceModRegistry
                 VoiceListenerFilterResult result;
                 try { result = list[i](context) ?? new VoiceListenerFilterResult(false); }
                 catch { result = new VoiceListenerFilterResult(false); }
-                if (result.Muffle) return true;
+                muffled |= result.Muffle;
+                sightObscured |= result.SightObscured;
             }
         }
-        return false;
+        return new ListenerEffects(muffled, sightObscured);
     }
 
     // ---- Host-panel tab + option access (Stage C) ----
@@ -1087,7 +1063,7 @@ internal static class VoiceModRegistry
             var entry = config.Bind(
                 PersistentSection(modId),
                 PersistentKey("bool", option.Key),
-                option.Default,
+                LegacyDefault(option.LegacyBinding, option.Default),
                 new ConfigDescription($"Host option from {modId}: {option.Label}"));
             _boolConfigEntries[composedKey] = entry;
             return entry.Value;
@@ -1104,13 +1080,14 @@ internal static class VoiceModRegistry
             var entry = config.Bind(
                 PersistentSection(modId),
                 PersistentKey("enum", option.Key),
-                option.Default,
+                LegacyDefault(option.LegacyBinding, option.Default),
                 new ConfigDescription($"Host option from {modId}: {option.Label}"));
             _enumConfigEntries[composedKey] = entry;
             return entry.Value;
         }
         catch { return option.Default; }
     }
+
 
     private static float BindPersistentNumber(string modId, VoiceHostNumberOption option, string composedKey)
     {
@@ -1121,13 +1098,81 @@ internal static class VoiceModRegistry
             var entry = config.Bind(
                 PersistentSection(modId),
                 PersistentKey("number", option.Key),
-                option.Default,
+                LegacyDefault(option.LegacyBinding, option.Default),
                 new ConfigDescription($"Host option from {modId}: {option.Label}"));
             _numberConfigEntries[composedKey] = entry;
             return entry.Value;
         }
         catch { return option.Default; }
     }
+    private static bool LegacyDefault(VoiceHostOptionLegacyBinding? binding, bool fallback)
+    {
+        if (!TryGetLegacyBinding(binding, out var config, out var section, out var key))
+            return fallback;
+        try
+        {
+            return config.Bind(
+                section,
+                key,
+                fallback,
+                new ConfigDescription("Migrated to a source-owned Perfect Comms API option.")).Value;
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    private static int LegacyDefault(VoiceHostOptionLegacyBinding? binding, int fallback)
+    {
+        if (!TryGetLegacyBinding(binding, out var config, out var section, out var key))
+            return fallback;
+        try
+        {
+            return config.Bind(
+                section,
+                key,
+                fallback,
+                new ConfigDescription("Migrated to a source-owned Perfect Comms API option.")).Value;
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    private static float LegacyDefault(VoiceHostOptionLegacyBinding? binding, float fallback)
+    {
+        if (!TryGetLegacyBinding(binding, out var config, out var section, out var key))
+            return fallback;
+        try
+        {
+            return config.Bind(
+                section,
+                key,
+                fallback,
+                new ConfigDescription("Migrated to a source-owned Perfect Comms API option.")).Value;
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    private static bool TryGetLegacyBinding(
+        VoiceHostOptionLegacyBinding? binding,
+        out ConfigFile config,
+        out string section,
+        out string key)
+    {
+        config = VoiceModConfigPersistence.Config!;
+        section = binding?.Section ?? string.Empty;
+        key = binding?.Key ?? string.Empty;
+        return config != null &&
+            !string.IsNullOrWhiteSpace(section) &&
+            !string.IsNullOrWhiteSpace(key);
+    }
+
 
     private static string PersistentSection(string modId)
         => "Mod Options " + Convert.ToHexString(Encoding.UTF8.GetBytes(modId));
@@ -1264,6 +1309,7 @@ internal static class VoiceModRegistry
             GetOption = key => GetBoolValue(Compose(modId, key)),
             GetEnumOption = key => GetEnumValue(Compose(modId, key)),
             GetNumberOption = key => GetNumberValue(Compose(modId, key)),
+            TeamRadioEnabled = VoiceRoomSettingsState.Current.TeamRadio,
         };
         return () =>
         {

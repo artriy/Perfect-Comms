@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -28,8 +27,8 @@ internal static class VoiceIdentityPrivacyPhasePolicy
         };
 
     /// <summary>
-    /// Built-in reflection reads describe the live task-world appearance. Public-identity phases
-    /// present the real transport source instead; explicit mod API rules still run separately.
+    /// Built-in reads describe the live task-world appearance. Public-identity phases present the
+    /// real transport source instead; explicit mod API rules still run separately.
     /// </summary>
     internal static bool UsesBuiltInAppearancePrivacy(VoiceGamePhase phase)
         => DomainFor(phase) == VoiceIdentityPrivacyDomain.TaskWorld;
@@ -97,50 +96,6 @@ internal sealed class VoiceIdentityPrivacyPhaseEpoch
         => LastKnownPhase = VoiceGamePhase.Unknown;
 }
 
-/// <summary>
-/// Pure allow-list for concealment modifiers that are safe to present as a known alias. Runtime
-/// reflection must verify every active ConcealedModifier against this policy; seeing one known
-/// alias is not enough when multiple concealments are stacked.
-/// </summary>
-internal static class VoiceConcealedModifierSetPolicy
-{
-    internal const string MorphlingMorphName =
-        "TownOfUs.Modifiers.Impostor.MorphlingMorphModifier";
-    internal const string GlitchMimicName =
-        "TownOfUs.Modifiers.Neutral.GlitchMimicModifier";
-    internal const string ShapeshifterShiftName =
-        "TownOfUs.Modifiers.Impostor.ShapeshifterShiftModifier";
-
-    internal static bool IsRecognizedActiveAlias(
-        string? modifierTypeName,
-        bool morphActive,
-        bool mimicActive,
-        bool shiftActive)
-        => (morphActive && modifierTypeName == MorphlingMorphName)
-           || (mimicActive && modifierTypeName == GlitchMimicName)
-           || (shiftActive && modifierTypeName == ShapeshifterShiftName);
-
-    internal static bool AreAllRecognizedActiveAliases(
-        IReadOnlyList<string?> modifierTypeNames,
-        bool morphActive,
-        bool mimicActive,
-        bool shiftActive)
-    {
-        for (int i = 0; i < modifierTypeNames.Count; i++)
-        {
-            if (!IsRecognizedActiveAlias(
-                    modifierTypeNames[i],
-                    morphActive,
-                    mimicActive,
-                    shiftActive))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-}
 
 /// <summary>
 /// Describes how a transport speaker may be represented by identity-bearing UI.

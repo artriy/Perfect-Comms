@@ -156,21 +156,5 @@ public sealed class SpeakingBarSettingsContractTests
         Assert.Equal(expectedSpeakingBarVisible, visibility.SpeakingBarVisible);
     }
 
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
-    public void JailorUnmuteVisibilityDoesNotDependOnPrimaryControls(
-        bool primaryControlsEnabled,
-        bool canLocalJailorUnmute)
-    {
-        VoiceHudControlVisibility visibility = VoiceHudControlVisibilityPolicy.Resolve(
-            primaryControlsEnabled,
-            canLocalJailorUnmute);
-
-        Assert.Equal(primaryControlsEnabled, visibility.PrimaryControlsVisible);
-        Assert.Equal(canLocalJailorUnmute, visibility.JailUnmuteVisible);
-    }
 
 }

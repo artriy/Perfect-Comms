@@ -1,6 +1,6 @@
-# API 1.1 Role Recipes
+# API 1.2 Role Recipes
 
-These examples show how an external role mod can reproduce Perfect Comms' 17 TOU-Mira host rows with public API 1.1. Names such as `MyRoles`, `MyVoiceState`, and `MyColors` are placeholders for the source mod's own synchronized state and helpers.
+These examples show how a source-owned role mod can implement the 17 TOU-Mira voice settings through public API 1.2. Names such as `MyRoles`, `MyVoiceState`, and `MyColors` stand for the source mod's own synchronized state and helpers.
 
 Call `Register()` only after the soft-dependency check in [Mod Integration](Mod-Integration). Register once and call `PerfectCommsApi.Unregister(Mod)` before a supported dynamic reload.
 
@@ -230,29 +230,35 @@ private static void RegisterControlHearing()
 
 ---
 
-## Eclipsal, Grenadier, and Hypnotist listener muffle
+## Eclipsal, Grenadier, and Hypnotist listener effects
 
 ```csharp
 private static void RegisterListenerEffects()
 {
     PerfectCommsApi.RegisterContextualListenerFilter(Mod, ctx =>
     {
-        bool blinded =
+        bool sightObscured =
+            MyRoles.IsEclipsalBlinded(ctx.Listener) ||
+            MyRoles.IsGrenadierFlashed(ctx.Listener);
+
+        bool muffleBlinded =
             ctx.GetOption("MuffleBlindedOrFlashedHearing") &&
-            (MyRoles.IsEclipsalBlinded(ctx.Listener) ||
-             MyRoles.IsGrenadierFlashed(ctx.Listener));
+            sightObscured;
 
         bool hypnotized =
             ctx.GetOption("MuffleHypnotizedDuringHysteria") &&
             MyRoles.IsMassHysteriaActive &&
             MyRoles.IsHypnotized(ctx.Listener);
 
-        return new VoiceListenerFilterResult(blinded || hypnotized);
+        return new VoiceListenerFilterResult(muffleBlinded || hypnotized)
+        {
+            SightObscured = sightObscured,
+        };
     });
 }
 ```
 
-This muffles every audible incoming route for that local listener. It does not alter what the affected player transmits.
+The low-pass option muffles every audible incoming route for that local listener. `SightObscured` separately limits sight-based hearing while Eclipsal/Grenadier vision is obscured, even when low-pass muffling is disabled. Neither changes what the affected player transmits.
 
 ---
 
@@ -391,16 +397,13 @@ internal static void Register()
     RegisterRoleRadios();
     RegisterOverlayPrivacy();
     PerfectCommsApi.RegisterAnimatedColorRule(Mod, MyColors.IsRainbow);
-
-    // Cut over only after every TOU-Mira behavior above is registered.
-    PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
 }
 
 internal static void Unregister()
     => PerfectCommsApi.Unregister(Mod);
 ```
 
-Overlay privacy is separate from audio policy. `RegisterOverlayPrivacy` should add viewer/speaker rules for every disguise, concealment, and alias that can affect Perfect Comms' identity-bearing UI. Ownership is claimed last so a partial or throwing setup cannot prematurely disable the frozen compatibility adapter.
+Overlay privacy is separate from audio policy. `RegisterOverlayPrivacy` should add viewer/speaker rules for every disguise, concealment, and alias that can affect Perfect Comms' identity-bearing UI. The source mod registers the complete integration directly; there is no ownership claim or Perfect Comms reflection fallback.
 
 ---
 
@@ -415,7 +418,7 @@ Overlay privacy is separate from audio policy. `RegisterOverlayPrivacy` should a
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - Perfect Comms persists and synchronizes registered host-option values. The role mod owns gameplay state, targets/pairs, lifecycle history, Jailor permissions/UI/RPCs, and other state read by these recipes. Managed Team Radio deliberately owns its own selector, keybind/touch control, PTT capture, selected-key synchronization, and private route.
 - These callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

@@ -1,6 +1,6 @@
 # API Reference
 
-Supported namespace: `PerfectComms.Api` in `PerfectComms.dll`. Current API version: **1.1**.
+Supported namespace: `PerfectComms.Api` in `PerfectComms.dll`. Current API version: **1.2**.
 
 Back to **[Mod Integration](Mod-Integration)**
 
@@ -10,9 +10,9 @@ Only the types in `PerfectComms.Api` are the supported integration contract. Pub
 
 ## Compatibility contract
 
-The completed API 1.1 preserves all original public enum values, positional record constructors, and registration signatures. Existing integrations can keep their source and binaries unchanged. New context properties are init-only additions; new behavior uses separately named methods instead of ambiguous delegate overloads.
+API 1.2 preserves all API 1.0 and 1.1 public enum values, positional record constructors, and registration signatures. Existing integrations can keep their source and binaries unchanged. New context/result properties are init-only additions; new behavior uses separately named methods instead of ambiguous delegate overloads.
 
-The legacy signatures remain:
+The original signatures remain:
 
 ```csharp
 RegisterVoiceRule(string, Func<VoiceRuleContext, VoiceRuleResult>);
@@ -28,14 +28,14 @@ RegisterOverlaySpeakerRule(string, Func<VoiceOverlaySpeakerContext, VoiceOverlay
 Unregister(string);
 ```
 
-The completed runtime fixes behavior behind those calls: per-speaker muffle, Lobby/dead/global gate enforcement, multiple and receive-only channels, speaker-position Proximity fallback, and `LightRadius: -1` inheritance.
+The runtime preserves the completed behavior behind those calls: per-speaker muffle, Lobby/dead/global gate enforcement, multiple and receive-only channels, speaker-position Proximity fallback, and `LightRadius: -1` inheritance. API 1.2 adds listener sight-obscuration state without changing the existing filter constructor.
 
 ---
 
 ## Runtime version and capabilities
 
 ```csharp
-public const string ApiVersion = "1.1";
+public const string ApiVersion = "1.2";
 public const string PluginId = "com.edgetel.perfectcomms";
 
 public static string RuntimeApiVersion { get; }
@@ -63,12 +63,13 @@ public enum VoiceApiCapability
     OverlayPrivacy = 1 << 10,
     ManagedTeamRadio = 1 << 11,
     PersistentHostOptions = 1 << 12,
-    IntegrationOwnership = 1 << 13,
     OverlayAppearance = 1 << 14,
+    ListenerTaskGateBypass = 1 << 15,
+    ListenerSightObscuration = 1 << 16,
 }
 ```
 
-An older assembly may also contain the literal `"1.1"` without these members. A bridge supporting such builds must reflect for the property before entering code that references a new API type, or require a current Perfect Comms release.
+An API 1.1 assembly does not expose the API 1.2 capability. A bridge supporting older builds must reflect for new properties before entering code that references new API members, or require Perfect Comms 4.1.7 or newer.
 
 ---
 
@@ -310,7 +311,10 @@ public enum VoiceListenerMode
 public sealed record VoiceListenerResult(
     Vector2 Origin,
     float LightRadius,
-    VoiceListenerMode Mode);
+    VoiceListenerMode Mode)
+{
+    public bool BypassTaskVoiceGates { get; init; }
+}
 
 public sealed record VoiceListenerContext(
     PlayerControl Listener,
@@ -322,7 +326,10 @@ public sealed record VoiceListenerContext(
     public Func<string, float> GetNumberOption { get; init; }
 }
 
-public sealed record VoiceListenerFilterResult(bool Muffle);
+public sealed record VoiceListenerFilterResult(bool Muffle)
+{
+    public bool SightObscured { get; init; }
+}
 ```
 
 ```csharp
@@ -343,11 +350,11 @@ public static void RegisterContextualListenerFilter(
     Func<VoiceListenerContext, VoiceListenerFilterResult> filter);
 ```
 
-Legacy and contextual origins share one registration order; the first finite, non-null origin wins. An enabled built-in Parasite/Puppeteer control-hearing origin takes precedence. `Replace` hears only from the override during Tasks; `Additive` compares body and override routes and keeps the louder result per speaker.
+Original and contextual origins share one registration order; the first finite, non-null origin wins. `Replace` hears only from the override during Tasks; `Additive` compares body and override routes and keeps the louder result per speaker.
 
-Any negative `LightRadius`, including `-1`, inherits the local resolved light radius. `0` disables vision-radius limiting at the override. A positive value supplies an explicit radius; non-finite values normalize to inheritance.
+Any negative `LightRadius`, including `-1`, inherits the local resolved light radius. `0` disables vision-radius limiting at the override. A positive value supplies an explicit radius; non-finite values normalize to inheritance. `BypassTaskVoiceGates` can bypass only Tasks-wide `OnlyGhostsCanTalk` and Comms-sabotage receive gates; speaker mutes, phase policy, vent privacy, sight, distance, walls, and channel membership remain authoritative.
 
-Legacy and contextual filters also share one list. Any `true`/`Muffle` result muffles all audible incoming audio for the local listener. Failures are neutral.
+Original and contextual filters also share one list. Results compose restrictively. Any `Muffle` result applies the listener low-pass filter to all audible incoming audio. Any `SightObscured` result restricts sight-based hearing as temporarily blinded/obscured without revealing the source mod's private state. Failures are neutral for both fields.
 
 ```csharp
 public sealed record VoicePhaseChangedContext(
@@ -444,26 +451,15 @@ public static void RegisterOverlaySpeakerRule(
 
 See **[Overlay Privacy](Mod-Integration-Overlay-Privacy)** for the exact result records and safe-alias rules.
 
-## Integration ownership and overlay appearance
+## Overlay appearance
 
 ```csharp
-public static class VoiceIntegrationIds
-{
-    public const string TouMira = "tou-mira";
-}
-
-public static void RegisterIntegrationOwner(
-    string modId,
-    string integrationId);
-
 public static void RegisterAnimatedColorRule(
     string modId,
     Func<int, bool> isAnimatedColor);
 ```
 
-`RegisterIntegrationOwner` is a cutover switch, not feature discovery. Register every replacement callback first, then claim `VoiceIntegrationIds.TouMira`. While claimed, Perfect Comms hides its legacy TOU-Mira host tab and suppresses reflected TOU role, control-hearing, privacy, and rainbow behavior. The first `modId` to claim an id owns it until `Unregister(modId)`; a competing claim is ignored. Unregistering restores legacy discovery.
-
-Animated-color classifiers compose additively: the first `true` marks that color id for Perfect Comms' animated rainbow speaking-avatar material. Exceptions are treated as `false`. When TOU-Mira is source-owned, its old reflection classifier is skipped.
+Animated-color classifiers compose additively: the first `true` marks that color id for Perfect Comms' animated rainbow speaking-avatar material. Exceptions are treated as `false`. Source mods register their own classifiers; Perfect Comms does not reflect mod-specific color state.
 
 ---
 
@@ -543,7 +539,7 @@ The callback collection currently being evaluated is snapshotted. A callback may
 | Channel | `null` |
 | Managed radio | `null` |
 | Listener origin | `null` |
-| Listener filter | not muffled |
+| Listener filter | not muffled or sight-obscured |
 | Phase observer | ignored exception |
 | Option visibility | visible |
 | Overlay viewer | `HideAll` |
@@ -556,7 +552,7 @@ Audio callbacks run at snapshot cadence, roughly 20 times per second per applica
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - Perfect Comms synchronizes registered host-option values and persists local-host choices. It does not own your role/modifier state, targets, pairings, lifecycle history, or role RPCs. Managed Team Radio owns its existing selector/input/capture/wire path, not gameplay membership.
 - Host-option snapshots and local callback evaluation coordinate cooperative clients. They are not hostile-client authentication or enforcement.

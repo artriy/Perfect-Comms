@@ -445,16 +445,6 @@ public class VoiceChatRoom
 #endif
     }
 
-    internal static void SendJailVoicePacket(byte jailedPlayerId, bool allowed)
-    {
-        var local = PlayerControl.LocalPlayer;
-        if (local == null) return;
-
-        // Keep this on the Among Us custom-RPC path instead of the voice side-channel. The receiver
-        // re-derives the live Jailor relationship and accepts only the permissive direction, but the
-        // routed PlayerControl is still not authenticated packet-sender provenance.
-        VoiceJailVoiceRpc.Send(local.PlayerId, jailedPlayerId, allowed);
-    }
 
     // ======================================================================
     // Main update loop (WITH AGGRESSIVE SPEAKER RECOVERY - FIXED!)
@@ -2328,13 +2318,11 @@ public class VoiceChatRoom
     private static string DescribeGameOptions()
     {
         var o = VoiceChatGameOptions.GetInstance();
-        var roomSettings = VoiceRoomSettingsState.Current;
         return
             $"publicLobby={o.PublicVoiceLobby.Value} maxDistance={o.MaxChatDistance.Value:0.000} falloff={(VoiceFalloffMode)o.FalloffMode.Value} occlusion={(VoiceOcclusionMode)o.OcclusionMode.Value} " +
             $"wallsBlock={o.WallsBlockSound.Value} onlySight={o.OnlyHearInSight.Value} cameraCanHear={o.CameraCanHear.Value} " +
             $"hearInVent={o.HearInVent.Value} ventPrivate={o.VentPrivateChat.Value} commsDisable={o.CommsSabDisables.Value} " +
-            $"impHearGhosts={o.ImpostorHearGhosts.Value} teamRadio={o.TeamRadio.Value} teamRadioImps={o.TeamRadioImpostors.Value} teamRadioVamps={o.TeamRadioVampires.Value} teamRadioLovers={o.TeamRadioLovers.Value} onlyGhosts={o.OnlyGhostsCanTalk.Value} onlyMeetingLobby={o.OnlyMeetingOrLobby.Value} " +
-            $"muteJailed={roomSettings.MuteJailedInMeetings} jailorCanUnmute={roomSettings.JailorCanUnmuteJailed}";
+            $"impHearGhosts={o.ImpostorHearGhosts.Value} teamRadio={o.TeamRadio.Value} teamRadioImps={o.TeamRadioImpostors.Value} onlyGhosts={o.OnlyGhostsCanTalk.Value} onlyMeetingLobby={o.OnlyMeetingOrLobby.Value}";
     }
 
     private static string DescribePlayer(VoicePlayerSnapshot? player)

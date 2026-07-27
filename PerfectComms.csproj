@@ -9,6 +9,8 @@
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
 		<Version>4.1.7</Version>
+		<!-- 4.1.7 is already immutable on NuGet.org; .1 carries the completed API 1.2 reference contract without changing the mod release version. -->
+		<PerfectCommsApiPackageVersion>4.1.7.1</PerfectCommsApiPackageVersion>
 		<AssemblyVersion>4.1.7.0</AssemblyVersion>
 		<FileVersion>4.1.7.0</FileVersion>
 		<InformationalVersion>4.1.7</InformationalVersion>

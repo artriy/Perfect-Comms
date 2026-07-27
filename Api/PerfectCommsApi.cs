@@ -58,7 +58,7 @@ public enum VoiceListenerMode
     Additive,
 }
 
-/// <summary>Runtime-discoverable API 1.1 capabilities.</summary>
+/// <summary>Runtime-discoverable API 1.2 capabilities.</summary>
 [Flags]
 public enum VoiceApiCapability
 {
@@ -78,10 +78,12 @@ public enum VoiceApiCapability
     ManagedTeamRadio = 1 << 11,
     /// <summary>Registered host options retain the local host's values across restarts.</summary>
     PersistentHostOptions = 1 << 12,
-    /// <summary>A source mod can claim a legacy built-in integration so duplicate behavior is suppressed.</summary>
-    IntegrationOwnership = 1 << 13,
     /// <summary>Mods can classify custom player colors that need animated voice-overlay rendering.</summary>
     OverlayAppearance = 1 << 14,
+    /// <summary>A replacement listener origin can bypass task-wide receive disruptions without bypassing speaker privacy or route policy.</summary>
+    ListenerTaskGateBypass = 1 << 15,
+    /// <summary>Listener effects can mark sight-based hearing as temporarily obscured.</summary>
+    ListenerSightObscuration = 1 << 16,
 }
 
 /// <summary>Additional voice classifications a role mod can contribute for a player.</summary>
@@ -250,13 +252,24 @@ public sealed record VoiceManagedRadioChannelResult(
 public sealed record VoiceListenerResult(
     Vector2 Origin,
     float LightRadius,
-    VoiceListenerMode Mode);
+    VoiceListenerMode Mode)
+{
+    /// <summary>
+    /// Bypass only the task-wide "Only Ghosts Can Talk" and communications-sabotage receive gates.
+    /// Speaker mutes, phase policy, vent privacy, sight, distance, walls, and channel membership
+    /// remain authoritative.
+    /// </summary>
+    public bool BypassTaskVoiceGates { get; init; }
+}
 
 /// <summary>
-/// Result returned by RegisterContextualListenerFilter. True muffles all incoming audio for the
-/// local listener without changing how other players hear them.
+/// Result returned by RegisterContextualListenerFilter. Muffle applies the listener low-pass filter
+/// to all incoming audio; SightObscured limits sight-based hearing without exposing mod state.
 /// </summary>
-public sealed record VoiceListenerFilterResult(bool Muffle);
+public sealed record VoiceListenerFilterResult(bool Muffle)
+{
+    public bool SightObscured { get; init; }
+}
 
 /// <summary>Inputs delivered once when Perfect Comms observes a voice-phase transition.</summary>
 public sealed record VoicePhaseChangedContext(
@@ -345,13 +358,22 @@ public sealed record VoiceHostOptionContext
     public Func<string, bool> GetOption { get; init; } = _ => false;
     public Func<string, int> GetEnumOption { get; init; } = _ => 0;
     public Func<string, float> GetNumberOption { get; init; } = _ => 0f;
+    /// <summary>Current host-synced state of Perfect Comms' main Team Radio toggle.</summary>
+    public bool TeamRadioEnabled { get; init; }
 }
+
+/// <summary>
+/// Optional source for a one-way migration into a namespaced host option. The previous value is
+/// consulted only as the default when the new "modId.Key" setting is first created.
+/// </summary>
+public sealed record VoiceHostOptionLegacyBinding(string Section, string Key);
 
 /// <summary>Declarative host toggle. Persisted locally and lobby-synced as "modId.Key".</summary>
 public sealed record VoiceHostOption(string Key, string Label, bool Default)
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
+    public VoiceHostOptionLegacyBinding? LegacyBinding { get; init; }
 }
 
 /// <summary>Declarative persistent, lobby-synced host enum/stepper option.</summary>
@@ -359,6 +381,7 @@ public sealed record VoiceHostEnumOption(string Key, string Label, int Default, 
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
+    public VoiceHostOptionLegacyBinding? LegacyBinding { get; init; }
 }
 
 /// <summary>Declarative persistent, lobby-synced host numeric/slider option.</summary>
@@ -373,14 +396,9 @@ public sealed record VoiceHostNumberOption(
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
+    public VoiceHostOptionLegacyBinding? LegacyBinding { get; init; }
 }
 
-/// <summary>Canonical legacy-integration identifiers that a source mod can take ownership of.</summary>
-public static class VoiceIntegrationIds
-{
-    /// <summary>Town of Us Mira role voice, privacy, radio, and overlay-appearance integration.</summary>
-    public const string TouMira = "tou-mira";
-}
 
 public static class PerfectCommsApi
 {
@@ -388,14 +406,14 @@ public static class PerfectCommsApi
     /// Compile-time API identifier. Because const values are embedded into consuming assemblies,
     /// this is not a runtime capability probe.
     /// </summary>
-    public const string ApiVersion = "1.1";
+    public const string ApiVersion = "1.2";
     /// <summary>Stable BepInEx plugin id used for the soft-dependency presence check.</summary>
     public const string PluginId = "com.edgetel.perfectcomms";
 
     /// <summary>Runtime API identifier for reflection-based capability probes.</summary>
     public static string RuntimeApiVersion => ApiVersion;
 
-    /// <summary>Capabilities implemented by this runtime's API 1.1 surface.</summary>
+    /// <summary>Capabilities implemented by this runtime's API 1.2 surface.</summary>
     public static VoiceApiCapability Capabilities =>
         VoiceApiCapability.PerSpeakerMuffle |
         VoiceApiCapability.GlobalReceiveGate |
@@ -410,8 +428,9 @@ public static class PerfectCommsApi
         VoiceApiCapability.OverlayPrivacy |
         VoiceApiCapability.ManagedTeamRadio |
         VoiceApiCapability.PersistentHostOptions |
-        VoiceApiCapability.IntegrationOwnership |
-        VoiceApiCapability.OverlayAppearance;
+        VoiceApiCapability.OverlayAppearance |
+        VoiceApiCapability.ListenerTaskGateBypass |
+        VoiceApiCapability.ListenerSightObscuration;
 
     public static bool Supports(VoiceApiCapability capability)
         => capability != VoiceApiCapability.None && (Capabilities & capability) == capability;
@@ -540,15 +559,7 @@ public static class PerfectCommsApi
         Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult> rule)
         => VoiceModRegistry.AddOverlaySpeakerRule(modId, rule);
 
-    // ---- Primitive 7: Integration ownership and overlay appearance ----
-
-    /// <summary>
-    /// Claim a legacy built-in integration after registering its complete replacement. Perfect Comms
-    /// suppresses that built-in behavior while the claim is active, preventing duplicate options,
-    /// controls, routing, and privacy rules during a staged source-mod migration.
-    /// </summary>
-    public static void RegisterIntegrationOwner(string modId, string integrationId)
-        => VoiceModRegistry.AddIntegrationOwner(modId, integrationId);
+    // ---- Primitive 7: Overlay appearance ----
 
     /// <summary>
     /// Register an additive custom-color classifier for speaking-avatar rendering. Return true only

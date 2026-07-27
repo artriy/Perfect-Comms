@@ -56,6 +56,11 @@ internal readonly record struct ExternalVoiceState(
     Vector2 ListenerOrigin,
     float ListenerLightRadius,
     bool ListenerReplace,
+    // Listener may bypass task-wide receive disruptions, but no speaker or route policy.
+    bool ListenerBypassTaskVoiceGates,
+    // Local-player listener effects resolved with the snapshot.
+    bool ListenerMuffled,
+    bool ListenerSightObscured,
     // Local-listener/speaker pair state. This is resolved separately for each client snapshot.
     ExternalVoicePairState Pair)
 {
@@ -69,6 +74,9 @@ internal readonly record struct ExternalVoiceState(
         default,
         -1f,
         true,
+        false,
+        false,
+        false,
         ExternalVoicePairState.None);
 
     public bool HasReason => !string.IsNullOrEmpty(Reason);

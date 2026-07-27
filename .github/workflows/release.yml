@@ -210,14 +210,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
-          api_package="artifacts/PerfectComms.Api.$project_version.nupkg"
+          api_package_version="$(sed -n 's:.*<PerfectCommsApiPackageVersion>\([^<]*\)</PerfectCommsApiPackageVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
+          api_package="artifacts/PerfectComms.Api.$api_package_version.nupkg"
           test -s "artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip"
           test -s "artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip"
           test -s artifacts/PerfectComms.dll
           test -s artifacts/PerfectCommsAndroid.dll
           test -s "$api_package"
-          python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$project_version"
+          python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$api_package_version"
           echo "PERFECT_COMMS_API_PACKAGE=$api_package" >> "$GITHUB_ENV"
       - name: Publish release assets
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
@@ -263,10 +263,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
-          api_package="artifacts/PerfectComms.Api.$project_version.nupkg"
+          api_package_version="$(sed -n 's:.*<PerfectCommsApiPackageVersion>\([^<]*\)</PerfectCommsApiPackageVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
+          api_package="artifacts/PerfectComms.Api.$api_package_version.nupkg"
           test -s "$api_package"
-          python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$project_version"
+          python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$api_package_version"
           echo "PERFECT_COMMS_API_PACKAGE=$api_package" >> "$GITHUB_ENV"
       - name: Authenticate to NuGet.org
         id: nuget-login

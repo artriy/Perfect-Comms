@@ -1,17 +1,17 @@
-# Mod Integration (API 1.1 quickstart)
+# Mod Integration (API 1.2 quickstart)
 
-Perfect Comms API 1.1 lets a role mod add voice policy without forking Perfect Comms. Compile against the reference-only `PerfectComms.Api` package, treat Perfect Comms as a soft runtime dependency, and register only after plugin id `com.edgetel.perfectcomms` is present.
+Perfect Comms API 1.2 lets a role mod add voice policy without forking Perfect Comms. Compile against the reference-only `PerfectComms.Api` package, treat Perfect Comms as a soft runtime dependency, and register only after plugin id `com.edgetel.perfectcomms` is present.
 
 > Full guide: <https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration>
 
 ## Build-time package
 
-Use the package version matching the minimum Perfect Comms release your integration supports:
+Use the package version matching the minimum Perfect Comms release your integration supports. API 1.2 starts with Perfect Comms 4.1.7 and its corrected API package revision 4.1.7.1:
 
 ```xml
 <ItemGroup>
   <PackageReference Include="PerfectComms.Api"
-                    Version="X.Y.Z"
+                    Version="4.1.7.1"
                     PrivateAssets="all" />
 </ItemGroup>
 ```
@@ -70,11 +70,11 @@ Register once. Call `Unregister(Mod)` before a supported dynamic unload or reloa
 
 ## Compatibility and capability checks
 
-All original API 1.0/early-1.1 enum values, positional record constructors, and registration signatures remain available. An existing integration using gates, channels, listener callbacks, host bool/enum options, tabs, or overlay privacy can run unchanged. The completed API 1.1 runtime fixes the old routing gaps behind those same calls.
+API 1.2 preserves all API 1.0 and 1.1 enum values, positional record constructors, and registration signatures. Existing integrations using gates, channels, listener callbacks, host options, tabs, or overlay privacy can run unchanged.
 
-The compatibility tests mirror the unchanged name-only reflection bridge in [TownOfUsMegaChujoweExtension](https://github.com/HekerB/TownOfUsMegaChujoweExtension/blob/55e75669420c9cd093b16e5e0a73c08c85ef924e/TouMegaChujoweExtension/Modules/PerfectCommsIntegration.cs), including its exact types, constructors, members, enum ordinals, and eight unique registration method names.
+Compatibility tests pin the original public ABI: type names, constructors, members, enum ordinals, and registration signatures. API 1.2 only adds new listener-filter state and capability flags.
 
-`PerfectCommsApi.ApiVersion` remains the compile-time constant `"1.1"`; a consuming compiler embeds it, so it cannot identify the installed runtime. Current builds expose:
+`PerfectCommsApi.ApiVersion` is the compile-time constant `"1.2"`; a consuming compiler embeds it, so it cannot identify the installed runtime. Current builds expose:
 
 ```csharp
 string runtime = PerfectCommsApi.RuntimeApiVersion;
@@ -84,11 +84,12 @@ bool hasManagedRoleParity = PerfectCommsApi.Supports(
     VoiceApiCapability.PairRouting |
     VoiceApiCapability.ContextualListeners |
     VoiceApiCapability.ManagedTeamRadio |
-    VoiceApiCapability.IntegrationOwnership |
-    VoiceApiCapability.OverlayAppearance);
+    VoiceApiCapability.PersistentHostOptions |
+    VoiceApiCapability.OverlayAppearance |
+    VoiceApiCapability.ListenerSightObscuration);
 ```
 
-`Supports` requires every requested flag and returns `false` for `None`. If a bridge must also run against an older assembly that called itself API 1.1, probe the property by reflection before entering code that references a new type or method. Otherwise state a minimum Perfect Comms release.
+`Supports` requires every requested flag and returns `false` for `None`. If a bridge must also run against API 1.1, probe new capabilities by reflection before entering code that references a new member. Otherwise state Perfect Comms 4.1.7 as the minimum release.
 
 ## Implemented primitives
 
@@ -98,12 +99,11 @@ bool hasManagedRoleParity = PerfectCommsApi.Supports(
 | Player traits | Add impostor-equivalent voice, voice-dead, or spectator classification. |
 | Pair rule | Make a listener-specific `Mute`, `Muffle`, or explicit Proximity/Radio/Ghost route. |
 | Channel | Retain multiple memberships per player; `TwoWay: false` is a receive-only endpoint. |
-| Listener origin/filter | Replace or augment task hearing, or muffle all incoming audio; contextual forms receive phase and host options. |
+| Listener origin/filter | Replace or augment task hearing, muffle all incoming audio, or mark the listener's sight as temporarily obscured; contextual forms receive phase and host options. |
 | Phase observer | Observe API phase changes before the new phase's player callbacks run. |
 | Host options/tab | Add persistent, lobby-synced bools, enums, and stepped numbers, including conditional row visibility. |
 | Managed Team Radio | Add player or pair memberships to Perfect Comms' selector; Perfect Comms owns PTT capture, selected-channel sync, labels, and living non-member privacy. |
 | Overlay privacy/appearance | Hide, dim, or safely alias identity-bearing voice UI, and classify custom animated player colors. |
-| Integration ownership | Claim a completed source-mod replacement so Perfect Comms suppresses its frozen legacy adapter and duplicate settings. |
 
 Every callback context that supports settings exposes bare-key accessors scoped to its `modId`: `GetOption`, `GetEnumOption`, and `GetNumberOption`.
 
@@ -123,17 +123,11 @@ PerfectCommsApi.RegisterManagedRadioChannel(Mod, ctx =>
 
 Eligible channels appear after built-in choices. Holding Perfect Comms' Team Radio control opens capture even in Push To Talk mode, synchronizes the selected namespaced key, applies the radio filter to matching members, and hard-mutes living non-members before permissive pair/general-channel routes. The normal Team Radio master and phase settings remain authoritative. Your mod still owns role membership and pair ids; return current state from the callback.
 
-### Source-mod cutover
+### Source-mod integrations
 
-After registering a complete replacement for the frozen Town of Us Mira adapter, claim it last:
+The source mod owns its role state, lifecycle, UI, and RPCs. Register Perfect Comms callbacks directly from that source mod's soft-dependency bridge. Registration composes by `modId`, so unrelated mods can register concurrently without claiming a global integration slot.
 
-```csharp
-PerfectCommsApi.RegisterAnimatedColorRule(Mod, MyColors.IsRainbow);
-// Register role, listener, radio, option, and overlay callbacks first.
-PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
-```
-
-The claim hides the legacy TOU-Mira settings tab and stops Perfect Comms from reflecting TOU role, radio, privacy, and rainbow state. `Unregister(Mod)` removes the claim and restores legacy discovery. Do not claim ownership for a partial integration.
+Perfect Comms no longer contains a TOU-Mira reflection adapter or duplicate TOU-Mira host settings. TOU-Mira registers its own complete integration when Perfect Comms is present. If Perfect Comms is absent, only that optional voice registration is skipped; TOU-Mira's gameplay and Jailor controls continue to operate normally.
 
 ## Important routing details
 
@@ -143,7 +137,7 @@ The claim hides the legacy TOU-Mira settings tab and stops Perfect Comms from re
 - Every non-empty channel result is retained. A target can transmit only through a matching membership with `TwoWay: true`; `false` can receive the same key but cannot transmit it. If several shared memberships route the same speaker, the loudest valid result is used.
 - `VoiceAudioShape.Proximity` uses `Origin` when supplied and otherwise falls back to the speaker's resolved body position. It spatializes in Lobby, Tasks, Meeting, and Exile whenever a listener position exists.
 - `VoiceListenerResult.LightRadius == -1` inherits the local player's resolved light radius. `0` disables vision-radius limiting at the override. Other negative or non-finite inputs normalize to inheritance.
-- Legacy listener delegates still work. Use `RegisterContextualListenerOrigin` and `RegisterContextualListenerFilter` when the effect needs phase or option access.
+- Original listener delegates still work. Use `RegisterContextualListenerOrigin` and `RegisterContextualListenerFilter` when the effect needs phase or option access. A filter result can independently set `Muffle` and `SightObscured`; the latter restricts sight-based hearing without applying the low-pass filter.
 - Audio callback failures are neutral. Overlay viewer failures become `HideAll`; overlay speaker failures become `HideSource`.
 - EndGame is a fresh global results-screen call. Per-player API mute/muffle/channel/pair state from the previous phase is deliberately not reapplied after the game world disappears.
 
@@ -151,7 +145,7 @@ The full TOU-Mira parity matrix and copyable recipes are in [Examples](https://g
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - Perfect Comms synchronizes registered host-option values and persists the local host's values in its global BepInEx config. It does not discover your roles, modifiers, channel membership, phase bookkeeping, temporary permissions, aliases, or role RPCs. Managed Team Radio owns only Perfect Comms' existing selector/input/capture/wire path; your mod still supplies current membership keys and gameplay policy.
 - Host-option snapshots and locally evaluated callbacks are cooperative lobby policy, not hostile-client security. A modified client can ignore or forge local behavior.

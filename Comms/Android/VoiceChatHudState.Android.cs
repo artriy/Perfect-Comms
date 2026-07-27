@@ -135,8 +135,7 @@ public static partial class VoiceChatHudState
         Camera cam,
         ref Vector3 micPos,
         ref Vector3 spkPos,
-        ref Vector3 radioPos,
-        ref Vector3 jailPos)
+        ref Vector3 radioPos)
     {
         float minX = float.PositiveInfinity;
         float maxX = float.NegativeInfinity;
@@ -150,16 +149,11 @@ public static partial class VoiceChatHudState
             IncludeProposedButtonViewportBounds(
                 cam, _radioTouchButtonObj, _radioTouchButtonSrs, radioPos,
                 ref minX, ref maxX, ref minY, ref maxY);
-        if (!_jailOnCard && _jailButtonObj != null && _jailButtonObj.activeSelf)
-            IncludeProposedButtonViewportBounds(
-                cam, _jailButtonObj, _jailButtonSrs, jailPos,
-                ref minX, ref maxX, ref minY, ref maxY);
 
         var delta = ButtonGroupClampDelta(cam, minX, maxX, minY, maxY);
         micPos += delta;
         spkPos += delta;
         radioPos += delta;
-        jailPos += delta;
     }
 
     private static void AndroidMicButtonClick()
@@ -212,8 +206,6 @@ public static partial class VoiceChatHudState
         => VoiceTeamRadioChannels.Normalize(channel) switch
         {
             VoiceTeamRadioChannel.Impostors => "I",
-            VoiceTeamRadioChannel.Vampires => "V",
-            VoiceTeamRadioChannel.Lovers => "L",
             VoiceTeamRadioChannel.All => "A",
             _ => "R",
         };

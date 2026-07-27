@@ -106,7 +106,7 @@ dotnet build PerfectComms.csproj -c Release
 bash scripts/package-api.sh Release
 ```
 
-On Windows, use `pwsh scripts/package-api.ps1 -Configuration Release`. Both commands create `artifacts/PerfectComms.Api.X.Y.Z.nupkg`, validate that it contains only `ref/net6.0` compiler assets, compile a real consumer through `PackageReference`, and fail if `PerfectComms.dll` is copied to that consumer's output. Desktop release packaging runs the same gate automatically.
+On Windows, use `pwsh scripts/package-api.ps1 -Configuration Release`. Both commands create `artifacts/PerfectComms.Api.<PerfectCommsApiPackageVersion>.nupkg`, validate that it contains only `ref/net6.0` compiler assets, compile a real consumer through `PackageReference`, and fail if `PerfectComms.dll` is copied to that consumer's output. Desktop release packaging runs the same gate automatically.
 
 Tagged releases publish the package through NuGet.org Trusted Publishing. One-time repository setup is required:
 
@@ -125,13 +125,14 @@ Actions artifacts for 14 days:
 - `PerfectComms+dependencies-win-x86-steam-itch.zip`, containing the Steam and itch.io x86 bundle with the pinned x86 BepInEx build;
 - `PerfectComms+dependencies-win-x64-epic-msstore.zip`, containing the Epic Games Store and Microsoft Store x64 bundle with the pinned x64 BepInEx build;
 - `PerfectComms-standalone-dlls-*`, containing `PerfectComms.dll` for every supported desktop platform and `PerfectCommsAndroid.dll` for Android;
-- `PerfectComms-api-nuget-*`, containing the reference-only `PerfectComms.Api.X.Y.Z.nupkg`.
+- `PerfectComms-api-nuget-*`, containing the reference-only `PerfectComms.Api.<PerfectCommsApiPackageVersion>.nupkg`.
 
 ### Publishing a release
 
 1. Set `<Version>` and `<InformationalVersion>` to `X.Y.Z`, set
-   `<AssemblyVersion>` and `<FileVersion>` to `X.Y.Z.0`, and set
-   `VoiceChatPluginMain.Version` to `X.Y.Z`.
+   `<AssemblyVersion>` and `<FileVersion>` to `X.Y.Z.0`, set
+   `VoiceChatPluginMain.Version` to `X.Y.Z`, and set
+   `<PerfectCommsApiPackageVersion>` to the immutable NuGet version published for that API contract.
 2. Add the matching `Perfect Comms vX.Y.Z` changelog entry, commit the changes
    on `main`, and wait for every workflow triggered by that push.
 3. Run the manual Release rehearsal and inspect its packaged artifact.

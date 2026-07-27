@@ -59,11 +59,11 @@ Making a roles mod? You can add your own voice behaviours to Perfect Comms **wit
 
 ```xml
 <PackageReference Include="PerfectComms.Api"
-                  Version="X.Y.Z"
+                  Version="4.1.7.1"
                   PrivateAssets="all" />
 ```
 
-Use the package version matching the minimum Perfect Comms release you support. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
+`4.1.7.1` is the corrected API-package revision for the Perfect Comms 4.1.7 runtime; the player-facing mod version remains 4.1.7. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
 
 ```csharp
 [BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]

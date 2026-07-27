@@ -14,12 +14,9 @@ public static class HostSettingsPanel
     private const float TopPad = 12f;
 
     private static readonly string[] BuiltInCategories =
-        { "PROXIMITY", "LOBBY", "MEETING & VOICE", "TEAM RADIO", "TOU MIRA" };
+        { "PROXIMITY", "LOBBY", "MEETING & VOICE", "TEAM RADIO" };
 
-    private static bool LegacyTouMiraVisible
-        => !VoiceModRegistry.IsIntegrationOwned(PerfectComms.Api.VoiceIntegrationIds.TouMira);
-
-    private static int BuiltInCategoryCount => LegacyTouMiraVisible ? 5 : 4;
+    private const int BuiltInCategoryCount = 4;
 
     private static readonly (int index, string title)[] RailSections =
         { (4, "MOD BEHAVIOUR") };
@@ -252,7 +249,6 @@ public static class HostSettingsPanel
     private static List<OptionHolder> CategoryHolders(int cat)
     {
         var g = VoiceChatGameOptions.Instance;
-        var r = VoiceRoleIntegrationOptions.Instance;
         return cat switch
         {
             0 => new List<OptionHolder>
@@ -275,15 +271,6 @@ public static class HostSettingsPanel
             {
                 g.TeamRadio, g.TeamRadioImpostors,
                 g.TeamRadioInMeetings, g.TeamRadioInTasks
-            },
-            4 when LegacyTouMiraVisible => new List<OptionHolder>
-            {
-                r.MuteBlackmailedInMeetings, r.MuteBlackmailedNextRound, r.MuteParasiteControlled,
-                r.ParasiteHearFromVictim, r.MutePuppeteerControlled, r.PuppeteerHearFromVictim,
-                r.MuteSwooperWhileSwooped, r.MuffleBlindedOrFlashedHearing, r.MuffleHypnotizedDuringHysteria,
-                r.CrewpostorUsesImpostorVoice, r.MuteGlitchHacked, r.MuteJailedInMeetings,
-                r.JailPersistsAfterJailorDeath, r.JailorCanUnmuteJailed, r.MediumGhostVoice,
-                g.TeamRadioVampires, g.TeamRadioLovers
             },
             // Registered mod tabs start immediately after the currently visible built-in tabs.
             _ => VoiceModRegistry.HoldersForTab(cat - BuiltInCategoryCount)

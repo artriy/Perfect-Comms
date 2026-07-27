@@ -22,8 +22,6 @@ public class VoiceChatGameOptions
     public ToggleHolder CameraCanHear { get; }
     public ToggleHolder TeamRadio { get; }
     public ToggleHolder TeamRadioImpostors { get; }
-    public ToggleHolder TeamRadioVampires { get; }
-    public ToggleHolder TeamRadioLovers { get; }
     public ToggleHolder TeamRadioInMeetings { get; }
     public ToggleHolder TeamRadioInTasks { get; }
     public ToggleHolder OnlyGhostsCanTalk { get; }
@@ -69,16 +67,6 @@ public class VoiceChatGameOptions
             "Enables private hold-to-talk radio channels for eligible teams and roles.");
         TeamRadioImpostors = new ToggleHolder(cfg, Section, "TeamRadioImpostors", "Team Radio - Impostors", true,
             "Enables the private impostor team-radio channel when Team Radio is on.")
-        {
-            Visible = TeamRadioSubOptionsVisible
-        };
-        TeamRadioVampires = new ToggleHolder(cfg, Section, "TeamRadioVampires", "Team Radio - <color=#A32929><b>Vampires</b></color>", true,
-            "Enables the private vampire team-radio channel when Team Radio is on.")
-        {
-            Visible = TeamRadioSubOptionsVisible
-        };
-        TeamRadioLovers = new ToggleHolder(cfg, Section, "TeamRadioLovers", "Team Radio - <color=#FF66CC><b>Lovers</b></color>", true,
-            "Enables the private lovers team-radio channel when Team Radio is on.")
         {
             Visible = TeamRadioSubOptionsVisible
         };

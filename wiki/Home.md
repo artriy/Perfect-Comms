@@ -13,7 +13,7 @@ Proximity voice chat built directly into Among Us.
 
 Add your own voice behaviours to Perfect Comms **without forking it**.
 
-- **[Mod Integration](Mod-Integration)** - start here: safe soft-dependency setup and the complete API 1.1 behavior.
+- **[Mod Integration](Mod-Integration)** - start here: safe soft-dependency setup and the complete API 1.2 behavior.
 - **[Gate, Muffle & Player Traits](Mod-Integration-Gate)** - apply speaker/global policy in every API phase.
 - **[Channels & Pair Routing](Mod-Integration-Channels)** - create multiple, receive-only, spatial, and listener-specific routes.
 - **[Listener Origin, Filter & Phase Observer](Mod-Integration-Listener-Origin)** - relocate task hearing, muffle incoming audio, or observe phase changes.

@@ -153,42 +153,6 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(20f, VoiceChatPlugin.VoiceChatRoomDriver.UpdateFailureRebuildDelaySeconds(3));
     }
 
-    [Fact]
-    public void ListenerBlindProviderIsEvaluatedOnlyOncePerUnityFrame()
-    {
-        int calls = 0;
-        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = () =>
-        {
-            calls++;
-            return true;
-        };
-        try
-        {
-            Assert.True(VoiceProximityCalculator.IsLocalListenerBlindedOrFlashedThisFrame());
-            Assert.True(VoiceProximityCalculator.IsLocalListenerBlindedOrFlashedThisFrame());
-            Assert.Equal(1, calls);
-        }
-        finally
-        {
-            VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = null;
-            VoiceProximityCalculator.ResetSightState();
-        }
-    }
-
-    [Theory]
-    [InlineData((int)VoiceGamePhase.Unknown, false)]
-    [InlineData((int)VoiceGamePhase.Menu, false)]
-    [InlineData((int)VoiceGamePhase.Lobby, false)]
-    [InlineData((int)VoiceGamePhase.Intro, false)]
-    [InlineData((int)VoiceGamePhase.Tasks, true)]
-    [InlineData((int)VoiceGamePhase.Meeting, false)]
-    [InlineData((int)VoiceGamePhase.Exile, false)]
-    [InlineData((int)VoiceGamePhase.EndGame, false)]
-    public void BuiltInBlindMuffleAppliesOnlyDuringTasks(int phaseValue, bool expected)
-        => Assert.Equal(
-            expected,
-            VoiceRoleMuteState.ShouldApplyBlindedOrFlashedMuffle(
-                (VoiceGamePhase)phaseValue));
 
     [Fact]
     public void JoinGuardVersionMatchesBuiltPluginVersion()

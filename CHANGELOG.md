@@ -2,7 +2,7 @@
 
 ## Perfect Comms v4.1.7
 
-Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, completes the source-owned role-integration path, and restores native audio startup under CrossOver on macOS without changing how players install the mod.
+Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, and restores native audio startup under CrossOver on macOS without changing how players install the mod.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
@@ -11,15 +11,18 @@ Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, co
 ### Developer API Package
 
 - **Mod integrations can compile against `PerfectComms.Api` without checking in or redistributing the runtime DLL.**
-  > <sub>The versioned NuGet package contains only the small `net6.0` reference assembly and XML documentation. Release and CI gates compile a real package consumer, reject runtime, native, content, or build assets, and reject any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
+  > <sub>The `4.1.7.1` NuGet revision contains only the small `net6.0` reference assembly and XML documentation for the Perfect Comms 4.1.7 runtime. Release and CI gates compile a real package consumer, reject runtime, native, content, or build assets, and reject any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
 
-### Complete Source-Owned Mod Integrations
+### Source-Owned Mod Integrations
 
 - **Role mods can now move private Team Radio onto Perfect Comms without recreating its controls or transport.**
   > <sub>The managed-radio API adds namespaced player/pair memberships to the existing selector, labels, desktop and Android controls, Push To Talk capture gate, and synchronized radio state. Matching living members receive the radio route; living non-members are muted before permissive pair or general-channel callbacks can leak it.</sub>
 
-- **Registered host options now survive restarts and source mods can cleanly replace frozen compatibility adapters.**
-  > <sub>Bool, enum, and stepped-number values persist under encoded keys in Perfect Comms' global BepInEx config while lobby snapshots remain temporary host overrides. A complete TOU-Mira integration can claim ownership after registration, hiding duplicate legacy settings and suppressing reflected role, privacy, radio, and rainbow behavior; unregistering restores the legacy fallback for compatibility.</sub>
+- **TOU-Mira now owns its Perfect Comms integration end to end.**
+  > <sub>TOU-Mira registers its role rules, private radio memberships, persistent host settings, overlay privacy, animated colors, and listener effects through the public API. Perfect Comms no longer ships a TOU-specific role model, reflection resolver, duplicate settings tab, or compatibility fallback. Jailor buttons, permissions, lifecycle state, and RPCs remain in TOU-Mira, so removing Perfect Comms skips only the optional voice registration.</sub>
+
+- **Registered host options survive restarts, and listener effects can distinguish obscured sight from muffled audio.**
+  > <sub>Bool, enum, and stepped-number values persist under encoded keys in Perfect Comms' global BepInEx config while lobby snapshots remain temporary host overrides. API 1.2 adds `SightObscured` independently of the listener low-pass filter, so Eclipsal and Grenadier vision states restrict sight-based hearing without forcing audio muffling.</sub>
 
 ### Reliable CrossOver Audio Startup
 

@@ -95,7 +95,6 @@ public class VoiceChatPluginMain : BasePlugin
         VoiceSettings.Instance.WireRuntimeHandlers();
         VoiceChatKeybinds.Initialize(PluginConfig);
         VoiceChatGameOptions.GetInstance();
-        VoiceRoleIntegrationOptions.GetInstance();
         _configStore.CompleteInitialization();
         VanillaLobbyDiagnostics.Configure(message => Logger.LogInfo(message), message => Logger.LogWarning(message));
         VoiceDiagnostics.DebugInfo("[VC] Loading Perfect Comms.");

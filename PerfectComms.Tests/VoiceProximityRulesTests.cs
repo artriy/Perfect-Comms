@@ -10,7 +10,6 @@ public sealed class VoiceProximityRulesTests : IDisposable
 {
     public VoiceProximityRulesTests()
     {
-        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = () => false;
         VoiceProximityCalculator.ResetSightState();
         VoiceRoomSettingsState.ApplyRemote(BaseSettings());
     }
@@ -18,7 +17,6 @@ public sealed class VoiceProximityRulesTests : IDisposable
     public void Dispose()
     {
         VoiceRoomSettingsState.ClearRemote();
-        VoiceProximityCalculator.LocalListenerBlindedOrFlashedProvider = null;
         VoiceProximityCalculator.ResetSightState();
     }
 
@@ -143,7 +141,7 @@ public sealed class VoiceProximityRulesTests : IDisposable
     }
 
     [Fact]
-    public void CommsVentAndRoleMuteRulesAreAppliedBeforeProximity()
+    public void CommsAndVentRulesAreAppliedBeforeProximity()
     {
         var local = Player(0, 0f, isLocal: true);
         var nearby = Player(1, 1f);
@@ -159,129 +157,8 @@ public sealed class VoiceProximityRulesTests : IDisposable
         VoiceRoomSettingsState.ApplyRemote(BaseSettings() with { HearInVent = true, VentPrivateChat = true });
         Assert.Equal(VoiceProximityReason.VentPrivateMuted, Task(local, ventImp).Reason);
         Assert.True(Task(local, ventImp, localInVent: true).Audible);
-
-        VoiceRoomSettingsState.ApplyRemote(BaseSettings());
-        Assert.Equal(VoiceProximityReason.ParasiteControlled,
-            Task(local, Player(3, 1f, isParasiteControlled: true)).Reason);
-        Assert.Equal(VoiceProximityReason.PuppeteerControlled,
-            Task(local, Player(4, 1f, isPuppeteerControlled: true)).Reason);
-        Assert.Equal(VoiceProximityReason.Swooped,
-            Task(local, Player(5, 1f, isSwooped: true)).Reason);
-        Assert.Equal(VoiceProximityReason.BlackmailedNextRound,
-            Task(local, Player(6, 1f, isBlackmailedNextRound: true)).Reason);
     }
 
-    [Fact]
-    public void CommunicationsSabotageAudioGatePrecedesEveryAppearanceScenario()
-    {
-        var local = Player(0, 0f, isLocal: true);
-        var speaker = Player(3, 1f);
-        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with { CommsSabDisables = true });
-
-        foreach (BuiltInAppearance appearance in Enum.GetValues(typeof(BuiltInAppearance)))
-        {
-            for (int camo = 0; camo < 2; camo++)
-            {
-                var audio = Task(local, speaker, commsSabActive: true);
-                var privacy = ResolveBuiltInScenario(
-                    VoiceGamePhase.Tasks,
-                    touMiraCommsCamouflage: camo == 1,
-                    appearance);
-
-                Assert.False(audio.Audible);
-                Assert.Equal(VoiceProximityReason.CommsSabotage, audio.Reason);
-                Assert.Equal(
-                    ExpectedTaskPrivacyDecision(appearance, camo == 1),
-                    privacy.Decision);
-                Assert.False(audio.Audible && privacy.HasConcretePresentation);
-            }
-        }
-    }
-
-    [Theory]
-    [InlineData((int)BuiltInAppearance.Normal, false, (int)VoiceIdentityPrivacyDecision.Normal, 3)]
-    [InlineData((int)BuiltInAppearance.MorphOrMimic, false, (int)VoiceIdentityPrivacyDecision.Alias, 9)]
-    [InlineData((int)BuiltInAppearance.Venerer, false, (int)VoiceIdentityPrivacyDecision.HideSource, -1)]
-    [InlineData((int)BuiltInAppearance.AnonymousCamouflage, false, (int)VoiceIdentityPrivacyDecision.HideSource, -1)]
-    [InlineData((int)BuiltInAppearance.MorphWithHiddenStack, false, (int)VoiceIdentityPrivacyDecision.HideSource, -1)]
-    [InlineData((int)BuiltInAppearance.Normal, true, (int)VoiceIdentityPrivacyDecision.HideAllForViewer, -1)]
-    [InlineData((int)BuiltInAppearance.MorphOrMimic, true, (int)VoiceIdentityPrivacyDecision.HideAllForViewer, -1)]
-    [InlineData((int)BuiltInAppearance.Venerer, true, (int)VoiceIdentityPrivacyDecision.HideAllForViewer, -1)]
-    [InlineData((int)BuiltInAppearance.AnonymousCamouflage, true, (int)VoiceIdentityPrivacyDecision.HideAllForViewer, -1)]
-    [InlineData((int)BuiltInAppearance.MorphWithHiddenStack, true, (int)VoiceIdentityPrivacyDecision.HideAllForViewer, -1)]
-    public void TaskCommsAndAppearancePrivacyScenarioMatrix(
-        int appearanceValue,
-        bool touMiraCommsCamouflage,
-        int expectedDecisionValue,
-        int expectedPresentationPlayerId)
-    {
-        var local = Player(0, 0f, isLocal: true);
-        var speaker = Player(3, 1f);
-        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with { CommsSabDisables = false });
-
-        // Ordinary communications sabotage leaves voice audible when the PerfectComms audio gate is
-        // disabled. TouMira's optional camo-comms flag is a separate viewer-wide privacy input.
-        var audio = Task(local, speaker, commsSabActive: true);
-        var privacy = ResolveBuiltInScenario(
-            VoiceGamePhase.Tasks,
-            touMiraCommsCamouflage,
-            (BuiltInAppearance)appearanceValue);
-
-        Assert.True(audio.Audible);
-        Assert.Equal(VoiceProximityReason.Proximity, audio.Reason);
-        Assert.Equal((VoiceIdentityPrivacyDecision)expectedDecisionValue, privacy.Decision);
-        Assert.Equal(
-            expectedPresentationPlayerId < 0 ? null : (byte)expectedPresentationPlayerId,
-            privacy.PresentationPlayerId);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void MeetingImmediatelyAfterCommsRebasesEveryBuiltInScenario(bool commsSabDisables)
-    {
-        var local = Player(0, 0f, isLocal: true);
-        var speaker = Player(3, 1f);
-        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with { CommsSabDisables = commsSabDisables });
-
-        var taskAudio = Task(local, speaker, commsSabActive: true);
-        Assert.Equal(!commsSabDisables, taskAudio.Audible);
-        var meetingAudio = VoiceProximityCalculator.CalculateMeeting(local, speaker, false);
-        Assert.True(meetingAudio.Audible);
-        Assert.Equal(VoiceProximityReason.MeetingLiving, meetingAudio.Reason);
-
-        foreach (BuiltInAppearance appearance in Enum.GetValues(typeof(BuiltInAppearance)))
-        {
-            for (int camo = 0; camo < 2; camo++)
-            {
-                bool touMiraCommsCamouflage = camo == 1;
-                var taskPrivacy = ResolveBuiltInScenario(
-                    VoiceGamePhase.Tasks,
-                    touMiraCommsCamouflage,
-                    appearance);
-                var meetingPrivacy = ResolveBuiltInScenario(
-                    VoiceGamePhase.Meeting,
-                    touMiraCommsCamouflage,
-                    appearance);
-
-                var gate = new VoiceIdentityPrivacyTransitionGate();
-                var epoch = new VoiceIdentityPrivacyPhaseEpoch();
-                Assert.False(epoch.Advance(VoiceGamePhase.Tasks));
-                if (taskAudio.Audible)
-                    gate.Advance(taskPrivacy, isSpeaking: true);
-
-                if (epoch.Advance(VoiceGamePhase.Meeting))
-                    gate.Reset();
-                var meetingTransition = gate.Advance(meetingPrivacy, isSpeaking: true);
-
-                Assert.Equal(VoiceIdentityPrivacyDecision.Normal, meetingPrivacy.Decision);
-                Assert.Equal((byte)3, meetingPrivacy.PresentationPlayerId);
-                Assert.Equal(meetingPrivacy, meetingTransition.EffectiveResolution);
-                Assert.False(meetingTransition.IsQuarantined);
-                Assert.True(meetingAudio.Audible && meetingPrivacy.HasConcretePresentation);
-            }
-        }
-    }
 
     [Fact]
     public void LobbyMeetingAndEndGameRemainGlobalVoicePhases()
@@ -341,65 +218,13 @@ public sealed class VoiceProximityRulesTests : IDisposable
             CameraCanHear = false,
             TeamRadio = false,
             TeamRadioImpostors = true,
-            TeamRadioVampires = true,
-            TeamRadioLovers = true,
             TeamRadioInMeetings = false,
             TeamRadioInTasks = true,
             OnlyGhostsCanTalk = false,
             OnlyMeetingOrLobby = false,
             OnlyMeetingOrLobbyAffectsGhosts = false,
-            MuteBlackmailedNextRound = true,
-            MuteParasiteControlled = true,
-            MutePuppeteerControlled = true,
-            MuteSwooperWhileSwooped = true,
         };
 
-    private static VoiceIdentityPrivacyResolution ResolveBuiltInScenario(
-        VoiceGamePhase phase,
-        bool touMiraCommsCamouflage,
-        BuiltInAppearance appearance)
-    {
-        if (!VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
-            return VoiceIdentityPrivacyPolicy.Resolve(3, VoiceIdentityPrivacyEvidence.KnownNormal);
-
-        bool aliasActive = appearance is BuiltInAppearance.MorphOrMimic
-            or BuiltInAppearance.MorphWithHiddenStack;
-        bool hideSource = appearance is BuiltInAppearance.Venerer
-            or BuiltInAppearance.AnonymousCamouflage
-            or BuiltInAppearance.MorphWithHiddenStack;
-        return VoiceIdentityPrivacyPolicy.Resolve(
-            3,
-            new VoiceIdentityPrivacyEvidence(
-                ViewerStateKnown: true,
-                SourceStateKnown: true,
-                HideAllForViewer: touMiraCommsCamouflage,
-                HideSource: hideSource,
-                AliasActive: aliasActive,
-                AliasPlayerId: aliasActive ? (byte)9 : null));
-    }
-
-    private static VoiceIdentityPrivacyDecision ExpectedTaskPrivacyDecision(
-        BuiltInAppearance appearance,
-        bool touMiraCommsCamouflage)
-    {
-        if (touMiraCommsCamouflage)
-            return VoiceIdentityPrivacyDecision.HideAllForViewer;
-        return appearance switch
-        {
-            BuiltInAppearance.Normal => VoiceIdentityPrivacyDecision.Normal,
-            BuiltInAppearance.MorphOrMimic => VoiceIdentityPrivacyDecision.Alias,
-            _ => VoiceIdentityPrivacyDecision.HideSource,
-        };
-    }
-
-    private enum BuiltInAppearance
-    {
-        Normal,
-        MorphOrMimic,
-        Venerer,
-        AnonymousCamouflage,
-        MorphWithHiddenStack,
-    }
 
     private static VoicePlayerSnapshot Player(
         byte id,
@@ -411,11 +236,7 @@ public sealed class VoiceProximityRulesTests : IDisposable
         bool inVent = false,
         bool disconnected = false,
         bool isDummy = false,
-        bool isVisible = true,
-        bool isParasiteControlled = false,
-        bool isPuppeteerControlled = false,
-        bool isBlackmailedNextRound = false,
-        bool isSwooped = false)
+        bool isVisible = true)
         => new(
             id,
             100 + id,
@@ -425,28 +246,14 @@ public sealed class VoiceProximityRulesTests : IDisposable
             isDead,
             isSpectator,
             isImpostor,
-            IsVampire: false,
-            IsLover: false,
-            LoverPartnerId: byte.MaxValue,
             InVent: inVent,
             Disconnected: disconnected,
             IsDummy: isDummy,
             IsVisible: isVisible,
-            IsBlackmailed: false,
-            IsJailed: false,
-            JailorId: byte.MaxValue,
-            IsParasiteControlled: isParasiteControlled,
-            IsPuppeteerControlled: isPuppeteerControlled,
-            IsBlackmailedNextRound: isBlackmailedNextRound,
-            IsSwooped: isSwooped,
-            IsMedium: false,
-            HasMediumSpirit: false,
-            MediumSpiritPosition: Vector(x, 0f),
-            IsMediatedGhost: false,
-            MediatingMediumId: byte.MaxValue,
             ControlHearingMode: VoiceControlHearingMode.None,
             ControlledVictimPosition: default,
-            ControlledVictimLightRadius: -1f);
+            ControlledVictimLightRadius: -1f,
+            External: ExternalVoiceState.None);
 
     private static Vector2 Vector(float x, float y)
     {

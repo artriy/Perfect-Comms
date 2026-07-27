@@ -1,6 +1,6 @@
 # Host Options & Tabs
 
-Host options add persistent, lobby-synchronized controls to the Perfect Comms host panel. A player's local-host choices are stored in Perfect Comms' global BepInEx config; the connected host's current values travel in the host-settings snapshot so compatible clients evaluate the same voice policy. API 1.1 supports toggles, enum steppers, numeric rows, descriptions, and conditional visibility.
+Host options add persistent, lobby-synchronized controls to the Perfect Comms host panel. A player's local-host choices are stored in Perfect Comms' global BepInEx config; the connected host's current values travel in the host-settings snapshot so compatible clients evaluate the same voice policy. API 1.2 supports toggles, enum steppers, numeric rows, descriptions, and conditional visibility.
 
 Back to **[Mod Integration](Mod-Integration)**
 
@@ -139,7 +139,7 @@ Bool and enum declarations retain the original compatibility behavior and are ca
 - Duplicate registrations accumulate as rows while the first stored value for a composed key remains authoritative. Register once.
 - `Unregister(modId)` removes that id's active tab, declarations, values, and every other API registration. Its persisted config entries remain available if the same keys register again.
 
-All original bool/enum records and registration signatures remain unchanged. Existing integrations continue to compile and run; numbers and visibility are additive API 1.1 features.
+All original bool/enum records and registration signatures remain unchanged. Existing integrations continue to compile and run; numbers and visibility are additive API features.
 
 ---
 
@@ -162,7 +162,7 @@ All original bool/enum records and registration signatures remain unchanged. Exi
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - Perfect Comms persists local-host choices and synchronizes current host values. Your mod owns gameplay state, role UI, and role RPCs; managed Team Radio is the separate primitive that supplies radio input/control infrastructure.
 - Option snapshots and local callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

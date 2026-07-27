@@ -1,17 +1,17 @@
 # Mod Integration
 
-Perfect Comms API 1.1 exposes the supported `PerfectComms.Api` surface for role voice, managed private radio, persistent host settings, and concealment-safe voice UI. Your mod compiles against the reference-only API package and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
+Perfect Comms API 1.2 exposes the supported `PerfectComms.Api` surface for role voice, managed private radio, persistent host settings, concealment-safe voice UI, and temporary sight-obscuration effects. Your mod compiles against the reference-only API package and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
 
 ---
 
 ## Safe setup
 
-Add the build-only package version matching the minimum Perfect Comms release your integration supports:
+Add the build-only package version matching the minimum Perfect Comms release your integration supports. API 1.2 starts with Perfect Comms 4.1.7 and its corrected API package revision 4.1.7.1:
 
 ```xml
 <ItemGroup>
   <PackageReference Include="PerfectComms.Api"
-                    Version="X.Y.Z"
+                    Version="4.1.7.1"
                     PrivateAssets="all" />
 </ItemGroup>
 ```
@@ -71,29 +71,29 @@ A soft dependency controls load order; it does not make an eagerly resolved API 
 
 ## Existing integrations remain compatible
 
-The completed API 1.1 keeps every original enum value, positional record constructor, and reflected registration signature. Existing compiled or source integrations using these methods do not need rewrites:
+API 1.2 preserves every API 1.0 and 1.1 enum value, positional record constructor, and registration signature. Existing compiled or source integrations using these methods do not need rewrites:
 
 - `RegisterVoiceRule`, `RegisterGlobalGate`, and `RegisterVoiceChannel`
 - `RegisterListenerOrigin` and `RegisterListenerFilter`
 - bool/enum host options and `RegisterModTab`
 - overlay viewer/speaker rules and `Unregister`
 
-This contract is regression-tested against the unchanged name-only reflection bridge in [TownOfUsMegaChujoweExtension](https://github.com/HekerB/TownOfUsMegaChujoweExtension/blob/55e75669420c9cd093b16e5e0a73c08c85ef924e/TouMegaChujoweExtension/Modules/PerfectCommsIntegration.cs). Its expected types, constructors, members, enum ordinals, and eight method names remain unique and callable.
+ABI regression tests pin the original public types, constructors, members, enum ordinals, and registration signatures.
 
-The same calls now receive the completed behavior: per-speaker muffle is audible, gates include Lobby and voice-dead speakers, global gates are receiver-enforced, all channel memberships are retained, receive-only channels work, Proximity falls back to the speaker position, and `LightRadius: -1` inherits the local light radius.
+The same calls retain the completed routing behavior: per-speaker muffle is audible, gates include Lobby and voice-dead speakers, global gates are receiver-enforced, all channel memberships are retained, receive-only channels work, Proximity falls back to the speaker position, and `LightRadius: -1` inherits the local light radius. API 1.2 adds independent listener sight-obscuration state.
 
-`PerfectCommsApi.ApiVersion` stays `"1.1"` for compatibility, but it is a compile-time constant. Use the runtime surface for current capability checks:
+`PerfectCommsApi.ApiVersion` is `"1.2"`, but it is a compile-time constant. Use the runtime surface for current capability checks:
 
 ```csharp
 bool ready = PerfectCommsApi.Supports(
     VoiceApiCapability.PairRouting |
     VoiceApiCapability.ManagedTeamRadio |
     VoiceApiCapability.PersistentHostOptions |
-    VoiceApiCapability.IntegrationOwnership |
-    VoiceApiCapability.OverlayAppearance);
+    VoiceApiCapability.OverlayAppearance |
+    VoiceApiCapability.ListenerSightObscuration);
 ```
 
-`RuntimeApiVersion`, `Capabilities`, and `Supports(...)` distinguish the completed runtime when code is already running against it. If you support an older assembly that also reported 1.1, reflect for the property before entering a method that references new API types, or declare a minimum Perfect Comms release.
+`RuntimeApiVersion`, `Capabilities`, and `Supports(...)` identify the installed runtime when code is already running against it. If you support API 1.1, reflect for new capabilities before entering a method that references new API members, or require Perfect Comms 4.1.7 or newer.
 
 ---
 
@@ -105,23 +105,18 @@ bool ready = PerfectCommsApi.Supports(
 | Player traits and pair rules | Impostor-equivalent voice, voice-dead classification, directional/private Medium-style routing | [Gate](Mod-Integration-Gate#player-traits) and [Channels](Mod-Integration-Channels#listener-speaker-pair-rules) |
 | Multiple/directional channels | Team, pair, radio, muffle, and spatial routes; receive-only endpoints | [Channels](Mod-Integration-Channels) |
 | Managed Team Radio | Perfect Comms-owned selector, PTT/capture, wire state, labels, and exclusive living-member routing | [Examples](Mod-Integration-Examples#vampire-and-lovers-managed-team-radio) |
-| Listener origin and filter | Replace/add a task hearing point or muffle everything the local player hears | [Listener Origin & Filter](Mod-Integration-Listener-Origin) |
+| Listener origin and filter | Replace/add a task hearing point, muffle incoming audio, or restrict sight-based hearing while vision is obscured | [Listener Origin & Filter](Mod-Integration-Listener-Origin) |
 | Phase observer | Update integration-owned derived state exactly at API phase changes | [Examples](Mod-Integration-Examples#phase-owned-bookkeeping) |
 | Host options and tab | Persistent local-host toggles/enums/numbers with lobby sync and conditional rows | [Host Options & Tabs](Mod-Integration-Host-Options) |
 | Overlay privacy and appearance | Hide, dim, or safely alias voice presentation; classify animated custom colors | [Overlay Privacy](Mod-Integration-Overlay-Privacy) |
-| Integration ownership | Suppress a frozen legacy adapter after its source mod registers a complete replacement | [API Reference](Mod-Integration-API-Reference#integration-ownership-and-overlay-appearance) |
 
 The [Examples](Mod-Integration-Examples) page includes a 17-row TOU-Mira parity matrix covering every built-in role voice option.
 
-### Source-owned TOU-Mira cutover
+### Source-owned TOU-Mira integration
 
-A current Town of Us Mira build can own the integration directly. Register its complete role, listener, managed-radio, host-option, overlay-privacy, and animated-color callbacks, then call:
+Current Town of Us Mira builds register their complete role, listener, managed-radio, host-option, overlay-privacy, and animated-color integration directly from TOU-Mira's soft-dependency bridge.
 
-```csharp
-PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
-```
-
-Claim ownership last. Perfect Comms then hides its duplicate TOU-Mira settings and disables the old reflection adapter. `Unregister(Mod)` restores legacy discovery, so older TOU-Mira builds continue to use the frozen fallback unchanged.
+No claim or cutover call is required. Perfect Comms contains no TOU-Mira reflection adapter and no duplicate TOU-Mira settings. If Perfect Comms is absent, TOU-Mira skips only the optional registration; its gameplay, Jailor UI, and role RPCs remain source-owned and continue to work.
 
 ---
 
@@ -161,7 +156,7 @@ Phase observers can help maintain derived integration state, but they do not cre
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - **Gameplay state remains mod-owned.** The API projects role state into voice behavior. Managed Team Radio supplies its selector/input/capture/wire path; it does not add role abilities or role-state RPCs. Other UI, buttons, keybinds, and netcode remain your responsibility.
 - **This is not hostile-client security.** Host-option snapshots and local callbacks coordinate cooperative clients. A modified client can ignore or forge its local behavior.

@@ -1,6 +1,6 @@
 # Channels & Pair Routing
 
-General channels add named routes beyond ordinary proximity. API 1.1 retains every valid membership, supports receive-only endpoints, and can spatialize a Proximity channel from either an explicit origin or the speaker's resolved body position. Managed Team Radio adds those memberships to Perfect Comms' own selector/PTT/wire path. Pair rules handle listener-specific privacy and explicit Medium-style routes.
+General channels add named routes beyond ordinary proximity. API 1.2 retains every valid membership, supports receive-only endpoints, and can spatialize a Proximity channel from either an explicit origin or the speaker's resolved body position. Managed Team Radio adds those memberships to Perfect Comms' own selector/PTT/wire path. Pair rules handle listener-specific privacy and explicit Medium-style routes.
 
 Back to **[Mod Integration](Mod-Integration)**
 
@@ -192,7 +192,7 @@ EndGame is a fresh global results-screen call after player objects disappear. Tr
 
 ## Current status / limitations
 
-**Currently broken:** None of the documented API 1.1 primitives on this page.
+**Currently broken:** None of the documented API 1.2 primitives on this page.
 
 - Perfect Comms persists and synchronizes registered host-option values. Your mod owns channel membership, pairings, spirit positions, and role RPCs. General channels also require mod-owned transmit state/UI/input; managed Team Radio supplies the Perfect Comms selector, input, capture, selected-key sync, and exclusive route.
 - Channels and pair callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

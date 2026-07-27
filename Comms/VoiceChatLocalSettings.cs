@@ -66,11 +66,6 @@ public enum SpeakingBarSideLayout
     Wrapped = 1,
 }
 
-public enum JailUnmuteButtonPlacement
-{
-    VoiceHud = 0,
-    MeetingCard = 1,
-}
 
 public enum VoiceMicMode
 {
@@ -86,17 +81,6 @@ internal readonly record struct VoiceHudFeatureVisibility(
         bool disableVoiceControlsHud,
         bool disableSpeakingBar)
         => new(!disableVoiceControlsHud, !disableSpeakingBar);
-}
-internal readonly record struct VoiceHudControlVisibility(
-    bool PrimaryControlsVisible,
-    bool JailUnmuteVisible);
-
-internal static class VoiceHudControlVisibilityPolicy
-{
-    internal static VoiceHudControlVisibility Resolve(
-        bool primaryControlsEnabled,
-        bool canLocalJailorUnmute)
-        => new(primaryControlsEnabled, canLocalJailorUnmute);
 }
 
 
@@ -292,7 +276,6 @@ public class VoiceChatLocalSettings
     public ConfigEntry<bool> SpeakingBarLivePreview { get; }
     public ConfigEntry<bool> ShowFake15Players { get; }
     public ConfigEntry<bool> MeetingSpeakingOverlay { get; }
-    public ConfigEntry<JailUnmuteButtonPlacement> JailUnmuteButtonPlacement { get; }
     public ConfigEntry<float> SpeakingBarX { get; }
     public ConfigEntry<float> SpeakingBarY { get; }
     public ConfigEntry<float> OverlayScale { get; }
@@ -593,11 +576,11 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Shows voice connection progress in the lobby and active retry failures in other phases."));
 
         DisableVoiceControlsHud = config.Bind("UI", "DisableVoiceControlsHud", false,
-            new ConfigDescription("Hides the microphone, speaker, and mobile radio controls while keeping their keybinds and the Jailor unmute button active."));
+            new ConfigDescription("Hides the microphone, speaker, and mobile radio controls while keeping their keybinds active."));
 
         VoiceControlsLayout = config.Bind("UI", "VoiceControlsLayout",
             VoiceChatPlugin.VoiceChat.VoiceControlsLayout.Vertical,
-            new ConfigDescription("Arranges the microphone, speaker, and role voice controls vertically or horizontally."));
+            new ConfigDescription("Arranges the Perfect Comms HUD controls vertically or horizontally."));
 
         DisableSpeakingBar = config.Bind("UI", "DisableSpeakingBar", false,
             new ConfigDescription("Hides the in-game speaking bar completely."));
@@ -651,9 +634,6 @@ public class VoiceChatLocalSettings
         SpeakingBarLivePreview = config.Bind("UI", "SpeakingBarLivePreview", SpeakingBarLivePreviewDefault,
             new ConfigDescription("Temporarily moves the local settings panel aside and shows an isolated, realistic 15-player live preview of the speaking bar. It turns off when the panel closes, when you leave the HUD tab, and on every game launch."));
 
-        JailUnmuteButtonPlacement = config.Bind("UI", "JailUnmuteButtonPlacement",
-            VoiceChatPlugin.VoiceChat.JailUnmuteButtonPlacement.MeetingCard,
-            new ConfigDescription("Chooses whether the Jailor's temporary unmute control appears on the voice HUD or the jailed player's meeting card."));
 
         // Meeting overlay — on by default.
         MeetingSpeakingOverlay = config.Bind("UI", "MeetingSpeakingOverlay", true,
@@ -1696,10 +1676,6 @@ public class VoiceChatLocalSettings
         {
             PingTrackerPatch.ApplySpeakingBarLayoutSettings();
             PingTrackerPatch.ClearSpeakingBarSlots();
-        }
-        else if (configEntry == JailUnmuteButtonPlacement)
-        {
-            VoiceChatHudState.RefreshButtonLayout();
         }
         else if (configEntry == OverlayScale)
         {

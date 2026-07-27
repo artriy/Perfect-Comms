@@ -528,47 +528,6 @@ public sealed class VoiceIdentityPrivacyPolicyTests
         Assert.Equal(byte.MaxValue, playerId);
     }
 
-    [Fact]
-    public void ConcealedModifierSetAllowsOnlyEveryActiveRecognizedAlias()
-    {
-        string[] recognized =
-        [
-            VoiceConcealedModifierSetPolicy.MorphlingMorphName,
-            VoiceConcealedModifierSetPolicy.GlitchMimicName,
-        ];
-
-        Assert.True(VoiceConcealedModifierSetPolicy.AreAllRecognizedActiveAliases(
-            recognized,
-            morphActive: true,
-            mimicActive: true,
-            shiftActive: false));
-    }
-
-    [Fact]
-    public void StackedUnknownConcealmentFailsPrivateEvenBesideRecognizedAlias()
-    {
-        string[] stacked =
-        [
-            VoiceConcealedModifierSetPolicy.MorphlingMorphName,
-            "FutureMod.Modifiers.UnknownConcealment",
-        ];
-
-        Assert.False(VoiceConcealedModifierSetPolicy.AreAllRecognizedActiveAliases(
-            stacked,
-            morphActive: true,
-            mimicActive: false,
-            shiftActive: false));
-    }
-
-    [Fact]
-    public void InactiveAliasModifierIsNotAcceptedByNameAlone()
-    {
-        Assert.False(VoiceConcealedModifierSetPolicy.IsRecognizedActiveAlias(
-            VoiceConcealedModifierSetPolicy.MorphlingMorphName,
-            morphActive: false,
-            mimicActive: false,
-            shiftActive: false));
-    }
 
     [Fact]
     public void PrivacyFrameUpdatesInPlaceForHotPathReuse()

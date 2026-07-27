@@ -4,8 +4,6 @@ internal enum VoiceTeamRadioChannel : byte
 {
     None = 0,
     Impostors = 1,
-    Vampires = 2,
-    Lovers = 3,
     External = 4,
     All = byte.MaxValue,
 }
@@ -15,8 +13,6 @@ internal static class VoiceTeamRadioChannels
     public static readonly VoiceTeamRadioChannel[] Order =
     [
         VoiceTeamRadioChannel.Impostors,
-        VoiceTeamRadioChannel.Vampires,
-        VoiceTeamRadioChannel.Lovers,
     ];
 
     public static VoiceTeamRadioChannel FromWire(bool active, byte? channel)
@@ -32,8 +28,6 @@ internal static class VoiceTeamRadioChannels
 
     public static VoiceTeamRadioChannel Normalize(VoiceTeamRadioChannel channel)
         => channel is VoiceTeamRadioChannel.Impostors
-            or VoiceTeamRadioChannel.Vampires
-            or VoiceTeamRadioChannel.Lovers
             or VoiceTeamRadioChannel.External
             or VoiceTeamRadioChannel.All
             ? channel
@@ -46,8 +40,6 @@ internal static class VoiceTeamRadioChannels
         => Normalize(channel) switch
         {
             VoiceTeamRadioChannel.Impostors => "Impostors",
-            VoiceTeamRadioChannel.Vampires => "Vampires",
-            VoiceTeamRadioChannel.Lovers => "Lovers",
             VoiceTeamRadioChannel.External => "Managed",
             VoiceTeamRadioChannel.All => "All Teams",
             _ => "Unavailable",

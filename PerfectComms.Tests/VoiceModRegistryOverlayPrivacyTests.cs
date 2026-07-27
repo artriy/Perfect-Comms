@@ -10,9 +10,9 @@ public sealed class VoiceModRegistryOverlayPrivacyTests : IDisposable
     private readonly VoiceOverlaySpeakerContext _speakerContext = FakeSpeakerContext();
 
     [Fact]
-    public void OverlayPrivacyShipsAsAdditiveApiVersion11()
+    public void OverlayPrivacyRemainsAvailableInApiVersion12()
     {
-        Assert.Equal("1.1", PerfectCommsApi.ApiVersion);
+        Assert.Equal("1.2", PerfectCommsApi.ApiVersion);
     }
 
     [Fact]

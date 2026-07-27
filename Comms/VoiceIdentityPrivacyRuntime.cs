@@ -1,7 +1,5 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Reflection;
 using PerfectComms.Api;
 using UnityEngine;
 
@@ -52,36 +50,12 @@ internal sealed class VoiceIdentityPrivacyFrame
 }
 
 /// <summary>
-/// Runtime adapter for Town of Us/Mira and vanilla appearance state. TouMira is intentionally a
-/// soft dependency, so all role access is reflection-based and cached. The pure policy and
-/// transition behavior live in VoiceIdentityPrivacyPolicy.cs and are unit-tested without Unity.
+/// Mod-agnostic runtime projection for vanilla appearance privacy and registered overlay rules.
+/// Role-mod state is supplied through PerfectCommsApi; this assembly performs no mod discovery.
 /// </summary>
 internal static class VoiceIdentityPrivacyRuntime
 {
     private const float SilentPresentationRetentionSeconds = 1f;
-    private const string ModifierExtensionsName = "MiraAPI.Modifiers.ModifierExtensions";
-    private const string ModifierComponentName = "MiraAPI.Modifiers.ModifierComponent";
-
-    private const string MorphlingMorphName = VoiceConcealedModifierSetPolicy.MorphlingMorphName;
-    private const string GlitchMimicName = VoiceConcealedModifierSetPolicy.GlitchMimicName;
-    private const string ShapeshifterShiftName = VoiceConcealedModifierSetPolicy.ShapeshifterShiftName;
-    private const string ParasiteInfectedName = "TownOfUs.Modifiers.Impostor.ParasiteInfectedModifier";
-    private const string ConcealedModifierName = "TownOfUs.Modifiers.ConcealedModifier";
-
-    private const string HerbalistConfusedName = "TownOfUs.Modifiers.Impostor.Herbalist.HerbalistConfusedModifier";
-    private const string HypnotisedName = "TownOfUs.Modifiers.Impostor.HypnotisedModifier";
-    private const string EclipsalBlindName = "TownOfUs.Modifiers.Impostor.EclipsalBlindModifier";
-    private const string GrenadierFlashName = "TownOfUs.Modifiers.Impostor.GrenadierFlashModifier";
-    private const string HnsGlobalCamouflageName = "TownOfUs.Modifiers.HnsImpostor.HnsGlobalCamouflageModifier";
-
-    private static readonly string[] HiddenModifierNames =
-    [
-        "TownOfUs.Modifiers.Impostor.SwoopModifier",
-        "TownOfUs.Modifiers.HnsCrewmate.HnsChameleonSwoopModifier",
-        "TownOfUs.Modifiers.Impostor.AmbusherConcealedModifier",
-        "TownOfUs.Modifiers.Impostor.Venerer.VenererCamouflageModifier",
-        "TownOfUs.Modifiers.Crewmate.MediumHiddenModifier",
-    ];
 
     private static readonly Dictionary<byte, PlayerControl> PlayerLookup = new();
     private static readonly Dictionary<byte, int> PlayerInstanceIds = new();
@@ -99,15 +73,6 @@ internal static class VoiceIdentityPrivacyRuntime
     private static readonly List<VoiceIdentityPresentedSpeaker> PresentedSpeakers = new(16);
     private static readonly Dictionary<byte, int> PresentationIndex = new();
 
-    private static MethodInfo? _getModifierMethod;
-    private static Type? _getModifierMethodOwner;
-    private static object?[]? _getModifierArguments;
-    private static MethodInfo? _getModifierComponentMethod;
-    private static Type? _getModifierComponentMethodOwner;
-    private static object?[]? _getModifierComponentArguments;
-    private static Type? _activeModifiersOwner;
-    private static PropertyInfo? _activeModifiersProperty;
-    private static FieldInfo? _activeModifiersField;
     private static int _cachedFrame = -1;
     private static VoiceGamePhase _cachedPhase = VoiceGamePhase.Unknown;
     private static int _cachedGameId = int.MinValue;
@@ -399,9 +364,8 @@ internal static class VoiceIdentityPrivacyRuntime
         return gate;
     }
 
-    private static bool UsesLegacyAppearancePrivacy(VoiceGamePhase phase)
-        => VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase)
-           && !VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira);
+    private static bool UsesBuiltInAppearancePrivacy(VoiceGamePhase phase)
+        => VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase);
 
     private static VoiceIdentityPrivacyResolution ResolveCandidate(
         byte sourcePlayerId,
@@ -440,16 +404,8 @@ internal static class VoiceIdentityPrivacyRuntime
         bool hideSource = false;
         bool aliasActive = false;
         byte? aliasPlayerId = null;
-        if (UsesLegacyAppearancePrivacy(phase))
-        {
-            sourceKnown = TryReadSourceEvidence(
-                source,
-                phase,
-                out hideSource,
-                out aliasActive,
-                out aliasPlayerId);
-        }
-        bool builtInAliasUnresolved = aliasActive && !aliasPlayerId.HasValue;
+        if (UsesBuiltInAppearancePrivacy(phase))
+            sourceKnown = TryReadBuiltInSourceEvidence(source, phase, out hideSource);
 
         var local = PlayerControl.LocalPlayer;
         var external = VoiceModRegistry.HasOverlaySpeakerRules
@@ -470,16 +426,15 @@ internal static class VoiceIdentityPrivacyRuntime
                 break;
             case VoiceOverlaySpeakerVerdict.Alias:
                 aliasActive = true;
-                if (builtInAliasUnresolved
-                    || external.AliasPlayerId is not { } externalAlias
-                    || !IsSafeAliasTarget(externalAlias, phase)
-                    || (aliasPlayerId.HasValue && aliasPlayerId.Value != externalAlias))
+                if (external.AliasPlayerId is not { } externalAlias ||
+                    !IsSafeAliasTarget(externalAlias, phase))
                 {
                     aliasPlayerId = null;
                 }
                 else
                 {
                     aliasPlayerId = externalAlias;
+                    hideSource = false;
                 }
                 break;
         }
@@ -504,9 +459,9 @@ internal static class VoiceIdentityPrivacyRuntime
         if (local == null)
         {
             bool mustInspectViewer =
-                UsesLegacyAppearancePrivacy(phase)
-                || VoiceModRegistry.HasOverlayViewerRules
-                || VoiceModRegistry.HasOverlaySpeakerRules;
+                UsesBuiltInAppearancePrivacy(phase) ||
+                VoiceModRegistry.HasOverlayViewerRules ||
+                VoiceModRegistry.HasOverlaySpeakerRules;
             return mustInspectViewer
                 ? new ViewerEvidence(false, false, false)
                 : ViewerEvidence.KnownNormal;
@@ -516,51 +471,17 @@ internal static class VoiceIdentityPrivacyRuntime
         bool hideAll = false;
         bool dimAll = false;
 
-        if (UsesLegacyAppearancePrivacy(phase))
+        if (UsesBuiltInAppearancePrivacy(phase))
         {
-            known &= TryHasModifier(local, HerbalistConfusedName, out bool herbalistConfused);
-            hideAll |= herbalistConfused;
-
-            known &= TryGetNamedModifier(local, HypnotisedName, out var hypnotised);
-            if (hypnotised != null)
-            {
-                if (TryReadBool(hypnotised, "HysteriaActive", out bool hysteriaActive))
-                    hideAll |= hysteriaActive;
-                else
-                    known = false;
-            }
-
-            known &= TryHasModifier(local, EclipsalBlindName, out bool eclipsalBlind);
-            hideAll |= eclipsalBlind;
-
-            known &= TryHasModifier(local, GrenadierFlashName, out bool grenadierFlash);
-            if (grenadierFlash)
-            {
-                // TouMira fully blinds living non-impostors but only dims impostor-aligned/dead viewers.
-                // Dim is still treated as non-attributing in speaker-only mode; fixed/static UI may dim.
-                if (!VoiceRoleMuteState.IsVoiceDead(local) && !VoiceRoleMuteState.IsVoiceImpostor(local))
-                    hideAll = true;
-                else
-                    dimAll = true;
-            }
-
-            known &= TryHasModifier(local, HnsGlobalCamouflageName, out bool hnsGlobalCamouflage);
-            hideAll |= hnsGlobalCamouflage;
-
             if (TryReadOutfitType(local, out int localOutfitType))
             {
-                // Mushroom Mix-Up is a viewer-wide random identity scramble.
+                // Mushroom Mix-Up randomizes every visible identity for this viewer.
                 hideAll |= localOutfitType == 3;
             }
             else
             {
                 known = false;
             }
-
-            if (TryReadStaticBool("TownOfUs.Patches.HudManagerPatches", "CamouflageCommsEnabled", out bool commsCamo))
-                hideAll |= commsCamo;
-            else
-                known = false;
         }
 
         var external = VoiceModRegistry.ResolveOverlayViewerPrivacy(
@@ -580,76 +501,15 @@ internal static class VoiceIdentityPrivacyRuntime
         return new ViewerEvidence(known, hideAll, dimAll && !hideAll);
     }
 
-    private static bool TryReadSourceEvidence(
+    private static bool TryReadBuiltInSourceEvidence(
         PlayerControl source,
         VoiceGamePhase phase,
-        out bool hideSource,
-        out bool aliasActive,
-        out byte? aliasPlayerId)
+        out bool hideSource)
     {
         hideSource = false;
-        aliasActive = false;
-        aliasPlayerId = null;
-
-        // Only these explicit presentation modifiers are aliases. In particular, Ambusher.Target is
-        // an attack victim and Parasite.Controller is a control/listening relationship, not a voice identity.
-        if (!TryReadAlias(source, MorphlingMorphName, out bool morphActive, out byte? morphTarget)
-            || !TryReadAlias(source, GlitchMimicName, out bool mimicActive, out byte? mimicTarget)
-            || !TryReadAlias(source, ShapeshifterShiftName, out bool shiftActive, out byte? shiftTarget))
-        {
-            return false;
-        }
-
-        aliasActive = morphActive || mimicActive || shiftActive;
-        aliasPlayerId = SelectAliasTarget(
-            morphActive, morphTarget,
-            mimicActive, mimicTarget,
-            shiftActive, shiftTarget);
-
-        for (int i = 0; i < HiddenModifierNames.Length; i++)
-        {
-            if (!TryHasModifier(source, HiddenModifierNames[i], out bool hidden))
-                return false;
-            if (hidden)
-            {
-                hideSource = true;
-                return true;
-            }
-        }
-
-        if (!TryHasModifier(source, ParasiteInfectedName, out bool parasiteControlled))
-            return false;
 
         if (!TryReadOutfitType(source, out int outfitType))
             return false;
-
-        // Parasite itself never aliases to the victim and the victim never aliases merely because it
-        // is controlled. If the optional victim-looking-like-Parasite presentation is active (Morph),
-        // suppress attribution instead of falsely claiming the controller is speaking.
-        if (parasiteControlled && outfitType == 7)
-        {
-            hideSource = true;
-            return true;
-        }
-
-        // TouMira deliberately gives every concealment/disguise a common base modifier. Inspect the
-        // complete active set: a known Morph/Mimic plus one unknown stacked concealment is still
-        // private. Looking up only the first assignable modifier would allow that stack to leak.
-        if (!TryInspectConcealedModifierSet(
-                source,
-                morphActive,
-                mimicActive,
-                shiftActive,
-                out bool hasConcealedModifier,
-                out bool allConcealedModifiersAreRecognizedAliases))
-        {
-            return false;
-        }
-        if (hasConcealedModifier && !allConcealedModifiersAreRecognizedAliases)
-        {
-            hideSource = true;
-            return true;
-        }
 
         try
         {
@@ -664,15 +524,15 @@ internal static class VoiceIdentityPrivacyRuntime
             return false;
         }
 
-        // Known identity-changing/anonymous outfit values that did not have an authoritative alias
-        // above are unsafe. HorseWrangler (2) only changes body shape and is not an identity disguise.
-        if (!aliasActive && outfitType != 0 && outfitType != 2)
+        // 0 is the normal outfit and 2 is HorseWrangler's body-shape-only presentation. Every other
+        // outfit changes or obscures identity. A registered source rule may replace this with a safe
+        // explicit alias; without one the privacy-preserving result is to hide the source.
+        if (outfitType is not (0 or 2))
         {
             hideSource = true;
             return true;
         }
 
-        // Covers Shy and future transparency-based concealments that do not change outfit type.
         if (!TryReadBodyAlpha(source, out float bodyAlpha))
             return false;
         if (bodyAlpha < 0.95f)
@@ -686,10 +546,7 @@ internal static class VoiceIdentityPrivacyRuntime
             try
             {
                 if (!source.Visible || source.shouldAppearInvisible)
-                {
                     hideSource = true;
-                    return true;
-                }
             }
             catch
             {
@@ -697,195 +554,7 @@ internal static class VoiceIdentityPrivacyRuntime
             }
         }
 
-        if (aliasActive)
-        {
-            if (aliasPlayerId is not { } targetId || !IsSafeAliasTarget(targetId, phase))
-                aliasPlayerId = null;
-        }
-
         return true;
-    }
-
-    private static byte? SelectAliasTarget(
-        bool firstActive,
-        byte? firstTarget,
-        bool secondActive,
-        byte? secondTarget,
-        bool thirdActive,
-        byte? thirdTarget)
-    {
-        byte? selected = null;
-        bool hasSelection = false;
-        if (!MergeAlias(firstActive, firstTarget, ref selected, ref hasSelection)
-            || !MergeAlias(secondActive, secondTarget, ref selected, ref hasSelection)
-            || !MergeAlias(thirdActive, thirdTarget, ref selected, ref hasSelection))
-        {
-            return null;
-        }
-        return selected;
-    }
-
-    private static bool MergeAlias(bool active, byte? target, ref byte? selected, ref bool hasSelection)
-    {
-        if (!active) return true;
-        if (!hasSelection)
-        {
-            selected = target;
-            hasSelection = true;
-            return true;
-        }
-        return selected == target;
-    }
-
-    private static bool TryInspectConcealedModifierSet(
-        PlayerControl player,
-        bool morphActive,
-        bool mimicActive,
-        bool shiftActive,
-        out bool hasConcealedModifier,
-        out bool allConcealedModifiersAreRecognizedAliases)
-    {
-        hasConcealedModifier = false;
-        allConcealedModifiersAreRecognizedAliases = true;
-
-        var concealedType = ResolveType(ConcealedModifierName);
-        if (concealedType == null)
-            return true; // This TouMira version has no common concealment base.
-
-        var extensionsType = ResolveType(ModifierExtensionsName);
-        var componentType = ResolveType(ModifierComponentName);
-        if (extensionsType == null || componentType == null)
-            return false;
-
-        var method = ResolveGetModifierComponentMethod(extensionsType, componentType);
-        var args = _getModifierComponentArguments;
-        if (method == null || args == null || args.Length == 0)
-            return false;
-
-        object? component;
-        try
-        {
-            Array.Clear(args, 0, args.Length);
-            args[0] = player;
-            component = method.Invoke(null, args);
-        }
-        catch
-        {
-            return false;
-        }
-
-        // A component cannot have an active modifier before it exists. This is the expected lobby
-        // state on some Mira builds and is therefore a known-empty set, not an inspection failure.
-        if (component == null)
-            return true;
-
-        object? activeModifiers;
-        try
-        {
-            ResolveActiveModifiersMember(component.GetType());
-            activeModifiers = _activeModifiersProperty?.GetValue(component)
-                              ?? _activeModifiersField?.GetValue(component);
-        }
-        catch
-        {
-            return false;
-        }
-
-        if (activeModifiers == null)
-            return false;
-
-        return TryInspectConcealedModifierCollection(
-            activeModifiers,
-            concealedType,
-            morphActive,
-            mimicActive,
-            shiftActive,
-            out hasConcealedModifier,
-            out allConcealedModifiersAreRecognizedAliases);
-    }
-
-    private static bool TryInspectConcealedModifierCollection(
-        object activeModifiers,
-        Type concealedType,
-        bool morphActive,
-        bool mimicActive,
-        bool shiftActive,
-        out bool hasConcealedModifier,
-        out bool allConcealedModifiersAreRecognizedAliases)
-    {
-        hasConcealedModifier = false;
-        allConcealedModifiersAreRecognizedAliases = true;
-
-        try
-        {
-            if (activeModifiers is IEnumerable enumerable)
-            {
-                foreach (object? modifier in enumerable)
-                {
-                    InspectConcealedModifier(
-                        modifier,
-                        concealedType,
-                        morphActive,
-                        mimicActive,
-                        shiftActive,
-                        ref hasConcealedModifier,
-                        ref allConcealedModifiersAreRecognizedAliases);
-                }
-                return true;
-            }
-
-            // Some IL2CPP collection wrappers do not expose System.Collections.IEnumerable even
-            // though they retain Count/get_Item. Support that shape without accepting an unreadable set.
-            var collectionType = activeModifiers.GetType();
-            var countProperty = collectionType.GetProperty("Count", BindingFlags.Public | BindingFlags.Instance);
-            var itemProperty = collectionType.GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
-            if (countProperty?.GetValue(activeModifiers) is not int count || itemProperty == null)
-                return false;
-
-            for (int i = 0; i < count; i++)
-            {
-                object? modifier = itemProperty.GetValue(activeModifiers, [i]);
-                InspectConcealedModifier(
-                    modifier,
-                    concealedType,
-                    morphActive,
-                    mimicActive,
-                    shiftActive,
-                    ref hasConcealedModifier,
-                    ref allConcealedModifiersAreRecognizedAliases);
-            }
-            return true;
-        }
-        catch
-        {
-            hasConcealedModifier = false;
-            allConcealedModifiersAreRecognizedAliases = false;
-            return false;
-        }
-    }
-
-    private static void InspectConcealedModifier(
-        object? modifier,
-        Type concealedType,
-        bool morphActive,
-        bool mimicActive,
-        bool shiftActive,
-        ref bool hasConcealedModifier,
-        ref bool allConcealedModifiersAreRecognizedAliases)
-    {
-        if (modifier == null || !concealedType.IsInstanceOfType(modifier))
-            return;
-
-        hasConcealedModifier = true;
-        string? fullName = modifier.GetType().FullName;
-        if (!VoiceConcealedModifierSetPolicy.IsRecognizedActiveAlias(
-                fullName,
-                morphActive,
-                mimicActive,
-                shiftActive))
-        {
-            allConcealedModifiersAreRecognizedAliases = false;
-        }
     }
 
     private static bool IsSafeAliasTarget(byte targetId, VoiceGamePhase phase)
@@ -893,22 +562,16 @@ internal static class VoiceIdentityPrivacyRuntime
         if (targetId == byte.MaxValue)
             return false;
 
-        if (!PlayerLookup.TryGetValue(targetId, out var target)
-            || target == null
-            || target.Data == null)
+        if (!PlayerLookup.TryGetValue(targetId, out var target) ||
+            target == null ||
+            target.Data == null)
         {
-            // Public aliases point at an already-published identity slot. During Meeting/Exile scene
-            // rebuilds the target control may be absent for a frame even though the authenticated
-            // roster/card remains authoritative. Tasks never get this fallback.
+            // Meeting/exile can rebuild controls while the public roster slot remains authoritative.
             return HasStablePublicIdentity(targetId, phase);
         }
 
         if (target.Data.Disconnected)
             return false;
-
-        // A meeting/public-results slot already exposes this player's stable identity. An explicit
-        // third-party rule may still alias to that slot, but task-world camouflage on the target must
-        // not make an otherwise valid public slot fail closed.
         if (!VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
             return true;
 
@@ -922,39 +585,20 @@ internal static class VoiceIdentityPrivacyRuntime
             return false;
         }
 
-        if (!TryReadOutfitType(target, out int targetOutfitType))
+        if (!TryReadOutfitType(target, out int targetOutfitType) ||
+            targetOutfitType is not (0 or 2))
             return false;
-        if (targetOutfitType is not (0 or 2))
-            return false;
-
-        // An alias must not route attribution onto a target with any active concealment, including
-        // a stacked/unknown modifier whose current outfit happens to look normal.
-        if (!TryInspectConcealedModifierSet(
-                target,
-                morphActive: false,
-                mimicActive: false,
-                shiftActive: false,
-                out bool targetHasConcealedModifier,
-                out _)
-            || targetHasConcealedModifier)
-        {
-            return false;
-        }
-
         if (!TryReadBodyAlpha(target, out float bodyAlpha) || bodyAlpha < 0.95f)
             return false;
 
         try
         {
-            if (!target.Visible || target.shouldAppearInvisible)
-                return false;
+            return target.Visible && !target.shouldAppearInvisible;
         }
         catch
         {
             return false;
         }
-
-        return true;
     }
 
     private static VoiceIdentityPrivacyResolution ResolveAndCacheCandidate(
@@ -1015,199 +659,6 @@ internal static class VoiceIdentityPrivacyRuntime
         return false;
     }
 
-    private static bool TryReadAlias(PlayerControl source, string modifierName, out bool active, out byte? targetId)
-    {
-        active = false;
-        targetId = null;
-        if (!TryGetNamedModifier(source, modifierName, out var modifier))
-            return false;
-        if (modifier == null)
-            return true;
-
-        active = true;
-        try
-        {
-            object? value = modifier.GetType().GetProperty("Target")?.GetValue(modifier);
-            if (value is PlayerControl target && target != null)
-                targetId = target.PlayerId;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool TryHasModifier(PlayerControl player, string modifierName, out bool present)
-    {
-        present = false;
-        if (!TryGetNamedModifier(player, modifierName, out var modifier))
-            return false;
-        present = modifier != null;
-        return true;
-    }
-
-    private static bool TryGetNamedModifier(PlayerControl player, string modifierName, out object? modifier)
-    {
-        modifier = null;
-        var modifierType = ResolveType(modifierName);
-        if (modifierType == null)
-            return true; // This TouMira version simply does not contain that effect.
-
-        var extensionsType = ResolveType(ModifierExtensionsName);
-        if (extensionsType == null)
-            return false;
-
-        var method = ResolveGetModifierMethod(extensionsType);
-        var args = _getModifierArguments;
-        if (method == null || args == null || args.Length < 2)
-            return false;
-
-        try
-        {
-            Array.Clear(args, 0, args.Length);
-            args[0] = player;
-            args[1] = modifierType;
-            modifier = method.Invoke(null, args);
-            return true;
-        }
-        catch
-        {
-            modifier = null;
-            return false;
-        }
-    }
-
-    private static MethodInfo? ResolveGetModifierMethod(Type owner)
-    {
-        if (_getModifierMethod != null && _getModifierMethodOwner == owner)
-            return _getModifierMethod;
-
-        try
-        {
-            foreach (var method in owner.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (method.Name != "GetModifier" || method.IsGenericMethodDefinition)
-                    continue;
-                var parameters = method.GetParameters();
-                if (parameters.Length >= 2
-                    && parameters[0].ParameterType == typeof(PlayerControl)
-                    && parameters[1].ParameterType == typeof(Type))
-                {
-                    _getModifierMethod = method;
-                    _getModifierMethodOwner = owner;
-                    _getModifierArguments = new object?[parameters.Length];
-                    return method;
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private static MethodInfo? ResolveGetModifierComponentMethod(Type owner, Type componentType)
-    {
-        if (_getModifierComponentMethod != null
-            && _getModifierComponentMethodOwner == owner
-            && componentType.IsAssignableFrom(_getModifierComponentMethod.ReturnType))
-        {
-            return _getModifierComponentMethod;
-        }
-
-        _getModifierComponentMethod = null;
-        _getModifierComponentMethodOwner = owner;
-        _getModifierComponentArguments = null;
-        try
-        {
-            foreach (var method in owner.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            {
-                if (method.Name != "GetModifierComponent" || method.IsGenericMethodDefinition)
-                    continue;
-                var parameters = method.GetParameters();
-                if (parameters.Length == 1
-                    && parameters[0].ParameterType == typeof(PlayerControl)
-                    && componentType.IsAssignableFrom(method.ReturnType))
-                {
-                    _getModifierComponentMethod = method;
-                    _getModifierComponentArguments = new object?[1];
-                    return method;
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private static void ResolveActiveModifiersMember(Type owner)
-    {
-        if (_activeModifiersOwner == owner)
-            return;
-
-        _activeModifiersOwner = owner;
-        _activeModifiersProperty = null;
-        _activeModifiersField = null;
-        try
-        {
-            _activeModifiersProperty = owner.GetProperty(
-                "ActiveModifiers",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (_activeModifiersProperty == null)
-            {
-                _activeModifiersField = owner.GetField(
-                    "ActiveModifiers",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            }
-        }
-        catch
-        {
-            _activeModifiersProperty = null;
-            _activeModifiersField = null;
-        }
-    }
-
-    private static Type? ResolveType(string fullName)
-        => SoftDependencyTypeResolver.ResolveExact(fullName);
-
-    private static bool TryReadBool(object instance, string propertyName, out bool value)
-    {
-        value = false;
-        try
-        {
-            object? raw = instance.GetType().GetProperty(propertyName)?.GetValue(instance);
-            if (raw is not bool boolValue) return false;
-            value = boolValue;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool TryReadStaticBool(string typeName, string memberName, out bool value)
-    {
-        value = false;
-        var type = ResolveType(typeName);
-        if (type == null) return true;
-        try
-        {
-            object? raw = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null)
-                          ?? type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-            if (raw is not bool boolValue) return false;
-            value = boolValue;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     private static bool TryReadOutfitType(PlayerControl player, out int outfitType)
     {

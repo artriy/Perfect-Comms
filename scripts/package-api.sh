@@ -6,16 +6,16 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$root/PerfectComms.csproj"
 package_project="$root/packaging/PerfectComms.Api/PerfectComms.Api.csproj"
 smoke_project="$root/packaging/PerfectComms.Api.Smoke/PerfectComms.Api.Smoke.csproj"
-source_version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
-package="$root/artifacts/PerfectComms.Api.$source_version.nupkg"
+api_package_version="$(grep -m1 '<PerfectCommsApiPackageVersion>' "$project" | sed -E 's/.*<PerfectCommsApiPackageVersion>([^<]+)<\/PerfectCommsApiPackageVersion>.*/\1/')"
+package="$root/artifacts/PerfectComms.Api.$api_package_version.nupkg"
 local_source="$root/artifacts"
 smoke_packages="$root/packaging/.nuget-smoke"
 dotnet_package_project="$package_project"
 dotnet_smoke_project="$smoke_project"
 dotnet_local_source="$local_source"
 
-if [[ ! "$source_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-	echo "invalid Perfect Comms package version: $source_version" >&2
+if [[ ! "$api_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+	echo "invalid Perfect Comms API package version: $api_package_version" >&2
 	exit 1
 fi
 
@@ -47,16 +47,16 @@ mkdir -p "$root/artifacts"
 rm -f "$package"
 dotnet pack "$dotnet_package_project" -c Release --nologo \
 	-p:PerfectCommsConfiguration="$configuration" \
-	-p:PerfectCommsApiPackageVersion="$source_version"
+	-p:PerfectCommsApiPackageVersion="$api_package_version"
 
 "${asset_python[@]}" "$root/scripts/verify-nuget-package.py" \
-	"$package" --expected-version "$source_version"
+	"$package" --expected-version "$api_package_version"
 
 rm -rf "$root/packaging/PerfectComms.Api.Smoke/bin" \
 	"$root/packaging/PerfectComms.Api.Smoke/obj" \
 	"$smoke_packages"
 NUGET_PACKAGES="$smoke_packages" dotnet build "$dotnet_smoke_project" -c Release --nologo \
-	-p:PerfectCommsApiPackageVersion="$source_version" \
+	-p:PerfectCommsApiPackageVersion="$api_package_version" \
 	-p:RestoreAdditionalProjectSources="$dotnet_local_source"
 
 smoke_output="$root/packaging/PerfectComms.Api.Smoke/bin/Release/net6.0"

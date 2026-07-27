@@ -13,14 +13,14 @@ internal static class VoiceRoomSettingsRpc
     internal const byte LegacySnapshotKind = 1;
     private const byte RequestKind = 2;
     internal const byte SnapshotKind = 3;
-    internal const byte SnapshotSchema = 1;
+    internal const byte SnapshotSchema = 2;
     private const int MaxSyncedModOptions = 256;
 
     // Schema 1 is a self-contained, exact binary layout. The old kind-1 envelope had no
     // schema marker and was extended in-place repeatedly; its remaining-byte heuristics can
     // misread later fields at earlier offsets, so it must never enter the current decoder.
     private const int SnapshotHeaderBytes = 3; // schema:byte + bodyLength:ushort
-    private const int FixedSettingsBytes = 56;
+    private const int FixedSettingsBytes = 36;
     private const int ModOptionBytes = 9; // keyHash:int + isEnum:byte + value:int
     private const int MaxBackendServerUrlBytes = 512;
     internal const int MaxSnapshotPayloadBytes = SnapshotHeaderBytes + FixedSettingsBytes + 2
@@ -176,29 +176,12 @@ internal static class VoiceRoomSettingsRpc
         WriteBoolean(payload, ref offset, settings.CameraCanHear);
         WriteBoolean(payload, ref offset, settings.TeamRadio);
         WriteBoolean(payload, ref offset, settings.TeamRadioImpostors);
-        WriteBoolean(payload, ref offset, settings.TeamRadioVampires);
-        WriteBoolean(payload, ref offset, settings.TeamRadioLovers);
         WriteBoolean(payload, ref offset, settings.OnlyGhostsCanTalk);
         WriteBoolean(payload, ref offset, settings.OnlyMeetingOrLobby);
         WriteBoolean(payload, ref offset, settings.OnlyMeetingOrLobbyAffectsGhosts);
-        WriteBoolean(payload, ref offset, settings.MuteBlackmailedInMeetings);
-        WriteBoolean(payload, ref offset, settings.MuteBlackmailedNextRound);
-        WriteBoolean(payload, ref offset, settings.MuteJailedInMeetings);
-        WriteBoolean(payload, ref offset, settings.JailorCanUnmuteJailed);
-        WriteBoolean(payload, ref offset, settings.MuteParasiteControlled);
-        WriteBoolean(payload, ref offset, settings.MutePuppeteerControlled);
-        WriteBoolean(payload, ref offset, settings.CrewpostorUsesImpostorVoice);
-        WriteBoolean(payload, ref offset, settings.MuteSwooperWhileSwooped);
-        WriteInt32(payload, ref offset, settings.MediumGhostVoice);
-        WriteBoolean(payload, ref offset, settings.MuteGlitchHacked);
-        WriteBoolean(payload, ref offset, settings.MuffleBlindedOrFlashedHearing);
-        WriteBoolean(payload, ref offset, settings.MuffleHypnotizedDuringHysteria);
         WriteBoolean(payload, ref offset, settings.TeamRadioInMeetings);
-        WriteBoolean(payload, ref offset, settings.PuppeteerHearFromVictim);
-        WriteBoolean(payload, ref offset, settings.ParasiteHearFromVictim);
         WriteBoolean(payload, ref offset, settings.TeamRadioInTasks);
         WriteBoolean(payload, ref offset, settings.GhostsHearEachOtherUnlimited);
-        WriteBoolean(payload, ref offset, settings.JailPersistsAfterJailorDeath);
         WriteBoolean(payload, ref offset, settings.GracePeriodEnabled);
         WriteSingle(payload, ref offset, settings.GracePeriodSeconds);
 
@@ -287,34 +270,12 @@ internal static class VoiceRoomSettingsRpc
             || !TryReadBoolean(payload, ref offset, out bool cameraCanHear)
             || !TryReadBoolean(payload, ref offset, out bool teamRadio)
             || !TryReadBoolean(payload, ref offset, out bool teamRadioImpostors)
-            || !TryReadBoolean(payload, ref offset, out bool teamRadioVampires)
-            || !TryReadBoolean(payload, ref offset, out bool teamRadioLovers)
             || !TryReadBoolean(payload, ref offset, out bool onlyGhostsCanTalk)
             || !TryReadBoolean(payload, ref offset, out bool onlyMeetingOrLobby)
             || !TryReadBoolean(payload, ref offset, out bool onlyMeetingOrLobbyAffectsGhosts)
-            || !TryReadBoolean(payload, ref offset, out bool muteBlackmailedInMeetings)
-            || !TryReadBoolean(payload, ref offset, out bool muteBlackmailedNextRound)
-            || !TryReadBoolean(payload, ref offset, out bool muteJailedInMeetings)
-            || !TryReadBoolean(payload, ref offset, out bool jailorCanUnmuteJailed)
-            || !TryReadBoolean(payload, ref offset, out bool muteParasiteControlled)
-            || !TryReadBoolean(payload, ref offset, out bool mutePuppeteerControlled)
-            || !TryReadBoolean(payload, ref offset, out bool crewpostorUsesImpostorVoice)
-            || !TryReadBoolean(payload, ref offset, out bool muteSwooperWhileSwooped))
-        {
-            reason = "invalid-boolean";
-            return false;
-        }
-
-        int mediumGhostVoice = ReadInt32(payload, ref offset);
-        if (!TryReadBoolean(payload, ref offset, out bool muteGlitchHacked)
-            || !TryReadBoolean(payload, ref offset, out bool muffleBlindedOrFlashedHearing)
-            || !TryReadBoolean(payload, ref offset, out bool muffleHypnotizedDuringHysteria)
             || !TryReadBoolean(payload, ref offset, out bool teamRadioInMeetings)
-            || !TryReadBoolean(payload, ref offset, out bool puppeteerHearFromVictim)
-            || !TryReadBoolean(payload, ref offset, out bool parasiteHearFromVictim)
             || !TryReadBoolean(payload, ref offset, out bool teamRadioInTasks)
             || !TryReadBoolean(payload, ref offset, out bool ghostsHearEachOtherUnlimited)
-            || !TryReadBoolean(payload, ref offset, out bool jailPersistsAfterJailorDeath)
             || !TryReadBoolean(payload, ref offset, out bool gracePeriodEnabled))
         {
             reason = "invalid-boolean";
@@ -394,29 +355,12 @@ internal static class VoiceRoomSettingsRpc
             cameraCanHear,
             teamRadio,
             teamRadioImpostors,
-            teamRadioVampires,
-            teamRadioLovers,
             onlyGhostsCanTalk,
             onlyMeetingOrLobby,
             onlyMeetingOrLobbyAffectsGhosts,
-            muteBlackmailedInMeetings,
-            muteBlackmailedNextRound,
-            muteJailedInMeetings,
-            jailorCanUnmuteJailed,
-            muteParasiteControlled,
-            mutePuppeteerControlled,
-            crewpostorUsesImpostorVoice,
-            muteSwooperWhileSwooped,
-            mediumGhostVoice,
-            muteGlitchHacked,
-            muffleBlindedOrFlashedHearing,
-            muffleHypnotizedDuringHysteria,
             teamRadioInMeetings,
-            puppeteerHearFromVictim,
-            parasiteHearFromVictim,
             teamRadioInTasks,
             ghostsHearEachOtherUnlimited,
-            jailPersistsAfterJailorDeath,
             gracePeriodEnabled,
             gracePeriodSeconds).Clamp();
         modOptions = parsedOptions;

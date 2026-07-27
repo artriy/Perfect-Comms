@@ -2169,7 +2169,7 @@ public static class PingTrackerPatch
     private static string GetDisplayName(PlayerControl? player)
     {
         if (player?.Data == null) return "?";
-        // Hide name of a concealed (camo/mixed-up/swooped) speaker so the overlay can't identify them.
+        // Hide the name of a concealed speaker so the overlay cannot identify them.
         if (!_fixedAllPlayers && MeetingHud.Instance == null && CrewmateAvatarRenderer.IsConcealed(player))
             return string.Empty;
         try

@@ -39,7 +39,7 @@ public static class VoiceChatKeybinds
         TeamRadio = new VoiceKeybind(config, s, "Team Radio (Hold)", KeyCode.V,
             helpText: "While held, transmits over your selected private team channel when your role and the host settings allow it.");
         CycleTeamRadioChannel = new VoiceKeybind(config, s, "Cycle Team Radio Channel", KeyCode.G,
-            helpText: "Cycles through the team-radio channels available to you, such as Impostors, Vampires, or Lovers.");
+            helpText: "Cycles through the built-in and mod-registered team-radio channels available to you.");
         PushToTalk = new VoiceKeybind(config, s, "Push To Talk (Hold)", KeyCode.C,
             helpText: "While held, transmits your microphone when Mic Mode is set to Push To Talk.");
         ToggleMicMode = new VoiceKeybind(config, s, "Toggle Open Mic / Push To Talk", KeyCode.None,

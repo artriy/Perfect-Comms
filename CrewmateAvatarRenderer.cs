@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using Il2CppInterop.Runtime.Injection;
 using PerfectComms.Api;
 using UnityEngine;
@@ -35,13 +34,10 @@ internal static class CrewmateAvatarRenderer
 
     private static readonly Dictionary<int, Sprite> BaseSpriteCache = new();
     private static readonly Dictionary<int, Sprite> RainbowSpriteCache = new();
-    // Memoized "is this color id the animated Rainbow color?" so the per-frame ring/glow/highlight color path
-    // never repeats IsRainbowColorId's assembly-scanning reflection. Cleared per game by ClearCache().
+    // Memoized because every ring/glow/highlight path can query the same color each frame.
+    // Registered animated-color rules and vanilla palette fallbacks are evaluated once per game.
     private static readonly Dictionary<int, bool> RainbowColorIdCache = new();
     private static readonly Dictionary<int, Sprite?> StaticLeftSpriteCache = new();
-    private static MethodInfo? _townOfUsRainbowMethod;
-    private static Type? _townOfUsRainbowMethodOwner;
-    private static readonly object?[] TownOfUsRainbowArguments = new object?[1];
     private static Color32[]? templatePixels;
     private static int templateWidth;
     private static int templateHeight;
@@ -197,8 +193,8 @@ internal static class CrewmateAvatarRenderer
     private static bool RenderAsConcealed(PlayerControl pc)
         => !ShowRealIdentity && IsConcealed(pc);
 
-    // True when the player's live outfit is a disguise (morph/shapeshift/mimic) that differs from their real
-    // default outfit. Used to suppress the live (disguised) cosmetics when the bar should show real identity.
+    // True when the player's live outfit differs from their stable default identity. Used to suppress
+    // live disguise cosmetics when the bar should show the authenticated real identity.
     private static bool IsDisguised(PlayerControl pc)
     {
         try
@@ -1633,9 +1629,9 @@ internal static class CrewmateAvatarRenderer
     {
         if (pc?.Data == null) return new Color(0.18f, 0.80f, 0.44f, 1f); // voice fallback green
         if (RenderAsConcealed(pc)) return (Color)ConcealedColor;
-        // A Rainbow-colored player's palette swatch is solid black (the body only LOOKS rainbow because Town of Us
-        // rewrites its material every frame). Return the SAME animated color the body icon shows this frame so the
-        // ring/glow + meeting highlight cycle rainbow in lockstep instead of rendering a dead black blob.
+        // A registered animated color may use a static palette swatch while its body material changes
+        // every frame. Return the same animated color the body icon shows this frame so ring/glow and
+        // meeting highlights stay in lockstep.
         if (IsRainbowPlayer(pc)) return (Color)RainbowBodyColor(GetRainbowFrameIndex(Time.time));
         // Clamp via the same index the body uses so ring/glow never disagrees with the body.
         return (Color)Palette.PlayerColors[ClampColorId(GetPlayerColorId(pc))];
@@ -1643,8 +1639,8 @@ internal static class CrewmateAvatarRenderer
 
     /// <summary>
     /// Settings rosters pair this swatch with the player's real name, so they must always use the
-    /// stable default identity. Reading the live Morph/Mimic/Swoop appearance here would itself be
-    /// an identity leak even when every speaking meter is correctly hidden.
+    /// stable default identity. Reading a live disguise or concealment here would itself leak
+    /// identity even when every speaking meter is correctly hidden.
     /// </summary>
     internal static Color GetStableIdentityPaletteColor(PlayerControl? pc)
     {
@@ -1684,8 +1680,8 @@ internal static class CrewmateAvatarRenderer
         catch { return false; }
     }
 
-    // Per-frame-safe wrapper over IsRainbowColorId: that scan walks every loaded assembly via reflection, far too
-    // costly for GetPaletteColor's per-frame-per-speaker callers, so memoize by color id (reset each game).
+    // Per-frame-safe wrapper over animated-color resolution. Memoize by color id and reset each game
+    // so repeated per-frame-per-speaker callers do not rerun registered rules or palette checks.
     private static bool IsRainbowColorIdCached(int colorId)
     {
         if (RainbowColorIdCache.TryGetValue(colorId, out bool cached)) return cached;
@@ -1694,14 +1690,9 @@ internal static class CrewmateAvatarRenderer
         return result;
     }
 
-    // Whether the speaker is hidden by the game and must render as a grey, nameless, cosmetic-less blob (never
-    // leaking their real color/cosmetics/name). CurrentOutfitType (vanilla + Town of Us share the space):
-    //   3=MushroomMixUp, 4=Swooper(invisible), 6=Camouflage, 8=PlayerNameOnly, 9=PlayerOnly(ghost fade).
-    // Disguises (1=Shapeshift, 5=Mimic, 7=Morph) intentionally show the TARGET's look, so they are NOT concealed.
-    // Some TOU concealments keep CurrentOutfitType==0 (Default) and hide identity only via the outfit fields, so
-    // type 0 is additionally treated as concealed when its outfit looks camouflaged (HNS global camo stamps the
-    // name "???"; Venerer camo empties all cosmetics and blanks the name). A normal type-0 player keeps a real
-    // (non-empty) name, so is never falsely concealed.
+    // Built-in concealment covers Perfect Comms communications-sabotage privacy and vanilla Mushroom
+    // Mix-Up. Role mods project every other concealment through PerfectCommsApi overlay rules, so this
+    // renderer does not discover or interpret their runtime types.
     // Comms sabotage participates in speaking-attribution privacy. Dynamic speaker icons may still use this
     // neutral fallback, while fixed-roster and meeting surfaces retain their stable real identities with rings off.
     private static bool CommsConcealmentActive()
@@ -1720,17 +1711,7 @@ internal static class CrewmateAvatarRenderer
         if (CommsConcealmentActive()) return true;
         try
         {
-            int outfitType = (int)pc.CurrentOutfitType;
-            if (outfitType == 3 || outfitType == 4 || outfitType == 6 || outfitType == 8 || outfitType == 9)
-                return true;
-            if (outfitType == 0)
-            {
-                var o = GetDisplayOutfit(pc);
-                if (o.PlayerName == "???") return true;            // HNS global camouflage (only writer of "???")
-                if (IsEmptyCosmeticId(o.HatId) && IsEmptyCosmeticId(o.SkinId) && IsEmptyCosmeticId(o.VisorId)
-                    && string.IsNullOrEmpty(o.PlayerName)) return true; // Venerer camo: type 0, no cosmetics, no name
-            }
-            return false;
+            return (int)pc.CurrentOutfitType == 3;
         }
         catch
         {
@@ -1854,9 +1835,6 @@ internal static class CrewmateAvatarRenderer
         {
             if (colorId < 0 || colorId >= Palette.ColorNames.Length) return false;
             if (VoiceModRegistry.IsAnimatedColor(colorId)) return true;
-            if (!VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira)
-                && TryIsTownOfUsRainbowColor(colorId, out bool isTownOfUsRainbow))
-                return isTownOfUsRainbow;
             return IsRainbowColorName(Palette.GetColorName(colorId))
                 || IsRainbowColorName(Palette.ColorNames[colorId].ToString())
                 || (colorId < Palette.PlayerColors.Length && IsZeroColor(Palette.PlayerColors[colorId]));
@@ -1871,40 +1849,6 @@ internal static class CrewmateAvatarRenderer
         => !string.IsNullOrWhiteSpace(name)
            && name.IndexOf("Rainbow", StringComparison.OrdinalIgnoreCase) >= 0;
 
-    private static bool TryIsTownOfUsRainbowColor(int colorId, out bool isRainbow)
-    {
-        isRainbow = false;
-        try
-        {
-            var type = SoftDependencyTypeResolver.ResolveExact("TownOfUs.Modules.RainbowMod.RainbowUtils");
-            if (type == null) return false;
-
-            if (_townOfUsRainbowMethod == null || _townOfUsRainbowMethodOwner != type)
-            {
-                _townOfUsRainbowMethod = type.GetMethod(
-                    "IsRainbow",
-                    BindingFlags.Public | BindingFlags.Static,
-                    null,
-                    new[] { typeof(int) },
-                    null);
-                _townOfUsRainbowMethodOwner = type;
-            }
-
-            if (_townOfUsRainbowMethod == null) return false;
-            TownOfUsRainbowArguments[0] = colorId;
-            if (_townOfUsRainbowMethod.Invoke(null, TownOfUsRainbowArguments) is not bool value)
-                return false;
-
-            isRainbow = value;
-            return true;
-        }
-        catch
-        {
-            isRainbow = false;
-        }
-
-        return false;
-    }
 
     private static bool IsZeroColor(Color32 color)
         => color.r == 0 && color.g == 0 && color.b == 0;

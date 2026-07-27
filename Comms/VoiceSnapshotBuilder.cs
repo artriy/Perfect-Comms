@@ -37,43 +37,21 @@ internal static class VoiceSnapshotBuilder
             : VoicePlayerTraits.None;
         bool localVoiceDead = localBaseDead || (localTraits & VoicePlayerTraits.VoiceDead) != 0;
 
-        // Resolve once: is the LOCAL player controlling a victim (Puppeteer/Parasite)? Used to relocate/augment
-        // their proximity hearing to the victim's surroundings when the host has the matching toggle on.
         VoiceControlHearingMode localControlMode = VoiceControlHearingMode.None;
         Vector2 localControlledVictimPos = default;
         float localControlledVictimLight = -1f;
-        if (local != null && VoiceRoleMuteState.TryGetLocalControlledVictim(local, out var ctrlMode, out var ctrlVictim))
-        {
-            try
-            {
-                localControlledVictimPos = (Vector2)ctrlVictim.transform.position;
-                localControlledVictimLight = ResolveLocalLightRadius(ctrlVictim);
-                localControlMode = ctrlMode;
-            }
-            catch
-            {
-                localControlMode = VoiceControlHearingMode.None;
-            }
-        }
-
-        // Third-party mod listener-origin override (PerfectComms.Api Primitive 3). Reuses the
-        // control-hearing fields/branch already consumed by the calculator. A built-in TOU control
-        // takes precedence; the override only applies when no built-in control hearing is active.
         ExternalVoiceState localExternal = ExternalVoiceState.None;
         if (local != null)
         {
-            localExternal = VoiceModRegistry.ResolvePlayer(local, apiPhase, isLocal: true,
+            localExternal = VoiceModRegistry.ResolvePlayer(
+                local,
+                apiPhase,
+                isLocal: true,
                 isDead: localVoiceDead);
-            var settings = VoiceRoomSettingsState.Current;
-            bool builtInOriginActive =
-                localControlMode == VoiceControlHearingMode.PuppeteerSwap && settings.PuppeteerHearFromVictim ||
-                localControlMode == VoiceControlHearingMode.ParasiteAdditive && settings.ParasiteHearFromVictim;
-            if (!builtInOriginActive && localExternal.ListenerActive)
+            if (localExternal.ListenerActive)
             {
                 localControlledVictimPos = localExternal.ListenerOrigin;
                 localControlledVictimLight = localExternal.ListenerLightRadius;
-                // Use the External* modes so the calculator applies them unconditionally, without
-                // gating on the TOU-specific PuppeteerHearFromVictim/ParasiteHearFromVictim toggles.
                 localControlMode = localExternal.ListenerReplace
                     ? VoiceControlHearingMode.ExternalReplace
                     : VoiceControlHearingMode.ExternalAdditive;
@@ -92,27 +70,6 @@ internal static class VoiceSnapshotBuilder
             var data = player.Data;
             int clientId = ResolveClientId(player, data);
             string name = data?.PlayerName ?? player.name ?? "Unknown";
-            VoiceRoleMuteState.GetPlayerRoleState(
-                player,
-                out bool isBlackmailed,
-                out bool isJailed,
-                out byte jailorId,
-                out bool isParasiteControlled,
-                out bool isPuppeteerControlled,
-                out bool isCrewpostor,
-                out bool isVampire,
-                out bool isLover,
-                out byte loverPartnerId,
-                out bool isBlackmailedNextRound,
-                out bool isSwooped,
-                out bool isGlitchHacked);
-            VoiceRoleMuteState.GetPlayerMediumVoiceState(
-                player,
-                out bool isMedium,
-                out bool hasMediumSpirit,
-                out Vector2 mediumSpiritPosition,
-                out bool isMediatedGhost,
-                out byte mediatingMediumId);
 
             bool dataDead = data?.IsDead == true;
             bool roleOnlyDead = !dataDead && data?.Role?.IsDead == true;
@@ -146,40 +103,29 @@ internal static class VoiceSnapshotBuilder
                     voiceDead),
             };
             players.Add(new VoicePlayerSnapshot(
-                player.PlayerId,
-                clientId,
-                name,
-                (Vector2)player.transform.position,
-                playerIsLocal,
-                voiceDead,
-                voiceSpectator,
-                data?.Role?.IsImpostor == true ||
-                (VoiceRoomSettingsState.Current.CrewpostorUsesImpostorVoice && isCrewpostor) ||
-                (traits & VoicePlayerTraits.ImpostorVoice) != 0,
-                isVampire,
-                isLover,
-                loverPartnerId,
-                player.inVent,
-                data?.Disconnected == true,
-                player.isDummy || player.notRealPlayer,
-                player.gameObject != null && player.gameObject.activeInHierarchy,
-                isBlackmailed,
-                isJailed,
-                jailorId,
-                isParasiteControlled,
-                isPuppeteerControlled,
-                isBlackmailedNextRound,
-                isSwooped,
-                isMedium,
-                hasMediumSpirit,
-                mediumSpiritPosition,
-                isMediatedGhost,
-                mediatingMediumId,
-                playerIsLocal ? localControlMode : VoiceControlHearingMode.None,
-                playerIsLocal ? localControlledVictimPos : default,
-                playerIsLocal ? localControlledVictimLight : -1f,
-                external,
-                IsGlitchHacked: isGlitchHacked));
+                PlayerId: player.PlayerId,
+                ClientId: clientId,
+                PlayerName: name,
+                Position: (Vector2)player.transform.position,
+                IsLocal: playerIsLocal,
+                IsDead: voiceDead,
+                IsSpectator: voiceSpectator,
+                IsImpostor: data?.Role?.IsImpostor == true ||
+                            (traits & VoicePlayerTraits.ImpostorVoice) != 0,
+                InVent: player.inVent,
+                Disconnected: data?.Disconnected == true,
+                IsDummy: player.isDummy || player.notRealPlayer,
+                IsVisible: player.gameObject != null && player.gameObject.activeInHierarchy,
+                ControlHearingMode: playerIsLocal
+                    ? localControlMode
+                    : VoiceControlHearingMode.None,
+                ControlledVictimPosition: playerIsLocal
+                    ? localControlledVictimPos
+                    : default,
+                ControlledVictimLightRadius: playerIsLocal
+                    ? localControlledVictimLight
+                    : -1f,
+                External: external));
         }
         }
         catch
@@ -188,7 +134,6 @@ internal static class VoiceSnapshotBuilder
             playerEnumerationCompleted = false;
         }
 
-        ApplyLoverPairingFallback(players);
         VoiceFrameProfiler.End("snapshot.players", playerTicks);
 
         long finalizeTicks = VoiceFrameProfiler.Begin();
@@ -234,27 +179,6 @@ internal static class VoiceSnapshotBuilder
         }
     }
 
-    // If partner-id reflection failed (byte.MaxValue) a genuine pair would be false-muted on the lovers
-    // radio. Lovers are always a pair of two, so when exactly two exist, pair them explicitly.
-    private static void ApplyLoverPairingFallback(List<VoicePlayerSnapshot> players)
-    {
-        int firstIndex = -1, secondIndex = -1, loverCount = 0;
-        for (int i = 0; i < players.Count; i++)
-        {
-            if (!players[i].IsLover) continue;
-            loverCount++;
-            if (firstIndex < 0) firstIndex = i;
-            else if (secondIndex < 0) secondIndex = i;
-        }
-        if (loverCount != 2) return;
-
-        var first = players[firstIndex];
-        var second = players[secondIndex];
-        if (first.LoverPartnerId == byte.MaxValue)
-            players[firstIndex] = first with { LoverPartnerId = second.PlayerId };
-        if (second.LoverPartnerId == byte.MaxValue)
-            players[secondIndex] = second with { LoverPartnerId = first.PlayerId };
-    }
 
     private static int ResolveMapId()
     {

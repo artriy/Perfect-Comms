@@ -840,7 +840,6 @@ public static class VoiceSettingsPanel
         Toggle(defs, "Meeting Speaking Overlay", s.MeetingSpeakingOverlay);
 
         Section(defs, "OTHER");
-        EnumStep(defs, "Jail Unmute Placement", s.JailUnmuteButtonPlacement, new[] { "Voice HUD", "Meeting Card" });
     }
 
     private static void BuildAdvanced(List<Entry> defs, VoiceChatLocalSettings s)

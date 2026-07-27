@@ -10,31 +10,10 @@ internal static class VoiceProximityCalculator
     private const float GhostVisionRangeMultiplier = 1f;
     private const float LowVolumeFloor = 0.06f;
     private static float _lastUnimpairedLocalLightRadius;
-    private static Func<bool>? _localListenerBlindedOrFlashedProvider;
-    private static int _listenerBlindFrame = -1;
-    private static bool _listenerBlindValue;
-    private static int _listenerMuffleFrame = -1;
-    private static bool _listenerMuffleValue;
-    private static VoiceGamePhase _listenerMufflePhase = VoiceGamePhase.Unknown;
-
-    internal static Func<bool>? LocalListenerBlindedOrFlashedProvider
-    {
-        get => _localListenerBlindedOrFlashedProvider;
-        set
-        {
-            _localListenerBlindedOrFlashedProvider = value;
-            _listenerBlindFrame = -1;
-        }
-    }
 
     // Clear stale light radius on lifecycle transitions so a prior game can't shrink new-game hearing range.
     internal static void ResetSightState()
-    {
-        _lastUnimpairedLocalLightRadius = 0f;
-        _listenerBlindFrame = -1;
-        _listenerMuffleFrame = -1;
-        _listenerMufflePhase = VoiceGamePhase.Unknown;
-    }
+        => _lastUnimpairedLocalLightRadius = 0f;
 
     public static VoiceProximityResult CalculateLobby(
         VoicePlayerSnapshot? targetPlayer,
@@ -157,9 +136,7 @@ internal static class VoiceProximityCalculator
     // are heard via normal meeting audibility (no private meeting channel).
 
     // Public entry. Applies Town of Us control-hearing for the LOCAL player, then defers to CalculateTaskPhaseSingle:
-    //   PuppeteerSwap    — hear ENTIRELY from the controlled victim's body (origin + sight swapped to the victim).
-    //   ParasiteAdditive — hear normally AND from the victim's surroundings; per target keep whichever is louder.
-    // Both are gated on the host toggle; everyone else hears from their own body exactly as before.
+    // Registered listener origins can replace the local origin or add a second hearing point.
     public static VoiceProximityResult CalculateTaskPhase(
         VoicePlayerSnapshot? localPlayer,
         VoicePlayerSnapshot? targetPlayer,
@@ -179,44 +156,46 @@ internal static class VoiceProximityCalculator
         string targetManagedRadioKey = "")
     {
         var mode = localPlayer.HasValue ? localPlayer.Value.ControlHearingMode : VoiceControlHearingMode.None;
-        if (mode != VoiceControlHearingMode.None)
+        if (mode is VoiceControlHearingMode.ExternalReplace or VoiceControlHearingMode.ExternalAdditive)
         {
-            var cs = VoiceRoomSettingsState.Current;
-            // Replace-style hearing: TOU Puppeteer (gated on its host toggle) OR a third-party
-            // PerfectComms.Api listener-origin override (ungated - the API stands alone).
-            bool replace = (mode == VoiceControlHearingMode.PuppeteerSwap && cs.PuppeteerHearFromVictim)
-                || mode == VoiceControlHearingMode.ExternalReplace;
             float overrideLightRadius = localPlayer!.Value.ControlledVictimLightRadius < 0f
                 ? localLightRadius
                 : localPlayer.Value.ControlledVictimLightRadius;
-            if (replace)
-                return CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
+            if (mode == VoiceControlHearingMode.ExternalReplace)
+                return CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer.Value.ControlledVictimPosition,
                     overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
                     activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
                     previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
 
-            // Additive-style hearing: TOU Parasite (gated) OR a third-party Additive override (ungated).
-            bool additive = (mode == VoiceControlHearingMode.ParasiteAdditive && cs.ParasiteHearFromVictim)
-                || mode == VoiceControlHearingMode.ExternalAdditive;
-            if (additive)
-            {
-                var fromSelf = CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
-                    cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
-                    targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
-                var fromVictim = CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
-                    overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
-                    activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
-                    previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
-                return Louder(fromSelf, fromVictim);
-            }
+            var fromSelf = CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
+                cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
+                targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
+            var fromOverride = CalculateTaskPhaseSingle(
+                localPlayer,
+                targetPlayer,
+                localPlayer.Value.ControlledVictimPosition,
+                overrideLightRadius,
+                mapId,
+                cameraViewActive,
+                activeCameraIndex,
+                activeCameraPosition,
+                speakers,
+                virtualMics,
+                localInVent,
+                targetRadioActive,
+                commsSabActive,
+                previousWallCoefficient,
+                targetRadioChannel,
+                targetManagedRadioKey);
+            return Louder(fromSelf, fromOverride);
         }
         return CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
             cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
             targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
     }
 
-    // Picks the more-audible of two proximity results (used to merge a Parasite's own-body and victim-surroundings
-    // hearing into a union). Ties favour the first (own-body) result.
+    // Picks the more-audible of the player's normal origin and a registered additive listener origin.
+    // Ties favour the first (own-body) result.
     private static VoiceProximityResult Louder(VoiceProximityResult a, VoiceProximityResult b)
     {
         float la = a.NormalVolume + a.GhostVolume + a.RadioVolume;
@@ -252,7 +231,7 @@ internal static class VoiceProximityCalculator
 
         var s = VoiceRoomSettingsState.Current;
         var targetPos = target.Position;
-        var localListenerPos = ResolveListenerPosition(localPlayer, listenerPos.Value);
+        var localListenerPos = listenerPos.Value;
         Vector2 cameraPosition = default;
         bool hasCameraProxy = s.CameraCanHear && VoiceAudioOcclusion.TryGetCameraListenerPosition(
             mapId,
@@ -271,8 +250,8 @@ internal static class VoiceProximityCalculator
         bool localImp = localPlayer?.IsImpostor == true;
         bool targetImp = target.IsImpostor;
         bool targetInVent = target.InVent;
-        bool localMediatingMedium = IsMediatingMedium(localPlayer) &&
-                                     (MediumGhostVoiceMode)s.MediumGhostVoice != MediumGhostVoiceMode.None;
+        bool localBypassesTaskVoiceGates =
+            localPlayer?.External.ListenerBypassTaskVoiceGates == true;
 
         if (ShouldMeetingLobbyOnlyBlockTaskVoice(s, localDead, targetDead))
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
@@ -300,13 +279,10 @@ internal static class VoiceProximityCalculator
                 localListenerPos))
             return pairRoute;
 
-        var mediumGhostRoute = TryCalculateMediumGhostRoute(localPlayer, target, localListenerPos, s, previousWallCoefficient);
-        if (mediumGhostRoute.HasValue)
-            return mediumGhostRoute.Value;
 
-        if (s.OnlyGhostsCanTalk && !localDead && !localMediatingMedium)
+        if (s.OnlyGhostsCanTalk && !localDead && !localBypassesTaskVoiceGates)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
-        if (commsSabActive && s.CommsSabDisables && !localDead && !localMediatingMedium)
+        if (commsSabActive && s.CommsSabDisables && !localDead && !localBypassesTaskVoiceGates)
             return VoiceProximityResult.Muted(VoiceProximityReason.CommsSabotage, previousWallCoefficient);
 
         // Third-party mod channel (PerfectComms.Api Primitive 2), before built-in team radio. The
@@ -368,9 +344,9 @@ internal static class VoiceProximityCalculator
         }
 
         float maxDistance = s.MaxChatDistance;
-        bool listenerBlindedOrFlashed = IsLocalListenerBlindedOrFlashedThisFrame();
+        bool listenerSightObscured = localPlayer?.External.ListenerSightObscured == true;
         if (s.OnlyHearInSight)
-            maxDistance = ResolveSightLimitedMaxDistance(maxDistance, localLightRadius, listenerBlindedOrFlashed);
+            maxDistance = ResolveSightLimitedMaxDistance(maxDistance, localLightRadius, listenerSightObscured);
 
         float dist = Distance(targetPos, localListenerPos);
         float volume = VoiceAudioOcclusion.ApplyFalloff(dist, maxDistance, (VoiceFalloffMode)s.FalloffMode);
@@ -639,13 +615,8 @@ internal static class VoiceProximityCalculator
         var local = localPlayer.Value;
         return VoiceTeamRadioChannels.Normalize(targetRadioChannel) switch
         {
-            VoiceTeamRadioChannel.Impostors => settings.TeamRadioImpostors && local.IsImpostor && target.IsImpostor,
-            VoiceTeamRadioChannel.Vampires => settings.TeamRadioVampires && local.IsVampire && target.IsVampire,
-            VoiceTeamRadioChannel.Lovers => settings.TeamRadioLovers && AreLinkedLovers(local, target),
-            VoiceTeamRadioChannel.All =>
-                (settings.TeamRadioImpostors && local.IsImpostor && target.IsImpostor) ||
-                (settings.TeamRadioVampires && local.IsVampire && target.IsVampire) ||
-                (settings.TeamRadioLovers && AreLinkedLovers(local, target)),
+            VoiceTeamRadioChannel.Impostors or VoiceTeamRadioChannel.All =>
+                settings.TeamRadioImpostors && local.IsImpostor && target.IsImpostor,
             _ => false,
         };
     }
@@ -653,95 +624,6 @@ internal static class VoiceProximityCalculator
     internal static bool IsUnavailableTarget(VoicePlayerSnapshot target)
         => target.Disconnected || target.IsDummy || !target.IsVisible;
 
-    private static VoiceProximityResult? TryCalculateMediumGhostRoute(
-        VoicePlayerSnapshot? localPlayer,
-        VoicePlayerSnapshot target,
-        Vector2 listenerPos,
-        VoiceRoomSettingsSnapshot settings,
-        float wallCoefficient)
-    {
-        if (!localPlayer.HasValue)
-            return null;
-
-        var local = localPlayer.Value;
-        var mode = (MediumGhostVoiceMode)settings.MediumGhostVoice;
-        if (mode == MediumGhostVoiceMode.None)
-            return null;
-
-        if (target.IsMedium && target.HasMediumSpirit)
-        {
-            if (MediumCanTalkToGhosts(mode))
-            {
-                if (local.IsDead)
-                    return CalculateMediumSpatialRoute(
-                        target.MediumSpiritPosition,
-                        listenerPos,
-                        settings,
-                        wallCoefficient,
-                        VoiceProximityReason.MediumSpeaksToGhost,
-                        ghostOutput: false);
-
-                return VoiceProximityResult.Muted(VoiceProximityReason.MediumPrivateFromLiving, wallCoefficient);
-            }
-
-            if (local.IsDead)
-                return VoiceProximityResult.Muted(VoiceProximityReason.NonSelectedGhostMuted, wallCoefficient);
-
-            return VoiceProximityResult.Muted(VoiceProximityReason.MediumPrivateFromLiving, wallCoefficient);
-        }
-
-        if (local.IsMedium && local.HasMediumSpirit && target.IsDead && GhostCanTalkToMedium(mode))
-        {
-            if (!target.IsMediatedGhost || target.MediatingMediumId != local.PlayerId)
-                return VoiceProximityResult.Muted(VoiceProximityReason.NonSelectedGhostMuted, wallCoefficient);
-
-            return CalculateMediumSpatialRoute(
-                target.Position,
-                local.MediumSpiritPosition,
-                settings,
-                wallCoefficient,
-                VoiceProximityReason.GhostSpeaksToMedium,
-                ghostOutput: true);
-        }
-
-        return null;
-    }
-
-    private static bool IsMediatingMedium(VoicePlayerSnapshot? player)
-        => player.HasValue && player.Value.IsMedium && player.Value.HasMediumSpirit;
-
-    private static bool MediumCanTalkToGhosts(MediumGhostVoiceMode mode)
-        => mode is MediumGhostVoiceMode.MediumToGhost or MediumGhostVoiceMode.Both;
-
-    private static bool GhostCanTalkToMedium(MediumGhostVoiceMode mode)
-        => mode is MediumGhostVoiceMode.GhostToMedium or MediumGhostVoiceMode.Both;
-
-    private static Vector2 ResolveListenerPosition(VoicePlayerSnapshot? localPlayer, Vector2 fallback)
-        => IsMediatingMedium(localPlayer) ? localPlayer!.Value.MediumSpiritPosition : fallback;
-
-    internal static bool IsLocalListenerBlindedOrFlashedThisFrame()
-    {
-        int frame = Time.frameCount;
-        if (_listenerBlindFrame == frame) return _listenerBlindValue;
-        _listenerBlindFrame = frame;
-        _listenerBlindValue = _localListenerBlindedOrFlashedProvider?.Invoke()
-                              ?? VoiceRoleMuteState.IsLocalListenerBlindedOrFlashed();
-        return _listenerBlindValue;
-    }
-
-    // PerfectCommsVoiceBackend evaluates listener muffle once per remote route. Cache the
-    // reflection-heavy local modifier check for the whole Unity frame; route-specific audio shape
-    // remains untouched.
-    internal static bool IsLocalListenerAudioMuffledThisFrame(VoiceGamePhase phase)
-    {
-        int frame = Time.frameCount;
-        if (_listenerMuffleFrame == frame && _listenerMufflePhase == phase)
-            return _listenerMuffleValue;
-        _listenerMuffleFrame = frame;
-        _listenerMufflePhase = phase;
-        _listenerMuffleValue = VoiceRoleMuteState.IsLocalListenerAudioMuffled(phase);
-        return _listenerMuffleValue;
-    }
 
     internal static VoiceProximityResult ApplyExternalAudioEffects(
         VoiceProximityResult result,
@@ -795,34 +677,6 @@ internal static class VoiceProximityCalculator
         return Math.Min(maxDistance, referenceRadius);
     }
 
-    private static VoiceProximityResult CalculateMediumSpatialRoute(
-        Vector2 sourcePos,
-        Vector2 listenerPos,
-        VoiceRoomSettingsSnapshot settings,
-        float wallCoefficient,
-        VoiceProximityReason reason,
-        bool ghostOutput)
-    {
-        float dist = Distance(sourcePos, listenerPos);
-        float volume = VoiceAudioOcclusion.ApplyFalloff(dist, settings.MaxChatDistance, (VoiceFalloffMode)settings.FalloffMode);
-        if (volume < LowVolumeFloor)
-            volume = 0f;
-
-        float pan = VoiceChatRoom.GetPan(listenerPos.x, sourcePos.x);
-        return ghostOutput
-            ? new(0f, volume, 0f, pan, VoiceAudioFilterMode.Ghost, volume > 0f, reason, wallCoefficient)
-            : new(volume, 0f, 0f, pan, VoiceAudioFilterMode.None, volume > 0f, reason, wallCoefficient);
-    }
-
-    private static bool AreLinkedLovers(VoicePlayerSnapshot local, VoicePlayerSnapshot target)
-    {
-        if (!local.IsLover || !target.IsLover)
-            return false;
-
-        // Explicit partner ids only; byte.MaxValue (unresolved sentinel) as wildcard let unrelated pairs match.
-        return local.LoverPartnerId == target.PlayerId ||
-               target.LoverPartnerId == local.PlayerId;
-    }
 
     private static VoiceProximityResult CalculateVirtualRoute(
         VoicePlayerSnapshot target,
