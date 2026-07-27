@@ -2,7 +2,7 @@
 
 ## Perfect Comms v4.1.7
 
-Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package without changing how players install the mod.
+Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package and restores native audio startup under CrossOver on macOS without changing how players install the mod.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
@@ -11,7 +11,12 @@ Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package wit
 ### Developer API Package
 
 - **Mod integrations can compile against `PerfectComms.Api` without checking in or redistributing the runtime DLL.**
-  > <sub>The versioned NuGet package contains only the small `net6.0` reference assembly and XML documentation. Release and CI gates compile a real package consumer and reject runtime, native, content, or build assets—or any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
+  > <sub>The versioned NuGet package contains only the small `net6.0` reference assembly and XML documentation. Release and CI gates compile a real package consumer, reject runtime, native, content, or build assets, and reject any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
+
+### Reliable CrossOver Audio Startup
+
+- **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**
+  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command or treating a macOS `.app` directory as an executable through `start.exe /unix`. It uses Wine's direct Unix process bridge to restore the embedded Mach-O's executable mode, remove quarantine, and invoke hidden LaunchServices with separated arguments. The signed, argument-free app broker then consumes nonce-bound requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
 
 ## Perfect Comms v4.1.6
 
@@ -30,12 +35,6 @@ Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen 
 
 - **Voice controls and speaking-bar content now reach their selected safe-screen edge.**
   > <sub>Desktop controls no longer reserve an extra viewport margin or clamp against transparent PNG canvas space. Speaking-bar avatars, rings, and names own the edge instead of the backdrop's decorative padding, and the overlay camera follows the main camera's viewport and aspect.</sub>
-
-
-### Reliable CrossOver Audio Startup
-
-- **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**
-  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command—or treating a macOS `.app` directory as an executable—through `start.exe /unix`. It uses Wine's direct Unix process bridge to restore the embedded Mach-O's executable mode, remove quarantine, and invoke hidden LaunchServices with separated arguments. The signed, argument-free app broker then consumes nonce-bound requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
 
 ## Perfect Comms v4.1.5
 
