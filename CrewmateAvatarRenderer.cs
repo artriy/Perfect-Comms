@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Il2CppInterop.Runtime.Injection;
+using PerfectComms.Api;
 using UnityEngine;
 using Object = UnityEngine.Object;
 using VoiceChatPlugin.VoiceChat;
@@ -1852,7 +1853,10 @@ internal static class CrewmateAvatarRenderer
         try
         {
             if (colorId < 0 || colorId >= Palette.ColorNames.Length) return false;
-            if (TryIsTownOfUsRainbowColor(colorId, out bool isTownOfUsRainbow)) return isTownOfUsRainbow;
+            if (VoiceModRegistry.IsAnimatedColor(colorId)) return true;
+            if (!VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira)
+                && TryIsTownOfUsRainbowColor(colorId, out bool isTownOfUsRainbow))
+                return isTownOfUsRainbow;
             return IsRainbowColorName(Palette.GetColorName(colorId))
                 || IsRainbowColorName(Palette.ColorNames[colorId].ToString())
                 || (colorId < Palette.PlayerColors.Length && IsZeroColor(Palette.PlayerColors[colorId]));

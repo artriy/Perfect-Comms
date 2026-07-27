@@ -694,7 +694,7 @@ public class VoiceChatRoom
             _voiceBackend.Update(routedSnapshot, speakerCache, _virtualMics, localInVent, _commsSabActive);
             VoiceFrameProfiler.End("room.backend", __backendTicks);
             if (routedSnapshot != null)
-                SendRadioState(routedSnapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+                SendRadioState(routedSnapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioState());
             long __recoveryTicks = VoiceFrameProfiler.Begin();
             TryRecoverMissingBackendPeers(routedSnapshot);
             VoiceFrameProfiler.End("room.recovery", __recoveryTicks);
@@ -1237,7 +1237,7 @@ public class VoiceChatRoom
         {
             if (snapshot.TryGetLocalPlayer(out var localPlayer))
                 backend.UpdateProfile(snapshot.LocalPlayerId, localPlayer.PlayerName);
-            SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioChannel());
+            SendRadioState(snapshot.LocalPlayerId, VoiceChatHudState.ActiveTeamRadioState());
         }
         _activeRoomCode = roomCode;
         _activeRegion = region;
@@ -1851,26 +1851,25 @@ public class VoiceChatRoom
                 $"{sender.ToDiagnosticFields()} target={targetClientId}");
     }
 
-    internal static void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel)
+    internal static void ApplyRemoteRadioState(byte playerId, VoiceRadioState state)
     {
-        Current?._voiceBackend?.ApplyRemoteRadioState(playerId, channel);
+        Current?._voiceBackend?.ApplyRemoteRadioState(playerId, state.Normalize());
     }
 
-    private void SendRadioState(byte playerId, VoiceTeamRadioChannel channel)
+    private void SendRadioState(byte playerId, VoiceRadioState state)
     {
-        channel = VoiceTeamRadioChannels.Normalize(channel);
-        SyncRadioStateRpc(playerId, channel);
+        SyncRadioStateRpc(playerId, state.Normalize());
     }
 
-    private void SyncRadioStateRpc(byte playerId, VoiceTeamRadioChannel channel)
+    private void SyncRadioStateRpc(byte playerId, VoiceRadioState state)
     {
         if (playerId == byte.MaxValue) return;
 
         var now = DateTime.UtcNow;
-        if (!_radioStateSync.ShouldAttempt(playerId, channel, now)) return;
+        if (!_radioStateSync.ShouldAttempt(playerId, state, now)) return;
 
-        var sent = VoiceRadioStateRpc.TrySend(playerId, channel);
-        _radioStateSync.RecordAttempt(playerId, channel, now, sent);
+        var sent = VoiceRadioStateRpc.TrySend(playerId, state);
+        _radioStateSync.RecordAttempt(playerId, state, now, sent);
     }
 
     private void DisposeVoiceBackend()

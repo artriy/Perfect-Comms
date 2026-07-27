@@ -90,7 +90,8 @@ internal static class VoiceProximityCalculator
         VoicePlayerSnapshot? targetPlayer,
         bool targetRadioActive,
         VoiceGamePhase phase,
-        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All)
+        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All,
+        string targetManagedRadioKey = "")
     {
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped);
@@ -101,12 +102,22 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable);
         bool localDead = localPlayer?.IsDead == true;
         bool targetDead = target.IsDead;
+        var targetRadioState = targetRadioChannel == VoiceTeamRadioChannel.External
+            ? VoiceRadioState.Managed(targetManagedRadioKey)
+            : targetRadioActive
+                ? VoiceRadioState.BuiltIn(targetRadioChannel)
+                : VoiceRadioState.None;
 
         if (s.OnlyGhostsCanTalk && !localDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk);
 
         if (VoiceRoleMuteState.IsMeetingVoiceBlocked(target, phase))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetMeetingBlockReason(target, phase));
+
+        if (s.TeamRadio
+            && s.TeamRadioInMeetings
+            && TryGetManagedRadioRoute(localPlayer, target, targetRadioState, 1f, out var managedRadio))
+            return managedRadio;
 
         Vector2? meetingListenerPosition = localPlayer?.Position;
         if (TryGetModPairRoute(localPlayer, target, 1f, out var pairRoute, meetingListenerPosition))
@@ -164,7 +175,8 @@ internal static class VoiceProximityCalculator
         bool targetRadioActive,
         bool commsSabActive,
         float previousWallCoefficient,
-        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All)
+        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All,
+        string targetManagedRadioKey = "")
     {
         var mode = localPlayer.HasValue ? localPlayer.Value.ControlHearingMode : VoiceControlHearingMode.None;
         if (mode != VoiceControlHearingMode.None)
@@ -181,7 +193,7 @@ internal static class VoiceProximityCalculator
                 return CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
                     overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
                     activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
-                    previousWallCoefficient, targetRadioChannel);
+                    previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
 
             // Additive-style hearing: TOU Parasite (gated) OR a third-party Additive override (ungated).
             bool additive = (mode == VoiceControlHearingMode.ParasiteAdditive && cs.ParasiteHearFromVictim)
@@ -190,17 +202,17 @@ internal static class VoiceProximityCalculator
             {
                 var fromSelf = CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
                     cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
-                    targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel);
+                    targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
                 var fromVictim = CalculateTaskPhaseSingle(localPlayer, targetPlayer, localPlayer!.Value.ControlledVictimPosition,
                     overrideLightRadius, mapId, cameraViewActive, activeCameraIndex,
                     activeCameraPosition, speakers, virtualMics, localInVent, targetRadioActive, commsSabActive,
-                    previousWallCoefficient, targetRadioChannel);
+                    previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
                 return Louder(fromSelf, fromVictim);
             }
         }
         return CalculateTaskPhaseSingle(localPlayer, targetPlayer, listenerPos, localLightRadius, mapId,
             cameraViewActive, activeCameraIndex, activeCameraPosition, speakers, virtualMics, localInVent,
-            targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel);
+            targetRadioActive, commsSabActive, previousWallCoefficient, targetRadioChannel, targetManagedRadioKey);
     }
 
     // Picks the more-audible of two proximity results (used to merge a Parasite's own-body and victim-surroundings
@@ -227,7 +239,8 @@ internal static class VoiceProximityCalculator
         bool targetRadioActive,
         bool commsSabActive,
         float previousWallCoefficient,
-        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All)
+        VoiceTeamRadioChannel targetRadioChannel = VoiceTeamRadioChannel.All,
+        string targetManagedRadioKey = "")
     {
         if (!targetPlayer.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.Unmapped, previousWallCoefficient);
@@ -250,6 +263,11 @@ internal static class VoiceProximityCalculator
             out cameraPosition);
         bool localDead = localPlayer?.IsDead == true;
         bool targetDead = target.IsDead;
+        var targetRadioState = targetRadioChannel == VoiceTeamRadioChannel.External
+            ? VoiceRadioState.Managed(targetManagedRadioKey)
+            : targetRadioActive
+                ? VoiceRadioState.BuiltIn(targetRadioChannel)
+                : VoiceRadioState.None;
         bool localImp = localPlayer?.IsImpostor == true;
         bool targetImp = target.IsImpostor;
         bool targetInVent = target.InVent;
@@ -262,6 +280,17 @@ internal static class VoiceProximityCalculator
         // Host-enforced speaker mutes remain authoritative over every private API route.
         if (VoiceRoleMuteState.IsTaskVoiceBlocked(target))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetTaskBlockReason(target), previousWallCoefficient);
+
+        bool taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
+        if (s.TeamRadio
+            && taskRadioAllowed
+            && TryGetManagedRadioRoute(
+                localPlayer,
+                target,
+                targetRadioState,
+                previousWallCoefficient,
+                out var managedRadio))
+            return managedRadio;
 
         if (TryGetModPairRoute(
                 localPlayer,
@@ -289,7 +318,7 @@ internal static class VoiceProximityCalculator
 
         // Task-phase team radio is gated by the "Usable in Tasks" sub-toggle ONLY when the meeting/lobby radio
         // option is on; when that parent is off the sub-toggle does nothing and radio stays task-usable.
-        bool taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
+        taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
         if (s.TeamRadio && taskRadioAllowed && targetRadioActive && !targetDead)
         {
             if (CanHearTeamRadio(localPlayer, target, s, targetRadioChannel))
@@ -543,6 +572,60 @@ internal static class VoiceProximityCalculator
     private static bool IsLouder(VoiceProximityResult candidate, VoiceProximityResult current)
         => candidate.NormalVolume + candidate.GhostVolume + candidate.RadioVolume
            > current.NormalVolume + current.GhostVolume + current.RadioVolume;
+
+    private static bool TryGetManagedRadioRoute(
+        VoicePlayerSnapshot? localPlayer,
+        VoicePlayerSnapshot target,
+        VoiceRadioState targetRadioState,
+        float wallCoefficient,
+        out VoiceProximityResult result)
+    {
+        result = default;
+        if (targetRadioState.Channel != VoiceTeamRadioChannel.External || !targetRadioState.IsActive)
+            return false;
+        if (target.IsDead)
+            return false;
+
+        // A claimed external transmit key is valid only while the speaker's current resolved
+        // memberships contain it. This prevents a stale or forged radio RPC from opening a route.
+        if (!HasManagedRadioMembership(target, targetRadioState.ManagedKey))
+        {
+            result = VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, wallCoefficient);
+            return true;
+        }
+
+        // Preserve the existing Team Radio ghost policy: dead listeners fall through to their
+        // normal all-hearing route instead of being constrained to living private channels.
+        if (localPlayer?.IsDead == true)
+            return false;
+
+        if (localPlayer.HasValue
+            && HasManagedRadioMembership(localPlayer.Value, targetRadioState.ManagedKey))
+        {
+            result = new VoiceProximityResult(
+                0f,
+                0f,
+                1f,
+                0f,
+                VoiceAudioFilterMode.Radio,
+                true,
+                VoiceProximityReason.TeamRadio,
+                wallCoefficient);
+            return true;
+        }
+
+        result = VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, wallCoefficient);
+        return true;
+    }
+
+    private static bool HasManagedRadioMembership(VoicePlayerSnapshot player, string key)
+    {
+        ExternalVoiceManagedRadioState[]? channels = player.External.ManagedRadioChannels;
+        if (channels == null) return false;
+        for (var i = 0; i < channels.Length; i++)
+            if (string.Equals(channels[i].Key, key, StringComparison.Ordinal)) return true;
+        return false;
+    }
 
     private static bool CanHearTeamRadio(
         VoicePlayerSnapshot? localPlayer,

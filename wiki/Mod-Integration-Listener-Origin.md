@@ -135,5 +135,5 @@ Register callbacks once, keep them cheap, and return neutral values when inactiv
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values only. Your mod owns controller/target state, world positions, phase-persistent role state, UI, and role RPCs.
+- Perfect Comms persists and synchronizes registered host-option values. Your mod owns controller/target state, world positions, phase-persistent role state, UI, and role RPCs.
 - Listener callbacks and observers coordinate cooperative clients; they are not hostile-client authentication or enforcement.

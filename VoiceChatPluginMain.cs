@@ -90,6 +90,7 @@ public class VoiceChatPluginMain : BasePlugin
             message => Log.LogInfo(message),
             message => Log.LogWarning(message));
         PluginConfig = _configStore.Config;
+        VoiceModConfigPersistence.Config = PluginConfig;
         VoiceSettings.Instance = new VoiceChatLocalSettings(PluginConfig);
         VoiceSettings.Instance.WireRuntimeHandlers();
         VoiceChatKeybinds.Initialize(PluginConfig);

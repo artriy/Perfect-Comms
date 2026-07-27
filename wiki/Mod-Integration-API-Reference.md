@@ -61,6 +61,10 @@ public enum VoiceApiCapability
     ConditionalHostOptions = 1 << 8,
     NumericHostOptions = 1 << 9,
     OverlayPrivacy = 1 << 10,
+    ManagedTeamRadio = 1 << 11,
+    PersistentHostOptions = 1 << 12,
+    IntegrationOwnership = 1 << 13,
+    OverlayAppearance = 1 << 14,
 }
 ```
 
@@ -273,6 +277,25 @@ For a local listener to hear a target, both need the same namespaced key and the
 
 See **[Channels](Mod-Integration-Channels)**.
 
+### Managed Team Radio
+
+```csharp
+public sealed record VoiceManagedRadioChannelResult(
+    string Key,
+    string Label,
+    string Badge);
+
+public static void RegisterManagedRadioChannel(
+    string modId,
+    Func<VoiceRuleContext, VoiceManagedRadioChannelResult?> channel);
+```
+
+Return one current membership or `null` for each resolved player. Perfect Comms namespaces `Key` by `modId`; players whose callbacks return the same key share a selectable private radio. `Label` is used in tooltips and `Badge` on compact/touch UI. Empty/control-character keys and oversized wire keys are ignored; duplicate keys for one player collapse to one choice.
+
+This primitive uses the existing Team Radio master and Tasks/Meeting policy. Perfect Comms adds eligible memberships after built-in selector choices, opens capture while its radio control is held (including in Push To Talk mode), synchronizes the selected key, applies the radio filter to matching members, and mutes living non-members before pair/general-channel routing. A claimed/stale key that is absent from the transmitting player's resolved memberships is muted. Dead listeners retain the existing ghost fallthrough.
+
+Use general `RegisterVoiceChannel` when your mod owns its own transmit state or wants a nonexclusive route. Use `RegisterManagedRadioChannel` when Perfect Comms should own selection, PTT, wire state, and private routing end to end.
+
 ---
 
 ## Listener origin, filter, and phase observer
@@ -421,6 +444,27 @@ public static void RegisterOverlaySpeakerRule(
 
 See **[Overlay Privacy](Mod-Integration-Overlay-Privacy)** for the exact result records and safe-alias rules.
 
+## Integration ownership and overlay appearance
+
+```csharp
+public static class VoiceIntegrationIds
+{
+    public const string TouMira = "tou-mira";
+}
+
+public static void RegisterIntegrationOwner(
+    string modId,
+    string integrationId);
+
+public static void RegisterAnimatedColorRule(
+    string modId,
+    Func<int, bool> isAnimatedColor);
+```
+
+`RegisterIntegrationOwner` is a cutover switch, not feature discovery. Register every replacement callback first, then claim `VoiceIntegrationIds.TouMira`. While claimed, Perfect Comms hides its legacy TOU-Mira host tab and suppresses reflected TOU role, control-hearing, privacy, and rainbow behavior. The first `modId` to claim an id owns it until `Unregister(modId)`; a competing claim is ignored. Unregistering restores legacy discovery.
+
+Animated-color classifiers compose additively: the first `true` marks that color id for Perfect Comms' animated rainbow speaking-avatar material. Exceptions are treated as `false`. When TOU-Mira is source-owned, its old reflection classifier is skipped.
+
 ---
 
 ## Host options and tabs
@@ -474,7 +518,7 @@ public static void RegisterHostNumberOption(string modId, VoiceHostNumberOption 
 public static void RegisterModTab(string modId, string tabLabel);
 ```
 
-One exact mod id gets one tab; its first label wins. Rows render toggles, then enums, then numbers, preserving registration order inside each group. Values are session-local defaults/host snapshots, not BepInEx config.
+One exact mod id gets one tab; its first label wins. Rows render toggles, then enums, then numbers, preserving registration order inside each group. Local host values persist in Perfect Comms' global BepInEx config under encoded mod/key definitions; the connected host's values are synchronized as lobby overrides and never overwrite a client's stored local-host choices.
 
 The snapshot holds at most 256 mod-option values and identifies each scoped key/type with a 32-bit wire hash (numbers use a separate type salt); unknown hashes are ignored and collisions are not detected.
 
@@ -486,7 +530,7 @@ See **[Host Options & Tabs](Mod-Integration-Host-Options)**.
 
 An empty `modId` or null registration callback/option is ignored. Host options receive the validation above and the inventory is capped at 256 synced values. Registrations accumulate; only the exact mod tab is deduplicated.
 
-`Unregister(modId)` removes that id's rules, traits, pair rules, channels, listener callbacks, observers, overlay rules, gates, tab, option declarations, and option values. There is no individual unregister method.
+`Unregister(modId)` removes that id's rules, traits, pair rules, general/managed channels, listener callbacks, observers, overlay rules, animated-color rules, integration claims, gates, tab, option declarations, and active option values. Persisted local-host option entries remain available if the same mod/key registers again. There is no individual unregister method.
 
 The callback collection currently being evaluated is snapshotted. A callback may register or unregister safely without invalidating that pass; a new callback in the same collection begins on its next evaluation. Do normal cross-primitive registration outside callbacks rather than depending on same-frame timing between rules, gates, channels, and listeners.
 
@@ -497,12 +541,14 @@ The callback collection currently being evaluated is snapshotted. A callback may
 | Player traits | `None` |
 | Pair rule | `Pass` |
 | Channel | `null` |
+| Managed radio | `null` |
 | Listener origin | `null` |
 | Listener filter | not muffled |
 | Phase observer | ignored exception |
 | Option visibility | visible |
 | Overlay viewer | `HideAll` |
 | Overlay speaker | `HideSource` |
+| Animated color | `false` |
 
 Audio callbacks run at snapshot cadence, roughly 20 times per second per applicable player. Listener filters and overlay rules may run once per rendered frame. Do not rely on an exact cadence.
 
@@ -512,5 +558,5 @@ Audio callbacks run at snapshot cadence, roughly 20 times per second per applica
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values, not your role/modifier state, targets, pairings, lifecycle history, custom radio hold state, temporary permissions, buttons, keybinds, or role RPCs. The integrating mod owns gameplay state, UI, and netcode.
+- Perfect Comms synchronizes registered host-option values and persists local-host choices. It does not own your role/modifier state, targets, pairings, lifecycle history, or role RPCs. Managed Team Radio owns its existing selector/input/capture/wire path, not gameplay membership.
 - Host-option snapshots and local callback evaluation coordinate cooperative clients. They are not hostile-client authentication or enforcement.

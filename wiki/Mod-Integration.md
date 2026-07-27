@@ -1,6 +1,6 @@
 # Mod Integration
 
-Perfect Comms API 1.1 exposes the supported `PerfectComms.Api` surface for role voice, private routes, host settings, and concealment-safe voice UI. Your mod compiles against the reference-only API package and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
+Perfect Comms API 1.1 exposes the supported `PerfectComms.Api` surface for role voice, managed private radio, persistent host settings, and concealment-safe voice UI. Your mod compiles against the reference-only API package and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
 
 ---
 
@@ -87,8 +87,10 @@ The same calls now receive the completed behavior: per-speaker muffle is audible
 ```csharp
 bool ready = PerfectCommsApi.Supports(
     VoiceApiCapability.PairRouting |
-    VoiceApiCapability.ContextualListeners |
-    VoiceApiCapability.NumericHostOptions);
+    VoiceApiCapability.ManagedTeamRadio |
+    VoiceApiCapability.PersistentHostOptions |
+    VoiceApiCapability.IntegrationOwnership |
+    VoiceApiCapability.OverlayAppearance);
 ```
 
 `RuntimeApiVersion`, `Capabilities`, and `Supports(...)` distinguish the completed runtime when code is already running against it. If you support an older assembly that also reported 1.1, reflect for the property before entering a method that references new API types, or declare a minimum Perfect Comms release.
@@ -102,12 +104,24 @@ bool ready = PerfectCommsApi.Supports(
 | Gate, global gate, and speaker muffle | Speaker-wide restrictions in every API phase | [Gate](Mod-Integration-Gate) |
 | Player traits and pair rules | Impostor-equivalent voice, voice-dead classification, directional/private Medium-style routing | [Gate](Mod-Integration-Gate#player-traits) and [Channels](Mod-Integration-Channels#listener-speaker-pair-rules) |
 | Multiple/directional channels | Team, pair, radio, muffle, and spatial routes; receive-only endpoints | [Channels](Mod-Integration-Channels) |
+| Managed Team Radio | Perfect Comms-owned selector, PTT/capture, wire state, labels, and exclusive living-member routing | [Examples](Mod-Integration-Examples#vampire-and-lovers-managed-team-radio) |
 | Listener origin and filter | Replace/add a task hearing point or muffle everything the local player hears | [Listener Origin & Filter](Mod-Integration-Listener-Origin) |
 | Phase observer | Update integration-owned derived state exactly at API phase changes | [Examples](Mod-Integration-Examples#phase-owned-bookkeeping) |
-| Host options and tab | Synced toggles, enums, stepped numbers, conditional rows | [Host Options & Tabs](Mod-Integration-Host-Options) |
-| Overlay privacy | Hide, dim, or safely alias identity-bearing voice presentation | [Overlay Privacy](Mod-Integration-Overlay-Privacy) |
+| Host options and tab | Persistent local-host toggles/enums/numbers with lobby sync and conditional rows | [Host Options & Tabs](Mod-Integration-Host-Options) |
+| Overlay privacy and appearance | Hide, dim, or safely alias voice presentation; classify animated custom colors | [Overlay Privacy](Mod-Integration-Overlay-Privacy) |
+| Integration ownership | Suppress a frozen legacy adapter after its source mod registers a complete replacement | [API Reference](Mod-Integration-API-Reference#integration-ownership-and-overlay-appearance) |
 
 The [Examples](Mod-Integration-Examples) page includes a 17-row TOU-Mira parity matrix covering every built-in role voice option.
+
+### Source-owned TOU-Mira cutover
+
+A current Town of Us Mira build can own the integration directly. Register its complete role, listener, managed-radio, host-option, overlay-privacy, and animated-color callbacks, then call:
+
+```csharp
+PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
+```
+
+Claim ownership last. Perfect Comms then hides its duplicate TOU-Mira settings and disables the old reflection adapter. `Unregister(Mod)` restores legacy discovery, so older TOU-Mira builds continue to use the frozen fallback unchanged.
 
 ---
 
@@ -126,13 +140,13 @@ The [Examples](Mod-Integration-Examples) page includes a 17-row TOU-Mira parity 
 
 ## Role-state ownership
 
-Perfect Comms synchronizes registered host-option values only. Your mod still owns:
+Perfect Comms persists and synchronizes registered host-option values. Your mod still owns:
 
 - role and modifier discovery;
 - current targets, partners, controllers, and spirit positions;
 - cross-phase persistence such as “blackmailed next round”;
 - temporary permissions such as a Jailor allowing voice;
-- custom radio hold state, keybinds, buttons, and RPCs;
+- custom radio hold state, keybinds, buttons, and RPCs when using general channels instead of managed Team Radio;
 - disguise/alias state used by overlay callbacks.
 
 Phase observers can help maintain derived integration state, but they do not create authoritative gameplay state or networking.
@@ -149,5 +163,5 @@ Phase observers can help maintain derived integration state, but they do not cre
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- **Gameplay/UI/netcode remain mod-owned.** The API projects state into voice routing; it does not add role abilities, buttons, keybinds, or role RPCs for you.
+- **Gameplay state remains mod-owned.** The API projects role state into voice behavior. Managed Team Radio supplies its selector/input/capture/wire path; it does not add role abilities or role-state RPCs. Other UI, buttons, keybinds, and netcode remain your responsibility.
 - **This is not hostile-client security.** Host-option snapshots and local callbacks coordinate cooperative clients. A modified client can ignore or forge its local behavior.

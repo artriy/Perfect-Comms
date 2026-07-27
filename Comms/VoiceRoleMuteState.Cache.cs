@@ -1,4 +1,5 @@
 using System;
+using PerfectComms.Api;
 using UnityEngine;
 
 namespace VoiceChatPlugin.VoiceChat;
@@ -190,6 +191,17 @@ internal static partial class VoiceRoleMuteState
 
     private static void RefreshSupportedModTypesIfNeeded()
     {
+        bool suppress = VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira);
+        if (suppress)
+        {
+            SuppressLegacyTouMiraState();
+            return;
+        }
+        if (_legacyTouMiraSuppressed)
+        {
+            _legacyTouMiraSuppressed = false;
+            _supportedModTypesResolved = false;
+        }
         VoiceGamePhase phase = VoiceSceneState.ResolvePhase();
         int gameId = AmongUsClient.Instance?.GameId ?? 0;
         bool shouldProbe = phase is VoiceGamePhase.Lobby
@@ -229,6 +241,33 @@ internal static partial class VoiceRoleMuteState
         _mediatedModifierType = ResolveType(MediatedModifierName);
         _supportedModTypesResolved = true;
         InvalidateRoleStateCache();
+    }
+
+    private static void SuppressLegacyTouMiraState()
+    {
+        _legacyTouMiraSuppressed = true;
+        _supportedModTypesResolved = false;
+        _blackmailedModifierType = null;
+        _jailedModifierType = null;
+        _parasiteInfectedModifierType = null;
+        _puppeteerControlModifierType = null;
+        _crewpostorModifierType = null;
+        _loverModifierType = null;
+        _swoopModifierType = null;
+        _glitchHackedModifierType = null;
+        _eclipsalBlindModifierType = null;
+        _grenadierFlashModifierType = null;
+        _hypnotisedModifierType = null;
+        _vampireRoleType = null;
+        _mediumRoleType = null;
+        _mediatedModifierType = null;
+        RoleStateCache.Clear();
+        MeetingBlackmailedPlayers.Clear();
+        PostMeetingBlackmailedPlayers.Clear();
+        JailVoiceAllowed.Clear();
+        ClearGracePeriod();
+        _wasInMeeting = false;
+        _lastJailVoiceUnmuteAvailable = false;
     }
 
     internal static bool ShouldRefreshSupportedModTypes(

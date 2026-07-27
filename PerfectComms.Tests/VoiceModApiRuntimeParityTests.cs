@@ -1,3 +1,5 @@
+using BepInEx;
+using BepInEx.Configuration;
 using System.Runtime.CompilerServices;
 using System.Reflection;
 using PerfectComms.Api;
@@ -44,7 +46,11 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             VoiceApiCapability.PhaseObservers |
             VoiceApiCapability.ConditionalHostOptions |
             VoiceApiCapability.NumericHostOptions |
-            VoiceApiCapability.OverlayPrivacy;
+            VoiceApiCapability.OverlayPrivacy |
+            VoiceApiCapability.ManagedTeamRadio |
+            VoiceApiCapability.PersistentHostOptions |
+            VoiceApiCapability.IntegrationOwnership |
+            VoiceApiCapability.OverlayAppearance;
 
         Assert.Equal("1.1", PerfectCommsApi.ApiVersion);
         Assert.Equal(expected, PerfectCommsApi.Capabilities);
@@ -1211,6 +1217,255 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.True(VoiceModRegistry.GetBoolValue(
             VoiceModRegistry.Compose(nestedModId, "enabled")));
         Assert.Single(VoiceModRegistry.BoolOptionsFor(nestedModId));
+    }
+
+    [Fact]
+    public void ManagedRadioRegistrationNamespacesSanitizesAndUnregistersState()
+    {
+        string modId = NewModId("managed-radio");
+        PlayerControl player = FakePlayer();
+        PerfectCommsApi.RegisterManagedRadioChannel(
+            modId,
+            _ => new VoiceManagedRadioChannelResult("pair-7", "Lovers\nRadio", "L\n7"));
+        PerfectCommsApi.RegisterManagedRadioChannel(
+            modId,
+            _ => throw new InvalidOperationException("resolver failure"));
+
+        ExternalVoiceState state = VoiceModRegistry.ResolvePlayer(
+            player,
+            VoicePhaseKind.Tasks,
+            isLocal: true,
+            isDead: false);
+
+        ExternalVoiceManagedRadioState radio = Assert.Single(state.ManagedRadioChannels!);
+        Assert.Equal(modId + "\0pair-7", radio.Key);
+        Assert.Equal("Lovers Radio", radio.Label);
+        Assert.Equal("L 7", radio.Badge);
+
+        PerfectCommsApi.Unregister(modId);
+        ExternalVoiceState removed = VoiceModRegistry.ResolvePlayer(
+            player,
+            VoicePhaseKind.Tasks,
+            isLocal: true,
+            isDead: false);
+        Assert.Null(removed.ManagedRadioChannels);
+    }
+
+    [Fact]
+    public void IntegrationOwnershipAndAnimatedColorRulesAreScopedAndGuarded()
+    {
+        string modId = NewModId("ownership");
+        string integrationId = "tests.integration." + Guid.NewGuid().ToString("N");
+        PerfectCommsApi.RegisterIntegrationOwner(modId, integrationId);
+        PerfectCommsApi.RegisterAnimatedColorRule(modId, _ => throw new InvalidOperationException("classifier failure"));
+        PerfectCommsApi.RegisterAnimatedColorRule(modId, colorId => colorId == 417);
+
+        Assert.True(VoiceModRegistry.IsIntegrationOwned(integrationId));
+        Assert.True(VoiceModRegistry.IsAnimatedColor(417));
+        Assert.False(VoiceModRegistry.IsAnimatedColor(418));
+
+        PerfectCommsApi.Unregister(modId);
+        Assert.False(VoiceModRegistry.IsIntegrationOwned(integrationId));
+        Assert.False(VoiceModRegistry.IsAnimatedColor(417));
+    }
+
+    [Fact]
+    public void ManagedRadioIsPrivateBeforePairAndGeneralChannelRoutes()
+    {
+        const string key = "tests.radio\0pair-3";
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            TeamRadio = true,
+            TeamRadioInMeetings = true,
+            TeamRadioInTasks = true,
+        });
+        var managed = new[]
+        {
+            new ExternalVoiceManagedRadioState(key, "Lovers", "L"),
+        };
+        var targetExternal = ExternalVoiceState.None with
+        {
+            ManagedRadioChannels = managed,
+            Pair = ExternalVoicePairState.None with
+            {
+                Verdict = VoicePairVerdict.Route,
+                Shape = (int)VoicePairRouteShape.Radio,
+                Volume = 1f,
+            },
+        };
+        var memberExternal = ExternalVoiceState.None with
+        {
+            ManagedRadioChannels = managed,
+        };
+        VoicePlayerSnapshot target = Player(2, 1f, external: targetExternal);
+        VoicePlayerSnapshot member = Player(1, 0f, isLocal: true, external: memberExternal);
+        VoicePlayerSnapshot nonMember = Player(3, 0f, isLocal: true);
+
+        VoiceProximityResult memberMeeting = VoiceProximityCalculator.CalculateMeeting(
+            member,
+            target,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            key);
+        VoiceProximityResult privateMeeting = VoiceProximityCalculator.CalculateMeeting(
+            nonMember,
+            target,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            key);
+        VoiceProximityResult privateTask = VoiceProximityCalculator.CalculateTaskPhase(
+            nonMember,
+            target,
+            nonMember.Position,
+            -1f,
+            0,
+            false,
+            -1,
+            null,
+            Array.Empty<VoiceChatRoom.SpeakerCache>(),
+            Array.Empty<IVoiceComponent>(),
+            false,
+            true,
+            false,
+            1f,
+            VoiceTeamRadioChannel.External,
+            key);
+
+        Assert.True(memberMeeting.Audible);
+        AssertClose(1f, memberMeeting.RadioVolume);
+        Assert.False(privateMeeting.Audible);
+        Assert.Equal(VoiceProximityReason.TeamRadioMuted, privateMeeting.Reason);
+        Assert.False(privateTask.Audible);
+        Assert.Equal(VoiceProximityReason.TeamRadioMuted, privateTask.Reason);
+
+        VoicePlayerSnapshot forgedTarget = Player(4, 1f);
+        VoiceProximityResult forged = VoiceProximityCalculator.CalculateMeeting(
+            member,
+            forgedTarget,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            key);
+        Assert.False(forged.Audible);
+        Assert.Equal(VoiceProximityReason.TeamRadioMuted, forged.Reason);
+    }
+
+    [Fact]
+    public void ManagedRadioApiResolvesMembershipIntoPrivateMeetingRoute()
+    {
+        string modId = NewModId("managed-radio-e2e");
+        PlayerControl listenerControl = FakePlayer();
+        PlayerControl speakerControl = FakePlayer();
+        PlayerControl outsiderControl = FakePlayer();
+        PerfectCommsApi.RegisterManagedRadioChannel(modId, context =>
+            ReferenceEquals(context.Player, listenerControl) ||
+            ReferenceEquals(context.Player, speakerControl)
+                ? new VoiceManagedRadioChannelResult("lovers:4", "Lovers", "L")
+                : null);
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            TeamRadio = true,
+            TeamRadioInMeetings = true,
+        });
+
+        ExternalVoiceState listenerExternal = VoiceModRegistry.ResolvePlayer(
+            listenerControl, VoicePhaseKind.Meeting, isLocal: true, isDead: false);
+        ExternalVoiceState speakerExternal = VoiceModRegistry.ResolvePlayer(
+            speakerControl, VoicePhaseKind.Meeting, isLocal: true, isDead: false);
+        ExternalVoiceState outsiderExternal = VoiceModRegistry.ResolvePlayer(
+            outsiderControl, VoicePhaseKind.Meeting, isLocal: true, isDead: false);
+        string managedKey = Assert.Single(listenerExternal.ManagedRadioChannels!).Key;
+        Assert.Equal(managedKey, Assert.Single(speakerExternal.ManagedRadioChannels!).Key);
+        Assert.Null(outsiderExternal.ManagedRadioChannels);
+
+        VoicePlayerSnapshot listener = Player(1, 0f, isLocal: true, external: listenerExternal);
+        VoicePlayerSnapshot outsider = Player(3, 0f, isLocal: true, external: outsiderExternal);
+        VoicePlayerSnapshot speaker = Player(2, 1f, external: speakerExternal);
+        VoiceProximityResult memberRoute = VoiceProximityCalculator.CalculateMeeting(
+            listener,
+            speaker,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            managedKey);
+        VoiceProximityResult outsiderRoute = VoiceProximityCalculator.CalculateMeeting(
+            outsider,
+            speaker,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            managedKey);
+        VoicePlayerSnapshot deadSpeaker = Player(4, 1f, isDead: true, external: speakerExternal);
+        VoiceProximityResult deadSpeakerRoute = VoiceProximityCalculator.CalculateMeeting(
+            listener,
+            deadSpeaker,
+            targetRadioActive: true,
+            VoiceGamePhase.Meeting,
+            VoiceTeamRadioChannel.External,
+            managedKey);
+
+        Assert.True(memberRoute.Audible);
+        AssertClose(1f, memberRoute.RadioVolume);
+        Assert.False(outsiderRoute.Audible);
+        Assert.Equal(VoiceProximityReason.TeamRadioMuted, outsiderRoute.Reason);
+        Assert.False(deadSpeakerRoute.Audible);
+        Assert.Equal(VoiceProximityReason.TargetDeadMuted, deadSpeakerRoute.Reason);
+    }
+
+    [Fact]
+    public void RegisteredHostOptionsReloadPersistedValues()
+    {
+        string modId = NewModId("persistent-options");
+        string root = Path.Combine(Path.GetTempPath(), "perfect-comms-option-tests", Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(root, "options.cfg");
+        Directory.CreateDirectory(root);
+        ConfigFile? previous = VoiceModConfigPersistence.Config;
+        var metadata = new BepInPlugin("tests.perfectcomms.options", "Perfect Comms Tests", "1.0.0");
+
+        try
+        {
+            var first = new ConfigFile(path, saveOnInit: false, metadata);
+            VoiceModConfigPersistence.Config = first;
+            PerfectCommsApi.RegisterHostOption(
+                modId,
+                new VoiceHostOption("enabled", "Enabled", false));
+            PerfectCommsApi.RegisterHostEnumOption(
+                modId,
+                new VoiceHostEnumOption("mode", "Mode", 0, new[] { "Off", "On", "Auto" }));
+            PerfectCommsApi.RegisterHostNumberOption(
+                modId,
+                new VoiceHostNumberOption("range", "Range", 2f, 1f, 5f, 0.5f));
+
+            VoiceModRegistry.SetBoolValue(VoiceModRegistry.Compose(modId, "enabled"), true);
+            VoiceModRegistry.SetEnumValue(VoiceModRegistry.Compose(modId, "mode"), 2);
+            VoiceModRegistry.SetNumberValue(VoiceModRegistry.Compose(modId, "range"), 4.5f);
+            first.Save();
+            PerfectCommsApi.Unregister(modId);
+
+            var reloaded = new ConfigFile(path, saveOnInit: false, metadata);
+            VoiceModConfigPersistence.Config = reloaded;
+            PerfectCommsApi.RegisterHostOption(
+                modId,
+                new VoiceHostOption("enabled", "Enabled", false));
+            PerfectCommsApi.RegisterHostEnumOption(
+                modId,
+                new VoiceHostEnumOption("mode", "Mode", 0, new[] { "Off", "On", "Auto" }));
+            PerfectCommsApi.RegisterHostNumberOption(
+                modId,
+                new VoiceHostNumberOption("range", "Range", 2f, 1f, 5f, 0.5f));
+
+            Assert.True(VoiceModRegistry.GetBoolValue(VoiceModRegistry.Compose(modId, "enabled")));
+            Assert.Equal(2, VoiceModRegistry.GetEnumValue(VoiceModRegistry.Compose(modId, "mode")));
+            AssertClose(4.5f, VoiceModRegistry.GetNumberValue(VoiceModRegistry.Compose(modId, "range")));
+        }
+        finally
+        {
+            PerfectCommsApi.Unregister(modId);
+            VoiceModConfigPersistence.Config = previous;
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private string NewModId(string suffix)

@@ -54,6 +54,7 @@ cloudflare/**/package-lock.json
 cloudflare/**/*.log
 TouMira/
 artifacts/
+packaging/.nuget-smoke/
 native/pc-pion/.cache/
 native/pion-sys/target/
 native/vendor/**/target/

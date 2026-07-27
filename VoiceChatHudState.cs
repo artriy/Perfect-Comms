@@ -97,6 +97,7 @@ public static partial class VoiceChatHudState
     private static bool _teamRadioHeld;
     private static bool _keyboardTeamRadioHeld;
     private static VoiceTeamRadioChannel _teamRadioChannel = VoiceTeamRadioChannel.None;
+    private static string _managedTeamRadioKey = string.Empty;
     private static bool _pushToTalkHeld;
     private static bool _keyboardPushToTalkHeld;
     private static bool _speakerMuted;
@@ -200,6 +201,7 @@ public static partial class VoiceChatHudState
         _teamRadioHeld = false;
         _keyboardTeamRadioHeld = false;
         _teamRadioChannel = VoiceTeamRadioChannel.None;
+        _managedTeamRadioKey = string.Empty;
         _pushToTalkHeld = false;
         _keyboardPushToTalkHeld = false;
         _pushToMuteHeld = false;
@@ -225,6 +227,7 @@ public static partial class VoiceChatHudState
         _teamRadioHeld = false;
         _keyboardTeamRadioHeld = false;
         _teamRadioChannel = VoiceTeamRadioChannel.None;
+        _managedTeamRadioKey = string.Empty;
         _pushToTalkHeld = false;
         _keyboardPushToTalkHeld = false;
         _pushToMuteHeld = false;
@@ -1366,8 +1369,8 @@ public static partial class VoiceChatHudState
 
     private static void ApplyTeamRadioHold(bool held)
     {
-        var channel = NormalizeTeamRadioChannel();
-        if (channel == VoiceTeamRadioChannel.None)
+        var state = NormalizeTeamRadioState();
+        if (!state.IsActive)
         {
             if (_teamRadioHeld)
             {
@@ -1394,7 +1397,7 @@ public static partial class VoiceChatHudState
 
     internal static bool IsInTeamRadioMode()
         => _teamRadioHeld
-        && GetSelectedTeamRadioChannel() != VoiceTeamRadioChannel.None
+        && NormalizeTeamRadioState().IsActive
         && !_speakerMuted
         && !IsManualMuteActive()
         && !TryGetLocalTransmitBlockReason(out _)
@@ -1421,16 +1424,26 @@ public static partial class VoiceChatHudState
     internal static bool IsInImpostorRadioMode()
         => IsInTeamRadioMode();
 
+    internal static VoiceRadioState ActiveTeamRadioState()
+        => IsInTeamRadioMode() ? NormalizeTeamRadioState() : VoiceRadioState.None;
+
     internal static VoiceTeamRadioChannel ActiveTeamRadioChannel()
-        => IsInTeamRadioMode() ? GetSelectedTeamRadioChannel() : VoiceTeamRadioChannel.None;
+        => ActiveTeamRadioState().Channel;
 
     internal static VoiceTeamRadioChannel GetSelectedTeamRadioChannel()
-        => NormalizeTeamRadioChannel();
+        => NormalizeTeamRadioState().Channel;
 
     internal static void CycleTeamRadioChannel()
     {
-        var next = VoiceRoleMuteState.GetNextTeamRadioChannel(PlayerControl.LocalPlayer, _teamRadioChannel);
-        if (next == _teamRadioChannel)
+        var current = NormalizeTeamRadioState();
+        var choices = BuildTeamRadioChoices();
+        var next = VoiceRadioState.None;
+        if (choices.Count > 0)
+        {
+            var currentIndex = choices.IndexOf(current);
+            next = choices[(currentIndex + 1 + choices.Count) % choices.Count];
+        }
+        if (next == current)
         {
 #if ANDROID
             ShowCompactStatus(AndroidTeamRadioChannelStatus(next));
@@ -1438,7 +1451,7 @@ public static partial class VoiceChatHudState
             return;
         }
 
-        _teamRadioChannel = next;
+        SetSelectedTeamRadioState(next);
         InvalidateAudioPolicyCache();
         ApplyMicState();
         RefreshButtonVisuals();
@@ -1463,13 +1476,96 @@ public static partial class VoiceChatHudState
         => tooltipActive ? owner : SharedMicTooltipOwner.None;
 
     private static VoiceTeamRadioChannel NormalizeTeamRadioChannel()
-    {
-        if (VoiceRoleMuteState.CanUseTeamRadioChannel(PlayerControl.LocalPlayer, _teamRadioChannel))
-            return _teamRadioChannel;
+        => NormalizeTeamRadioState().Channel;
 
-        _teamRadioChannel = VoiceRoleMuteState.GetFirstTeamRadioChannel(PlayerControl.LocalPlayer);
-        return _teamRadioChannel;
+    private static VoiceRadioState NormalizeTeamRadioState()
+    {
+        if (_teamRadioChannel == VoiceTeamRadioChannel.External
+            && TryFindLocalManagedRadio(_managedTeamRadioKey, out _))
+            return VoiceRadioState.Managed(_managedTeamRadioKey);
+        if (VoiceRoleMuteState.CanUseTeamRadioChannel(PlayerControl.LocalPlayer, _teamRadioChannel))
+            return VoiceRadioState.BuiltIn(_teamRadioChannel);
+
+        var firstBuiltIn = VoiceRoleMuteState.GetFirstTeamRadioChannel(PlayerControl.LocalPlayer);
+        if (firstBuiltIn != VoiceTeamRadioChannel.None)
+        {
+            SetSelectedTeamRadioState(VoiceRadioState.BuiltIn(firstBuiltIn));
+            return VoiceRadioState.BuiltIn(firstBuiltIn);
+        }
+
+        if (TryGetLocalManagedRadios(out var managed) && managed.Length > 0)
+        {
+            var firstManaged = VoiceRadioState.Managed(managed[0].Key);
+            SetSelectedTeamRadioState(firstManaged);
+            return firstManaged;
+        }
+
+        SetSelectedTeamRadioState(VoiceRadioState.None);
+        return VoiceRadioState.None;
     }
+
+    private static List<VoiceRadioState> BuildTeamRadioChoices()
+    {
+        var choices = new List<VoiceRadioState>();
+        var local = PlayerControl.LocalPlayer;
+        for (var i = 0; i < VoiceTeamRadioChannels.Order.Length; i++)
+            if (VoiceRoleMuteState.CanUseTeamRadioChannel(local, VoiceTeamRadioChannels.Order[i]))
+                choices.Add(VoiceRadioState.BuiltIn(VoiceTeamRadioChannels.Order[i]));
+        if (TryGetLocalManagedRadios(out var managed))
+            for (var i = 0; i < managed.Length; i++)
+                choices.Add(VoiceRadioState.Managed(managed[i].Key));
+        return choices;
+    }
+
+    private static void SetSelectedTeamRadioState(VoiceRadioState state)
+    {
+        state = state.Normalize();
+        _teamRadioChannel = state.Channel;
+        _managedTeamRadioKey = state.ManagedKey;
+    }
+
+    private static bool TryGetLocalManagedRadios(out ExternalVoiceManagedRadioState[] channels)
+    {
+        channels = Array.Empty<ExternalVoiceManagedRadioState>();
+        if (!VoiceRoomSettingsState.Current.TeamRadio) return false;
+        var snapshot = VoiceChatRoom.Current?.CurrentSnapshot;
+        if (snapshot == null || !snapshot.TryGetLocalPlayer(out var local)) return false;
+        channels = local.External.ManagedRadioChannels ?? Array.Empty<ExternalVoiceManagedRadioState>();
+        return channels.Length > 0;
+    }
+
+    private static bool TryFindLocalManagedRadio(
+        string key,
+        out ExternalVoiceManagedRadioState channel)
+    {
+        channel = default;
+        if (!TryGetLocalManagedRadios(out var channels)) return false;
+        for (var i = 0; i < channels.Length; i++)
+        {
+            if (!string.Equals(channels[i].Key, key, StringComparison.Ordinal)) continue;
+            channel = channels[i];
+            return true;
+        }
+        return false;
+    }
+
+    internal static string TeamRadioDisplayName(VoiceRadioState state)
+        => state.Channel == VoiceTeamRadioChannel.External
+           && TryFindLocalManagedRadio(state.ManagedKey, out var managed)
+            ? managed.Label
+            : VoiceTeamRadioChannels.DisplayName(state.Channel);
+
+    internal static string TeamRadioBadge(VoiceRadioState state)
+        => state.Channel == VoiceTeamRadioChannel.External
+           && TryFindLocalManagedRadio(state.ManagedKey, out var managed)
+            ? managed.Badge
+            : VoiceTeamRadioChannels.Normalize(state.Channel) switch
+            {
+                VoiceTeamRadioChannel.Impostors => "I",
+                VoiceTeamRadioChannel.Vampires => "V",
+                VoiceTeamRadioChannel.Lovers => "L",
+                _ => "R",
+            };
 
     internal static void UpdatePushToTalkHeld(bool held)
     {
@@ -1873,10 +1969,10 @@ public static partial class VoiceChatHudState
             ? transmitBlockReason
             : _speakerMuted ? "Deafened"
             : IsManualMuteActive() ? "Muted"
-            : IsInTeamRadioMode() ? $"Team Radio: {VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel())} (held)"
+            : IsInTeamRadioMode() ? $"Team Radio: {TeamRadioDisplayName(NormalizeTeamRadioState())} (held)"
             : pushToTalkMode ? "Push To Talk"
             : "Active";
-        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
+        string channel = TeamRadioDisplayName(NormalizeTeamRadioState());
 
 #if ANDROID
         bool radioVisible = _radioTouchButtonObj?.activeInHierarchy == true;
@@ -2027,7 +2123,8 @@ public static partial class VoiceChatHudState
         => PlayerControl.LocalPlayer != null
         && PlayerControl.LocalPlayer.Data != null
         && !VoiceRoleMuteState.IsVoiceDead(PlayerControl.LocalPlayer)
-        && VoiceRoleMuteState.CanUseTeamRadio(PlayerControl.LocalPlayer);
+        && (VoiceRoleMuteState.CanUseTeamRadio(PlayerControl.LocalPlayer)
+            || TryGetLocalManagedRadios(out _));
 
     private static bool CanUseImpostorRadio()
         => CanUseTeamRadio();

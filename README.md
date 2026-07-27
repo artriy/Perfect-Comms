@@ -55,7 +55,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 ## For Mod Developers
 
-Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private radio channels, relocated hearing, your own host-settings tab, and more. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
+Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private routes, persistent host options, concealment-safe overlays, animated colors, and managed Team Radio that reuses Perfect Comms' selector/PTT/network path. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
 
 ```xml
 <PackageReference Include="PerfectComms.Api"

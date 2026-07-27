@@ -103,7 +103,7 @@ public static partial class VoiceChatHudState
         }
 
         if (_radioTouchLabelTmp == null) return;
-        string badge = AndroidTeamRadioChannelBadge(GetSelectedTeamRadioChannel());
+        string badge = AndroidTeamRadioChannelBadge(NormalizeTeamRadioState());
         if (_radioTouchLabelTmp.text != badge)
             _radioTouchLabelTmp.text = badge;
         _radioTouchLabelTmp.color = radioColor;
@@ -218,6 +218,9 @@ public static partial class VoiceChatHudState
             _ => "R",
         };
 
+    internal static string AndroidTeamRadioChannelBadge(VoiceRadioState state)
+        => TeamRadioBadge(state);
+
     internal static string AndroidTeamRadioChannelStatus(VoiceTeamRadioChannel channel)
     {
         channel = VoiceTeamRadioChannels.Normalize(channel);
@@ -225,6 +228,11 @@ public static partial class VoiceChatHudState
             ? $"Team Radio: {VoiceTeamRadioChannels.DisplayName(channel)}"
             : "Team Radio unavailable";
     }
+
+    internal static string AndroidTeamRadioChannelStatus(VoiceRadioState state)
+        => state.IsActive
+            ? $"Team Radio: {TeamRadioDisplayName(state)}"
+            : "Team Radio unavailable";
 
     internal static bool AndroidTeamRadioPhaseSupportsPrivateRouting(VoiceGamePhase phase)
         => VoiceSceneState.IsTaskVoicePhase(phase) || VoiceSceneState.IsMeetingVoicePhase(phase);
@@ -398,7 +406,7 @@ public static partial class VoiceChatHudState
 
         _sharedMicTooltipOwner = SharedMicTooltipOwner.Radio;
 
-        string channel = VoiceTeamRadioChannels.DisplayName(GetSelectedTeamRadioChannel());
+        string channel = TeamRadioDisplayName(NormalizeTeamRadioState());
         string status = TryGetLocalTransmitBlockReason(out string transmitBlockReason)
             ? transmitBlockReason
             : _speakerMuted ? "Deafened"

@@ -1,6 +1,6 @@
 # Channels & Pair Routing
 
-Channels add named routes beyond ordinary proximity. API 1.1 retains every valid membership, supports receive-only endpoints, and can spatialize a Proximity channel from either an explicit origin or the speaker's resolved body position. Pair rules handle listener-specific privacy and explicit Medium-style routes.
+General channels add named routes beyond ordinary proximity. API 1.1 retains every valid membership, supports receive-only endpoints, and can spatialize a Proximity channel from either an explicit origin or the speaker's resolved body position. Managed Team Radio adds those memberships to Perfect Comms' own selector/PTT/wire path. Pair rules handle listener-specific privacy and explicit Medium-style routes.
 
 Back to **[Mod Integration](Mod-Integration)**
 
@@ -78,6 +78,27 @@ PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
 ```
 
 Perfect Comms does not create the keybind, button, hold-state RPC, or authoritative role membership. Each client must already have that synchronized mod state.
+
+
+## Managed Team Radio
+
+For the common role-radio case, do not duplicate input or transmit-state networking:
+
+```csharp
+PerfectCommsApi.RegisterManagedRadioChannel(Mod, ctx =>
+    MyRoles.LoverPairId(ctx.Player) is { } pair
+        ? new VoiceManagedRadioChannelResult(
+            $"lovers:{pair}",
+            "Lovers",
+            "L")
+        : null);
+```
+
+Every current local membership becomes a selectable choice after built-in channels. Perfect Comms owns its Team Radio keyboard/touch input, opens capture while held even in Push To Talk mode, transmits the selected namespaced key, and only routes a living speaker to living listeners with the same membership. The built-in Team Radio master and phase settings remain authoritative. Dead-listener ghost policy keeps its normal fallthrough.
+
+Return `null` when a player is not a current member. Keys are namespaced by `modId`; labels and badges are sanitized for UI/wire bounds. The source mod still owns authoritative role/pair state, but it does not need a duplicate radio UI, hold RPC, or selected-key RPC.
+
+Use `RegisterVoiceChannel` for simultaneous/nonexclusive routes, custom shapes or volume/origins, or when your mod deliberately owns transmit state. Use `RegisterManagedRadioChannel` for a selectable, exclusive Perfect Comms Team Radio channel.
 
 ---
 
@@ -173,5 +194,5 @@ EndGame is a fresh global results-screen call after player objects disappear. Tr
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values only. Your mod owns channel membership, pairings, spirit positions, transmit-hold state, UI, input, and role RPCs.
+- Perfect Comms persists and synchronizes registered host-option values. Your mod owns channel membership, pairings, spirit positions, and role RPCs. General channels also require mod-owned transmit state/UI/input; managed Team Radio supplies the Perfect Comms selector, input, capture, selected-key sync, and exclusive route.
 - Channels and pair callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

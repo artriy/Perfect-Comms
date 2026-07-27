@@ -9,6 +9,9 @@ internal static class VoiceRadioStateRpc
     private const byte RpcId = 205;
 
     public static bool TrySend(byte playerId, VoiceTeamRadioChannel channel)
+        => TrySend(playerId, VoiceRadioState.BuiltIn(channel));
+
+    public static bool TrySend(byte playerId, VoiceRadioState state)
     {
         try
         {
@@ -19,10 +22,12 @@ internal static class VoiceRadioStateRpc
                 return false;
             }
 
-            channel = VoiceTeamRadioChannels.Normalize(channel);
+            state = state.Normalize();
             writer.Write(playerId);
-            writer.Write(VoiceTeamRadioChannels.IsActive(channel));
-            writer.Write((byte)channel);
+            writer.Write(state.IsActive);
+            writer.Write((byte)state.Channel);
+            if (state.Channel == VoiceTeamRadioChannel.External)
+                writer.Write(state.ManagedKey);
             FinishWriter(writer);
             return true;
         }
@@ -30,7 +35,7 @@ internal static class VoiceRadioStateRpc
         {
             VoiceDiagnostics.Log(
                 "radio.rpc.send_failed",
-                $"player={playerId} channel={channel} errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
+                $"player={playerId} channel={state.Channel} errorType={ex.GetType().Name} error=\"{Safe(ex.Message)}\"");
             return false;
         }
     }
@@ -67,6 +72,9 @@ internal static class VoiceRadioStateRpc
                 var channel = VoiceTeamRadioChannels.FromWire(
                     active,
                     reader.BytesRemaining > 0 ? reader.ReadByte() : null);
+                var state = channel == VoiceTeamRadioChannel.External && reader.BytesRemaining > 0
+                    ? VoiceRadioState.Managed(reader.ReadString())
+                    : VoiceRadioState.BuiltIn(channel);
 
                 // Claimed id must match dispatched PlayerControl; PlayerId is netId-derived, not auth, so spoofable on a relay.
                 if (__instance == null || __instance.PlayerId != playerId)
@@ -76,7 +84,7 @@ internal static class VoiceRadioStateRpc
                     return;
                 }
 
-                VoiceChatRoom.ApplyRemoteRadioState(playerId, channel);
+                VoiceChatRoom.ApplyRemoteRadioState(playerId, state);
             }
             catch (Exception ex)
             {

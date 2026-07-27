@@ -399,6 +399,10 @@ internal static class VoiceIdentityPrivacyRuntime
         return gate;
     }
 
+    private static bool UsesLegacyAppearancePrivacy(VoiceGamePhase phase)
+        => VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase)
+           && !VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira);
+
     private static VoiceIdentityPrivacyResolution ResolveCandidate(
         byte sourcePlayerId,
         VoiceGamePhase phase)
@@ -436,7 +440,7 @@ internal static class VoiceIdentityPrivacyRuntime
         bool hideSource = false;
         bool aliasActive = false;
         byte? aliasPlayerId = null;
-        if (VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
+        if (UsesLegacyAppearancePrivacy(phase))
         {
             sourceKnown = TryReadSourceEvidence(
                 source,
@@ -500,7 +504,7 @@ internal static class VoiceIdentityPrivacyRuntime
         if (local == null)
         {
             bool mustInspectViewer =
-                VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase)
+                UsesLegacyAppearancePrivacy(phase)
                 || VoiceModRegistry.HasOverlayViewerRules
                 || VoiceModRegistry.HasOverlaySpeakerRules;
             return mustInspectViewer
@@ -512,7 +516,7 @@ internal static class VoiceIdentityPrivacyRuntime
         bool hideAll = false;
         bool dimAll = false;
 
-        if (VoiceIdentityPrivacyPhasePolicy.UsesBuiltInAppearancePrivacy(phase))
+        if (UsesLegacyAppearancePrivacy(phase))
         {
             known &= TryHasModifier(local, HerbalistConfusedName, out bool herbalistConfused);
             hideAll |= herbalistConfused;

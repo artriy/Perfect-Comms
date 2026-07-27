@@ -16,6 +16,11 @@ public static class HostSettingsPanel
     private static readonly string[] BuiltInCategories =
         { "PROXIMITY", "LOBBY", "MEETING & VOICE", "TEAM RADIO", "TOU MIRA" };
 
+    private static bool LegacyTouMiraVisible
+        => !VoiceModRegistry.IsIntegrationOwned(PerfectComms.Api.VoiceIntegrationIds.TouMira);
+
+    private static int BuiltInCategoryCount => LegacyTouMiraVisible ? 5 : 4;
+
     private static readonly (int index, string title)[] RailSections =
         { (4, "MOD BEHAVIOUR") };
 
@@ -26,8 +31,9 @@ public static class HostSettingsPanel
         get
         {
             var tabs = VoiceModRegistry.Tabs;
-            if (tabs.Count == 0) return BuiltInCategories;
-            var list = new System.Collections.Generic.List<string>(BuiltInCategories);
+            int builtInCount = BuiltInCategoryCount;
+            var list = new System.Collections.Generic.List<string>(builtInCount + tabs.Count);
+            for (int i = 0; i < builtInCount; i++) list.Add(BuiltInCategories[i]);
             for (int i = 0; i < tabs.Count; i++) list.Add(tabs[i].Label.ToUpperInvariant());
             return list.ToArray();
         }
@@ -270,7 +276,7 @@ public static class HostSettingsPanel
                 g.TeamRadio, g.TeamRadioImpostors,
                 g.TeamRadioInMeetings, g.TeamRadioInTasks
             },
-            4 => new List<OptionHolder>
+            4 when LegacyTouMiraVisible => new List<OptionHolder>
             {
                 r.MuteBlackmailedInMeetings, r.MuteBlackmailedNextRound, r.MuteParasiteControlled,
                 r.ParasiteHearFromVictim, r.MutePuppeteerControlled, r.PuppeteerHearFromVictim,
@@ -279,8 +285,8 @@ public static class HostSettingsPanel
                 r.JailPersistsAfterJailorDeath, r.JailorCanUnmuteJailed, r.MediumGhostVoice,
                 g.TeamRadioVampires, g.TeamRadioLovers
             },
-            // Built-in tabs are indices 0..4; everything past that is a registered mod tab.
-            _ => VoiceModRegistry.HoldersForTab(cat - BuiltInCategories.Length)
+            // Registered mod tabs start immediately after the currently visible built-in tabs.
+            _ => VoiceModRegistry.HoldersForTab(cat - BuiltInCategoryCount)
         };
     }
 

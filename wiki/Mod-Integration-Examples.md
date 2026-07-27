@@ -1,6 +1,6 @@
 # API 1.1 Role Recipes
 
-These examples show how an external role mod can reproduce Perfect Comms' 17 TOU-Mira host rows with public API 1.1. Names such as `MyRoles`, `MyVoiceState`, and `MyRadio` are placeholders for your mod's own synchronized API.
+These examples show how an external role mod can reproduce Perfect Comms' 17 TOU-Mira host rows with public API 1.1. Names such as `MyRoles`, `MyVoiceState`, and `MyColors` are placeholders for the source mod's own synchronized state and helpers.
 
 Call `Register()` only after the soft-dependency check in [Mod Integration](Mod-Integration). Register once and call `PerfectCommsApi.Unregister(Mod)` before a supported dynamic reload.
 
@@ -27,8 +27,8 @@ Back to **[Mod Integration](Mod-Integration)**
 | 13 | `JailPersistsAfterJailorDeath` / Off | Conditional bool option + jail rule checks Jailor alive state | Jailor alive/dead and persisted jail |
 | 14 | `JailorCanUnmuteJailed` / On | Bool option + jail rule reads synchronized temporary allow flag | Jailor UI/input plus allow/revoke RPC |
 | 15 | `MediumGhostVoice` / None | Enum option + Tasks-only pair Route/Mute rules | Active Medium, spirit position, and the selected mediated ghost for the reverse direction |
-| 16 | `TeamRadioVampires` / On | Bool option + shared channel; receive-only except while transmitting | Vampire membership, phase policy, hold state, UI/input/RPC |
-| 17 | `TeamRadioLovers` / On | Bool option + pair-scoped channel; receive-only except while transmitting | Partner pairing, phase policy, hold state, UI/input/RPC |
+| 16 | `TeamRadioVampires` / On | Bool option + managed Team Radio membership | Current Vampire membership |
+| 17 | `TeamRadioLovers` / On | Bool option + pair-keyed managed Team Radio membership | Current Lovers pairing |
 
 Every built-in row has a public-API equivalent. The API supplies voice policy and option synchronization; the external mod supplies role truth and role networking.
 
@@ -332,50 +332,48 @@ Pair `Mute` results are important: they prevent ordinary proximity or a differen
 
 ---
 
-## Vampire and Lovers push-to-radio
+## Vampire and Lovers managed Team Radio
 
-All eligible members keep a channel membership. A player becomes a transmitter only while the role mod's synchronized radio hold state is true:
+Use the managed primitive when Perfect Comms should own selection, hold-to-talk capture, selected-channel synchronization, labels, and private routing:
 
 ```csharp
 private static void RegisterRoleRadios()
 {
-    PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
-    {
-        if (!ctx.IsDead &&
-            MyRadio.IsVoicePhaseEnabled(ctx.Phase) &&
-            ctx.GetOption("TeamRadioVampires") &&
-            MyRoles.IsVampire(ctx.Player))
-        {
-            return new VoiceChannelResult(
-                "radio:vampires",
-                TwoWay: MyRadio.IsTransmitting(ctx.Player.PlayerId),
-                Shape: VoiceAudioShape.Radio);
-        }
-
-        return null;
-    });
-
-    PerfectCommsApi.RegisterVoiceChannel(Mod, ctx =>
+    PerfectCommsApi.RegisterManagedRadioChannel(Mod, ctx =>
     {
         if (ctx.IsDead ||
-            !MyRadio.IsVoicePhaseEnabled(ctx.Phase) ||
+            !ctx.GetOption("TeamRadioVampires") ||
+            !MyRoles.IsVampire(ctx.Player))
+        {
+            return null;
+        }
+
+        return new VoiceManagedRadioChannelResult(
+            Key: "vampires",
+            Label: "Vampires",
+            Badge: "V");
+    });
+
+    PerfectCommsApi.RegisterManagedRadioChannel(Mod, ctx =>
+    {
+        if (ctx.IsDead ||
             !ctx.GetOption("TeamRadioLovers") ||
             MyRoles.LoverPairId(ctx.Player) is not byte pairId)
         {
             return null;
         }
 
-        return new VoiceChannelResult(
-            $"radio:lovers:{pairId}",
-            TwoWay: MyRadio.IsTransmitting(ctx.Player.PlayerId),
-            Shape: VoiceAudioShape.Radio);
+        return new VoiceManagedRadioChannelResult(
+            Key: $"lovers:{pairId}",
+            Label: "Lovers",
+            Badge: "L");
     });
 }
 ```
 
-`TwoWay: false` is receive-only: the player can hear a matching transmitter but cannot be heard back. When their synchronized hold state becomes true, the same membership transmits.
+Each returned key is automatically namespaced by `Mod`. All eligible memberships appear in Perfect Comms' Team Radio selector after its built-in choices. Holding Perfect Comms' radio control opens capture even when microphone mode is Push To Talk, sends the selected key, and routes only to living players with the same current membership. The normal Team Radio master and Tasks/Meeting settings remain authoritative.
 
-`MyRadio.IsVoicePhaseEnabled` is the role mod's synchronized phase policy; use it to mirror whichever Tasks/Meeting/Exile availability your radio UI exposes. Perfect Comms does not add the radio keybind/button, eligibility UI, selected-channel state, phase policy, or hold-state RPC. The mod must publish those state changes to every client that evaluates the channel.
+The role mod owns only current Vampire/Lovers membership and stable pair ids. It no longer needs a duplicate radio keybind, selected-channel UI, transmit-state RPC, or receive-only channel trick. Return membership whenever it is current; Perfect Comms applies phase eligibility itself.
 
 ---
 
@@ -391,13 +389,18 @@ internal static void Register()
     RegisterCrewpostor();
     RegisterMedium();
     RegisterRoleRadios();
+    RegisterOverlayPrivacy();
+    PerfectCommsApi.RegisterAnimatedColorRule(Mod, MyColors.IsRainbow);
+
+    // Cut over only after every TOU-Mira behavior above is registered.
+    PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
 }
 
 internal static void Unregister()
     => PerfectCommsApi.Unregister(Mod);
 ```
 
-Overlay privacy is separate from audio policy. Register viewer/speaker overlay rules when a role's disguise or concealment should hide or alias Perfect Comms' identity-bearing UI.
+Overlay privacy is separate from audio policy. `RegisterOverlayPrivacy` should add viewer/speaker rules for every disguise, concealment, and alias that can affect Perfect Comms' identity-bearing UI. Ownership is claimed last so a partial or throwing setup cannot prematurely disable the frozen compatibility adapter.
 
 ---
 
@@ -414,5 +417,5 @@ Overlay privacy is separate from audio policy. Register viewer/speaker overlay r
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values only. The role mod owns all gameplay state, targets/pairs, lifecycle history, buttons/keybinds, UI, and role RPCs used by these recipes.
+- Perfect Comms persists and synchronizes registered host-option values. The role mod owns gameplay state, targets/pairs, lifecycle history, Jailor permissions/UI/RPCs, and other state read by these recipes. Managed Team Radio deliberately owns its own selector, keybind/touch control, PTT capture, selected-key synchronization, and private route.
 - These callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

@@ -37,6 +37,11 @@ internal readonly record struct ExternalVoicePairState(
         default);
 }
 
+internal readonly record struct ExternalVoiceManagedRadioState(
+    string Key,
+    string Label,
+    string Badge);
+
 internal readonly record struct ExternalVoiceState(
     // Speaker-wide gate state.
     bool Muted,
@@ -44,6 +49,8 @@ internal readonly record struct ExternalVoiceState(
     string Reason,
     // Every channel membership returned by this player's registered resolvers.
     ExternalVoiceChannelState[]? Channels,
+    // Managed Team Radio memberships offered by registered source mods.
+    ExternalVoiceManagedRadioState[]? ManagedRadioChannels,
     // Local-player listener-origin state.
     bool ListenerActive,
     Vector2 ListenerOrigin,
@@ -57,6 +64,7 @@ internal readonly record struct ExternalVoiceState(
         false,
         string.Empty,
         null,
+        null,
         false,
         default,
         -1f,
@@ -65,4 +73,5 @@ internal readonly record struct ExternalVoiceState(
 
     public bool HasReason => !string.IsNullOrEmpty(Reason);
     public ReadOnlySpan<ExternalVoiceChannelState> ChannelSpan => Channels;
+    public ReadOnlySpan<ExternalVoiceManagedRadioState> ManagedRadioChannelSpan => ManagedRadioChannels;
 }

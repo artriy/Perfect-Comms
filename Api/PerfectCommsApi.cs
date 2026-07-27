@@ -74,6 +74,14 @@ public enum VoiceApiCapability
     ConditionalHostOptions = 1 << 8,
     NumericHostOptions = 1 << 9,
     OverlayPrivacy = 1 << 10,
+    /// <summary>Perfect Comms owns input, selection, capture, synchronization, and private routing for registered radio channels.</summary>
+    ManagedTeamRadio = 1 << 11,
+    /// <summary>Registered host options retain the local host's values across restarts.</summary>
+    PersistentHostOptions = 1 << 12,
+    /// <summary>A source mod can claim a legacy built-in integration so duplicate behavior is suppressed.</summary>
+    IntegrationOwnership = 1 << 13,
+    /// <summary>Mods can classify custom player colors that need animated voice-overlay rendering.</summary>
+    OverlayAppearance = 1 << 14,
 }
 
 /// <summary>Additional voice classifications a role mod can contribute for a player.</summary>
@@ -224,6 +232,18 @@ public sealed record VoiceChannelResult(
     Vector2? Origin = null);
 
 /// <summary>
+/// One private team-radio membership managed end to end by Perfect Comms. <see cref="Key"/> is the
+/// membership identity and may be player-specific (for example, a Lovers pair id). Perfect Comms
+/// namespaces it by the registering mod id, adds it to the existing radio selector, synchronizes the
+/// selected transmit channel, opens capture while the radio control is held, and mutes living
+/// non-members. <see cref="Label"/> and <see cref="Badge"/> describe the channel in desktop and touch UI.
+/// </summary>
+public sealed record VoiceManagedRadioChannelResult(
+    string Key,
+    string Label,
+    string Badge);
+
+/// <summary>
 /// Relocates where the LOCAL player hears from during tasks. LightRadius = -1 inherits the local
 /// player's resolved light radius; zero disables vision-radius limiting for the override.
 /// </summary>
@@ -327,21 +347,21 @@ public sealed record VoiceHostOptionContext
     public Func<string, float> GetNumberOption { get; init; } = _ => 0f;
 }
 
-/// <summary>Declarative host toggle. Stored/synced as "modId.Key".</summary>
+/// <summary>Declarative host toggle. Persisted locally and lobby-synced as "modId.Key".</summary>
 public sealed record VoiceHostOption(string Key, string Label, bool Default)
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
 }
 
-/// <summary>Declarative host enum/stepper option.</summary>
+/// <summary>Declarative persistent, lobby-synced host enum/stepper option.</summary>
 public sealed record VoiceHostEnumOption(string Key, string Label, int Default, string[] Choices)
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
 }
 
-/// <summary>Declarative host numeric/slider option.</summary>
+/// <summary>Declarative persistent, lobby-synced host numeric/slider option.</summary>
 public sealed record VoiceHostNumberOption(
     string Key,
     string Label,
@@ -353,6 +373,13 @@ public sealed record VoiceHostNumberOption(
 {
     public string Description { get; init; } = "";
     public Func<VoiceHostOptionContext, bool>? Visible { get; init; }
+}
+
+/// <summary>Canonical legacy-integration identifiers that a source mod can take ownership of.</summary>
+public static class VoiceIntegrationIds
+{
+    /// <summary>Town of Us Mira role voice, privacy, radio, and overlay-appearance integration.</summary>
+    public const string TouMira = "tou-mira";
 }
 
 public static class PerfectCommsApi
@@ -380,7 +407,11 @@ public static class PerfectCommsApi
         VoiceApiCapability.PhaseObservers |
         VoiceApiCapability.ConditionalHostOptions |
         VoiceApiCapability.NumericHostOptions |
-        VoiceApiCapability.OverlayPrivacy;
+        VoiceApiCapability.OverlayPrivacy |
+        VoiceApiCapability.ManagedTeamRadio |
+        VoiceApiCapability.PersistentHostOptions |
+        VoiceApiCapability.IntegrationOwnership |
+        VoiceApiCapability.OverlayAppearance;
 
     public static bool Supports(VoiceApiCapability capability)
         => capability != VoiceApiCapability.None && (Capabilities & capability) == capability;
@@ -425,6 +456,17 @@ public static class PerfectCommsApi
     /// </summary>
     public static void RegisterVoiceChannel(string modId, Func<VoiceRuleContext, VoiceChannelResult?> channel)
         => VoiceModRegistry.AddChannel(modId, channel);
+
+    /// <summary>
+    /// Register a private radio membership managed by Perfect Comms' existing Team Radio controls.
+    /// Return null when the player is ineligible. Players with the same non-empty Key share the
+    /// selected channel. Unlike a general voice channel, a managed radio transmission is exclusive:
+    /// living non-members cannot hear its normal proximity/meeting voice.
+    /// </summary>
+    public static void RegisterManagedRadioChannel(
+        string modId,
+        Func<VoiceRuleContext, VoiceManagedRadioChannelResult?> channel)
+        => VoiceModRegistry.AddManagedRadioChannel(modId, channel);
 
     // ---- Primitive 3: Listener-origin ----
 
@@ -497,6 +539,23 @@ public static class PerfectCommsApi
         string modId,
         Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult> rule)
         => VoiceModRegistry.AddOverlaySpeakerRule(modId, rule);
+
+    // ---- Primitive 7: Integration ownership and overlay appearance ----
+
+    /// <summary>
+    /// Claim a legacy built-in integration after registering its complete replacement. Perfect Comms
+    /// suppresses that built-in behavior while the claim is active, preventing duplicate options,
+    /// controls, routing, and privacy rules during a staged source-mod migration.
+    /// </summary>
+    public static void RegisterIntegrationOwner(string modId, string integrationId)
+        => VoiceModRegistry.AddIntegrationOwner(modId, integrationId);
+
+    /// <summary>
+    /// Register an additive custom-color classifier for speaking-avatar rendering. Return true only
+    /// for color ids that should use Perfect Comms' animated rainbow material.
+    /// </summary>
+    public static void RegisterAnimatedColorRule(string modId, Func<int, bool> isAnimatedColor)
+        => VoiceModRegistry.AddAnimatedColorRule(modId, isAnimatedColor);
 
     // ---- Cleanup ----
 

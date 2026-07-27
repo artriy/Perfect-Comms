@@ -10,5 +10,22 @@ public static class ApiConsumer
             : VoiceRuleResult.Pass;
 
     public static void Register()
-        => PerfectCommsApi.RegisterVoiceRule("com.perfectcomms.package-smoke", Evaluate);
+    {
+        const string modId = "com.perfectcomms.package-smoke";
+
+        PerfectCommsApi.RegisterVoiceRule(modId, Evaluate);
+        PerfectCommsApi.RegisterManagedRadioChannel(modId, context =>
+            context.IsDead
+                ? null
+                : new VoiceManagedRadioChannelResult("crew", "Crew", "C"));
+        PerfectCommsApi.RegisterAnimatedColorRule(modId, colorId => colorId == 99);
+        PerfectCommsApi.RegisterIntegrationOwner(modId, VoiceIntegrationIds.TouMira);
+    }
+
+    public static bool SupportsCompletedIntegration()
+        => PerfectCommsApi.Supports(
+            VoiceApiCapability.ManagedTeamRadio |
+            VoiceApiCapability.PersistentHostOptions |
+            VoiceApiCapability.IntegrationOwnership |
+            VoiceApiCapability.OverlayAppearance);
 }

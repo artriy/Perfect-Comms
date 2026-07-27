@@ -117,5 +117,5 @@ See **[API Reference](Mod-Integration-API-Reference)** for exact signatures and 
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values only. Your mod owns disguise/concealment state, aliases, gameplay UI, and role RPCs.
+- Perfect Comms persists and synchronizes registered host-option values. Your mod owns disguise/concealment state, aliases, gameplay UI, and role RPCs.
 - Overlay callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

@@ -29,7 +29,7 @@ internal interface IVoiceBackend : IDisposable
     void SetMicrophone(string deviceName, float volume, bool forceRestart = false);
     void SetSpeaker(string deviceName);
     void UpdateProfile(byte playerId, string playerName);
-    void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel);
+    void ApplyRemoteRadioState(byte playerId, VoiceRadioState state);
     void Rejoin();
     // Rebuild any pre-built ICE/peer-connection pool after a custom TURN / relay-policy setting change, so the next
     // peer-join uses the new policy without generating a DTLS certificate on the main thread. Backends with

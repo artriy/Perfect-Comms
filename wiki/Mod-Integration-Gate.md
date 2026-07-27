@@ -143,5 +143,5 @@ PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values only. Your mod owns gameplay state, UI, custom input, role RPCs, pairings, targets, and lifecycle bookkeeping.
+- Perfect Comms persists and synchronizes registered host-option values. Your mod owns gameplay state, UI, custom input, role RPCs, pairings, targets, and lifecycle bookkeeping.
 - Host snapshots and callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

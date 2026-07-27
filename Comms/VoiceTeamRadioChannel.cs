@@ -6,6 +6,7 @@ internal enum VoiceTeamRadioChannel : byte
     Impostors = 1,
     Vampires = 2,
     Lovers = 3,
+    External = 4,
     All = byte.MaxValue,
 }
 
@@ -33,6 +34,7 @@ internal static class VoiceTeamRadioChannels
         => channel is VoiceTeamRadioChannel.Impostors
             or VoiceTeamRadioChannel.Vampires
             or VoiceTeamRadioChannel.Lovers
+            or VoiceTeamRadioChannel.External
             or VoiceTeamRadioChannel.All
             ? channel
             : VoiceTeamRadioChannel.None;
@@ -46,6 +48,7 @@ internal static class VoiceTeamRadioChannels
             VoiceTeamRadioChannel.Impostors => "Impostors",
             VoiceTeamRadioChannel.Vampires => "Vampires",
             VoiceTeamRadioChannel.Lovers => "Lovers",
+            VoiceTeamRadioChannel.External => "Managed",
             VoiceTeamRadioChannel.All => "All Teams",
             _ => "Unavailable",
         };

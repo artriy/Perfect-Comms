@@ -35,7 +35,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly object _captureFrameSync = new();
     private readonly object _peerSync = new();
     private readonly Dictionary<string, PeerConnection> _peersBySocket = new();
-    private readonly Dictionary<byte, VoiceTeamRadioChannel> _radioStateByPlayerId = new();
+    private readonly Dictionary<byte, VoiceRadioState> _radioStateByPlayerId = new();
 
     private const string RpcRoutePeerPrefix = "rpc-route:";
     private readonly List<PeerConnection> _updatePeerScratch = new();
@@ -3824,17 +3824,19 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         // refreshed from VoiceGameStateSnapshot in EnsureSnapshotRoutePeers.
     }
 
-    public void ApplyRemoteRadioState(byte playerId, VoiceTeamRadioChannel channel)
+    public void ApplyRemoteRadioState(byte playerId, VoiceRadioState state)
     {
-        channel = VoiceTeamRadioChannels.Normalize(channel);
+        state = state.Normalize();
         lock (_peerSync)
-            _radioStateByPlayerId[playerId] = channel;
+            _radioStateByPlayerId[playerId] = state;
         foreach (var peer in SnapshotPeers())
         {
             if (peer.PlayerId == playerId)
             {
-                peer.ApplyRadioChannel(channel);
-                VoiceDiagnostics.Log("voice.radio.rx", $"client={peer.ClientId} player={playerId} active={VoiceTeamRadioChannels.IsActive(channel)} channel={channel}");
+                peer.ApplyRadioState(state);
+                VoiceDiagnostics.Log(
+                    "voice.radio.rx",
+                    $"client={peer.ClientId} player={playerId} active={state.IsActive} channel={state.Channel}");
             }
         }
     }
@@ -3998,9 +4000,31 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             else if (VoiceSceneState.IsLobbyVoicePhase(snapshot.Phase))
                 result = VoiceProximityCalculator.CalculateLobby(localPlayer, target, listenerPos);
             else if (VoiceSceneState.IsMeetingVoicePhase(snapshot.Phase))
-                result = VoiceProximityCalculator.CalculateMeeting(localPlayer, target, peer.RadioActive, snapshot.Phase, peer.RadioChannel);
+                result = VoiceProximityCalculator.CalculateMeeting(
+                    localPlayer,
+                    target,
+                    peer.RadioState.IsActive,
+                    snapshot.Phase,
+                    peer.RadioState.Channel,
+                    peer.RadioState.ManagedKey);
             else
-                result = VoiceProximityCalculator.CalculateTaskPhase(localPlayer, target, listenerPos, snapshot.LocalLightRadius, snapshot.MapId, snapshot.CameraViewActive, snapshot.ActiveCameraIndex, snapshot.ActiveCameraPosition, speakerCache, virtualMicrophones, localInVent, peer.RadioActive, commsSabActive, peer.WallCoefficient, peer.RadioChannel);
+                result = VoiceProximityCalculator.CalculateTaskPhase(
+                    localPlayer,
+                    target,
+                    listenerPos,
+                    snapshot.LocalLightRadius,
+                    snapshot.MapId,
+                    snapshot.CameraViewActive,
+                    snapshot.ActiveCameraIndex,
+                    snapshot.ActiveCameraPosition,
+                    speakerCache,
+                    virtualMicrophones,
+                    localInVent,
+                    peer.RadioState.IsActive,
+                    commsSabActive,
+                    peer.WallCoefficient,
+                    peer.RadioState.Channel,
+                    peer.RadioState.ManagedKey);
 
             result = VoiceProximityCalculator.ApplyExternalAudioEffects(result, target, snapshot.Phase);
             if (snapshot.Phase != VoiceGamePhase.EndGame &&
@@ -4635,7 +4659,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             _snapshotRouteClientIds.Add(player.ClientId);
             PeerConnection routePeer;
-            VoiceTeamRadioChannel savedRadio;
+            VoiceRadioState savedRadio;
             var created = false;
             lock (_peerSync)
             {
@@ -4652,8 +4676,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             if (routePeer.UpdateProfile(player.PlayerId, player.PlayerName))
                 ApplySavedVolume(routePeer);
-            if (routePeer.RadioChannel != savedRadio)
-                routePeer.ApplyRadioChannel(savedRadio);
+            if (routePeer.RadioState != savedRadio)
+                routePeer.ApplyRadioState(savedRadio);
             if (created)
                 VoiceDiagnostics.Log(
                     "voice.route-peer.created",
@@ -4968,29 +4992,45 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         public byte PlayerId { get => _playerId; private set => _playerId = value; }
         public string PlayerName { get; private set; } = "Unknown";
         private volatile VoiceTeamRadioChannel _radioChannel = VoiceTeamRadioChannel.None;
+        private string _managedRadioKey = string.Empty;
         private volatile byte _radioChannelOwner = byte.MaxValue;
         private int _consecutiveNonRadioVoicePackets;
         private long _lastRadioChannelAppliedTicks;
         public bool RadioActive
         {
-            get => VoiceTeamRadioChannels.IsActive(_radioChannel);
+            get => RadioState.IsActive;
             set
             {
-                if (!value) _radioChannel = VoiceTeamRadioChannel.None;
+                if (!value) ApplyRadioState(VoiceRadioState.None);
             }
         }
         public VoiceTeamRadioChannel RadioChannel
         {
             get => _radioChannel;
-            set => _radioChannel = VoiceTeamRadioChannels.Normalize(value);
+            set => ApplyRadioState(VoiceRadioState.BuiltIn(value));
         }
+        public VoiceRadioState RadioState
+            => new VoiceRadioState(_radioChannel, Volatile.Read(ref _managedRadioKey)).Normalize();
 
         public void ApplyRadioChannel(VoiceTeamRadioChannel channel)
+            => ApplyRadioState(VoiceRadioState.BuiltIn(channel));
+
+        public void ApplyRadioState(VoiceRadioState state)
         {
-            _radioChannel = VoiceTeamRadioChannels.Normalize(channel);
+            state = state.Normalize();
+            if (state.Channel == VoiceTeamRadioChannel.External)
+            {
+                Volatile.Write(ref _managedRadioKey, state.ManagedKey);
+                _radioChannel = state.Channel;
+            }
+            else
+            {
+                _radioChannel = state.Channel;
+                Volatile.Write(ref _managedRadioKey, string.Empty);
+            }
             _radioChannelOwner = PlayerId;
             Interlocked.Exchange(ref _consecutiveNonRadioVoicePackets, 0);
-            if (VoiceTeamRadioChannels.IsActive(_radioChannel))
+            if (state.IsActive)
                 Interlocked.Exchange(ref _lastRadioChannelAppliedTicks, DateTime.UtcNow.Ticks);
         }
         public float WallCoefficient { get; private set; } = 1f;
@@ -5040,6 +5080,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (playerId != _radioChannelOwner)
             {
                 _radioChannel = VoiceTeamRadioChannel.None;
+                Volatile.Write(ref _managedRadioKey, string.Empty);
                 _radioChannelOwner = byte.MaxValue;
                 WallCoefficient = 1f;
             }

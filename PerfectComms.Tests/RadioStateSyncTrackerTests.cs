@@ -41,4 +41,27 @@ public sealed class RadioStateSyncTrackerTests
         Assert.False(tracker.ShouldAttempt(8, VoiceTeamRadioChannel.None, start.AddMilliseconds(999)));
         Assert.True(tracker.ShouldAttempt(8, VoiceTeamRadioChannel.None, start.AddMilliseconds(1000)));
     }
+    [Fact]
+    public void ManagedChannelKeyChangeUsesShortStateChangeGate()
+    {
+        var tracker = new RadioStateSyncTracker(
+            TimeSpan.FromMilliseconds(250),
+            TimeSpan.FromSeconds(5));
+        var start = DateTime.UtcNow;
+        var first = VoiceRadioState.Managed("tests.radio\0pair-1");
+        var second = VoiceRadioState.Managed("tests.radio\0pair-2");
+
+        Assert.True(tracker.ShouldAttempt(3, first, start));
+        tracker.RecordAttempt(3, first, start, sent: true);
+        Assert.Equal("tests.radio\0pair-1", tracker.LastManagedKey);
+        Assert.False(tracker.ShouldAttempt(3, first, start.AddMilliseconds(1)));
+        Assert.False(tracker.ShouldAttempt(3, second, start.AddMilliseconds(249)));
+        var changed = start.AddMilliseconds(250);
+        Assert.True(tracker.ShouldAttempt(3, second, changed));
+
+        tracker.RecordAttempt(3, second, changed, sent: true);
+        Assert.Equal(VoiceTeamRadioChannel.External, tracker.LastChannel);
+        Assert.Equal("tests.radio\0pair-2", tracker.LastManagedKey);
+    }
+
 }

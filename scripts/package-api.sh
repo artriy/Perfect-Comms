@@ -9,6 +9,7 @@ smoke_project="$root/packaging/PerfectComms.Api.Smoke/PerfectComms.Api.Smoke.csp
 source_version="$(grep -m1 '<Version>' "$project" | sed -E 's/.*<Version>([^<]+)<\/Version>.*/\1/')"
 package="$root/artifacts/PerfectComms.Api.$source_version.nupkg"
 local_source="$root/artifacts"
+smoke_packages="$root/packaging/.nuget-smoke"
 dotnet_package_project="$package_project"
 dotnet_smoke_project="$smoke_project"
 dotnet_local_source="$local_source"
@@ -52,8 +53,9 @@ dotnet pack "$dotnet_package_project" -c Release --nologo \
 	"$package" --expected-version "$source_version"
 
 rm -rf "$root/packaging/PerfectComms.Api.Smoke/bin" \
-	"$root/packaging/PerfectComms.Api.Smoke/obj"
-dotnet build "$dotnet_smoke_project" -c Release --nologo \
+	"$root/packaging/PerfectComms.Api.Smoke/obj" \
+	"$smoke_packages"
+NUGET_PACKAGES="$smoke_packages" dotnet build "$dotnet_smoke_project" -c Release --nologo \
 	-p:PerfectCommsApiPackageVersion="$source_version" \
 	-p:RestoreAdditionalProjectSources="$dotnet_local_source"
 

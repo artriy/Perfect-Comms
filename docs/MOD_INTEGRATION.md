@@ -80,9 +80,12 @@ The compatibility tests mirror the unchanged name-only reflection bridge in [Tow
 string runtime = PerfectCommsApi.RuntimeApiVersion;
 VoiceApiCapability available = PerfectCommsApi.Capabilities;
 
-bool hasPairRouting = PerfectCommsApi.Supports(
+bool hasManagedRoleParity = PerfectCommsApi.Supports(
     VoiceApiCapability.PairRouting |
-    VoiceApiCapability.ContextualListeners);
+    VoiceApiCapability.ContextualListeners |
+    VoiceApiCapability.ManagedTeamRadio |
+    VoiceApiCapability.IntegrationOwnership |
+    VoiceApiCapability.OverlayAppearance);
 ```
 
 `Supports` requires every requested flag and returns `false` for `None`. If a bridge must also run against an older assembly that called itself API 1.1, probe the property by reflection before entering code that references a new type or method. Otherwise state a minimum Perfect Comms release.
@@ -97,10 +100,40 @@ bool hasPairRouting = PerfectCommsApi.Supports(
 | Channel | Retain multiple memberships per player; `TwoWay: false` is a receive-only endpoint. |
 | Listener origin/filter | Replace or augment task hearing, or muffle all incoming audio; contextual forms receive phase and host options. |
 | Phase observer | Observe API phase changes before the new phase's player callbacks run. |
-| Host options/tab | Add synced bools, enums, and stepped numbers, including conditional row visibility. |
-| Overlay privacy | Hide, dim, or safely alias identity-bearing voice UI. |
+| Host options/tab | Add persistent, lobby-synced bools, enums, and stepped numbers, including conditional row visibility. |
+| Managed Team Radio | Add player or pair memberships to Perfect Comms' selector; Perfect Comms owns PTT capture, selected-channel sync, labels, and living non-member privacy. |
+| Overlay privacy/appearance | Hide, dim, or safely alias identity-bearing voice UI, and classify custom animated player colors. |
+| Integration ownership | Claim a completed source-mod replacement so Perfect Comms suppresses its frozen legacy adapter and duplicate settings. |
 
 Every callback context that supports settings exposes bare-key accessors scoped to its `modId`: `GetOption`, `GetEnumOption`, and `GetNumberOption`.
+
+### Managed Team Radio
+
+Use `RegisterManagedRadioChannel` instead of a general `RegisterVoiceChannel` when Perfect Comms should own the complete radio control plane:
+
+```csharp
+PerfectCommsApi.RegisterManagedRadioChannel(Mod, ctx =>
+    !ctx.IsDead && MyRoles.LoverPairId(ctx.Player) is { } pairId
+        ? new VoiceManagedRadioChannelResult(
+            $"lovers:{pairId}",
+            "Lovers",
+            "L")
+        : null);
+```
+
+Eligible channels appear after built-in choices. Holding Perfect Comms' Team Radio control opens capture even in Push To Talk mode, synchronizes the selected namespaced key, applies the radio filter to matching members, and hard-mutes living non-members before permissive pair/general-channel routes. The normal Team Radio master and phase settings remain authoritative. Your mod still owns role membership and pair ids; return current state from the callback.
+
+### Source-mod cutover
+
+After registering a complete replacement for the frozen Town of Us Mira adapter, claim it last:
+
+```csharp
+PerfectCommsApi.RegisterAnimatedColorRule(Mod, MyColors.IsRainbow);
+// Register role, listener, radio, option, and overlay callbacks first.
+PerfectCommsApi.RegisterIntegrationOwner(Mod, VoiceIntegrationIds.TouMira);
+```
+
+The claim hides the legacy TOU-Mira settings tab and stops Perfect Comms from reflecting TOU role, radio, privacy, and rainbow state. `Unregister(Mod)` removes the claim and restores legacy discovery. Do not claim ownership for a partial integration.
 
 ## Important routing details
 
@@ -120,5 +153,5 @@ The full TOU-Mira parity matrix and copyable recipes are in [Examples](https://g
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes registered host-option values. It does not discover or synchronize your roles, modifiers, channel membership, phase bookkeeping, temporary permissions, aliases, custom buttons, keybinds, or role RPCs. Your mod owns that gameplay state, UI, and netcode; callbacks only project already-available state into voice behavior.
+- Perfect Comms synchronizes registered host-option values and persists the local host's values in its global BepInEx config. It does not discover your roles, modifiers, channel membership, phase bookkeeping, temporary permissions, aliases, or role RPCs. Managed Team Radio owns only Perfect Comms' existing selector/input/capture/wire path; your mod still supplies current membership keys and gameplay policy.
 - Host-option snapshots and locally evaluated callbacks are cooperative lobby policy, not hostile-client security. A modified client can ignore or forge local behavior.

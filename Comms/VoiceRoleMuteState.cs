@@ -52,6 +52,7 @@ internal static partial class VoiceRoleMuteState
     private static Type? _mediumRoleType;
     private static Type? _mediatedModifierType;
     private static bool _supportedModTypesResolved;
+    private static bool _legacyTouMiraSuppressed;
     private static int _resolvedGameId = int.MinValue;
     private static VoiceGamePhase _resolvedPhase = VoiceGamePhase.Unknown;
     private static int _resolvedAssemblyGeneration = -1;
@@ -81,6 +82,11 @@ internal static partial class VoiceRoleMuteState
 
     internal static void Update()
     {
+        if (VoiceModRegistry.IsIntegrationOwned(VoiceIntegrationIds.TouMira))
+        {
+            SuppressLegacyTouMiraState();
+            return;
+        }
         var settings = VoiceRoomSettingsState.Current;
         var phase = VoiceSceneState.ResolvePhase();
         bool inMeetingVoicePhase = VoiceSceneState.IsMeetingVoicePhase(phase);

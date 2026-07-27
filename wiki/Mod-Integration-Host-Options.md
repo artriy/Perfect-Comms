@@ -1,6 +1,6 @@
 # Host Options & Tabs
 
-Host options add session-local controls to the Perfect Comms host panel. Their values travel in the host-settings snapshot so compatible clients can evaluate the same voice policy. API 1.1 supports toggles, enum steppers, numeric rows, descriptions, and conditional visibility.
+Host options add persistent, lobby-synchronized controls to the Perfect Comms host panel. A player's local-host choices are stored in Perfect Comms' global BepInEx config; the connected host's current values travel in the host-settings snapshot so compatible clients evaluate the same voice policy. API 1.1 supports toggles, enum steppers, numeric rows, descriptions, and conditional visibility.
 
 Back to **[Mod Integration](Mod-Integration)**
 
@@ -129,14 +129,15 @@ Bool and enum declarations retain the original compatibility behavior and are ca
 
 ## Lifetime, sync, and compatibility
 
-- Values are session-local memory. They are not written to either mod's BepInEx config and restart at registered defaults.
+- The local host's choices persist in Perfect Comms' global BepInEx config. Stable `modId` and option keys restore the values after restart or re-registration.
+- A joined lobby's host snapshot temporarily overrides evaluation on that client; received values do not overwrite that client's saved local-host choices.
 - Only values are synchronized. Tabs, labels, choices, descriptions, visibility callbacks, and gameplay state are local declarations.
-- Compatible clients must register the same `modId), keys, types, and meanings.
+- Compatible clients must register the same `modId`, keys, types, and meanings.
 - Unknown option hashes are ignored by a client.
 - The host snapshot supports at most 256 synchronized mod-option values across all installed mods.
-- The wire identifies a value with a 32-bit hash of `modId.Key`. Collisions are not detected.
+- The wire identifies bool/enum values with a 32-bit hash of `modId.Key`; numbers use a separate type salt. Collisions are not detected.
 - Duplicate registrations accumulate as rows while the first stored value for a composed key remains authoritative. Register once.
-- `Unregister(modId)` removes that id's tab, option declarations, values, and every other API registration.
+- `Unregister(modId)` removes that id's active tab, declarations, values, and every other API registration. Its persisted config entries remain available if the same keys register again.
 
 All original bool/enum records and registration signatures remain unchanged. Existing integrations continue to compile and run; numbers and visibility are additive API 1.1 features.
 
@@ -163,5 +164,5 @@ All original bool/enum records and registration signatures remain unchanged. Exi
 
 **Currently broken:** None of the documented API 1.1 primitives on this page.
 
-- Perfect Comms synchronizes these option values only. Your mod owns gameplay state, role UI, buttons/keybinds, and role RPCs.
+- Perfect Comms persists local-host choices and synchronizes current host values. Your mod owns gameplay state, role UI, and role RPCs; managed Team Radio is the separate primitive that supplies radio input/control infrastructure.
 - Option snapshots and local callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.

@@ -1,6 +1,8 @@
+using BepInEx.Configuration;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using PerfectComms.Api;
 using UnityEngine;
 
@@ -65,11 +67,15 @@ internal static class VoiceModRegistry
     private static readonly CallbackMap<Func<VoiceRuleContext, VoicePlayerTraits>> _playerTraits = new();
     private static readonly CallbackMap<Func<VoicePairContext, VoicePairResult>> _pairRules = new();
     private static readonly CallbackMap<Func<VoiceRuleContext, VoiceChannelResult?>> _channels = new();
+    private static readonly CallbackMap<Func<VoiceRuleContext, VoiceManagedRadioChannelResult?>> _managedRadioChannels = new();
     private static readonly CallbackMap<Func<VoiceListenerContext, VoiceListenerResult?>> _origins = new();
     private static readonly CallbackMap<Func<VoiceListenerContext, VoiceListenerFilterResult>> _listenerFilters = new();
     private static readonly CallbackMap<Action<VoicePhaseChangedContext>> _phaseObservers = new();
     private static readonly CallbackMap<Func<VoiceOverlayViewerContext, VoiceOverlayViewerResult>> _overlayViewerRules = new();
     private static readonly CallbackMap<Func<VoiceOverlaySpeakerContext, VoiceOverlaySpeakerResult>> _overlaySpeakerRules = new();
+    private static readonly CallbackMap<Func<int, bool>> _animatedColorRules = new();
+    private static readonly Dictionary<string, string> _integrationOwnerById = new(StringComparer.Ordinal);
+    private static string[] _ownedIntegrationSnapshot = Array.Empty<string>();
     private static readonly List<GlobalGate> _globalGates = new();
     private static GlobalGate[] _globalGateSnapshot = Array.Empty<GlobalGate>();
 
@@ -85,13 +91,16 @@ internal static class VoiceModRegistry
     private static readonly Dictionary<string, bool> _boolValues = new();
     private static readonly Dictionary<string, int> _enumValues = new();
     private static readonly Dictionary<string, float> _numberValues = new();
+    private static readonly Dictionary<string, ConfigEntry<bool>> _boolConfigEntries = new();
+    private static readonly Dictionary<string, ConfigEntry<int>> _enumConfigEntries = new();
+    private static readonly Dictionary<string, ConfigEntry<float>> _numberConfigEntries = new();
     private static VoicePhaseKind? _lastObservedPhase;
     [ThreadStatic] private static bool _resolvingPlayerTraits;
 
     internal static bool HasAnyRegistrations =>
         _rules.Count > 0 || _playerTraits.Count > 0 || _pairRules.Count > 0 || _channels.Count > 0
-        || _origins.Count > 0 || _listenerFilters.Count > 0 || _globalGates.Count > 0
-        || _overlayViewerRules.Count > 0 || _overlaySpeakerRules.Count > 0;
+        || _managedRadioChannels.Count > 0 || _origins.Count > 0 || _listenerFilters.Count > 0
+        || _globalGates.Count > 0 || _overlayViewerRules.Count > 0 || _overlaySpeakerRules.Count > 0;
 
     internal static bool HasOverlayViewerRules => _overlayViewerRules.Count > 0;
     internal static bool HasOverlaySpeakerRules => _overlaySpeakerRules.Count > 0;
@@ -138,6 +147,14 @@ internal static class VoiceModRegistry
     {
         if (string.IsNullOrEmpty(modId) || channel == null) return;
         _channels.Add(modId, channel);
+    }
+
+    internal static void AddManagedRadioChannel(
+        string modId,
+        Func<VoiceRuleContext, VoiceManagedRadioChannelResult?> channel)
+    {
+        if (string.IsNullOrEmpty(modId) || channel == null) return;
+        _managedRadioChannels.Add(modId, channel);
     }
 
     internal static void AddListenerOrigin(string modId, Func<PlayerControl, VoiceListenerResult?> origin)
@@ -191,14 +208,29 @@ internal static class VoiceModRegistry
         _overlaySpeakerRules.Add(modId, rule);
     }
 
+    internal static void AddAnimatedColorRule(string modId, Func<int, bool> isAnimatedColor)
+    {
+        if (string.IsNullOrEmpty(modId) || isAnimatedColor == null) return;
+        _animatedColorRules.Add(modId, isAnimatedColor);
+    }
+
+    internal static void AddIntegrationOwner(string modId, string integrationId)
+    {
+        if (string.IsNullOrWhiteSpace(modId) || string.IsNullOrWhiteSpace(integrationId)) return;
+        if (_integrationOwnerById.TryGetValue(integrationId, out var owner) && owner != modId) return;
+        _integrationOwnerById[integrationId] = modId;
+        _ownedIntegrationSnapshot = new List<string>(_integrationOwnerById.Keys).ToArray();
+    }
+
     internal static void AddHostOption(string modId, VoiceHostOption option)
     {
         if (string.IsNullOrEmpty(modId) || option == null) return;
         if (!IsOptionKeyAvailable(modId, option.Key)) return;
         Add(_boolOptions, modId, option);
         var key = Compose(modId, option.Key);
-        _boolValues.TryAdd(key, option.Default);
-        VoiceModRemoteOptionState.RegisterBool(key, option.Default);
+        var value = BindPersistentBool(modId, option, key);
+        _boolValues.TryAdd(key, value);
+        VoiceModRemoteOptionState.RegisterBool(key, value);
         OptionRevision++;
     }
 
@@ -217,8 +249,10 @@ internal static class VoiceModRegistry
         };
         Add(_enumOptions, modId, option);
         var key = Compose(modId, option.Key);
-        _enumValues.TryAdd(key, option.Default);
-        VoiceModRemoteOptionState.RegisterEnum(key, option.Default);
+        var value = Math.Clamp(BindPersistentEnum(modId, option, key), 0, option.Choices.Length - 1);
+        if (_enumConfigEntries.TryGetValue(key, out var enumEntry)) enumEntry.Value = value;
+        _enumValues.TryAdd(key, value);
+        VoiceModRemoteOptionState.RegisterEnum(key, value);
         OptionRevision++;
     }
 
@@ -229,7 +263,8 @@ internal static class VoiceModRegistry
         option = option with { Format = SafeNumberFormat(option.Format, option.Default) };
         Add(_numberOptions, modId, option);
         var key = Compose(modId, option.Key);
-        float value = NormalizeNumber(option, option.Default);
+        float value = NormalizeNumber(option, BindPersistentNumber(modId, option, key));
+        if (_numberConfigEntries.TryGetValue(key, out var numberEntry)) numberEntry.Value = value;
         _numberValues.TryAdd(key, value);
         VoiceModRemoteOptionState.RegisterNumber(key, value);
         OptionRevision++;
@@ -261,11 +296,23 @@ internal static class VoiceModRegistry
         _playerTraits.Remove(modId);
         _pairRules.Remove(modId);
         _channels.Remove(modId);
+        _managedRadioChannels.Remove(modId);
         _origins.Remove(modId);
         _listenerFilters.Remove(modId);
         _phaseObservers.Remove(modId);
         _overlayViewerRules.Remove(modId);
         _overlaySpeakerRules.Remove(modId);
+        _animatedColorRules.Remove(modId);
+        if (_integrationOwnerById.Count > 0)
+        {
+            var owned = new List<string>();
+            foreach (var pair in _integrationOwnerById)
+                if (pair.Value == modId) owned.Add(pair.Key);
+            for (var i = 0; i < owned.Count; i++)
+                _integrationOwnerById.Remove(owned[i]);
+            if (owned.Count > 0)
+                _ownedIntegrationSnapshot = new List<string>(_integrationOwnerById.Keys).ToArray();
+        }
         bool optionInventoryChanged = _boolOptions.Remove(modId);
         optionInventoryChanged |= _enumOptions.Remove(modId);
         optionInventoryChanged |= _numberOptions.Remove(modId);
@@ -281,6 +328,33 @@ internal static class VoiceModRegistry
         }
         VoiceModRemoteOptionState.RemoveKeys(optionKeys);
         if (optionInventoryChanged) OptionRevision++;
+    }
+
+    internal static bool IsIntegrationOwned(string integrationId)
+    {
+        if (string.IsNullOrEmpty(integrationId)) return false;
+        var snapshot = _ownedIntegrationSnapshot;
+        for (var i = 0; i < snapshot.Length; i++)
+            if (string.Equals(snapshot[i], integrationId, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    internal static bool IsAnimatedColor(int colorId)
+    {
+        CallbackGroup<Func<int, bool>>[] groups = _animatedColorRules.Snapshot;
+        for (var groupIndex = 0; groupIndex < groups.Length; groupIndex++)
+        {
+            Func<int, bool>[] callbacks = groups[groupIndex].Callbacks;
+            for (var i = 0; i < callbacks.Length; i++)
+            {
+                try
+                {
+                    if (callbacks[i](colorId)) return true;
+                }
+                catch { }
+            }
+        }
+        return false;
     }
 
     internal static void NotifyPhase(VoicePhaseKind phase, PlayerControl? localPlayer)
@@ -638,6 +712,7 @@ internal static class VoiceModRegistry
         bool muted = false, muffled = false;
         string reason = string.Empty;
         List<ExternalVoiceChannelState>? channels = null;
+        List<ExternalVoiceManagedRadioState>? managedRadioChannels = null;
         bool listenerActive = false;
         Vector2 listenerOrigin = default;
         float listenerLight = -1f;
@@ -710,6 +785,42 @@ internal static class VoiceModRegistry
             }
         }
 
+        // Managed radios are kept separate from general channels because they opt into the complete
+        // Team Radio control plane: selection, PTT capture, wire state, and non-member privacy.
+        CallbackGroup<Func<VoiceRuleContext, VoiceManagedRadioChannelResult?>>[] radioGroups =
+            _managedRadioChannels.Snapshot;
+        for (var groupIndex = 0; groupIndex < radioGroups.Length; groupIndex++)
+        {
+            CallbackGroup<Func<VoiceRuleContext, VoiceManagedRadioChannelResult?>> group = radioGroups[groupIndex];
+            var context = MakeContext(group.ModId, player, phase, isLocal, isDead, localIsDead);
+            Func<VoiceRuleContext, VoiceManagedRadioChannelResult?>[] callbacks = group.Callbacks;
+            for (var i = 0; i < callbacks.Length; i++)
+            {
+                VoiceManagedRadioChannelResult? radio;
+                try { radio = callbacks[i](context); }
+                catch { radio = null; }
+                if (radio == null || !IsSafePublicKey(radio.Key)) continue;
+
+                var namespacedKey = group.ModId + "\u0000" + radio.Key;
+                if (!VoiceManagedRadioWireKey.IsValid(namespacedKey)) continue;
+                var duplicate = false;
+                if (managedRadioChannels != null)
+                    for (var existing = 0; existing < managedRadioChannels.Count; existing++)
+                        if (managedRadioChannels[existing].Key == namespacedKey)
+                        {
+                            duplicate = true;
+                            break;
+                        }
+                if (duplicate) continue;
+
+                managedRadioChannels ??= new List<ExternalVoiceManagedRadioState>();
+                managedRadioChannels.Add(new ExternalVoiceManagedRadioState(
+                    namespacedKey,
+                    SafeUiText(radio.Label, radio.Key, 48),
+                    SafeUiText(radio.Badge, radio.Label, 16)));
+            }
+        }
+
         // Listener origin: local player only, first non-null wins.
         if (isLocal && _origins.Count > 0)
         {
@@ -742,6 +853,7 @@ internal static class VoiceModRegistry
             muffled,
             reason,
             channels?.ToArray(),
+            managedRadioChannels?.ToArray(),
             listenerActive,
             listenerOrigin,
             listenerLight,
@@ -851,6 +963,7 @@ internal static class VoiceModRegistry
         if (!_boolValues.TryGetValue(composedKey, out var cur)) return;
         if (cur == value) return;
         _boolValues[composedKey] = value;
+        if (_boolConfigEntries.TryGetValue(composedKey, out var entry)) entry.Value = value;
         OptionRevision++;
     }
 
@@ -867,6 +980,7 @@ internal static class VoiceModRegistry
         value = Math.Clamp(value, 0, definition.Choices.Length - 1);
         if (cur == value) return;
         _enumValues[composedKey] = value;
+        if (_enumConfigEntries.TryGetValue(composedKey, out var entry)) entry.Value = value;
         OptionRevision++;
     }
 
@@ -883,6 +997,7 @@ internal static class VoiceModRegistry
         value = NormalizeNumber(definition, value);
         if (Math.Abs(current - value) < 0.0001f) return;
         _numberValues[composedKey] = value;
+        if (_numberConfigEntries.TryGetValue(composedKey, out var entry)) entry.Value = value;
         OptionRevision++;
     }
 
@@ -946,6 +1061,79 @@ internal static class VoiceModRegistry
                 if (KeyHash(key) == hash) { VoiceModRemoteOptionState.SetBool(key, value != 0); return; }
         }
     }
+
+    private static bool IsSafePublicKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 160) return false;
+        for (var i = 0; i < value.Length; i++)
+            if (char.IsControl(value[i])) return false;
+        return true;
+    }
+
+    private static string SafeUiText(string? value, string? fallback, int maxLength)
+    {
+        var text = string.IsNullOrWhiteSpace(value) ? fallback ?? string.Empty : value;
+        text = text.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ').Trim();
+        if (text.Length == 0) text = "Radio";
+        return text.Length <= maxLength ? text : text[..maxLength];
+    }
+
+    private static bool BindPersistentBool(string modId, VoiceHostOption option, string composedKey)
+    {
+        try
+        {
+            var config = VoiceModConfigPersistence.Config;
+            if (config == null) return option.Default;
+            var entry = config.Bind(
+                PersistentSection(modId),
+                PersistentKey("bool", option.Key),
+                option.Default,
+                new ConfigDescription($"Host option from {modId}: {option.Label}"));
+            _boolConfigEntries[composedKey] = entry;
+            return entry.Value;
+        }
+        catch { return option.Default; }
+    }
+
+    private static int BindPersistentEnum(string modId, VoiceHostEnumOption option, string composedKey)
+    {
+        try
+        {
+            var config = VoiceModConfigPersistence.Config;
+            if (config == null) return option.Default;
+            var entry = config.Bind(
+                PersistentSection(modId),
+                PersistentKey("enum", option.Key),
+                option.Default,
+                new ConfigDescription($"Host option from {modId}: {option.Label}"));
+            _enumConfigEntries[composedKey] = entry;
+            return entry.Value;
+        }
+        catch { return option.Default; }
+    }
+
+    private static float BindPersistentNumber(string modId, VoiceHostNumberOption option, string composedKey)
+    {
+        try
+        {
+            var config = VoiceModConfigPersistence.Config;
+            if (config == null) return option.Default;
+            var entry = config.Bind(
+                PersistentSection(modId),
+                PersistentKey("number", option.Key),
+                option.Default,
+                new ConfigDescription($"Host option from {modId}: {option.Label}"));
+            _numberConfigEntries[composedKey] = entry;
+            return entry.Value;
+        }
+        catch { return option.Default; }
+    }
+
+    private static string PersistentSection(string modId)
+        => "Mod Options " + Convert.ToHexString(Encoding.UTF8.GetBytes(modId));
+
+    private static string PersistentKey(string kind, string optionKey)
+        => kind + "_" + Convert.ToHexString(Encoding.UTF8.GetBytes(optionKey));
 
     internal static string Compose(string modId, string key) => modId + "." + key;
 
