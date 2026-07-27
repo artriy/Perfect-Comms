@@ -8,6 +8,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_api:
+        description: Publish only the reference-only PerfectComms.Api package to NuGet.org
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -224,6 +230,44 @@ jobs:
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll
             artifacts/PerfectComms.Api.*.nupkg
+      - name: Authenticate to NuGet.org
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - name: Publish reference-only API package
+        run: >-
+          dotnet nuget push "$PERFECT_COMMS_API_PACKAGE"
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
+          --source "https://api.nuget.org/v3/index.json"
+          --skip-duplicate
+
+  publish-api:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_api
+    needs: package
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+      - name: Download reference-only API package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: PerfectComms-api-nuget-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Verify downloaded API package
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' PerfectComms.csproj | head -n1)"
+          api_package="artifacts/PerfectComms.Api.$project_version.nupkg"
+          test -s "$api_package"
+          python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$project_version"
+          echo "PERFECT_COMMS_API_PACKAGE=$api_package" >> "$GITHUB_ENV"
       - name: Authenticate to NuGet.org
         id: nuget-login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
