@@ -18,7 +18,7 @@ jobs:
     name: Managed build and tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate release and helper scripts
         run: |
           python3 -m py_compile scripts/verify-release-assets.py
@@ -60,7 +60,7 @@ jobs:
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
@@ -109,7 +109,7 @@ jobs:
         run: cargo clippy --locked --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
       - name: Lint mobile wrapper
         run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-audit@0.22.2
       - name: Audit native dependency locks
@@ -128,7 +128,7 @@ jobs:
         run: |
           cargo test --locked --manifest-path native/pion-sys/Cargo.toml --all-targets
           cargo test --locked --manifest-path native/pc-capture/Cargo.toml --all-targets
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-about@0.9.1
       - name: Verify native dependency license inventory
@@ -161,7 +161,7 @@ jobs:
       run:
         working-directory: cloudflare/perfect-comms-lobbies
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
