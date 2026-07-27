@@ -1,5 +1,18 @@
 # Changelog
 
+## Perfect Comms v4.1.7
+
+Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package without changing how players install the mod.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Developer API Package
+
+- **Mod integrations can compile against `PerfectComms.Api` without checking in or redistributing the runtime DLL.**
+  > <sub>The versioned NuGet package contains only the small `net6.0` reference assembly and XML documentation. Release and CI gates compile a real package consumer and reject runtime, native, content, or build assets—or any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
+
 ## Perfect Comms v4.1.6
 
 Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen and lets voice HUD elements reach their selected safe-screen edges without invisible padding.
@@ -17,6 +30,7 @@ Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen 
 
 - **Voice controls and speaking-bar content now reach their selected safe-screen edge.**
   > <sub>Desktop controls no longer reserve an extra viewport margin or clamp against transparent PNG canvas space. Speaking-bar avatars, rings, and names own the edge instead of the backdrop's decorative padding, and the overlay camera follows the main camera's viewport and aspect.</sub>
+
 
 ### Reliable CrossOver Audio Startup
 

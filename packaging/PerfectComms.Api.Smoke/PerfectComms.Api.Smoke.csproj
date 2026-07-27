@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>enable</Nullable>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PerfectComms.Api" Version="$(PerfectCommsApiPackageVersion)" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.735" PrivateAssets="all" ExcludeAssets="runtime;native" />
+    <PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="ValidatePerfectCommsApiSmokeInputs" BeforeTargets="CollectPackageReferences">
+    <Error Condition="'$(PerfectCommsApiPackageVersion)' == ''"
+           Text="PerfectCommsApiPackageVersion is required for the package smoke build." />
+  </Target>
+
+</Project>

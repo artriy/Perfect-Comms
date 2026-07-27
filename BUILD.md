@@ -97,16 +97,35 @@ loopback all succeed for that exact tagged commit. The workflow also rejects a
 tag that is not the current `main` tip, or whose version does not exactly match
 the project, plugin, assembly, file, and informational versions.
 
+### Reference-only API package
+
+A desktop managed build produces the reference assembly and XML documentation used by the developer package. Package and smoke-test it without staging native release assets:
+
+```bash
+dotnet build PerfectComms.csproj -c Release
+bash scripts/package-api.sh Release
+```
+
+On Windows, use `pwsh scripts/package-api.ps1 -Configuration Release`. Both commands create `artifacts/PerfectComms.Api.X.Y.Z.nupkg`, validate that it contains only `ref/net6.0` compiler assets, compile a real consumer through `PackageReference`, and fail if `PerfectComms.dll` is copied to that consumer's output. Desktop release packaging runs the same gate automatically.
+
+Tagged releases publish the package through NuGet.org Trusted Publishing. One-time repository setup is required:
+
+1. Set the GitHub Actions repository variable `NUGET_USER` to the NuGet.org profile name that owns the package.
+2. In that NuGet.org account's **Trusted Publishing** settings, add a GitHub Actions policy for owner `artriy`, repository `Perfect-Comms`, and workflow file `release.yml`. Do not set an environment unless the publish job is updated to use the same environment.
+
+The workflow requests only a short-lived OIDC credential; no long-lived NuGet API key is stored.
+
 ### GitHub release rehearsal
 
 Before tagging, open **Actions -> Release -> Run workflow** and run it against
 `main`. A manual run never creates a GitHub Release. It runs the complete
-managed, native, RTC, desktop, Android, and packaging gates, then uploads three
+managed, native, RTC, desktop, Android, and packaging gates, then uploads four
 Actions artifacts for 14 days:
 
 - `PerfectComms+dependencies-win-x86-steam-itch.zip`, containing the Steam and itch.io x86 bundle with the pinned x86 BepInEx build;
 - `PerfectComms+dependencies-win-x64-epic-msstore.zip`, containing the Epic Games Store and Microsoft Store x64 bundle with the pinned x64 BepInEx build;
-- `PerfectComms-standalone-dlls-*`, containing `PerfectComms.dll` for every supported desktop platform and `PerfectCommsAndroid.dll` for Android.
+- `PerfectComms-standalone-dlls-*`, containing `PerfectComms.dll` for every supported desktop platform and `PerfectCommsAndroid.dll` for Android;
+- `PerfectComms-api-nuget-*`, containing the reference-only `PerfectComms.Api.X.Y.Z.nupkg`.
 
 ### Publishing a release
 
@@ -119,6 +138,7 @@ Actions artifacts for 14 days:
 4. Create and push tag `vX.Y.Z` on that tested `main` commit.
 
 The tag run repeats every gate, verifies the tag is the current `main` tip,
-checks every version field, publishes the four release assets from an isolated
-write-enabled job, and generates GitHub release notes automatically. A failed
-gate cannot publish a partial release.
+checks every version field, publishes the five GitHub release assets, and
+publishes the reference-only API package to NuGet.org using OIDC. GitHub release
+notes are generated automatically. A failed gate cannot publish a partial
+release.

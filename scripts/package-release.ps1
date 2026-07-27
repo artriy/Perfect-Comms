@@ -252,6 +252,13 @@ if ($Configuration -ne "Android") {
     Write-Host "release.package.embedded_helpers_match configuration=$Configuration"
 }
 
+if ($Configuration -ne "Android") {
+    & (Join-Path $root "scripts\package-api.ps1") -Configuration $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "PerfectComms.Api packaging failed with exit code $LASTEXITCODE"
+    }
+}
+
 if (Test-Path $output) { Remove-Item $output -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $output "BepInEx\plugins") | Out-Null
 

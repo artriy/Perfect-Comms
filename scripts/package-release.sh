@@ -206,6 +206,10 @@ if [[ "$config" != "Android" ]]; then
 	echo "release.package.embedded_helpers_match configuration=$config"
 fi
 
+if [[ "$config" != "Android" ]]; then
+	bash "$root/scripts/package-api.sh" "$config"
+fi
+
 rm -rf "$output"
 mkdir -p "$output/BepInEx/plugins"
 cp "$dll" "$output/BepInEx/plugins/PerfectComms.dll"

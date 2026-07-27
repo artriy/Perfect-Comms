@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <!-- NuGet's built-in analyzer assumes every ref TFM also has lib/dependency
+         groups. This package deliberately has neither; the release verifier
+         enforces the stricter reference-only layout instead. -->
+    <NoPackageAnalysis>true</NoPackageAnalysis>
+
+    <PackageId>PerfectComms.Api</PackageId>
+    <PackageVersion>$(PerfectCommsApiPackageVersion)</PackageVersion>
+    <Title>Perfect Comms API</Title>
+    <Authors>Perfect Comms</Authors>
+    <Company>Perfect Comms</Company>
+    <Description>Reference-only compile-time API for integrating Among Us mods with Perfect Comms. This package does not install or redistribute the Perfect Comms runtime mod.</Description>
+    <PackageTags>among-us;bepinex;il2cpp;voice-chat;modding</PackageTags>
+    <PackageProjectUrl>https://github.com/artriy/Perfect-Comms</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/artriy/Perfect-Comms.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>LGPL-2.1-only</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+
+    <PerfectCommsConfiguration Condition="'$(PerfectCommsConfiguration)' == ''">Release</PerfectCommsConfiguration>
+    <PerfectCommsReferenceAssembly>$(MSBuildThisFileDirectory)..\..\obj\$(PerfectCommsConfiguration)\net6.0\ref\PerfectComms.dll</PerfectCommsReferenceAssembly>
+    <PerfectCommsDocumentationFile>$(MSBuildThisFileDirectory)..\..\bin\$(PerfectCommsConfiguration)\net6.0\PerfectComms.xml</PerfectCommsDocumentationFile>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts</PackageOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(PerfectCommsReferenceAssembly)" Pack="true" PackagePath="ref/net6.0/PerfectComms.dll" />
+    <None Include="$(PerfectCommsDocumentationFile)" Pack="true" PackagePath="ref/net6.0/PerfectComms.xml" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\docs\MOD_INTEGRATION.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+
+  <Target Name="ValidatePerfectCommsApiPackageInputs" BeforeTargets="GenerateNuspec">
+    <Error Condition="'$(PerfectCommsApiPackageVersion)' == ''"
+           Text="PerfectCommsApiPackageVersion is required. Use the version from PerfectComms.csproj." />
+    <Error Condition="!Exists('$(PerfectCommsReferenceAssembly)')"
+           Text="Missing Perfect Comms reference assembly: $(PerfectCommsReferenceAssembly). Build PerfectComms.csproj first." />
+    <Error Condition="!Exists('$(PerfectCommsDocumentationFile)')"
+           Text="Missing Perfect Comms XML documentation: $(PerfectCommsDocumentationFile). Build PerfectComms.csproj first." />
+  </Target>
+
+</Project>

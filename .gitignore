@@ -24,6 +24,9 @@ scripts/*
 !scripts/fetch-bepinex.sh
 !scripts/verify-release-assets.py
 !scripts/verify-package-layout.py
+!scripts/package-api.sh
+!scripts/package-api.ps1
+!scripts/verify-nuget-package.py
 !scripts/verify-native-license-inventory.py
 !scripts/generate-cubeb-license-inventories.py
 !scripts/verify-cubeb-provenance.py

@@ -55,7 +55,15 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 ## For Mod Developers
 
-Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**. Reference `PerfectComms.dll` as a soft dependency and register your rules in `Load()`: mutes, private radio channels, relocated hearing, your own host-settings tab, and more.
+Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private radio channels, relocated hearing, your own host-settings tab, and more. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
+
+```xml
+<PackageReference Include="PerfectComms.Api"
+                  Version="X.Y.Z"
+                  PrivateAssets="all" />
+```
+
+Use the package version matching the minimum Perfect Comms release you support. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
 
 ```csharp
 [BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]

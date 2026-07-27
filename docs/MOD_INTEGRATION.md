@@ -1,8 +1,24 @@
 # Mod Integration (API 1.1 quickstart)
 
-Perfect Comms API 1.1 lets a role mod add voice policy without forking Perfect Comms. Reference `PerfectComms.dll` at build time, treat it as a soft runtime dependency, and register only after plugin id `com.edgetel.perfectcomms` is present.
+Perfect Comms API 1.1 lets a role mod add voice policy without forking Perfect Comms. Compile against the reference-only `PerfectComms.Api` package, treat Perfect Comms as a soft runtime dependency, and register only after plugin id `com.edgetel.perfectcomms` is present.
 
 > Full guide: <https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration>
+
+## Build-time package
+
+Use the package version matching the minimum Perfect Comms release your integration supports:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="PerfectComms.Api"
+                    Version="X.Y.Z"
+                    PrivateAssets="all" />
+</ItemGroup>
+```
+
+The package contains only `ref/net6.0/PerfectComms.dll` and its XML documentation. It provides compiler metadata but has no runtime, native, content, or build assets, so `PerfectComms.dll` is not copied to your output. `PrivateAssets="all"` also prevents the build-only reference from becoming a dependency if you package your own mod.
+
+Your project still owns its normal BepInEx and Among Us game-library references. Players must install the matching or newer Perfect Comms mod separately; NuGet does not install a BepInEx plugin.
 
 ## Safe soft-dependency setup
 

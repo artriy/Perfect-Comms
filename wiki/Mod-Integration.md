@@ -1,12 +1,24 @@
 # Mod Integration
 
-Perfect Comms API 1.1 exposes the supported `PerfectComms.Api` surface for role voice, private routes, host settings, and concealment-safe voice UI. Your mod references `PerfectComms.dll` as a soft dependency and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
+Perfect Comms API 1.1 exposes the supported `PerfectComms.Api` surface for role voice, private routes, host settings, and concealment-safe voice UI. Your mod compiles against the reference-only API package and owns the gameplay state that its callbacks read; Perfect Comms never references your mod.
 
 ---
 
 ## Safe setup
 
-Reference `PerfectComms.dll` for compilation, but do not redistribute it with your mod. Keep all API references inside a lazy, non-inlined bridge that is entered only after the literal plugin id is present:
+Add the build-only package version matching the minimum Perfect Comms release your integration supports:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="PerfectComms.Api"
+                    Version="X.Y.Z"
+                    PrivateAssets="all" />
+</ItemGroup>
+```
+
+The package contains only the `net6.0` reference assembly and XML documentation. It does not install Perfect Comms, add native payloads, or copy `PerfectComms.dll` to your build output. `PrivateAssets="all"` also keeps it out of your own package dependencies. Keep your mod's normal BepInEx and Among Us game-library references, and require players to install Perfect Comms separately.
+
+Declare Perfect Comms as a soft dependency, but do not redistribute it with your mod. Keep all API references inside a lazy, non-inlined bridge that is entered only after the literal plugin id is present:
 
 ```csharp
 using BepInEx;
