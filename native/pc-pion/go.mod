@@ -3,11 +3,11 @@ module github.com/CallOfCreator/PerfectComms/native/pc-pion
 go 1.24.0
 
 require (
-	github.com/pion/ice/v4 v4.3.0
-	github.com/pion/interceptor v0.1.45
+	github.com/pion/ice/v4 v4.4.0
+	github.com/pion/interceptor v0.1.47
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.17
-	github.com/pion/rtp v1.10.4
+	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.17
 )
 
