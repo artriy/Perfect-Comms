@@ -82,9 +82,9 @@
       },
       "SocketIOClient": {
         "type": "Direct",
-        "requested": "[4.0.4, )",
-        "resolved": "4.0.4",
-        "contentHash": "fieiamC4be8gthLAdmT0tuu9lYdPcrpwFvcPqnxYY7gFgH646bhMBQeV+tf0z6WsU+rUGKLbEbPp3MJrSpAXEw==",
+        "requested": "[4.0.5, )",
+        "resolved": "4.0.5",
+        "contentHash": "VG4liS8wl5yg0K0MftVP5X2FV9iWPupNT0lAMd2rhmeNKYDTPjFm4Pkm4Br/0pUyAy3bACc1q7LRz0krB8uj4g==",
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection": "10.0.3",
           "Microsoft.Extensions.Logging": "10.0.3",
@@ -453,7 +453,7 @@
         "type": "Project",
         "dependencies": {
           "BepInEx.Unity.IL2CPP": "[6.0.0-be.735, )",
-          "SocketIOClient": "[4.0.4, )"
+          "SocketIOClient": "[4.0.5, )"
         }
       }
     }

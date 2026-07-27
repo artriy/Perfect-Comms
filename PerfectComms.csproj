@@ -58,7 +58,7 @@
 		     explicit so a clean restore always stages the exact files embedded below. -->
 		<PackageReference Include="System.Text.Encodings.Web" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.Text.Json" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="SocketIOClient" Version="4.0.4" GeneratePathProperty="true" />
+		<PackageReference Include="SocketIOClient" Version="4.0.5" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIOClient.Common" Version="4.0.0" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="SocketIOClient.Serializer" Version="4.0.0.1" PrivateAssets="all" GeneratePathProperty="true" />
 		<!-- Socket.IO 4's Microsoft.Extensions 10 runtime closure is not supplied by the

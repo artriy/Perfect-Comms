@@ -45,7 +45,7 @@
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
 		<!-- Keep the production Socket.IO version explicit in both Dependabot directories so
 		     a grouped update regenerates this ProjectReference consumer's lock file too. -->
-		<PackageReference Include="SocketIOClient" Version="4.0.4" PrivateAssets="all" />
+		<PackageReference Include="SocketIOClient" Version="4.0.5" PrivateAssets="all" />
 		<!-- Pin the embedded production runtime closure here as direct private test dependencies.
 		     Socket.IO only declares 10.0.3 minimums, so without these pins this lock file can
 		     silently test older assemblies than the single-DLL plugin embeds. -->
