@@ -8,9 +8,32 @@ public sealed class EmbeddedManagedDependenciesTests
     public void StandalonePluginCarriesNativeDependencyNotices()
     {
         var resources = typeof(BetterCrewLinkLobbyPublisher).Assembly.GetManifestResourceNames();
-        Assert.Contains("Licenses.THIRD_PARTY_NOTICES.md", resources);
-        Assert.Contains("Licenses.native-rust-dependencies.html", resources);
-        Assert.Contains("Licenses.pion-go-dependencies.txt", resources);
+        var expected = new[]
+        {
+            "Licenses.THIRD_PARTY_NOTICES.md",
+            "Licenses.SocketIOClient-MIT.txt",
+            "Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt",
+            "Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt",
+            "Licenses.WebRTC-BSD-3-Clause.txt",
+            "Licenses.WebRTC-fft-BSD-3-Clause.txt",
+            "Licenses.WebRTC-ooura-BSD.txt",
+            "Licenses.WebRTC-pffft-BSD-3-Clause.txt",
+            "Licenses.WebRTC-rnnoise-BSD-3-Clause.txt",
+            "Licenses.WebRTC-spl-sqrt-floor-BSD-3-Clause.txt",
+            "Licenses.cubeb-coreaudio-rust-dependencies.html",
+            "Licenses.cubeb-rs-ISC.txt",
+            "Licenses.cubeb-speex-resampler-BSD-3-Clause.txt",
+            "Licenses.dotnet-runtime-MIT.txt",
+            "Licenses.libcubeb-ISC.txt",
+            "Licenses.libopus-BSD-3-Clause.txt",
+            "Licenses.native-rust-dependencies.html",
+            "Licenses.opusic-c-BSD-3-Clause.txt",
+            "Licenses.pion-go-dependencies.txt",
+            "Licenses.webrtc-audio-processing-BSD-3-Clause.txt",
+        };
+
+        foreach (var resource in expected)
+            Assert.Contains(resource, resources);
     }
 
     [Fact]

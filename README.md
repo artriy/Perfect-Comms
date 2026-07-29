@@ -53,30 +53,6 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 <br>
 
-## For Mod Developers
-
-Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private routes, persistent host options, concealment-safe overlays, animated colors, and managed Team Radio that reuses Perfect Comms' selector/PTT/network path. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
-
-```xml
-<PackageReference Include="PerfectComms.Api"
-                  Version="4.1.7.1"
-                  PrivateAssets="all" />
-```
-
-`4.1.7.1` is the corrected API-package revision for the Perfect Comms 4.1.7 runtime; the player-facing mod version remains 4.1.7. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
-
-```csharp
-[BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]
-// in Load():
-PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
-    ctx.Phase == VoicePhaseKind.Meeting && MyRoles.IsGagged(ctx.Player)
-        ? VoiceRuleResult.Mute("Gagged")
-        : VoiceRuleResult.Pass);
-```
-
-Full guide, every primitive, and copy-paste examples are in the **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
-
-<br>
 
 ## Settings
 
@@ -117,12 +93,12 @@ microphone transmission until you undeafen.
 
 ## Install
 
-1. Install **BepInEx 6** (Unity IL2CPP build) into your Among Us folder, or download the bundle for your platform from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest), which already includes BepInEx and Perfect Comms:
-   - **`PerfectComms+dependencies-win-x86-steam-itch.zip`** for **Steam and itch.io** (x86).
-   - **`PerfectComms+dependencies-win-x64-epic-msstore.zip`** for **Epic Games Store and Microsoft Store** (x64).
+1. If another mod or modpack already provides or requires BepInEx, keep that exact installation. **Do not install or merge a second copy of BepInEx over it.** Otherwise install the tested **BepInEx 6.0.0-be.735 Unity IL2CPP** build that matches your Among Us executable:
+   - [Windows x86](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x86-6.0.0-be.735%2B5fef357.zip) for **Steam and itch.io**.
+   - [Windows x64](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.735%2B5fef357.zip) for **Epic Games Store and Microsoft Store**.
 
-   Extract the selected bundle into the Among Us folder so `winhttp.dll` sits beside `Among Us.exe`.
-2. If you installed BepInEx separately, drop `PerfectComms.dll` into `BepInEx/plugins`.
+   For a fresh installation, extract BepInEx into the folder containing `Among Us.exe`, launch once, then close the game. See the [official IL2CPP guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html) for details.
+2. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in the existing `BepInEx/plugins` folder.
 3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
 ```text
@@ -131,7 +107,32 @@ BepInEx/
    └─ PerfectComms.dll
 ```
 
-Perfect Comms is fully standalone. It installs in the same `BepInEx/plugins` folder as mods that do use Reactor or MiraAPI (such as TOU-Mira) and runs alongside them without conflict.
+Perfect Comms ships as one self-contained desktop plugin DLL apart from its BepInEx requirement. It installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies.
+
+<br>
+
+## For Mod Developers
+
+Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private routes, persistent host options, concealment-safe overlays, animated colors, and managed Team Radio that reuses Perfect Comms' selector/PTT/network path. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
+
+```xml
+<PackageReference Include="PerfectComms.Api"
+                  Version="4.1.7.1"
+                  PrivateAssets="all" />
+```
+
+`4.1.7.1` is the corrected API-package revision for the Perfect Comms 4.1.7 runtime; the player-facing mod version remains 4.1.7. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
+
+```csharp
+[BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]
+// in Load():
+PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
+    ctx.Phase == VoicePhaseKind.Meeting && MyRoles.IsGagged(ctx.Player)
+        ? VoiceRuleResult.Mute("Gagged")
+        : VoiceRuleResult.Pass);
+```
+
+Full guide, every primitive, and copy-paste examples are in the **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
 
 <br>
 

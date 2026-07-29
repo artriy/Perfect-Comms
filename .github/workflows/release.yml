@@ -111,34 +111,10 @@ jobs:
           cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
           cp dl/pion-android-arm64/libpc-pion.so Libs/pion/libpc-pion.android-arm64.so
           # Android intentionally uses the platform audio path without desktop DSP sidecars.
-      - name: Assemble BepInEx sources (Steam/itch.io x86 + Epic Games Store/Microsoft Store x64)
-        run: |
-          bash scripts/fetch-bepinex.sh --self-test
-          bash scripts/fetch-bepinex.sh win-x86 "${{ runner.temp }}/bepinex-deps-win-x86"
-          bash scripts/fetch-bepinex.sh win-x64 "${{ runner.temp }}/bepinex-deps-win-x64"
-      - name: Package (Release + Steam/itch.io x86 + Epic Games Store/Microsoft Store x64 dependencies)
-        env:
-          PC_DEPENDENCY_SOURCE_WIN_X86: ${{ runner.temp }}/bepinex-deps-win-x86
-          PC_DEPENDENCY_SOURCE_WIN_X64: ${{ runner.temp }}/bepinex-deps-win-x64
+      - name: Package desktop DLL
         run: bash scripts/package-release.sh Release
       - name: Package (Android)
         run: bash scripts/package-release.sh Android
-      - name: Upload Steam/itch.io x86 dependency artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: "PerfectComms+dependencies-win-x86-steam-itch.zip"
-          path: "artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip"
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
-      - name: Upload Epic Games Store/Microsoft Store x64 dependency artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: "PerfectComms+dependencies-win-x64-epic-msstore.zip"
-          path: "artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip"
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
       - name: Upload standalone DLL artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -186,16 +162,6 @@ jobs:
             echo "Release notes must not repeat the GitHub release title." >&2
             exit 1
           fi
-      - name: Download Steam/itch.io x86 dependency artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: "PerfectComms+dependencies-win-x86-steam-itch.zip"
-          path: artifacts
-      - name: Download Epic Games Store/Microsoft Store x64 dependency artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: "PerfectComms+dependencies-win-x64-epic-msstore.zip"
-          path: artifacts
       - name: Download standalone DLL artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -212,8 +178,6 @@ jobs:
           set -euo pipefail
           api_package_version="$(sed -n 's:.*<PerfectCommsApiPackageVersion>\([^<]*\)</PerfectCommsApiPackageVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
           api_package="artifacts/PerfectComms.Api.$api_package_version.nupkg"
-          test -s "artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip"
-          test -s "artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip"
           test -s artifacts/PerfectComms.dll
           test -s artifacts/PerfectCommsAndroid.dll
           test -s "$api_package"
@@ -225,11 +189,8 @@ jobs:
           name: Perfect Comms ${{ github.ref_name }}
           body_path: release-notes.md
           files: |
-            artifacts/PerfectComms+dependencies-win-x86-steam-itch.zip
-            artifacts/PerfectComms+dependencies-win-x64-epic-msstore.zip
             artifacts/PerfectComms.dll
             artifacts/PerfectCommsAndroid.dll
-            artifacts/PerfectComms.Api.*.nupkg
       - name: Authenticate to NuGet.org
         id: nuget-login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0

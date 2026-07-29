@@ -2,11 +2,19 @@
 
 ## Perfect Comms v4.1.7
 
-Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, and restores native audio startup under CrossOver on macOS without changing how players install the mod.
+Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, restores native audio startup under CrossOver on macOS, and switches desktop releases to a safer DLL-only installation.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
 </p>
+
+### Safer DLL-Only Installation
+
+- **Desktop releases no longer bundle or overwrite BepInEx.**
+  > <sub>Starting with v4.1.7, the desktop download is the self-contained `PerfectComms.dll` plugin. Players using a mod or modpack keep the exact BepInEx installation it provides or requires and place Perfect Comms in the existing `BepInEx/plugins` folder, avoiding clashes with customized loaders, runtimes, patchers, and configuration.</sub>
+
+- **Fresh installations use the tested upstream BepInEx build.**
+  > <sub>Players without an existing mod installation download the matching x86 or x64 BepInEx 6 Unity IL2CPP build directly from the official BepInEx build service, run its first-time setup, and then add `PerfectComms.dll`. Release automation no longer downloads, packages, verifies, or publishes third-party BepInEx files.</sub>
 
 ### Developer API Package
 

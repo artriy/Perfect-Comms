@@ -113,17 +113,28 @@
 		     the app bundle, so macOS deliberately has no standalone DSP resource. -->
 	</ItemGroup>
 
-	<!-- Standalone DLL release assets carry the same native dependency notices as the ZIPs. -->
+	<!-- The standalone DLL carries complete notices for every embedded managed and native dependency. -->
 	<ItemGroup>
-		<EmbeddedResource Include="THIRD_PARTY_NOTICES.md">
-			<LogicalName>Licenses.THIRD_PARTY_NOTICES.md</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs/native-rust-dependencies.html">
-			<LogicalName>Licenses.native-rust-dependencies.html</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs/pion-go-dependencies.txt">
-			<LogicalName>Licenses.pion-go-dependencies.txt</LogicalName>
-		</EmbeddedResource>
+		<EmbeddedResource Include="THIRD_PARTY_NOTICES.md" LogicalName="Licenses.THIRD_PARTY_NOTICES.md" />
+		<EmbeddedResource Include="Libs\libcubeb.LICENSE" LogicalName="Licenses.libcubeb-ISC.txt" />
+		<EmbeddedResource Include="Libs\cubeb-rs.LICENSE" LogicalName="Licenses.cubeb-rs-ISC.txt" />
+		<EmbeddedResource Include="Libs\cubeb-speex-resampler.LICENSE" LogicalName="Licenses.cubeb-speex-resampler-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\cubeb-coreaudio-rust-dependencies.html" LogicalName="Licenses.cubeb-coreaudio-rust-dependencies.html" />
+		<EmbeddedResource Include="Libs\opus.COPYING" LogicalName="Licenses.libopus-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\opusic-c.COPYING" LogicalName="Licenses.opusic-c-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-apm.COPYING" LogicalName="Licenses.webrtc-audio-processing-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-upstream.LICENSE" LogicalName="Licenses.WebRTC-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-ooura.LICENSE" LogicalName="Licenses.WebRTC-ooura-BSD.txt" />
+		<EmbeddedResource Include="Libs\webrtc-spl-sqrt-floor.LICENSE" LogicalName="Licenses.WebRTC-spl-sqrt-floor-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-fft.LICENSE" LogicalName="Licenses.WebRTC-fft-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-pffft.LICENSE" LogicalName="Licenses.WebRTC-pffft-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\webrtc-rnnoise.COPYING" LogicalName="Licenses.WebRTC-rnnoise-BSD-3-Clause.txt" />
+		<EmbeddedResource Include="Libs\socketio-client-csharp.LICENSE" LogicalName="Licenses.SocketIOClient-MIT.txt" />
+		<EmbeddedResource Include="Libs\dotnet-runtime.LICENSE.TXT" LogicalName="Licenses.dotnet-runtime-MIT.txt" />
+		<EmbeddedResource Include="Libs\system-text-encodings-web.THIRD-PARTY-NOTICES.TXT" LogicalName="Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt" />
+		<EmbeddedResource Include="Libs\system-text-json.THIRD-PARTY-NOTICES.TXT" LogicalName="Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt" />
+		<EmbeddedResource Include="Libs\native-rust-dependencies.html" LogicalName="Licenses.native-rust-dependencies.html" />
+		<EmbeddedResource Include="Libs\pion-go-dependencies.txt" LogicalName="Licenses.pion-go-dependencies.txt" />
 	</ItemGroup>
 
 	<!-- Pion WebRTC v4 is loaded dynamically by the Rust transport facade. -->

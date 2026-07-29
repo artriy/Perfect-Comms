@@ -1,5 +1,7 @@
 # Dependency Bundle Third-Party Notices
 
+> Legacy provenance for dependency bundles published before v4.1.7. Current releases do not redistribute BepInEx or these files.
+
 The `PerfectComms+dependencies-win-x86-steam-itch.zip` and
 `PerfectComms+dependencies-win-x64-epic-msstore.zip` release assets redistribute the
 matching official BepInEx Unity IL2CPP build 735 archive without modifying its

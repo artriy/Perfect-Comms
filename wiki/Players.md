@@ -4,7 +4,7 @@ This is the player guide for installing Perfect Comms, completing the guided set
 
 ## Get started
 
-1. Follow [Installing Perfect Comms](Installing-Perfect-Comms). On Windows, use `PerfectComms+dependencies-win-x86-steam-itch.zip` for Steam/itch.io or `PerfectComms+dependencies-win-x64-epic-msstore.zip` for Epic Games Store/Microsoft Store. Android uses the advanced `PerfectCommsAndroid.dll` mod-build route; the release does not include an APK.
+1. Follow [Installing Perfect Comms](Installing-Perfect-Comms). Desktop users keep the BepInEx installation supplied or required by their modpack—or install the tested upstream BepInEx build for an unmodded game—then place `PerfectComms.dll` in `BepInEx/plugins`. Android uses the advanced `PerfectCommsAndroid.dll` mod-build route; the release does not include an APK.
 2. Launch Among Us and complete the guided Welcome, Audio, Controls, HUD, and Review steps.
 3. Open **Voice Settings** from Options whenever you want to change your local setup. On desktop, you can also press `F10`.
 4. If you host, open **Host Voice Settings** from the lobby game-settings console. On desktop, you can also press `F11`.
