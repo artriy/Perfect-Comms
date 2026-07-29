@@ -93,13 +93,30 @@ microphone transmission until you undeafen.
 
 ## Install
 
-1. If another mod or modpack already provides or requires BepInEx, keep that exact installation. **Do not install or merge a second copy of BepInEx over it.** Otherwise install the tested **BepInEx 6.0.0-be.735 Unity IL2CPP** build that matches your Among Us executable:
-   - [Windows x86](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x86-6.0.0-be.735%2B5fef357.zip) for **Steam and itch.io**.
-   - [Windows x64](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.735%2B5fef357.zip) for **Epic Games Store and Microsoft Store**.
+> Starting with v4.1.7, Perfect Comms is distributed as a plugin DLL only. It does not include BepInEx.
 
-   For a fresh installation, extract BepInEx into the folder containing `Among Us.exe`, launch once, then close the game. See the [official IL2CPP guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html) for details.
-2. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in the existing `BepInEx/plugins` folder.
-3. Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
+> [!TIP]
+> **If your mod provides BepInEx**
+>
+> 1. Close Among Us.
+> 2. Keep the BepInEx installation supplied by the mod or modpack. **Do not install or merge another copy over it.**
+> 3. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+> 4. Place or replace the DLL in `BepInEx/plugins`.
+
+> [!IMPORTANT]
+> **If BepInEx is not provided**
+>
+> Use this path if your mod does not provide BepInEx, or if you are not using another mod.
+>
+> 1. Download **BepInEx 6 Unity IL2CPP** from the [official BepInEx build page](https://builds.bepinex.dev/projects/bepinex_be).
+> 2. Choose the build for your platform:
+>    - **Steam or itch.io:** `Unity.IL2CPP-win-x86`
+>    - **Epic Games Store or Microsoft Store:** `Unity.IL2CPP-win-x64`
+> 3. Extract BepInEx into the folder containing `Among Us.exe`.
+> 4. Launch the game once to complete BepInEx setup, then close it.
+> 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
+
+### Final folder layout
 
 ```text
 BepInEx/
@@ -107,7 +124,9 @@ BepInEx/
    └─ PerfectComms.dll
 ```
 
-Perfect Comms ships as one self-contained desktop plugin DLL apart from its BepInEx requirement. It installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies.
+Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
+
+Perfect Comms installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies. For BepInEx setup help, see the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html).
 
 <br>
 

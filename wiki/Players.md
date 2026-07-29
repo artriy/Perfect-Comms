@@ -1,53 +1,131 @@
-# Players
+# Player Guide
 
-This is the player guide for installing Perfect Comms, completing the guided setup, changing your local voice and HUD options, and understanding the host's lobby rules.
+Perfect Comms puts proximity voice, team channels, player volumes, and speaking indicators inside Among Us. Your local settings control what you send, hear, and see; the lobby host controls the match-wide voice rules.
 
-## Get started
+> [!TIP]
+> Installing for the first time? Start with **[Installing Perfect Comms](Installing-Perfect-Comms)**. It has separate instructions for modpacks that provide BepInEx and installations where BepInEx is not provided.
 
-1. Follow [Installing Perfect Comms](Installing-Perfect-Comms). Desktop users keep the BepInEx installation supplied or required by their modpack—or install the tested upstream BepInEx build for an unmodded game—then place `PerfectComms.dll` in `BepInEx/plugins`. Android uses the advanced `PerfectCommsAndroid.dll` mod-build route; the release does not include an APK.
-2. Launch Among Us and complete the guided Welcome, Audio, Controls, HUD, and Review steps.
-3. Open **Voice Settings** from Options whenever you want to change your local setup. On desktop, you can also press `F10`.
-4. If you host, open **Host Voice Settings** from the lobby game-settings console. On desktop, you can also press `F11`.
+## Install and verify
 
-## Your Voice Settings tabs
+1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and place the correct plugin DLL in `BepInEx/plugins`.
+   - Desktop uses `PerfectComms.dll`.
+   - A BepInEx-enabled ARM64 Android mod build uses `PerfectCommsAndroid.dll`; the release is not an APK.
+2. Launch Among Us. A new installation opens the guided setup automatically.
+3. Confirm that **Voice Settings** appears in the Among Us Options menu and that the voice HUD appears in a lobby.
+4. The main menu should also show **Voice Lobbies**. Hosts additionally see **Host Voice Settings** at the lobby game-settings console.
 
-| Tab | Includes |
+On desktop, press `F10` to open Voice Settings. Hosts can press `F11` to open Host Voice Settings.
+
+## First-time setup
+
+The setup saves everything only after you finish the final Review step. Existing settings remain unchanged if you leave early.
+
+| Step | What you choose |
 | :--- | :--- |
-| **Audio** | Mic and speaker levels, mic sensitivity, open mic/push to talk, processing, falloff softness, and startup mute/deafen. |
-| **Devices** | Microphone selection and Windows speaker selection. |
-| **Keybinds** (desktop) | Every voice action, modifier chords, alive/dead hold-mix levels, local refresh, and player volumes. |
-| **HUD** | Voice-control placement, mute/deafen reminder, speaking-bar presets and live preview, manual layout, meeting overlay, and Jailor control placement. |
-| **Advanced** | Run first-time setup again, preview a fake 15-player roster, and enable troubleshooting diagnostics. |
+| **Welcome** | Begin a new setup or keep the settings you already have. |
+| **Audio** | Select and test your microphone and output, set levels, and choose Open Mic or Push To Talk. |
+| **Controls** | Review voice controls and, on desktop, choose whether keybinds stay active while chat is open. |
+| **HUD** | Show or hide voice controls, connection status, the speaking bar, and the meeting overlay; choose a speaking-bar layout with a live preview. |
+| **Review** | Check the complete setup and save it together. |
 
-Android shows Audio, Devices, HUD, and Advanced tabs and uses touch controls instead of the desktop Keybinds tab. See [Player Settings & Controls](Controls) for every option, default, shortcut, and Android control.
+Run the setup again at any time from **Voice Settings > Advanced > First-Time Setup**.
 
-## Host Voice Settings tabs
+## Voice Settings
 
-| Tab | Includes |
+These settings are local. They never change the host's lobby rules.
+
+| Tab | What it controls |
 | :--- | :--- |
-| **Proximity** | Hearing distance, falloff, occlusion, walls, vision, and camera hearing. |
+| **Audio** | Microphone and speaker volume, mic sensitivity, Open Mic or Push To Talk, voice falloff softness, startup mute/deafen, noise suppression, and echo cancellation. |
+| **Devices** | Microphone selection, Windows speaker selection, live microphone monitoring, and optional delayed playback for testing how you sound. |
+| **Keybinds** (desktop) | Every keyboard or mouse binding, exact modifier chords, chat-keybind behavior, temporary alive/dead volume profiles, and voice refresh. |
+| **HUD** | Voice-control layout, mute/deafen reminder, connection status, speaking-bar presets or manual placement, live preview, meeting speaking overlay, and Jailor control placement when available. |
+| **Advanced** | Run setup again, show a fake 15-player roster for layout testing, and enable temporary diagnostics. |
+
+Android shows Audio, Devices, HUD, and Advanced tabs. Android playback follows the current system audio route, so it does not show the Windows Speaker selector or desktop Keybinds tab.
+
+For every setting, range, and default, see **[Player Settings & Controls](Controls)**.
+
+## Desktop controls
+
+Every binding can be changed or cleared in **Voice Settings > Keybinds**.
+
+| Action | Default |
+| :--- | :---: |
+| Open Voice Settings | `F10` |
+| Open Host Voice Settings | `F11` |
+| Mute or unmute microphone | `Shift+M` |
+| Push To Talk | Hold `C` |
+| Push To Mute | Unbound |
+| Team Radio | Hold `V` |
+| Cycle Team Radio channel | `G` |
+| Toggle Open Mic / Push To Talk | Unbound |
+| Deafen or undeafen | `Shift+N` |
+| Open Player Volumes | `Shift+B` |
+| Alive louder / dead quieter | Unbound |
+| Alive quieter / dead louder | Unbound |
+| Refresh local voice connection | `F7` |
+
+Voice keybinds are blocked while chat is open by default, so typing cannot also transmit or change voice state. Enable **Allow Keybinds While Chat Is Open** if you want them active while typing. Settings panels, active key rebinding, application focus loss, and other text fields still suppress them.
+
+Push To Talk keeps the selected microphone ready while connected but discards audio before encoding and transmission until the binding is held. The operating system may therefore show the microphone as active between presses.
+
+## Android controls
+
+- In **Open Mic** mode, tap the microphone button to mute or unmute.
+- In **Push To Talk** mode, hold the microphone button while speaking and release it to stop.
+- When Team Radio is available, tap its button to cycle channels or hold it to transmit.
+- Tap the speaker button to deafen or undeafen.
+
+## During a match
+
+### Proximity and host rules
+
+Task-phase voice is proximity-based by default. Distance, falloff, walls, vision, cameras, vent voice, meeting behavior, ghost rules, Communications sabotage, and Meetings/Lobby Only mode all follow the host's synced settings.
+
+You cannot override these match rules from Voice Settings. See **[Host Settings](Host-Settings)** for their exact behavior.
+
+### Team Radio
+
+Team Radio provides private hold-to-talk channels when the host enables it and your current team or role is eligible. On desktop, hold `V` to transmit and press `G` to cycle available channels. On Android, tap the radio button to cycle or hold it to transmit. The host decides whether channels work during tasks, meetings, or both.
+
+### Player volumes, mute, and deafen
+
+- Press `Shift+B` to open persistent local volume sliders and live speaking meters for other players. Each slider ranges from 0% to 200% and affects only what you hear.
+- Muting stops your microphone transmission without silencing other players.
+- Deafening mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.
+- The optional alive/dead focus bindings temporarily apply separate group volume levels while held.
+
+### Speaking indicators and privacy
+
+The speaking bar can show only active speakers or reserve a slot for every connected player. The meeting overlay highlights the public meeting card of a speaker. Disguises, concealment, blindness, and compatible mod privacy rules can hide or reattribute speaking indicators so they do not reveal protected identities.
+
+### Voice Lobbies
+
+Open **Voice Lobbies** from the main menu to browse public voice-enabled lobbies. A host chooses whether to publish the lobby and which supported directory to use. Directory selection changes discovery only; it does not change the match's voice rules.
+
+## Host Voice Settings overview
+
+Only the current lobby host can edit these synced settings.
+
+| Built-in tab | Includes |
+| :--- | :--- |
+| **Proximity** | Maximum hearing distance, falloff, wall/vision occlusion, and security-camera hearing. |
 | **Lobby** | Public voice-lobby listing and directory selection. |
-| **Meeting & Voice** | Meeting-floor grace period, vent voice, ghost rules, sabotage, and meetings/lobby-only mode. |
-| **Team Radio** | Team radio, impostor channel, and task/meeting availability. |
-| **TOU MIRA** | Supported role mutes, relocated hearing, muffling, Jailor/Medium behavior, and Vampire/Lovers radio. |
+| **Meeting & Voice** | Meeting-floor grace period, vent voice, ghost rules, Communications sabotage, and Meetings/Lobby Only mode. |
+| **Team Radio** | Team Radio, the impostor channel, and task/meeting availability. |
 
-Compatible mods can add more host tabs. See [Host Settings](Host-Settings) for every built-in host option.
+Compatible mods can register additional tabs under **Mod Behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
 
-## Desktop shortcuts
+## Troubleshooting
 
-- `Shift+M`: mute or unmute your microphone.
-- `C`: hold to talk when Push To Talk is selected.
-- `Shift+N`: deafen or undeafen; deafening mutes playback and pauses microphone transmission.
-- `Shift+B`: open persistent per-player volume sliders and speaking meters.
-- `V`: hold Team Radio; `G`: cycle eligible channels.
-- `F7`: refresh your local voice session; this has a 10-second cooldown.
-
-## Android touch controls
-
-- In Open Mic mode, tap the microphone button to mute or unmute.
-- In Push To Talk mode, hold the microphone button while speaking.
-- When Team Radio is available, tap it to change channel or hold it to transmit.
-- Tap the speaker button to deafen or undeafen; deafening mutes playback and pauses microphone transmission.
+- **No Voice Settings, HUD, or Voice Lobbies:** confirm the plugin DLL is directly inside `BepInEx/plugins`, not inside another folder. Then check `BepInEx/LogOutput.log` for load errors.
+- **Connection is stuck or needs rebuilding:** press `F7` to refresh only your local voice session. Refresh has a 10-second cooldown.
+- **You cannot hear another player:** confirm you are not deafened, check Speaker Volume and that player's slider in **Player Volumes**, then confirm the selected output device.
+- **Others cannot hear you:** confirm you are not muted, hold Push To Talk if selected, check Mic Volume and Mic Sensitivity, and test the selected microphone in the Devices tab.
+- **Microphone or speaker is unavailable:** check operating-system permissions and device routing, then reopen Voice Settings. On Android, grant microphone permission to the rebuilt app.
+- **A Windows audio helper is blocked:** check whether security software quarantined it. Restore or allow it only when Perfect Comms came from the official release.
+- **A problem needs detailed logs:** enable **Voice Settings > Advanced > Diagnostics**, reproduce the problem, and collect the BepInEx log. Diagnostics turns itself off on the next launch.
 
 ## More help
 

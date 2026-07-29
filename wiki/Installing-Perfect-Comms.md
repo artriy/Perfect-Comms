@@ -1,37 +1,43 @@
 # Installing Perfect Comms
 
-Perfect Comms is a standalone BepInEx plugin for Among Us. Its only hard dependency is **BepInEx**. It does **not** require MiraAPI or Reactor.
+Perfect Comms is a standalone BepInEx plugin for Among Us. It does **not** require MiraAPI or Reactor.
 
-## Choose the correct download
+> Starting with v4.1.7, Perfect Comms is distributed as a plugin DLL only. It does not include BepInEx.
 
-Download from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+> [!TIP]
+> **If your mod provides BepInEx**
+>
+> 1. Close Among Us.
+> 2. Keep the BepInEx installation supplied by the mod or modpack. **Do not install or merge another copy over it.**
+> 3. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+> 4. Place or replace the DLL in `BepInEx/plugins`.
+>
+> Installing another BepInEx copy over a modpack can replace its loader, runtime, patchers, or configuration and break the pack.
 
-| Your setup | Download |
-| :--- | :--- |
-| Desktop Among Us with BepInEx 6 Unity IL2CPP | `PerfectComms.dll` |
-| Fresh desktop Among Us installation | Install BepInEx first, then download `PerfectComms.dll` |
-| BepInEx-enabled ARM64 Android mod build | `PerfectCommsAndroid.dll` |
+> [!IMPORTANT]
+> **If BepInEx is not provided**
+>
+> Use this path if your mod does not provide BepInEx, or if you are not using another mod.
+>
+> 1. Download **BepInEx 6 Unity IL2CPP** from the [official BepInEx build page](https://builds.bepinex.dev/projects/bepinex_be).
+> 2. Choose the build for your platform:
+>    - **Steam or itch.io:** `Unity.IL2CPP-win-x86`
+>    - **Epic Games Store or Microsoft Store:** `Unity.IL2CPP-win-x64`
+> 3. Extract BepInEx directly into the folder containing `Among Us.exe`.
+> 4. Launch the game once to complete BepInEx setup, then close it.
+> 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
 
-Starting with v4.1.7, desktop releases do not bundle BepInEx. The release does not contain a ready-to-install Android APK or an Android dependency bundle.
+For more BepInEx setup details, see the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html).
 
-## Windows install
-
-1. Close Among Us.
-2. If another mod or modpack already provides or requires BepInEx, keep that exact installation. **Do not install or merge a second copy of BepInEx over it.**
-3. If this is a fresh, unmodded installation, install the tested **BepInEx 6.0.0-be.735 Unity IL2CPP** build matching your Among Us executable:
-   - [Windows x86](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x86-6.0.0-be.735%2B5fef357.zip) for Steam and itch.io.
-   - [Windows x64](https://builds.bepinex.dev/projects/bepinex_be/735/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.735%2B5fef357.zip) for Epic Games Store and Microsoft Store.
-
-   Extract BepInEx directly into the folder containing `Among Us.exe`, launch once to finish its first-run setup, and close the game. IL2CPP builds are distributed through the official [BepInEx Bleeding Edge page](https://builds.bepinex.dev/projects/bepinex_be); use the links above for the version tested with Perfect Comms. The [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html) has additional details.
-4. Place or replace the downloaded DLL at:
+## Final folder layout
 
 ```text
-BepInEx/plugins/PerfectComms.dll
+BepInEx/
+└─ plugins/
+   └─ PerfectComms.dll
 ```
 
-5. Launch Among Us. A new Perfect Comms installation opens its guided setup from the main menu.
-
-Installing another BepInEx copy over a modpack can replace its loader, runtime, patchers, or configuration and break the pack. Perfect Comms therefore distributes only its plugin DLL and uses the BepInEx installation selected by the player or modpack.
+Launch Among Us. A new Perfect Comms installation opens its guided setup from the main menu.
 
 ## Android DLL install (advanced)
 
@@ -61,12 +67,12 @@ If those are missing, use `BepInEx/LogOutput.log` rather than waiting for a cons
 
 | Component | Needed by Perfect Comms | Included? |
 | :--- | :--- | :--- |
-| BepInEx 6 (Unity IL2CPP) | Yes | No; use the version supplied by your modpack or install the tested upstream build |
+| BepInEx 6 (Unity IL2CPP) | Yes | No; keep the version provided by your modpack or download it from the official build page |
 | MiraAPI | No | No |
 | Reactor | No | No |
 | TOU-Mira | No; optional role integration | No |
 
-Perfect Comms v4.1.7 is built against Among Us `2026.3.31` and BepInEx Unity IL2CPP `6.0.0-be.735`. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
+Perfect Comms v4.1.7 targets Among Us `2026.3.31` and BepInEx 6 Unity IL2CPP. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
 
 ## Updating
 
@@ -85,11 +91,13 @@ Do not remove shared BepInEx files when other installed mods still use BepInEx.
 
 ## Troubleshooting
 
-- **No Voice Settings or voice HUD:** confirm the plugin DLL is directly inside `BepInEx/plugins`, not one folder deeper. On Windows, also confirm that the dependency bundle matches the store and architecture.
-- **No console window:** this is expected with the dependency bundles. Check `BepInEx/LogOutput.log` for Perfect Comms load errors.
-- **Can't hear anyone:** select the intended microphone and speaker in Voice Settings, check operating-system microphone permission, and confirm the other players use a compatible Perfect Comms version.
+- **No Voice Settings, voice HUD, or Voice Lobbies:** confirm the plugin DLL is directly inside `BepInEx/plugins`, not one folder deeper. Then check `BepInEx/LogOutput.log` for load errors.
+- **No console window:** console visibility is controlled by the BepInEx installation supplied by your mod or modpack. Perfect Comms does not require a separate console; use `BepInEx/LogOutput.log`.
+- **Can't hear anyone:** confirm you are not deafened, check the selected speaker, Speaker Volume, and per-player volume sliders, and confirm the other players use a compatible Perfect Comms version.
+- **Others can't hear you:** confirm you are not muted, hold Push To Talk if selected, check the selected microphone and Mic Volume, and grant operating-system microphone permission.
+- **Connection is stuck:** press `F7` to rebuild your local voice session. Refresh has a 10-second cooldown.
 - **Windows helper is blocked:** check whether security software quarantined a Perfect Comms audio helper, then restore or allow it only if it came from the official release.
 - **Android mic never starts:** confirm the rebuilt APK's manifest contains `android.permission.RECORD_AUDIO`, then grant microphone permission in Android settings.
-- **Installing alongside a role mod:** let that mod provide its own MiraAPI or Reactor files. Do not add duplicate copies for Perfect Comms.
+- **Installing alongside a role mod:** keep the BepInEx, MiraAPI, and Reactor files supplied by that mod. Do not install duplicate copies for Perfect Comms.
 
 See also: [Player Guide](Players) · [Host Settings](Host-Settings) · [Player Settings & Controls](Controls)
