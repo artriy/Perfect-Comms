@@ -2652,6 +2652,7 @@ fn run_authenticated_session(
                     jitter.remove(&id);
                     last_seq.remove(&id);
                     peer_levels.remove(&id);
+                    mixer.reset_peer(&id);
                     if let Some(generation) = generation {
                         generations.insert(id, generation);
                     } else {
@@ -2668,6 +2669,7 @@ fn run_authenticated_session(
                         jitter.remove(&peer);
                         last_seq.remove(&peer);
                         peer_levels.remove(&peer);
+                        mixer.reset_peer(&peer);
                         generations.insert(peer.clone(), packet.generation);
                     }
                     let media = drain_rtc.media_receive_counters();
@@ -2774,11 +2776,14 @@ fn run_authenticated_session(
                     drain_counters
                         .mixed_peer_frames
                         .fetch_add(round.len() as u64, Ordering::Relaxed);
-                    let per_peer: Vec<(String, &[f32])> = round
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.as_slice()))
-                        .collect();
-                    mixer.mix(&per_peer, &drain_gs, &mut stereo);
+                    mixer.mix_with_measurement(
+                        round.iter().map(|(peer, samples, concealed)| {
+                            (peer.as_str(), samples.as_slice(), !*concealed)
+                        }),
+                        &drain_gs,
+                        &mut stereo,
+                    );
+                    drain_counters.record_mix_control(mixer.control_snapshot());
                     drain_counters.record_mix(&stereo);
 
                     ensure_playback(

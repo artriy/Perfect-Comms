@@ -43,6 +43,14 @@ Perfect Comms v4.1.7 adds a live owned lobby directory, gives mod developers a r
 - **Registered host options survive restarts, and listener effects can distinguish obscured sight from muffled audio.**
   > <sub>Bool, enum, and stepped-number values persist under encoded keys in Perfect Comms' global BepInEx config while lobby snapshots remain temporary host overrides. API 1.2 adds `SightObscured` independently of the listener low-pass filter, so Eclipsal and Grenadier vision states restrict sight-based hearing without forcing audio muffling.</sub>
 
+### Consistent Multi-Speaker Loudness
+
+- **One unusually loud microphone no longer compresses every simultaneous speaker.**
+  > <sub>Each decoded participant now receives independent speech-aware loudness control before user volume, proximity, panning, effects, and summation. Sustained overload is reduced quickly, quiet speech receives only slow signal-to-noise-limited makeup, packet-loss concealment does not create cross-peer gain coupling, and clipping evidence remains diagnostic rather than muting or punishing a player.</sub>
+
+- **A linked-stereo lookahead limiter protects the final mix without shifting the spatial image.**
+  > <sub>The receiver reserves five milliseconds of lookahead for rare overlapping peaks, applies one gain to both channels, and preserves the existing user volume, positional audio, radio, wall, and ghost routing stages. Native desktop and Android diagnostics report participant control counts, maximum gain changes, loudness estimates, overload and clipping evidence, and final-limiter activity.</sub>
+
 ### Reliable CrossOver Audio Startup
 
 - **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**

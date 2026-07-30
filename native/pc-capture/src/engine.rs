@@ -284,6 +284,7 @@ impl Engine {
                 state.encoded.remove(&peer);
                 state.jitter.remove(&peer);
                 state.peer_levels.remove(&peer);
+                state.mixer.reset_peer(&peer);
                 state.generations.insert(peer.clone(), packet.generation);
             }
             let media = self.rtc.media_receive_counters();
@@ -365,12 +366,15 @@ impl Engine {
         if round.is_empty() && !needs_idle_mix {
             return 0;
         }
-        let per_peer: Vec<(String, &[f32])> = round
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_slice()))
-            .collect();
         let DecodeState { mixer, stereo, .. } = &mut *state;
-        mixer.mix(&per_peer, &self.gs, stereo);
+        mixer.mix_with_measurement(
+            round
+                .iter()
+                .map(|(peer, samples, concealed)| (peer.as_str(), samples.as_slice(), !*concealed)),
+            &self.gs,
+            stereo,
+        );
+        self.rtc.record_mix_control(mixer.control_snapshot());
         self.dsp.lock().unwrap().far_end(stereo);
         let n = out.len().min(stereo.len());
         out[..n].copy_from_slice(&stereo[..n]);
@@ -471,6 +475,7 @@ impl Engine {
                     dec.encoded.remove(&peer_id);
                     dec.jitter.remove(&peer_id);
                     dec.peer_levels.remove(&peer_id);
+                    dec.mixer.reset_peer(&peer_id);
                     dec.generations.insert(peer_id.clone(), generation);
                 }
                 self.rtc
@@ -489,6 +494,7 @@ impl Engine {
                 dec.encoded.remove(&peer_id);
                 dec.generations.remove(&peer_id);
                 dec.peer_levels.remove(&peer_id);
+                dec.mixer.reset_peer(&peer_id);
             }
             InboundOp::SetRemoteSdp {
                 peer_id,
@@ -790,6 +796,9 @@ mod tests {
         assert!(value["media_receive"].is_object());
         assert!(value["network_paths"].is_array());
         assert!(value["encoder_bitrate"].as_i64().unwrap() > 0);
+        assert!(value["mix_control_peers"].is_u64());
+        assert!(value["mix_control_max_attenuation_db"].is_number());
+        assert!(value["mix_control_output_limiter_reduction_events"].is_u64());
         e.ack_signal();
 
         // Re-sending the same state must not bypass the cadence.
@@ -965,6 +974,20 @@ struct MobileDiagnosticsMsg {
     capture_media_gap_frames: u64,
     opus_gap_placeholders: u64,
     opus_discontinuity_resets: u64,
+    mix_control_peers: u64,
+    mix_control_attenuated_peers: u64,
+    mix_control_boosted_peers: u64,
+    mix_control_overload_peers: u64,
+    mix_control_clipping_confident_peers: u64,
+    mix_control_max_attenuation_db: f32,
+    mix_control_max_makeup_db: f32,
+    mix_control_max_peer_peak_reduction_db: f32,
+    mix_control_loudest_active_level_db: f32,
+    mix_control_highest_noise_level_db: f32,
+    mix_control_output_limiter_reduction_db: f32,
+    mix_control_output_limiter_detected_peak: f32,
+    mix_control_output_limiter_limited_samples: u64,
+    mix_control_output_limiter_reduction_events: u64,
 }
 
 fn mobile_diagnostics_json(
@@ -1037,6 +1060,23 @@ fn mobile_diagnostics_json(
         capture_media_gap_frames: transport.capture_media_gap_frames,
         opus_gap_placeholders: transport.opus_gap_placeholders,
         opus_discontinuity_resets: transport.opus_discontinuity_resets,
+        mix_control_peers: transport.mix_control_peers,
+        mix_control_attenuated_peers: transport.mix_control_attenuated_peers,
+        mix_control_boosted_peers: transport.mix_control_boosted_peers,
+        mix_control_overload_peers: transport.mix_control_overload_peers,
+        mix_control_clipping_confident_peers: transport.mix_control_clipping_confident_peers,
+        mix_control_max_attenuation_db: transport.mix_control_max_attenuation_db,
+        mix_control_max_makeup_db: transport.mix_control_max_makeup_db,
+        mix_control_max_peer_peak_reduction_db: transport.mix_control_max_peer_peak_reduction_db,
+        mix_control_loudest_active_level_db: transport.mix_control_loudest_active_level_db,
+        mix_control_highest_noise_level_db: transport.mix_control_highest_noise_level_db,
+        mix_control_output_limiter_reduction_db: transport.mix_control_output_limiter_reduction_db,
+        mix_control_output_limiter_detected_peak: transport
+            .mix_control_output_limiter_detected_peak,
+        mix_control_output_limiter_limited_samples: transport
+            .mix_control_output_limiter_limited_samples,
+        mix_control_output_limiter_reduction_events: transport
+            .mix_control_output_limiter_reduction_events,
     })
     .expect("mobile diagnostics serialize")
 }

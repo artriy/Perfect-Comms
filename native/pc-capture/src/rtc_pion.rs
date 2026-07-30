@@ -532,6 +532,10 @@ impl RtcEngine {
         self.counters.snapshot(0, 0, 0)
     }
 
+    pub fn record_mix_control(&self, snapshot: crate::mix::MixControlSnapshot) {
+        self.counters.record_mix_control(snapshot);
+    }
+
     pub fn record_capture_media_gap(
         &self,
         skipped_frames: u64,

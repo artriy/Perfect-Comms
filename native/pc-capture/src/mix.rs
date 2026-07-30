@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::gamestate::GameState;
+use crate::loudness::{LookaheadLimiter, PeerLoudnessNormalizer};
 
 pub const GAIN_GLIDE_K: f32 = 0.002;
 pub const PLAYBACK_SOFT_LIMIT_START: f32 = 0.92;
@@ -297,10 +298,77 @@ struct Glide {
     previous_bz1: f32,
     previous_bz2: f32,
     transition_remaining: usize,
+    seen_round: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MixControlSnapshot {
+    pub peers_tracked: u64,
+    pub attenuated_peers: u64,
+    pub boosted_peers: u64,
+    pub overload_peers: u64,
+    pub clipping_confident_peers: u64,
+    pub max_attenuation_db: f32,
+    pub max_makeup_db: f32,
+    pub max_peer_peak_reduction_db: f32,
+    pub loudest_active_level_db: f32,
+    pub highest_noise_level_db: f32,
+    pub output_limiter_gain_reduction_db: f32,
+    pub output_limiter_detected_peak: f32,
+    pub output_limiter_limited_samples: u64,
+    pub output_limiter_reduction_events: u64,
+}
+
+impl Default for MixControlSnapshot {
+    fn default() -> Self {
+        Self {
+            peers_tracked: 0,
+            attenuated_peers: 0,
+            boosted_peers: 0,
+            overload_peers: 0,
+            clipping_confident_peers: 0,
+            max_attenuation_db: 0.0,
+            max_makeup_db: 0.0,
+            max_peer_peak_reduction_db: 0.0,
+            loudest_active_level_db: -120.0,
+            highest_noise_level_db: -120.0,
+            output_limiter_gain_reduction_db: 0.0,
+            output_limiter_detected_peak: 0.0,
+            output_limiter_limited_samples: 0,
+            output_limiter_reduction_events: 0,
+        }
+    }
+}
+
+impl MixControlSnapshot {
+    fn observe_peer(&mut self, snapshot: crate::loudness::PeerLoudnessSnapshot) {
+        self.peers_tracked += 1;
+        if snapshot.gain_db < -0.1 {
+            self.attenuated_peers += 1;
+            self.max_attenuation_db = self.max_attenuation_db.min(snapshot.gain_db);
+        } else if snapshot.gain_db > 0.1 {
+            self.boosted_peers += 1;
+            self.max_makeup_db = self.max_makeup_db.max(snapshot.gain_db);
+        }
+        if snapshot.overload_active {
+            self.overload_peers += 1;
+        }
+        if snapshot.clipping_confidence >= 0.5 {
+            self.clipping_confident_peers += 1;
+        }
+        self.max_peer_peak_reduction_db = self
+            .max_peer_peak_reduction_db
+            .min(snapshot.peak_limiter_reduction_db);
+        self.loudest_active_level_db = self.loudest_active_level_db.max(snapshot.active_level_db);
+        self.highest_noise_level_db = self.highest_noise_level_db.max(snapshot.noise_level_db);
+    }
 }
 
 pub struct Mixer {
     glide: HashMap<String, Glide>,
+    levelers: HashMap<String, PeerLoudnessNormalizer>,
+    output_limiter: LookaheadLimiter,
+    control_snapshot: MixControlSnapshot,
     lp650: Biquad,
     hp650: Biquad,
     lp1900: Biquad,
@@ -326,6 +394,9 @@ impl Mixer {
     pub fn new() -> Mixer {
         Mixer {
             glide: HashMap::new(),
+            levelers: HashMap::new(),
+            output_limiter: LookaheadLimiter::new(),
+            control_snapshot: MixControlSnapshot::default(),
             lp650: Biquad::lowpass(650.0, 0.7),
             hp650: Biquad::highpass(650.0, 0.9),
             lp1900: Biquad::lowpass(1900.0, 0.7),
@@ -346,6 +417,9 @@ impl Mixer {
         // Treat deafen as an immediate break in the playback signal path. Otherwise reverb and
         // filter history accumulated before deafen can resume audibly when playback is restored.
         self.glide.clear();
+        self.levelers.clear();
+        self.output_limiter.reset();
+        self.control_snapshot = MixControlSnapshot::default();
         self.ghost_reverb.reset();
         self.wall_reverb.reset();
         self.ghost_send.fill(0.0);
@@ -357,13 +431,40 @@ impl Mixer {
         self.had_input_last_round = false;
     }
 
-    /// True while one empty 20 ms mix is needed to flush per-peer filter state or while an
-    /// existing reverb tail still has samples to render.
+    /// True while one empty 20 ms mix is needed to flush per-peer filter state, while an
+    /// existing reverb tail still has samples to render, or while limiter lookahead is draining.
     pub fn needs_idle_mix(&self) -> bool {
-        self.had_input_last_round || self.ghost_tail > 0 || self.wall_tail > 0
+        self.had_input_last_round
+            || self.ghost_tail > 0
+            || self.wall_tail > 0
+            || self.output_limiter.has_pending_audio()
+    }
+
+    pub fn reset_peer(&mut self, peer: &str) {
+        self.glide.remove(peer);
+        self.levelers.remove(peer);
+    }
+
+    pub fn control_snapshot(&self) -> MixControlSnapshot {
+        self.control_snapshot
     }
 
     pub fn mix(&mut self, per_peer: &[(String, &[f32])], gs: &GameState, out_stereo: &mut [f32]) {
+        self.mix_with_measurement(
+            per_peer
+                .iter()
+                .map(|(peer, samples)| (peer.as_str(), *samples, true)),
+            gs,
+            out_stereo,
+        );
+    }
+
+    pub(crate) fn mix_with_measurement<'a>(
+        &mut self,
+        per_peer: impl IntoIterator<Item = (&'a str, &'a [f32], bool)>,
+        gs: &GameState,
+        out_stereo: &mut [f32],
+    ) {
         for s in out_stereo.iter_mut() {
             *s = 0.0;
         }
@@ -388,10 +489,13 @@ impl Mixer {
                 *s = 0.0;
             }
         }
+        let mut control_snapshot = MixControlSnapshot::default();
         let (lp650, hp650) = (self.lp650, self.hp650);
         let mut any_ghost = false;
         let mut any_wall = false;
-        for (peer_id, mono) in per_peer {
+        let mut had_input = false;
+        for (peer_id, mono, measurement_eligible) in per_peer {
+            had_input = true;
             let (target, mode) = match snap.peers.get(peer_id) {
                 Some(p) => {
                     let (lg, rg) = pan_gains(p.pan);
@@ -399,17 +503,35 @@ impl Mixer {
                 }
                 None => ((0.0, 0.0), FilterMode::None),
             };
-            let g = self.glide.entry(peer_id.clone()).or_insert(Glide {
-                left: target.0,
-                right: target.1,
-                mode,
-                bz1: 0.0,
-                bz2: 0.0,
-                previous_mode: mode,
-                previous_bz1: 0.0,
-                previous_bz2: 0.0,
-                transition_remaining: 0,
-            });
+            if !self.glide.contains_key(peer_id) {
+                self.glide.insert(
+                    peer_id.to_string(),
+                    Glide {
+                        left: target.0,
+                        right: target.1,
+                        mode,
+                        bz1: 0.0,
+                        bz2: 0.0,
+                        previous_mode: mode,
+                        previous_bz1: 0.0,
+                        previous_bz2: 0.0,
+                        transition_remaining: 0,
+                        seen_round: true,
+                    },
+                );
+            }
+            let g = self.glide.get_mut(peer_id).expect("glide inserted above");
+            g.seen_round = true;
+            if !self.levelers.contains_key(peer_id) {
+                self.levelers
+                    .insert(peer_id.to_string(), PeerLoudnessNormalizer::new());
+            }
+            let leveler = self
+                .levelers
+                .get_mut(peer_id)
+                .expect("leveler inserted above");
+            let level_ramp = leveler.process_frame_with_measurement(mono, measurement_eligible);
+            control_snapshot.observe_peer(leveler.snapshot());
             if g.mode != mode {
                 g.previous_mode = g.mode;
                 g.previous_bz1 = g.bz1;
@@ -428,8 +550,10 @@ impl Mixer {
                 }
             }
             let n = frames.min(mono.len());
-            for f in 0..n {
-                let current = apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, mono[f]);
+            for (f, &sample) in mono.iter().take(n).enumerate() {
+                let normalized = sample * level_ramp.at(f, n);
+                let current =
+                    apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, normalized);
                 g.left += GAIN_GLIDE_K * (target.0 - g.left);
                 g.right += GAIN_GLIDE_K * (target.1 - g.right);
                 if g.transition_remaining == 0 {
@@ -451,7 +575,7 @@ impl Mixer {
                     &hp650,
                     &mut g.previous_bz1,
                     &mut g.previous_bz2,
-                    mono[f],
+                    normalized,
                 );
                 let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
                 let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
@@ -534,6 +658,13 @@ impl Mixer {
                 *s *= master;
             }
         }
+        self.output_limiter.process(out_stereo);
+        let limiter = self.output_limiter.snapshot();
+        control_snapshot.output_limiter_gain_reduction_db = limiter.gain_reduction_db;
+        control_snapshot.output_limiter_detected_peak = limiter.detected_peak;
+        control_snapshot.output_limiter_limited_samples = limiter.limited_samples;
+        control_snapshot.output_limiter_reduction_events = limiter.reduction_events;
+        self.control_snapshot = control_snapshot;
 
         let mut sample_index = 0;
         while sample_index + 1 < out_stereo.len() {
@@ -547,19 +678,20 @@ impl Mixer {
             out_stereo[sample_index] = soft_limit_sample(out_stereo[sample_index]);
         }
 
-        for (peer, glide) in self.glide.iter_mut() {
-            if !per_peer.iter().any(|(present, _)| present == peer) {
+        for glide in self.glide.values_mut() {
+            if !glide.seen_round {
                 glide.bz1 = 0.0;
                 glide.bz2 = 0.0;
                 glide.previous_bz1 = 0.0;
                 glide.previous_bz2 = 0.0;
                 glide.transition_remaining = 0;
             }
+            glide.seen_round = false;
         }
-        self.had_input_last_round = !per_peer.is_empty();
+        self.had_input_last_round = had_input;
 
-        self.glide
-            .retain(|k, _| snap.peers.contains_key(k) || per_peer.iter().any(|(pid, _)| pid == k));
+        self.glide.retain(|k, _| snap.peers.contains_key(k));
+        self.levelers.retain(|k, _| snap.peers.contains_key(k));
     }
 }
 
@@ -619,6 +751,7 @@ impl DecodedPlayoutMetrics {
 
 struct PeerQueue {
     frames: VecDeque<Vec<f32>>,
+    concealed: VecDeque<bool>,
     front_offset: usize,
     frame_samples: usize,
     recovery_debt_samples: usize,
@@ -637,6 +770,7 @@ impl PeerQueue {
     fn new(base_prime: usize) -> Self {
         Self {
             frames: VecDeque::new(),
+            concealed: VecDeque::new(),
             front_offset: 0,
             frame_samples: 0,
             recovery_debt_samples: 0,
@@ -658,6 +792,7 @@ impl PeerQueue {
             self.has_rendered = false;
         }
         self.frames.clear();
+        self.concealed.clear();
         self.front_offset = 0;
         self.recovery_debt_samples = 0;
         self.primed = false;
@@ -694,6 +829,25 @@ impl PeerQueue {
         output
     }
 
+    fn prefix_has_concealment(&self, count: usize) -> bool {
+        let mut remaining = count;
+        for (index, frame) in self.frames.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let start = if index == 0 { self.front_offset } else { 0 };
+            if start >= frame.len() {
+                continue;
+            }
+            let take = remaining.min(frame.len() - start);
+            if take > 0 && self.concealed.get(index).copied().unwrap_or(true) {
+                return true;
+            }
+            remaining -= take;
+        }
+        false
+    }
+
     fn consume_prefix(&mut self, mut count: usize) {
         while count > 0 {
             let Some(front) = self.frames.front() else {
@@ -707,6 +861,7 @@ impl PeerQueue {
             }
             count = count.saturating_sub(remaining);
             self.frames.pop_front();
+            self.concealed.pop_front();
             self.front_offset = 0;
         }
     }
@@ -716,6 +871,7 @@ impl PeerQueue {
             .frames
             .pop_front()
             .map_or(0, |frame| frame.len().saturating_sub(self.front_offset));
+        self.concealed.pop_front();
         self.front_offset = 0;
         removed
     }
@@ -783,8 +939,8 @@ impl PeerJitter {
 
         // Every decoded frame in one drain has the same network arrival.  Reusing one timestamp
         // keeps the arrival estimator from mistaking FEC/PLC frames for a zero-millisecond burst.
-        for frame in frames {
-            self.push_at(peer, frame, now);
+        for (index, frame) in frames.into_iter().enumerate() {
+            self.push_at_with_concealment(peer, frame, now, index < recovered);
         }
 
         if recovered_samples > 0 {
@@ -808,6 +964,16 @@ impl PeerJitter {
     }
 
     fn push_at(&mut self, peer: &str, frame: Vec<f32>, now: Instant) {
+        self.push_at_with_concealment(peer, frame, now, false);
+    }
+
+    fn push_at_with_concealment(
+        &mut self,
+        peer: &str,
+        frame: Vec<f32>,
+        now: Instant,
+        concealed: bool,
+    ) {
         if frame.is_empty() {
             return;
         }
@@ -854,6 +1020,7 @@ impl PeerJitter {
         }
         if q.frames.len() >= cap {
             if let Some(evicted) = q.frames.pop_front() {
+                q.concealed.pop_front();
                 let evicted_samples = evicted.len().saturating_sub(q.front_offset);
                 q.front_offset = 0;
                 q.recovery_debt_samples = q.recovery_debt_samples.saturating_sub(evicted_samples);
@@ -867,6 +1034,7 @@ impl PeerJitter {
             }
         }
         q.frames.push_back(frame);
+        q.concealed.push_back(concealed);
     }
 
     fn observe_arrival(q: &mut PeerQueue, now: Instant, base_prime: usize, cap: usize) {
@@ -924,7 +1092,7 @@ impl PeerJitter {
         }
     }
 
-    pub fn playout_round(&mut self) -> Vec<(String, Vec<f32>)> {
+    pub fn playout_round(&mut self) -> Vec<(String, Vec<f32>, bool)> {
         let mut out = Vec::new();
         let metrics = &self.metrics;
         for (peer, q) in self.peers.iter_mut() {
@@ -961,7 +1129,7 @@ impl PeerJitter {
                     q.last_output_sample = 0.0;
                     q.has_rendered = false;
                     q.transition_from = Some(0.0);
-                    out.push((peer.clone(), frame));
+                    out.push((peer.clone(), frame, true));
                 }
                 continue;
             }
@@ -970,6 +1138,7 @@ impl PeerJitter {
                 // partial decoded tail. Never hand a short vector to the fixed-cadence mixer: fade
                 // the retained PCM to zero, pad the rest, and retire debt now that no backlog exists.
                 let source = q.copy_prefix(available);
+                let concealed = q.prefix_has_concealment(available);
                 q.consume_prefix(available);
                 q.recovery_debt_samples = 0;
                 q.primed = false;
@@ -981,7 +1150,7 @@ impl PeerJitter {
                 q.last_output_sample = 0.0;
                 q.has_rendered = false;
                 q.transition_from = Some(0.0);
-                out.push((peer.clone(), frame));
+                out.push((peer.clone(), frame, concealed));
                 continue;
             }
             let max_extra = (output_samples / JITTER_CATCHUP_MAX_RATE_DIVISOR).max(1);
@@ -990,7 +1159,7 @@ impl PeerJitter {
                 .min(max_extra)
                 .min(available.saturating_sub(output_samples));
             let input_samples = output_samples + extra;
-            let mut frame = if extra == 0
+            let (mut frame, concealed) = if extra == 0
                 && q.front_offset == 0
                 && q.frames
                     .front()
@@ -998,8 +1167,13 @@ impl PeerJitter {
             {
                 // Preserve the allocation-free steady-state path. Copying is required only while
                 // overlap-add catch-up leaves the read cursor partway through a decoded frame.
-                q.frames.pop_front().expect("front frame checked above")
+                let concealed = q.concealed.pop_front().unwrap_or(true);
+                (
+                    q.frames.pop_front().expect("front frame checked above"),
+                    concealed,
+                )
             } else if extra > 0 {
+                let concealed = q.prefix_has_concealment(input_samples);
                 let source = q.copy_prefix(input_samples);
                 debug_assert_eq!(source.len(), input_samples);
                 metrics.catchup_rounds.fetch_add(1, Ordering::Relaxed);
@@ -1009,19 +1183,20 @@ impl PeerJitter {
                 q.recovery_debt_samples -= extra;
                 let frame = overlap_accelerate(&source, output_samples, extra);
                 q.consume_prefix(input_samples);
-                frame
+                (frame, concealed)
             } else {
+                let concealed = q.prefix_has_concealment(input_samples);
                 let frame = q.copy_prefix(input_samples);
                 debug_assert_eq!(frame.len(), input_samples);
                 q.consume_prefix(input_samples);
-                frame
+                (frame, concealed)
             };
             if let Some(from) = q.transition_from.take() {
                 crossfade_head(&mut frame, from);
             }
             q.last_output_sample = frame.last().copied().unwrap_or(0.0);
             q.has_rendered = true;
-            out.push((peer.clone(), frame));
+            out.push((peer.clone(), frame, concealed));
         }
         out
     }
@@ -1265,17 +1440,24 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].1.len(), FRAME_SIZE);
         assert!(first[0].1.iter().all(|sample| sample.is_finite()));
+        assert!(first[0].2, "reconstructed PCM must be marked ineligible");
         assert!(jb.depth_samples_for("a").unwrap() < FRAME_SIZE * 5);
 
         // At ten-percent acceleration the exact 4,800-sample recovery debt is retired in fifty
         // output rounds.  Normal 20 ms packets continue arriving while catch-up is in progress.
+        let mut reached_live_audio = false;
         for _ in 1..50 {
             jb.push("a", next_frame());
             let round = jb.playout_round();
             assert_eq!(round.len(), 1);
             assert_eq!(round[0].1.len(), FRAME_SIZE);
             assert!(round[0].1.iter().all(|sample| sample.is_finite()));
+            reached_live_audio |= !round[0].2;
         }
+        assert!(
+            reached_live_audio,
+            "fresh decoded speech must become measurement-eligible after recovery drains"
+        );
         assert_eq!(jb.recovery_debt_samples_for("a"), Some(0));
         assert_eq!(jb.depth_samples_for("a"), Some(0));
         assert!(
@@ -1285,6 +1467,10 @@ mod tests {
         let fade = jb.playout_round();
         assert_eq!(fade.len(), 1);
         assert_eq!(fade[0].1.len(), FRAME_SIZE);
+        assert!(
+            fade[0].2,
+            "locally synthesized tail fades must not train loudness"
+        );
         assert!(fade[0].1.iter().all(|sample| sample.is_finite()));
         assert!(
             jb.is_idle(),
@@ -1645,7 +1831,8 @@ mod tests {
             });
         }
         assert!(peak < 0.2, "reverb tail did not decay: {peak}");
-        for _ in 0..40 {
+        // The 2 s effect tail uses 100 rounds; one more drains the limiter's 5 ms lookahead.
+        for _ in 0..41 {
             mixer.mix(&empty, &gs, &mut out);
         }
         assert!(
@@ -1819,8 +2006,9 @@ mod tests {
         let per_peer = vec![("p".to_string(), mono.as_slice())];
         let mut out = vec![0.0f32; 1920];
         mixer.mix(&per_peer, &gs, &mut out);
-        approx(out[0], 0.1 * PAN_FAR_SIDE * 0.5);
-        approx(out[1], 0.1 * 0.5);
+        let audible = crate::loudness::LIMITER_LOOKAHEAD_FRAMES * 2;
+        approx(out[audible], 0.1 * PAN_FAR_SIDE * 0.5);
+        approx(out[audible + 1], 0.1 * 0.5);
     }
 
     #[test]
@@ -1864,8 +2052,9 @@ mod tests {
         let per_peer = vec![("p".to_string(), mono.as_slice())];
         let mut out = vec![0.0f32; 1920];
         mixer.mix(&per_peer, &gs, &mut out);
-        approx(out[0], 0.1 * PAN_FAR_SIDE * 0.5 * 0.5);
-        approx(out[1], 0.1 * 0.5 * 0.5);
+        let audible = crate::loudness::LIMITER_LOOKAHEAD_FRAMES * 2;
+        approx(out[audible], 0.1 * PAN_FAR_SIDE * 0.5 * 0.5);
+        approx(out[audible + 1], 0.1 * 0.5 * 0.5);
     }
 
     fn mix_first_sample(master: f32, peer_gain: f32, sample: f32) -> f32 {
@@ -1886,7 +2075,7 @@ mod tests {
         let per_peer = vec![("p".to_string(), mono.as_slice())];
         let mut out = vec![0.0; 1920];
         mixer.mix(&per_peer, &gs, &mut out);
-        out[0]
+        out[crate::loudness::LIMITER_LOOKAHEAD_FRAMES * 2]
     }
 
     fn mix_left_rms(master: f32, peer_gain: f32, peak: f32) -> f32 {
@@ -1974,12 +2163,12 @@ mod tests {
     }
 
     #[test]
-    fn master_boost_remains_audibly_monotonic_above_soft_limit_knee() {
+    fn master_boost_on_a_full_scale_onset_is_safely_limited() {
         let normal = mix_first_sample(1.0, 1.0, PLAYBACK_SOFT_LIMIT_START);
         let boosted = mix_first_sample(2.0, 1.0, PLAYBACK_SOFT_LIMIT_START);
-        approx(normal, PLAYBACK_SOFT_LIMIT_START);
-        assert!(boosted > normal, "200% master must be louder than 100%");
-        assert!(boosted <= 1.0);
+        assert!(normal > 0.0 && boosted > 0.0);
+        assert!(normal <= crate::loudness::MIX_LIMITER_CEILING);
+        assert!(boosted <= crate::loudness::MIX_LIMITER_CEILING);
     }
 
     #[test]

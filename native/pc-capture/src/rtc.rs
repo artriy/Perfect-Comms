@@ -605,6 +605,20 @@ pub struct NativeCounters {
     pub mix_nonzero_samples: AtomicU64,
     mix_peak_bits: AtomicU32,
     mix_square_sum_bits: AtomicU64,
+    mix_control_peers: AtomicU64,
+    mix_control_attenuated_peers: AtomicU64,
+    mix_control_boosted_peers: AtomicU64,
+    mix_control_overload_peers: AtomicU64,
+    mix_control_clipping_confident_peers: AtomicU64,
+    mix_control_max_attenuation_db_bits: AtomicU32,
+    mix_control_max_makeup_db_bits: AtomicU32,
+    mix_control_max_peer_peak_reduction_db_bits: AtomicU32,
+    mix_control_loudest_active_level_db_bits: AtomicU32,
+    mix_control_highest_noise_level_db_bits: AtomicU32,
+    mix_control_output_limiter_reduction_db_bits: AtomicU32,
+    mix_control_output_limiter_detected_peak_bits: AtomicU32,
+    mix_control_output_limiter_limited_samples: AtomicU64,
+    mix_control_output_limiter_reduction_events: AtomicU64,
     pub jitter_idle_ticks: AtomicU64,
     pub game_state_updates: AtomicU64,
     pub applied_deaf: AtomicU64,
@@ -689,6 +703,45 @@ impl NativeCounters {
         }
         Self::observe_peak(&self.mix_peak_bits, peak);
         Self::add_f64(&self.mix_square_sum_bits, square_sum);
+    }
+
+    pub fn record_mix_control(&self, snapshot: crate::mix::MixControlSnapshot) {
+        self.mix_control_peers
+            .store(snapshot.peers_tracked, Ordering::Relaxed);
+        self.mix_control_attenuated_peers
+            .store(snapshot.attenuated_peers, Ordering::Relaxed);
+        self.mix_control_boosted_peers
+            .store(snapshot.boosted_peers, Ordering::Relaxed);
+        self.mix_control_overload_peers
+            .store(snapshot.overload_peers, Ordering::Relaxed);
+        self.mix_control_clipping_confident_peers
+            .store(snapshot.clipping_confident_peers, Ordering::Relaxed);
+        self.mix_control_max_attenuation_db_bits
+            .store(snapshot.max_attenuation_db.to_bits(), Ordering::Relaxed);
+        self.mix_control_max_makeup_db_bits
+            .store(snapshot.max_makeup_db.to_bits(), Ordering::Relaxed);
+        self.mix_control_max_peer_peak_reduction_db_bits.store(
+            snapshot.max_peer_peak_reduction_db.to_bits(),
+            Ordering::Relaxed,
+        );
+        self.mix_control_loudest_active_level_db_bits.store(
+            snapshot.loudest_active_level_db.to_bits(),
+            Ordering::Relaxed,
+        );
+        self.mix_control_highest_noise_level_db_bits
+            .store(snapshot.highest_noise_level_db.to_bits(), Ordering::Relaxed);
+        self.mix_control_output_limiter_reduction_db_bits.store(
+            snapshot.output_limiter_gain_reduction_db.to_bits(),
+            Ordering::Relaxed,
+        );
+        self.mix_control_output_limiter_detected_peak_bits.store(
+            snapshot.output_limiter_detected_peak.to_bits(),
+            Ordering::Relaxed,
+        );
+        self.mix_control_output_limiter_limited_samples
+            .store(snapshot.output_limiter_limited_samples, Ordering::Relaxed);
+        self.mix_control_output_limiter_reduction_events
+            .store(snapshot.output_limiter_reduction_events, Ordering::Relaxed);
     }
 
     pub fn record_playback_output(&self, samples: &[f32]) {
@@ -790,6 +843,46 @@ impl NativeCounters {
             mix_nonzero_samples: self.mix_nonzero_samples.load(Ordering::Relaxed),
             mix_peak: f32::from_bits(self.mix_peak_bits.load(Ordering::Relaxed)),
             mix_rms,
+            mix_control_peers: self.mix_control_peers.load(Ordering::Relaxed),
+            mix_control_attenuated_peers: self.mix_control_attenuated_peers.load(Ordering::Relaxed),
+            mix_control_boosted_peers: self.mix_control_boosted_peers.load(Ordering::Relaxed),
+            mix_control_overload_peers: self.mix_control_overload_peers.load(Ordering::Relaxed),
+            mix_control_clipping_confident_peers: self
+                .mix_control_clipping_confident_peers
+                .load(Ordering::Relaxed),
+            mix_control_max_attenuation_db: f32::from_bits(
+                self.mix_control_max_attenuation_db_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_max_makeup_db: f32::from_bits(
+                self.mix_control_max_makeup_db_bits.load(Ordering::Relaxed),
+            ),
+            mix_control_max_peer_peak_reduction_db: f32::from_bits(
+                self.mix_control_max_peer_peak_reduction_db_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_loudest_active_level_db: f32::from_bits(
+                self.mix_control_loudest_active_level_db_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_highest_noise_level_db: f32::from_bits(
+                self.mix_control_highest_noise_level_db_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_output_limiter_reduction_db: f32::from_bits(
+                self.mix_control_output_limiter_reduction_db_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_output_limiter_detected_peak: f32::from_bits(
+                self.mix_control_output_limiter_detected_peak_bits
+                    .load(Ordering::Relaxed),
+            ),
+            mix_control_output_limiter_limited_samples: self
+                .mix_control_output_limiter_limited_samples
+                .load(Ordering::Relaxed),
+            mix_control_output_limiter_reduction_events: self
+                .mix_control_output_limiter_reduction_events
+                .load(Ordering::Relaxed),
             jitter_idle_ticks: self.jitter_idle_ticks.load(Ordering::Relaxed),
             game_state_updates: self.game_state_updates.load(Ordering::Relaxed),
             applied_deaf: self.applied_deaf.load(Ordering::Relaxed) != 0,

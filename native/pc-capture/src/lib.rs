@@ -5,6 +5,7 @@ pub mod engine;
 #[allow(dead_code)]
 pub mod gamestate;
 pub mod input;
+mod loudness;
 #[allow(dead_code)]
 pub mod mix;
 pub mod opus_native;
