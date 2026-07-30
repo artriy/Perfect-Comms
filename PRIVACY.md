@@ -13,9 +13,9 @@ commands, such as forcing every client to rebuild its voice session, are disable
 roster checks are compatibility safeguards, not a security boundary against a hostile lobby participant.
 Microphone audio flows peer-to-peer over WebRTC to the other players in the room, or through a TURN relay
 when a direct connection cannot be established. This carries the network metadata (IP addresses and ICE
-candidates) inherent to a real-time voice connection. Audio is not stored by the mod. BetterCrewLink and
-Perfect Comms registry endpoints are used only for optional public-lobby discovery/publishing; the configured
-registry may also provide short-lived managed TURN credentials.
+candidates) inherent to a real-time voice connection. Audio is not stored by the mod. The Perfect Comms
+registry is used only for optional public-lobby discovery/publishing and may also provide short-lived managed
+TURN credentials.
 
 Opus packets may carry up to 100 ms of encrypted speech redundancy so an authorized receiver can repair a
 short network loss. This history is transient, and the encoder is reset at microphone stop/start and before
@@ -23,16 +23,18 @@ a newly authorized peer is added so that peer cannot recover speech from before 
 
 ## Public lobby discovery and publishing
 
-Opening the in-game Voice Lobby browser connects to the selected public directory. The available sources
-use either a BetterCrewLink-compatible Socket.IO endpoint, the configured Perfect Comms registry `/lobbies`
-endpoint, or the vanilla public-list API at `https://au-eu.duikbo.at/public_api/games`. Discovery requests
-send nothing user-identifying beyond the connection itself (your IP, as with any network request).
+Opening the in-game Voice Lobby browser opens a WebSocket connection to the configured Perfect Comms live
+directory (by default `wss://perfect-comms-lobbies.edgetel.workers.dev/lobbies/live?role=browser`). The
+connection receives a current snapshot and subsequent lobby add, update, and removal events. It sends only a
+refresh request when the player clicks Refresh; the service still receives the player's IP as part of the
+network connection.
 
-If a host enables **Public Voice Lobby**, Perfect Comms publishes the room code, region, language, title,
-host display name, player counts, game state, mod version, and protocol version to the selected directory.
-The BetterCrewLink publisher also sends the local Among Us client/player ids required by that directory's
-join protocol. Publishing stops and the listing is removed when the room is no longer public or the lobby
-session ends. These directory connections are not used to carry private-room voice or voice signaling.
+If a host enables **Public Voice Lobby**, Perfect Comms opens a host WebSocket and publishes the room code,
+Among Us region, language, title, host display name, player counts, current game state, mod version, and
+protocol version. It also sends a random listing id and random ownership token; the token is used only to
+protect listing replacement and is never sent to lobby browsers. No Among Us client/player id is published.
+Closing the room, disabling publication, disconnecting, or missing the heartbeat timeout removes the listing.
+The directory connection does not carry private-room voice or voice signaling.
 
 ## Update check (outbound HTTP)
 
@@ -47,6 +49,5 @@ download link). No account or personal data is sent.
 
 ## Third parties
 
-These endpoints are operated by their respective providers (GitHub, Cloudflare, the lobby-list host) under
-their own privacy policies. Perfect Comms is not affiliated with Innersloth, Among Us, BepInEx, MiraAPI,
-Reactor, or any supported mods.
+These endpoints are operated by GitHub and Cloudflare under their respective privacy policies. Perfect Comms
+is not affiliated with Innersloth, Among Us, BepInEx, MiraAPI, Reactor, or any supported mods.

@@ -19,10 +19,9 @@ Open **Host Voice Settings** from the lobby game-settings console. On desktop, t
 
 | Setting | Default | What it controls |
 | :--- | :---: | :--- |
-| **Public Voice Lobby** | Off | Publishes the voice-enabled lobby so other Perfect Comms players can find it. |
-| **Public Lobby Directory** | BetterCrewLink Live | Chooses BetterCrewLink Live or the Perfect Comms Registry for the listing. |
+| **Public Voice Lobby** | Off | Publishes the voice-enabled lobby to the Perfect Comms live directory so other Perfect Comms players can find it. |
 
-The directory only handles public-lobby discovery; changing it does not change the host's voice rules.
+The directory handles public-lobby discovery only. It does not carry voice audio or signaling and does not change the host's voice rules.
 
 ## Meeting & Voice tab
 

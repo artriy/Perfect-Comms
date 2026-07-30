@@ -19,9 +19,11 @@ dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore
 Package locks are committed. Restore fails if a dependency changes or NuGet
 reports a vulnerability.
 
-The Cloudflare Worker uses an exact Wrangler lockfile. CI performs `npm ci`,
-fails on high-severity audit findings, runs all request/security tests, and
-builds the deployment bundle in dry-run mode.
+The Cloudflare Worker uses an exact Wrangler lockfile. Its hibernating Durable
+Object holds live lobby state on host WebSocket connections and pushes
+snapshot/upsert/remove events to browser WebSockets without D1 polling. CI runs
+the request, ownership, expiry, rate-limit, and TURN tests, then builds the
+deployment bundle in dry-run mode.
 
 ## Native gate
 

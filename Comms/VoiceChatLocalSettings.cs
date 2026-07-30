@@ -290,9 +290,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<string> PerPlayerVolumes { get; }
     public ConfigEntry<string> LobbyBrowserTitle { get; }
     public ConfigEntry<string> LobbyBrowserLanguage { get; }
-    public ConfigEntry<VoiceLobbyBrowserSource> LobbyBrowserSource { get; }
     public ConfigEntry<string> LobbyRegistryUrl { get; }
-    public ConfigEntry<string> BetterCrewLinkServerUrl { get; }
 
     // Config-file only (not shown in the in-game menu): optional custom TURN credentials for automatic fallback.
     // Empty values use short-lived managed credentials from the configured Perfect Comms registry.
@@ -679,17 +677,10 @@ public class VoiceChatLocalSettings
         LobbyBrowserLanguage = config.Bind("Lobby Browser", "Language", "English",
             new ConfigDescription("Language shown in the voice lobby browser"));
 
-        LobbyBrowserSource = config.Bind("Lobby Browser", "Source",
-            VoiceLobbyBrowserSource.BetterCrewLink,
-            new ConfigDescription("Main-menu browser view source only. Hosted lobby publishing uses the in-game Lobby Browser Backend option."));
 
         LobbyRegistryUrl = config.Bind("Lobby Browser", "RegistryUrl",
-            "https://perfect-comms-lobbies.edgetel.workers.dev",
-            new ConfigDescription("Voice lobby registry endpoint"));
-
-        BetterCrewLinkServerUrl = config.Bind("Voice Server", "BetterCrewLinkServerUrl",
-            BetterCrewLinkLobbyEndpoint.DefaultServerUrl,
-            new ConfigDescription("Optional BetterCrewLink public-lobby directory endpoint. Voice audio and signaling do not use this service."));
+            VoiceLobbyRegistryEndpoint.DefaultRegistryUrl,
+            new ConfigDescription("Perfect Comms live public-lobby directory endpoint"));
 
         TurnServerUrl = config.Bind("Voice Server", "TurnServerUrl",
             "",

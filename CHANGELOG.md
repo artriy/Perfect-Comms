@@ -2,7 +2,7 @@
 
 ## Perfect Comms v4.1.7
 
-Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, restores native audio startup under CrossOver on macOS, and switches desktop releases to a safer DLL-only installation.
+Perfect Comms v4.1.7 adds a live owned lobby directory, gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, restores native audio startup under CrossOver on macOS, and switches desktop releases to a safer DLL-only installation.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
@@ -15,6 +15,17 @@ Perfect Comms v4.1.7 gives mod developers a reference-only NuGet API package, mo
 
 - **Fresh installations get BepInEx directly from its official build page.**
   > <sub>Players without an existing mod installation download the matching x86 or x64 BepInEx 6 Unity IL2CPP build directly from the official BepInEx build service, run its first-time setup, and then add `PerfectComms.dll`. Release automation no longer downloads, packages, verifies, or publishes third-party BepInEx files.</sub>
+
+### Live Public Lobby Directory
+
+- **The Voice Lobby browser now receives live Perfect Comms listings from the owned Cloudflare service.**
+  > <sub>A hibernating Durable Object sends an initial snapshot and immediate add, update, and removal events over WebSockets, replacing five-second D1 polling and the split BetterCrewLink/Cloudflare source selector. Hosts publish only while connected, hosting, and in a real lobby or match; closing the room or missing the heartbeat removes the listing.</sub>
+
+- **Lobby rows now show the host's current lobby or in-game state and update player counts without manual refreshes.**
+  > <sub>Each update carries the room code, installed Among Us region, player capacity, state transition time, mod version, and Perfect Comms protocol version. Ownership tokens protect reconnect replacement but are never broadcast to browsers, and per-socket limits, payload caps, capacity limits, and expiry alarms bound abuse.</sub>
+
+- **JOIN now selects the listing's installed Among Us region before searching for its room code.**
+  > <sub>Vanilla, modded, and custom regions are matched by their installed region names. If the required region is missing, the browser stays open and shows an actionable install/enable error instead of searching the player's previous region and failing without explanation.</sub>
 
 ### Developer API Package
 

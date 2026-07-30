@@ -1,615 +1,397 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import test from "node:test";
+import worker, { LobbyHub, testing } from "../src/index.js";
 
-test("health returns ok", async () => {
-	const env = {
-		DB: new FakeDB(),
-		TURN_TOKEN_ID: "health-token-id-must-not-leak",
-		TURN_API_TOKEN: "health-api-token-must-not-leak",
-	};
-	const response = await worker.fetch(
-		new Request("https://example.com/health"),
-		env,
-	);
-	assert.equal(response.status, 200);
-	const text = await response.text();
-	assert.equal(JSON.parse(text).ok, true);
-	assert.equal(text.includes(env.TURN_TOKEN_ID), false);
-	assert.equal(text.includes(env.TURN_API_TOKEN), false);
-});
+const LIVE_URL = "https://example.com/lobbies/live";
 
-test("TURN credentials are POST-only, private, short-lived, and sanitized", async () => {
-	let upstreamRequest;
-	const env = {
-		TURN_TOKEN_ID: "configured-token-id",
-		TURN_API_TOKEN: "configured-api-token",
-		TURN_RATE_LIMITER: {
-			async limit() {
-				return { success: true };
-			},
-		},
-		async TURN_CREDENTIAL_FETCH(url, options) {
-			upstreamRequest = { url, options };
-			return new Response(
-				JSON.stringify({
-					iceServers: [
-						{ urls: ["stun:stun.cloudflare.com:3478"] },
-						{
-							urls: ["turn:turn.cloudflare.com:3478?transport=udp"],
-							username: "ephemeral-user",
-							credential: "ephemeral-credential",
-						},
-					],
-					upstreamInternalField: "must-not-pass-through",
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		},
-	};
-
-	let response = await worker.fetch(
-		new Request("https://example.com/turn-credentials"),
-		env,
-	);
-	assert.equal(response.status, 405);
-	assert.equal(response.headers.get("allow"), "POST");
-	assert.equal(response.headers.has("access-control-allow-origin"), false);
-
-	response = await worker.fetch(
-		new Request("https://example.com/turn-credentials", {
-			method: "POST",
-			headers: { "cf-connecting-ip": "203.0.113.20" },
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-	assert.equal(response.headers.get("cache-control"), "no-store");
-	assert.equal(response.headers.has("access-control-allow-origin"), false);
-
-	const body = await response.json();
-	assert.equal(Array.isArray(body.iceServers), true);
-	assert.equal(body.ttl, 3600);
-	assert.equal(body.upstreamInternalField, undefined);
-	assert.equal(body.iceServers[1].credential, "ephemeral-credential");
-
-	const upstreamBody = JSON.parse(upstreamRequest.options.body);
-	assert.equal(upstreamBody.ttl, 3600);
-	assert.match(upstreamBody.customIdentifier, /^[a-f0-9]{32}$/);
-	assert.equal(upstreamBody.customIdentifier.includes("203.0.113.20"), false);
-	assert.equal(
-		upstreamRequest.options.headers.authorization,
-		`Bearer ${env.TURN_API_TOKEN}`,
-	);
-});
-
-test("TURN credential rate limiting fails closed without exposing secrets", async () => {
-	let fetched = false;
-	const env = {
-		TURN_TOKEN_ID: "rate-token-id-must-not-leak",
-		TURN_API_TOKEN: "rate-api-token-must-not-leak",
-		TURN_RATE_LIMITER: {
-			async limit() {
-				return { success: false };
-			},
-		},
-		async TURN_CREDENTIAL_FETCH() {
-			fetched = true;
-			throw new Error("should not fetch");
-		},
-	};
-
-	const response = await worker.fetch(
-		new Request("https://example.com/turn-credentials", {
-			method: "POST",
-			headers: { "cf-connecting-ip": "203.0.113.21" },
-		}),
-		env,
-	);
-	assert.equal(response.status, 429);
-	assert.equal(fetched, false);
-	const text = await response.text();
-	assert.deepEqual(JSON.parse(text), { error: "rate_limited" });
-	assert.equal(text.includes(env.TURN_TOKEN_ID), false);
-	assert.equal(text.includes(env.TURN_API_TOKEN), false);
-	assert.equal(response.headers.has("access-control-allow-origin"), false);
-});
-
-test("TURN credential issuer falls back to a bounded local limiter", async () => {
-	let fetchCount = 0;
-	const env = {
-		TURN_TOKEN_ID: "fallback-token-id",
-		TURN_API_TOKEN: "fallback-api-token",
-		TURN_RATE_LIMITER: {
-			async limit() {
-				throw new Error("simulated binding outage");
-			},
-		},
-		async TURN_CREDENTIAL_FETCH() {
-			fetchCount += 1;
-			return new Response(
-				JSON.stringify({
-					iceServers: [
-						{
-							urls: ["turn:turn.cloudflare.com:3478?transport=udp"],
-							username: "ephemeral-user",
-							credential: "ephemeral-credential",
-						},
-					],
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		},
-	};
-
-	let response;
-	for (let i = 0; i < 31; i++) {
-		response = await worker.fetch(
-			new Request("https://example.com/turn-credentials", {
-				method: "POST",
-				headers: { "cf-connecting-ip": "203.0.113.23" },
-			}),
-			env,
-		);
-	}
-
-	assert.equal(response.status, 429);
-	assert.equal(fetchCount, 30);
-});
-
-test("TURN credential issuer rejects payloads without an authenticated relay", async () => {
-	const env = {
-		TURN_TOKEN_ID: "validation-token-id",
-		TURN_API_TOKEN: "validation-api-token",
-		TURN_RATE_LIMITER: {
-			async limit() {
-				return { success: true };
-			},
-		},
-		async TURN_CREDENTIAL_FETCH() {
-			return new Response(
-				JSON.stringify({
-					iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		},
-	};
-
-	const response = await worker.fetch(
-		new Request("https://example.com/turn-credentials", {
-			method: "POST",
-			headers: { "cf-connecting-ip": "203.0.113.24" },
-		}),
-		env,
-	);
-	assert.equal(response.status, 502);
-	assert.deepEqual(await response.json(), { error: "turn_generate_failed" });
-});
-
-test("TURN credential upstream failures stay sanitized", async () => {
-	const env = {
-		TURN_TOKEN_ID: "failure-token-id-must-not-leak",
-		TURN_API_TOKEN: "failure-api-token-must-not-leak",
-		TURN_RATE_LIMITER: {
-			async limit() {
-				return { success: true };
-			},
-		},
-		async TURN_CREDENTIAL_FETCH() {
-			throw new Error("upstream detail must not leak");
-		},
-	};
-
-	const response = await worker.fetch(
-		new Request("https://example.com/turn-credentials", {
-			method: "POST",
-			headers: { "cf-connecting-ip": "203.0.113.22" },
-		}),
-		env,
-	);
-	assert.equal(response.status, 502);
-	const text = await response.text();
-	assert.deepEqual(JSON.parse(text), { error: "turn_generate_failed" });
-	assert.equal(text.includes("upstream detail"), false);
-	assert.equal(text.includes(env.TURN_API_TOKEN), false);
-});
-
-test("update notification endpoint returns disabled for current release", async () => {
-	const env = updateEnv();
-	const response = await worker.fetch(
-		new Request("https://example.com/updates/latest?current=1.0.1"),
-		env,
-	);
-	assert.equal(response.status, 200);
-	const body = await response.json();
-	assert.equal(body.enabled, false);
-	assert.equal(body.test, false);
-	assert.equal(body.latestVersion, "v1.0.1");
-	assert.equal(
-		body.releaseUrl,
-		"https://github.com/artriy/Perfect-Comms/releases/tag/v1.0.1",
-	);
-	assert.equal(body.showEveryMainMenu, false);
-});
-
-test("update notification endpoint enables for v1.0.0 clients", async () => {
-	const env = updateEnv();
-	const response = await worker.fetch(
-		new Request("https://example.com/updates/latest?current=1.0.0"),
-		env,
-	);
-	assert.equal(response.status, 200);
-	const body = await response.json();
-	assert.equal(body.enabled, true);
-	assert.equal(body.test, false);
-	assert.equal(body.latestVersion, "v1.0.1");
-	assert.equal(
-		body.releaseUrl,
-		"https://github.com/artriy/Perfect-Comms/releases/tag/v1.0.1",
-	);
-});
-
-function updateEnv() {
+function attachment(role, overrides = {}) {
 	return {
-		DB: new FakeDB(),
-		UPDATE_RELEASE_FIXTURE_JSON: JSON.stringify({
-			tag_name: "v1.0.1",
-			html_url: "https://github.com/artriy/Perfect-Comms/releases/tag/v1.0.1",
-		}),
+		role,
+		lastSeen: Math.floor(Date.now() / 1000),
+		windowStartedAt: Math.floor(Date.now() / 1000),
+		windowMessages: 0,
+		ownerToken: "",
+		listing: null,
+		...overrides,
 	};
 }
 
-test("lobby publish list heartbeat delete flow", async () => {
-	const env = { DB: new FakeDB() };
-	const token = "0123456789abcdef";
-
-	let response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			id: "room-1",
-			ownerToken: token,
-			code: "abcxyz",
-			region: "NA",
-			language: "English",
-			title: "A".repeat(80),
-			host: "Host",
-			players: 2,
-			maxPlayers: 15,
-			state: "Lobby",
-			modVersion: "1.0.0",
-			protocolVersion: 3,
-			ttlSeconds: 999,
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-	const published = await response.json();
-	assert.equal(published.id, "room-1");
-
-	response = await worker.fetch(
-		new Request("https://example.com/lobbies"),
-		env,
-	);
-	const listed = await response.json();
-	assert.equal(listed.lobbies.length, 1);
-	assert.equal(listed.lobbies[0].code, "ABCXYZ");
-	assert.equal(listed.lobbies[0].title.length, 40);
-	assert.equal(listed.lobbies[0].protocolVersion, 3);
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies/room-1/heartbeat", "POST", {
-			ownerToken: token,
-			players: 4,
-			state: "InGame",
-			ttlSeconds: 35,
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies/room-1", "DELETE", { ownerToken: token }),
-		env,
-	);
-	assert.equal(response.status, 200);
-
-	response = await worker.fetch(
-		new Request("https://example.com/lobbies"),
-		env,
-	);
-	assert.equal((await response.json()).lobbies.length, 0);
-});
-
-test("worker rejects bad json, bad owner token, and token mismatch", async () => {
-	const env = { DB: new FakeDB() };
-
-	let response = await worker.fetch(
-		new Request("https://example.com/lobbies", {
-			method: "POST",
-			headers: { "content-type": "text/plain" },
-			body: "{}",
-		}),
-		env,
-	);
-	assert.equal(response.status, 400);
-	assert.equal((await response.json()).error, "invalid_json");
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			code: "ABCD",
-			ownerToken: "short",
-		}),
-		env,
-	);
-	assert.equal(response.status, 400);
-	assert.equal((await response.json()).error, "missing_owner_token");
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			id: "room-2",
-			code: "ABCD",
-			ownerToken: "0123456789abcdef",
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			id: "room-2",
-			code: "ABCD",
-			ownerToken: "fedcba9876543210",
-		}),
-		env,
-	);
-	assert.equal(response.status, 403);
-	assert.equal((await response.json()).error, "owner_token_mismatch");
-});
-
-test("worker rejects path-unsafe lobby ids before publish", async () => {
-	const env = { DB: new FakeDB() };
-	const response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			id: "bad/id",
-			code: "ABCD",
-			ownerToken: "0123456789abcdef",
-		}),
-		env,
-	);
-
-	assert.equal(response.status, 400);
-	assert.equal((await response.json()).error, "invalid_lobby_id");
-	assert.equal(env.DB.rows.size, 0);
-});
-
-test("ttl-only heartbeat preserves existing lobby metadata", async () => {
-	const env = { DB: new FakeDB() };
-	const token = "0123456789abcdef";
-
-	let response = await worker.fetch(
-		jsonRequest("/lobbies", "POST", {
-			id: "room-safe_1",
-			ownerToken: token,
-			code: "ABCD",
-			region: "NA",
-			host: "Host",
-			players: 4,
-			maxPlayers: 15,
-			state: "Lobby",
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-
-	response = await worker.fetch(
-		jsonRequest("/lobbies/room-safe_1/heartbeat", "POST", {
-			ownerToken: token,
-			ttlSeconds: 35,
-		}),
-		env,
-	);
-	assert.equal(response.status, 200);
-
-	response = await worker.fetch(new Request("https://example.com/lobbies"), env);
-	const listed = await response.json();
-	assert.equal(listed.lobbies[0].players, 4);
-	assert.equal(listed.lobbies[0].maxPlayers, 15);
-	assert.equal(listed.lobbies[0].state, "Lobby");
-	assert.equal(listed.lobbies[0].host, "Host");
-});
-
-test("worker rate limits excessive mutations per client", async () => {
-	const env = { DB: new FakeDB() };
-	const token = "0123456789abcdef";
-	let response;
-
-	for (let i = 0; i < 61; i++) {
-		response = await worker.fetch(
-			jsonRequest(
-				"/lobbies",
-				"POST",
-				{
-					id: `rate-${i}`,
-					ownerToken: token,
-					code: `ABCD${i}`,
-				},
-				{ "cf-connecting-ip": "203.0.113.10" },
-			),
-			env,
-		);
+class FakeSocket {
+	constructor(role, overrides = {}) {
+		this.attachment = attachment(role, overrides);
+		this.sent = [];
+		this.closed = null;
 	}
 
-	assert.equal(response.status, 429);
-	assert.equal((await response.json()).error, "rate_limited");
-});
+	serializeAttachment(value) {
+		this.attachment = JSON.parse(JSON.stringify(value));
+	}
 
-test("worker hides internal server error details", async () => {
-	const response = await worker.fetch(
-		new Request("https://example.com/lobbies"),
-		{
-			DB: {
-				prepare() {
-					throw new Error("secret database path");
-				},
-			},
+	deserializeAttachment() {
+		return JSON.parse(JSON.stringify(this.attachment));
+	}
+
+	send(message) {
+		this.sent.push(JSON.parse(message));
+	}
+
+	close(code, reason) {
+		this.closed = { code, reason };
+	}
+}
+
+class FakeContext {
+	constructor(sockets = []) {
+		this.sockets = sockets;
+		this.alarmAt = null;
+		this.storage = {
+			getAlarm: async () => this.alarmAt,
+			setAlarm: async (value) => { this.alarmAt = value; },
+		};
+	}
+
+	getWebSockets(tag) {
+		return this.sockets.filter((socket) => socket.attachment.role === tag);
+	}
+
+	acceptWebSocket(socket) {
+		this.sockets.push(socket);
+	}
+}
+
+function publish(overrides = {}) {
+	return JSON.stringify({
+		wire: testing.LOBBY_WIRE_VERSION,
+		type: "publish",
+		lobby: {
+			id: "lobby-1",
+			ownerToken: "owner-token-at-least-16-chars",
+			code: "ABCDEF",
+			region: "North America",
+			language: "English",
+			title: "Friday Crew",
+			host: "Alice",
+			players: 4,
+			maxPlayers: 15,
+			state: "Lobby",
+			modVersion: "4.1.7",
+			protocolVersion: 5,
+			...overrides,
 		},
-	);
-
-	assert.equal(response.status, 500);
-	const body = await response.json();
-	assert.equal(body.error, "server_error");
-	assert.equal(body.detail, undefined);
-});
-
-function jsonRequest(path, method, body, headers = {}) {
-	return new Request(`https://example.com${path}`, {
-		method,
-		headers: { "content-type": "application/json", ...headers },
-		body: JSON.stringify(body),
 	});
 }
 
-class FakeDB {
-	constructor() {
-		this.rows = new Map();
-	}
-
-	prepare(sql) {
-		return new FakeStatement(this, sql);
-	}
+function messages(socket, type) {
+	return socket.sent.filter((message) => message.type === type);
 }
 
-class FakeStatement {
-	constructor(db, sql) {
-		this.db = db;
-		this.sql = sql;
-		this.args = [];
+test("health identifies the live Durable Object directory", async () => {
+	const response = await worker.fetch(new Request("https://example.com/health"), {});
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), {
+		ok: true,
+		service: "perfect-comms-lobbies",
+		directory: "durable-object-websocket",
+		wireVersion: 1,
+	});
+});
+
+test("live route requires a WebSocket upgrade and a valid role", async () => {
+	const ordinary = await worker.fetch(new Request(`${LIVE_URL}?role=browser`), {});
+	assert.equal(ordinary.status, 426);
+	assert.equal(ordinary.headers.get("upgrade"), "websocket");
+	assert.equal(ordinary.headers.get("access-control-allow-origin"), null);
+
+	const invalid = await worker.fetch(new Request(`${LIVE_URL}?role=reader`, {
+		headers: { upgrade: "websocket" },
+	}), { LOBBY_HUB: {} });
+	assert.equal(invalid.status, 400);
+	assert.deepEqual(await invalid.json(), { error: "invalid_role" });
+});
+
+test("live route forwards upgrades to the global Durable Object", async () => {
+	let selectedName = "";
+	let forwardedUrl = "";
+	const env = {
+		LOBBY_HUB: {
+			idFromName(name) {
+				selectedName = name;
+				return "hub-id";
+			},
+			get(id) {
+				assert.equal(id, "hub-id");
+				return {
+					async fetch(request) {
+						forwardedUrl = request.url;
+						return new Response(null, { status: 204 });
+					},
+				};
+			},
+		},
+	};
+	const response = await worker.fetch(new Request(`${LIVE_URL}?role=browser`, {
+		headers: { upgrade: "websocket" },
+	}), env);
+	assert.equal(response.status, 204);
+	assert.equal(selectedName, "perfect-comms-global-v1");
+	assert.equal(forwardedUrl, `${LIVE_URL}?role=browser`);
+});
+
+test("retired polling lobby routes stay unavailable", async () => {
+	for (const path of ["/lobbies", "/lobbies/example", "/lobbies/example/heartbeat"])
+	{
+		const response = await worker.fetch(new Request(`https://example.com${path}`), {});
+		assert.equal(response.status, 404);
 	}
+});
 
-	bind(...args) {
-		this.args = args;
-		return this;
-	}
+test("host publish broadcasts an owned, sanitized live listing", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const ctx = new FakeContext([host, browser]);
+	const hub = new LobbyHub(ctx, {});
 
-	async all() {
-		if (this.sql.includes("SELECT id, code")) {
-			const [now, staleCutoff] = this.args;
-			const results = [...this.db.rows.values()]
-				.filter((row) => row.expiresAt > now && row.updatedAt > staleCutoff)
-				.sort(
-					(a, b) =>
-						(b.state === "Lobby") - (a.state === "Lobby") ||
-						b.updatedAt - a.updatedAt ||
-						b.players - a.players,
-				)
-				.slice(0, 100)
-				.map(({ ownerTokenHash, ...publicRow }) => publicRow);
-			return { results };
-		}
-		throw new Error(`unsupported all SQL: ${this.sql}`);
-	}
+	await hub.webSocketMessage(host, publish({
+		title: "  Crew\u0000 Night  ",
+		players: 99,
+		maxPlayers: 12,
+	}));
 
-	async first() {
-		const id = this.args[0];
-		const row = this.db.rows.get(id);
-		if (!row) return null;
-		if (
-			this.sql.includes(
-				"SELECT ownerTokenHash, state, stateChangedAt, updatedAt",
-			)
-		) {
-			return {
-				ownerTokenHash: row.ownerTokenHash,
-				state: row.state,
-				stateChangedAt: row.stateChangedAt,
-				updatedAt: row.updatedAt,
-			};
-		}
-		if (this.sql.includes("SELECT ownerTokenHash"))
-			return { ownerTokenHash: row.ownerTokenHash };
-		throw new Error(`unsupported first SQL: ${this.sql}`);
-	}
+	assert.equal(messages(host, "published").length, 1);
+	const upserts = messages(browser, "upsert");
+	assert.equal(upserts.length, 1);
+	assert.deepEqual(upserts[0].lobby, {
+		id: "lobby-1",
+		code: "ABCDEF",
+		region: "North America",
+		language: "English",
+		title: "Crew Night",
+		host: "Alice",
+		players: 12,
+		maxPlayers: 12,
+		state: "Lobby",
+		stateChangedAt: upserts[0].lobby.stateChangedAt,
+		modVersion: "4.1.7",
+		protocolVersion: 5,
+		updatedAt: upserts[0].lobby.updatedAt,
+		expiresAt: upserts[0].lobby.expiresAt,
+	});
+	assert.ok(upserts[0].lobby.stateChangedAt > 0);
+	assert.ok(upserts[0].lobby.expiresAt > upserts[0].lobby.updatedAt);
+	assert.equal("ownerToken" in upserts[0].lobby, false);
+	assert.equal(host.attachment.ownerToken, "owner-token-at-least-16-chars");
+	assert.ok(ctx.alarmAt > Date.now());
+});
 
-	async run() {
-		if (
-			this.sql.includes(
-				"DELETE FROM lobbies WHERE expiresAt <= ? OR updatedAt <= ?",
-			)
-		) {
-			const [now, staleCutoff] = this.args;
-			for (const [id, row] of this.db.rows) {
-				if (row.expiresAt <= now || row.updatedAt <= staleCutoff)
-					this.db.rows.delete(id);
-			}
-			return {};
-		}
+test("browser snapshot contains current listings without polling storage", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([host, browser]), {});
+	await hub.webSocketMessage(host, publish());
+	browser.sent.length = 0;
 
-		if (this.sql.includes("INSERT INTO lobbies")) {
-			const [
-				id,
-				code,
-				region,
-				language,
-				title,
-				host,
-				players,
-				maxPlayers,
-				state,
-				stateChangedAt,
-				modVersion,
-				protocolVersion,
-				ownerTokenHash,
-				updatedAt,
-				expiresAt,
-			] = this.args;
-			const previous = this.db.rows.get(id);
-			if (previous && previous.ownerTokenHash !== ownerTokenHash)
-				return { meta: { changes: 0 } };
-			this.db.rows.set(id, {
-				id,
-				code,
-				region,
-				language,
-				title,
-				host,
-				players,
-				maxPlayers,
-				state,
-				stateChangedAt:
-					previous?.state !== state
-						? stateChangedAt
-						: (previous?.stateChangedAt ?? stateChangedAt),
-				modVersion,
-				protocolVersion,
-				ownerTokenHash,
-				updatedAt,
-				expiresAt,
-			});
-			return { meta: { changes: 1 } };
-		}
+	hub.sendSnapshot(browser);
 
-		if (this.sql.includes("UPDATE lobbies SET")) {
-			const id = this.args[this.args.length - 1];
-			const row = this.db.rows.get(id);
-			assert.ok(row, `missing row ${id}`);
-			const assignments = this.sql
-				.match(/SET([\s\S]+)WHERE id = \?/)[1]
-				.split(",")
-				.map((part) => part.trim())
-				.filter(Boolean);
-			let argIndex = 0;
-			for (const assignment of assignments) {
-				const field = assignment.split("=")[0].trim();
-				row[field] = this.args[argIndex++];
-			}
-			return {};
-		}
+	assert.equal(browser.sent.length, 1);
+	assert.equal(browser.sent[0].type, "snapshot");
+	assert.equal(browser.sent[0].wire, 1);
+	assert.equal(browser.sent[0].lobbies.length, 1);
+	assert.equal(browser.sent[0].lobbies[0].code, "ABCDEF");
+});
 
-		if (this.sql.includes("DELETE FROM lobbies WHERE id = ?")) {
-			this.db.rows.delete(this.args[0]);
-			return {};
-		}
+test("host update preserves state age and broadcasts changed players immediately", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([host, browser]), {});
+	await hub.webSocketMessage(host, publish({ players: 2 }));
+	const first = messages(browser, "upsert").at(-1).lobby;
 
-		throw new Error(`unsupported run SQL: ${this.sql}`);
-	}
-}
+	await hub.webSocketMessage(host, publish({ players: 3 }));
+	const second = messages(browser, "upsert").at(-1).lobby;
+
+	assert.equal(second.players, 3);
+	assert.equal(second.stateChangedAt, first.stateChangedAt);
+});
+
+test("state transition resets stateChangedAt", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([host, browser]), {});
+	await hub.webSocketMessage(host, publish({ state: "Lobby" }));
+	host.attachment.listing.stateChangedAt = 10;
+	await hub.webSocketMessage(host, publish({ state: "InGame" }));
+
+	const changed = messages(browser, "upsert").at(-1).lobby;
+	assert.equal(changed.state, "InGame");
+	assert.ok(changed.stateChangedAt > 10);
+});
+
+test("same owner token transfers a listing to a replacement host socket", async () => {
+	const firstHost = new FakeSocket("host");
+	const replacement = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([firstHost, replacement, browser]), {});
+	await hub.webSocketMessage(firstHost, publish({ players: 2 }));
+	await hub.webSocketMessage(replacement, publish({ players: 5 }));
+
+	assert.equal(firstHost.attachment.listing, null);
+	assert.deepEqual(firstHost.closed, { code: 4001, reason: "listing connection replaced" });
+	assert.equal(replacement.attachment.listing.players, 5);
+	assert.equal(hub.activeListings().length, 1);
+});
+
+test("host changing lobby code removes its prior listing id", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([host, browser]), {});
+	await hub.webSocketMessage(host, publish());
+	browser.sent.length = 0;
+
+	await hub.webSocketMessage(host, publish({
+		id: "lobby-2",
+		ownerToken: "replacement-owner-token-12345",
+		code: "ZZZZZZ",
+	}));
+
+	assert.equal(messages(browser, "remove").at(-1).id, "lobby-1");
+	assert.equal(messages(browser, "upsert").at(-1).lobby.id, "lobby-2");
+	assert.equal(hub.activeListings().length, 1);
+});
+
+test("different owner token cannot hijack an active listing id", async () => {
+	const owner = new FakeSocket("host");
+	const attacker = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([owner, attacker, browser]), {});
+	await hub.webSocketMessage(owner, publish());
+	browser.sent.length = 0;
+	await hub.webSocketMessage(attacker, publish({ ownerToken: "different-owner-token-12345" }));
+
+	assert.equal(messages(attacker, "error").at(-1).error, "listing_id_in_use");
+	assert.equal(attacker.attachment.listing, null);
+	assert.equal(messages(browser, "upsert").length, 0);
+	assert.equal(owner.attachment.listing.id, "lobby-1");
+});
+
+test("remove and socket close immediately remove the owned listing", async () => {
+	const host = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([host, browser]), {});
+	await hub.webSocketMessage(host, publish());
+	browser.sent.length = 0;
+
+	await hub.webSocketMessage(host, JSON.stringify({ wire: 1, type: "remove" }));
+	assert.equal(messages(browser, "remove").at(-1).id, "lobby-1");
+	assert.equal(host.attachment.listing, null);
+
+	await hub.webSocketMessage(host, publish());
+	browser.sent.length = 0;
+	hub.webSocketClose(host);
+	assert.equal(messages(browser, "remove").at(-1).id, "lobby-1");
+});
+
+test("alarm prunes stale hosts and notifies browsers", async () => {
+	const stale = new FakeSocket("host");
+	const browser = new FakeSocket("browser");
+	const ctx = new FakeContext([stale, browser]);
+	const hub = new LobbyHub(ctx, {});
+	await hub.webSocketMessage(stale, publish());
+	stale.attachment.lastSeen = Math.floor(Date.now() / 1000) - testing.HOST_STALE_SECONDS - 1;
+	browser.sent.length = 0;
+
+	await hub.alarm();
+
+	assert.equal(stale.attachment.listing, null);
+	assert.equal(messages(browser, "remove").at(-1).id, "lobby-1");
+	assert.deepEqual(stale.closed, { code: 4000, reason: "host heartbeat expired" });
+});
+
+test("invalid state and oversized messages are rejected", async () => {
+	const host = new FakeSocket("host");
+	const hub = new LobbyHub(new FakeContext([host]), {});
+	await hub.webSocketMessage(host, publish({ state: "Unknown" }));
+	assert.equal(messages(host, "error").at(-1).error, "invalid_lobby");
+
+	await hub.webSocketMessage(host, "x".repeat(5000));
+	assert.equal(messages(host, "error").at(-1).error, "invalid_message");
+	assert.equal(host.closed.code, 1008);
+});
+
+test("per-socket message limit closes abusive clients", async () => {
+	const browser = new FakeSocket("browser");
+	const hub = new LobbyHub(new FakeContext([browser]), {});
+	const refresh = JSON.stringify({ wire: 1, type: "refresh" });
+	for (let index = 0; index < 31; index++)
+		await hub.webSocketMessage(browser, refresh);
+	assert.equal(messages(browser, "error").at(-1).error, "rate_limited");
+	assert.equal(browser.closed.code, 1008);
+});
+
+test("TURN credentials remain private and use the configured upstream", async () => {
+	let upstreamRequest;
+	const env = {
+		TURN_TOKEN_ID: "token-id",
+		TURN_API_TOKEN: "api-secret",
+		TURN_RATE_LIMITER: { async limit() { return { success: true }; } },
+		async TURN_CREDENTIAL_FETCH(url, options) {
+			upstreamRequest = { url, options };
+			return new Response(JSON.stringify({
+				iceServers: [{
+					urls: ["stun:turn.example.com", "turn:turn.example.com"],
+					username: "generated-user",
+					credential: "generated-password",
+				}],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		},
+	};
+	const response = await worker.fetch(new Request("https://example.com/turn-credentials", {
+		method: "POST",
+		headers: { "cf-connecting-ip": "203.0.113.10" },
+	}), env);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get("access-control-allow-origin"), null);
+	assert.equal(response.headers.get("cache-control"), "no-store");
+	const body = await response.json();
+	assert.equal(body.ttl, 3600);
+	assert.equal(body.iceServers[0].username, "generated-user");
+	assert.match(upstreamRequest.url, /token-id\/credentials\/generate-ice-servers$/);
+	assert.equal(upstreamRequest.options.headers.authorization, "Bearer api-secret");
+	const requestBody = JSON.parse(upstreamRequest.options.body);
+	assert.equal(requestBody.ttl, 3600);
+	assert.match(requestBody.customIdentifier, /^[a-f0-9]{32}$/);
+});
+
+test("TURN credential rate limiting fails closed without fetching", async () => {
+	let fetched = false;
+	const response = await worker.fetch(new Request("https://example.com/turn-credentials", {
+		method: "POST",
+	}), {
+		TURN_TOKEN_ID: "token-id",
+		TURN_API_TOKEN: "api-secret",
+		TURN_RATE_LIMITER: { async limit() { return { success: false }; } },
+		async TURN_CREDENTIAL_FETCH() {
+			fetched = true;
+			throw new Error("must not fetch");
+		},
+	});
+	assert.equal(response.status, 429);
+	assert.deepEqual(await response.json(), { error: "rate_limited" });
+	assert.equal(fetched, false);
+});
+
+test("latest update notification compares release versions", async () => {
+	const env = {
+		UPDATE_RELEASE_FIXTURE_JSON: JSON.stringify({
+			tag_name: "v4.1.7",
+			html_url: "https://github.com/artriy/Perfect-Comms/releases/tag/v4.1.7",
+		}),
+	};
+	const response = await worker.fetch(
+		new Request("https://example.com/updates/latest?current=4.1.6"),
+		env,
+	);
+	const body = await response.json();
+	assert.equal(body.enabled, true);
+	assert.equal(body.latestVersion, "v4.1.7");
+	assert.equal(body.showEveryMainMenu, false);
+});

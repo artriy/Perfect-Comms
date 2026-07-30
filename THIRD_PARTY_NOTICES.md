@@ -63,9 +63,8 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 
 | Assembly | Upstream and license text |
 |----------|---------------------------|
-| SocketIOClient 4.0.4, SocketIOClient.Common 4.0.0, SocketIOClient.Serializer 4.0.0.1 | [doghappy/socket.io-client-csharp](https://github.com/doghappy/socket.io-client-csharp), MIT. The exact license is embedded as `Licenses.SocketIOClient-MIT.txt`. |
 | System.Text.Encodings.Web and System.Text.Json 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is embedded as `Licenses.dotnet-runtime-MIT.txt`; the exact 10.x package notices are embedded as `Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt` and `Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt`. |
-| Microsoft.Bcl.AsyncInterfaces, Microsoft.Extensions.DependencyInjection, DependencyInjection.Abstractions, Logging, Logging.Abstractions, Options, Primitives, System.Diagnostics.DiagnosticSource, and System.IO.Pipelines 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. These Socket.IO runtime dependencies share the embedded .NET runtime license and 10.x NuGet third-party notices above. |
+| Microsoft.Bcl.AsyncInterfaces and System.IO.Pipelines 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. These System.Text.Json runtime dependencies share the embedded .NET runtime license and 10.x NuGet third-party notices above. |
 
 ## Native Rust dependencies
 

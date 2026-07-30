@@ -28,7 +28,7 @@ public sealed class EmbeddedNativeHelpersTests
                 Path.Combine(repositoryRoot, "Libs", "pc-capture", "pc-capture-mac.zip")),
         };
 
-        var pluginAssembly = typeof(BetterCrewLinkLobbyPublisher).Assembly;
+        var pluginAssembly = typeof(VoiceLobbyRegistryPublisher).Assembly;
         var embeddedResources = pluginAssembly
             .GetManifestResourceNames()
             .ToHashSet(StringComparer.Ordinal);
@@ -84,7 +84,7 @@ public sealed class EmbeddedNativeHelpersTests
                 "Lib.pc-pion.libpc-pion.android-arm64.so",
                 Path.Combine(repositoryRoot, "Libs", "pion", "libpc-pion.android-arm64.so")),
         };
-        var pluginAssembly = typeof(BetterCrewLinkLobbyPublisher).Assembly;
+        var pluginAssembly = typeof(VoiceLobbyRegistryPublisher).Assembly;
         var embeddedResources = pluginAssembly
             .GetManifestResourceNames()
             .ToHashSet(StringComparer.Ordinal);

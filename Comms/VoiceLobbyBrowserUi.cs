@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using HarmonyLib;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using InnerNet;
@@ -32,7 +31,6 @@ internal static class VoiceLobbyBrowserUi
     private static GameObject? _rowsRoot;
     private static TextMeshPro? _statusText;
     private static TextMeshPro? _editorText;
-    private static TextMeshPro? _sourceButtonText;
     private static PassiveButton? _buttonTemplate;
     private static bool _panelVisible;
     private static bool _panelClosing;
@@ -45,12 +43,8 @@ internal static class VoiceLobbyBrowserUi
     private static bool _editingLanguage;
     private static string _editTitle = "";
     private static string _editLanguage = "";
-    private static Task<IReadOnlyList<VoiceLobbyListing>>? _refreshTask;
-    private static VoiceLobbyBrowserSource _refreshTaskSource = VoiceLobbyBrowserSource.CloudflareLimited;
-    private static Task<BetterCrewLinkLobbyJoinResult>? _bclJoinTask;
-    private static DateTime _nextAutoRefreshUtc = DateTime.MinValue;
-    private static IReadOnlyList<VoiceLobbyListing> _lastBclLiveListings = Array.Empty<VoiceLobbyListing>();
-    private static DateTime _nextBclLiveAgeTickUtc = DateTime.MinValue;
+    private static IReadOnlyList<VoiceLobbyListing> _lastLiveListings = Array.Empty<VoiceLobbyListing>();
+    private static DateTime _nextLiveAgeTickUtc = DateTime.MinValue;
     private static Sprite? _panelSprite;
     private static Sprite? _rowSprite;
     private static Sprite? _voiceButtonSprite;
@@ -124,7 +118,6 @@ internal static class VoiceLobbyBrowserUi
         _rowsRoot = null;
         _statusText = null;
         _editorText = null;
-        _sourceButtonText = null;
         _buttonTemplate = null;
         _panelVisible = false;
         _panelClosing = false;
@@ -133,9 +126,8 @@ internal static class VoiceLobbyBrowserUi
         _buttonInputCached = false;
         _buttonVisualsPrepared = false;
         _editorOpen = false;
-        _refreshTask = null;
-        _bclJoinTask = null;
-        BetterCrewLinkLobbyBrowserClient.Disconnect();
+        _lastLiveListings = Array.Empty<VoiceLobbyListing>();
+        VoiceLobbyLiveBrowserClient.Disconnect();
     }
 
     internal static void OpenInfoEditor()
@@ -152,48 +144,24 @@ internal static class VoiceLobbyBrowserUi
     internal static void Update()
     {
         PrewarmPanelIfReady();
-        UpdateSourceButtonLabel();
-        CompleteBclJoinIfReady();
 
-        if (_refreshTask is { IsCompleted: true })
+        if (_panelVisible && !_editorOpen)
         {
-            var task = _refreshTask;
-            var source = _refreshTaskSource;
-            _refreshTask = null;
-            _nextAutoRefreshUtc = DateTime.UtcNow.AddSeconds(5);
-            if (source == CurrentSource())
+            EnsureLiveDirectory();
+            if (VoiceLobbyLiveBrowserClient.TryConsumeSnapshot(out var listings, out var status))
             {
-                if (task.IsFaulted)
-                    SetStatus("Failed to load lobbies: " + (task.Exception?.GetBaseException().Message ?? "unknown"));
-                else
-                    RenderListings(VisibleListings(task.Result));
-            }
-        }
-
-        if (_panelVisible && !_editorOpen && CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink)
-        {
-            EnsureBclLive();
-            if (BetterCrewLinkLobbyBrowserClient.TryConsumeSnapshot(out var listings, out var status))
-            {
-                _lastBclLiveListings = listings;
-                _nextBclLiveAgeTickUtc = DateTime.UtcNow.AddSeconds(1);
+                _lastLiveListings = listings;
+                _nextLiveAgeTickUtc = DateTime.UtcNow.AddSeconds(1);
                 RenderListings(VisibleListings(listings));
                 if (listings.Count == 0 && _statusText != null)
                     _statusText.text = status;
             }
-            else if (_lastBclLiveListings.Count > 0 && DateTime.UtcNow >= _nextBclLiveAgeTickUtc)
+            else if (_lastLiveListings.Count > 0 && DateTime.UtcNow >= _nextLiveAgeTickUtc)
             {
-                _nextBclLiveAgeTickUtc = DateTime.UtcNow.AddSeconds(1);
-                RenderListings(VisibleListings(_lastBclLiveListings));
+                _nextLiveAgeTickUtc = DateTime.UtcNow.AddSeconds(1);
+                RenderListings(VisibleListings(_lastLiveListings));
             }
         }
-
-        if (_panelVisible
-            && !_editorOpen
-            && CurrentSource() == VoiceLobbyBrowserSource.CloudflareLimited
-            && _refreshTask == null
-            && DateTime.UtcNow >= _nextAutoRefreshUtc)
-            Refresh(false);
 
         if (_editorOpen)
             UpdateEditorInput();
@@ -238,14 +206,8 @@ internal static class VoiceLobbyBrowserUi
     {
         _panelVisible = false;
         _editorOpen = false;
-        // Release the live BCL browser socket when the panel is dismissed; otherwise the Socket.IO
-        // connection and its reconnect loop leak on the main menu until a scene change or source
-        // switch (EnsureBclLive reconnects it when the panel is reopened). Keep the socket alive while
-        // a join is still in flight (JoinLobbyAsync awaits a server ack on it); CompleteBclJoinIfReady
-        // closes the panel again once the join resolves, which disconnects then.
-        if (_bclJoinTask is not { IsCompleted: false })
-            BetterCrewLinkLobbyBrowserClient.Disconnect();
-        _lastBclLiveListings = Array.Empty<VoiceLobbyListing>();
+        VoiceLobbyLiveBrowserClient.Disconnect();
+        _lastLiveListings = Array.Empty<VoiceLobbyListing>();
         _panelClosing = _panelRoot != null && _panelAnimation > 0f;
         if (_panelRoot == null) return;
 
@@ -375,8 +337,6 @@ internal static class VoiceLobbyBrowserUi
             new Vector2(CloseButtonSize, CloseButtonSize), "X", ClosePanel, transparentBackground: true);
         CreateTextButton("Refresh", _panelRoot.transform, new Vector3(-2.05f, -1.35f, -0.2f),
             new Vector2(1.08f, 0.44f), "Refresh", () => Refresh());
-        CreateTextButton("Source", _panelRoot.transform, new Vector3(-2.55f, 1.28f, -0.2f),
-            new Vector2(1.28f, 0.24f), SourceButtonLabel(), ToggleSource);
         CreateTextButton("Info", _panelRoot.transform, new Vector3(2.05f, -1.35f, -0.2f),
             new Vector2(1.14f, 0.44f), "Info", OpenInfoEditor);
         ApplyPanelTransform();
@@ -388,113 +348,17 @@ internal static class VoiceLobbyBrowserUi
         if (showLoading)
         {
             ClearRows();
-            SetStatus(CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-                ? "Connecting to BCL live lobbies..."
-                : "Loading Cloudflare (Limited) lobbies...");
+            SetStatus("Connecting to Perfect Comms live lobbies...");
         }
-        if (CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink)
-        {
-            _refreshTask = null;
-            EnsureBclLive();
-            BetterCrewLinkLobbyBrowserClient.RequestSnapshot();
-            return;
-        }
-
-        BetterCrewLinkLobbyBrowserClient.Disconnect();
-        var settings = VoiceSettings.Instance;
-        var url = settings?.LobbyRegistryUrl.Value ?? "";
-        _refreshTaskSource = VoiceLobbyBrowserSource.CloudflareLimited;
-        _refreshTask = VoiceLobbyRegistryClient.ListAsync(url);
-        _nextAutoRefreshUtc = DateTime.UtcNow.AddSeconds(5);
+        EnsureLiveDirectory();
+        VoiceLobbyLiveBrowserClient.RequestSnapshot();
     }
 
-    private static VoiceLobbyBrowserSource CurrentSource()
+    private static void EnsureLiveDirectory()
     {
-        var source = VoiceSettings.Instance?.LobbyBrowserSource.Value
-                     ?? VoiceLobbyBrowserSource.BetterCrewLink;
-        return Enum.IsDefined(typeof(VoiceLobbyBrowserSource), source)
-            ? source
-            : VoiceLobbyBrowserSource.BetterCrewLink;
-    }
-
-    private static string SourceButtonLabel()
-        => CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-            ? "BCL Live"
-            : "Cloudflare (Limited)";
-
-    private static void ToggleSource()
-    {
-        var settings = VoiceSettings.Instance;
-        if (settings == null) return;
-        settings.LobbyBrowserSource.Value = CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-            ? VoiceLobbyBrowserSource.CloudflareLimited
-            : VoiceLobbyBrowserSource.BetterCrewLink;
-        _refreshTask = null;
-        _refreshTaskSource = settings.LobbyBrowserSource.Value;
-        _lastBclLiveListings = Array.Empty<VoiceLobbyListing>();
-        _nextBclLiveAgeTickUtc = DateTime.MinValue;
-        _bclJoinTask = null;
-        _nextAutoRefreshUtc = DateTime.MinValue;
-        UpdateSourceButtonLabel();
-        Refresh();
-    }
-
-    private static void UpdateSourceButtonLabel()
-    {
-        if (_sourceButtonText != null)
-            _sourceButtonText.text = SourceButtonLabel();
-    }
-
-    private static void EnsureBclLive()
-    {
-        var settings = VoiceSettings.Instance;
-        BetterCrewLinkLobbyBrowserClient.EnsureConnected(settings?.BetterCrewLinkServerUrl.Value ?? "");
-    }
-
-    private static void CompleteBclJoinIfReady()
-    {
-        if (_bclJoinTask is not { IsCompleted: true }) return;
-        var task = _bclJoinTask;
-        _bclJoinTask = null;
-        if (task.IsFaulted)
-        {
-            SetStatus("Join failed: " + (task.Exception?.GetBaseException().Message ?? "unknown"));
-            ReleaseBclSocketIfPanelClosed();
-            return;
-        }
-
-        var result = task.Result;
-        if (!result.Success || string.IsNullOrWhiteSpace(result.Code))
-        {
-            SetStatus("Join failed: " + (string.IsNullOrWhiteSpace(result.Error) ? "Lobby is not joinable" : result.Error));
-            ReleaseBclSocketIfPanelClosed();
-            return;
-        }
-
-        try
-        {
-            int gameId = GameCode.GameNameToInt(result.Code.Trim());
-            AmongUsClient.Instance.StartCoroutine(AmongUsClient.Instance.CoFindGameInfoFromCodeAndJoin(gameId));
-            ClosePanel();
-        }
-        catch (Exception ex)
-        {
-            SetStatus("Join failed: " + ex.Message);
-            ReleaseBclSocketIfPanelClosed();
-        }
-    }
-
-    // If the panel was dismissed while this join was in flight, ClosePanel skipped the BCL socket
-    // Disconnect to keep the ack alive. On a failed/faulted/timed-out join the success path's ClosePanel
-    // never runs, so release the socket here to avoid leaking the Socket.IO client + its reconnect loop
-    // on the menu. When the panel is still open we keep the socket so the user can retry.
-    private static void ReleaseBclSocketIfPanelClosed()
-    {
-        if (!_panelVisible)
-        {
-            BetterCrewLinkLobbyBrowserClient.Disconnect();
-            _lastBclLiveListings = Array.Empty<VoiceLobbyListing>();
-        }
+        var registryUrl = VoiceSettings.Instance?.LobbyRegistryUrl.Value
+                          ?? VoiceLobbyRegistryEndpoint.DefaultRegistryUrl;
+        VoiceLobbyLiveBrowserClient.EnsureConnected(registryUrl);
     }
 
     private static void RenderListings(IReadOnlyList<VoiceLobbyListing> listings)
@@ -506,9 +370,7 @@ internal static class VoiceLobbyBrowserUi
         {
             SetStatus("");
             var empty = CreateText("EmptyState", _rowsRoot.transform, new Vector3(0f, 0.05f, -0.2f),
-                CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-                    ? "No PerfectComms BCL live lobbies listed.\nHost a lobby and enable Public Voice Lobby in game settings."
-                    : "No public voice lobbies listed.\nHost a lobby and enable Public Voice Lobby in game settings.",
+                "No public voice lobbies listed.\nHost a lobby and enable Public Voice Lobby in game settings.",
                 1.20f, TextAlignmentOptions.Center, SortBase + 4);
             empty.enableWordWrapping = true;
             empty.rectTransform.sizeDelta = new Vector2(6.0f, 1.6f);
@@ -516,9 +378,7 @@ internal static class VoiceLobbyBrowserUi
             return;
         }
 
-        SetStatus(CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-            ? $"{listings.Count} PerfectComms BCL live lobby/lobbies found"
-            : $"{listings.Count} Cloudflare (Limited) lobby/lobbies found");
+        SetStatus($"{listings.Count} Perfect Comms live lobby/lobbies found");
         int row = 0;
         foreach (var listing in listings)
         {
@@ -564,9 +424,7 @@ internal static class VoiceLobbyBrowserUi
         parts.Add($"{listing.Players}/{listing.MaxPlayers}");
 
         var region = (listing.Region ?? "").Trim();
-        if (!string.IsNullOrWhiteSpace(region)
-            && (CurrentSource() != VoiceLobbyBrowserSource.BetterCrewLink
-                || !string.Equals(region, "BCL", StringComparison.OrdinalIgnoreCase)))
+        if (!string.IsNullOrWhiteSpace(region))
             parts.Add(region);
 
         if (!string.IsNullOrWhiteSpace(listing.Language))
@@ -603,9 +461,7 @@ internal static class VoiceLobbyBrowserUi
         => string.Equals(listing.State, "Lobby", StringComparison.OrdinalIgnoreCase)
            && listing.Players < listing.MaxPlayers
            && listing.ProtocolVersion == VoiceProtocol.ProtocolVersion
-           && (CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-               ? BetterCrewLinkLobbyMetadata.TryGetLobbyId(listing, out _)
-               : !string.IsNullOrWhiteSpace(listing.Code));
+           && !string.IsNullOrWhiteSpace(listing.Code);
 
     private static string JoinStatus(VoiceLobbyListing listing)
     {
@@ -649,52 +505,93 @@ internal static class VoiceLobbyBrowserUi
         }
 
         var result = new List<VoiceLobbyListing>(byKey.Values);
-        result.Sort((a, b) => b.UpdatedAt.CompareTo(a.UpdatedAt));
+        result.Sort((a, b) =>
+        {
+            var lobbyOrder = Convert.ToInt32(string.Equals(b.State, "Lobby", StringComparison.OrdinalIgnoreCase))
+                             - Convert.ToInt32(string.Equals(a.State, "Lobby", StringComparison.OrdinalIgnoreCase));
+            return lobbyOrder != 0 ? lobbyOrder : b.UpdatedAt.CompareTo(a.UpdatedAt);
+        });
         return result;
     }
 
     private static string ListingIdentity(VoiceLobbyListing listing)
     {
+        var id = (listing.Id ?? "").Trim();
+        if (!string.IsNullOrEmpty(id)) return "id:" + id;
         var code = (listing.Code ?? "").Trim();
-        if (!string.IsNullOrEmpty(code))
-            return "code:" + code;
-
-        if (CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink
-            && BetterCrewLinkLobbyMetadata.TryGetLobbyId(listing, out _))
-            return "bcl:" + (listing.Id ?? "").Trim();
-
-        return "";
+        return string.IsNullOrEmpty(code) ? "" : "code:" + code;
     }
 
-    private static bool IsCurrentRegion(string region)
+    private static bool TrySelectRegion(string regionName, out string error)
     {
+        error = "";
         try
         {
-            var current = DestroyableSingleton<ServerManager>.Instance?.CurrentRegion?.Name;
-            return string.IsNullOrWhiteSpace(current)
-                   || string.Equals(current, region, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
+            var manager = DestroyableSingleton<ServerManager>.Instance;
+            if (manager == null)
+            {
+                error = "Among Us region manager is not available";
+                return false;
+            }
+
+            var wanted = NormalizeRegionName(regionName);
+            IRegionInfo? match = null;
+            foreach (var region in manager.AvailableRegions)
+            {
+                if (region == null) continue;
+                if (string.Equals(region.Name, regionName, StringComparison.OrdinalIgnoreCase)
+                    || NormalizeRegionName(region.Name) == wanted)
+                {
+                    match = region;
+                    break;
+                }
+            }
+
+            if (match == null)
+            {
+                error = $"Required region is not installed: {regionName}. Install/enable that region, then retry.";
+                return false;
+            }
+
+            if (!string.Equals(manager.CurrentRegion?.Name, match.Name, StringComparison.OrdinalIgnoreCase))
+                manager.SetRegion(match);
             return true;
         }
+        catch (Exception ex)
+        {
+            error = "Could not select region " + regionName + ": " + ex.Message;
+            return false;
+        }
+    }
+
+    private static string NormalizeRegionName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        var source = value.AsSpan();
+        Span<char> buffer = stackalloc char[Math.Min(source.Length, 64)];
+        var count = 0;
+        foreach (var character in source)
+        {
+            if (!char.IsLetterOrDigit(character) || count >= buffer.Length) continue;
+            buffer[count++] = char.ToLowerInvariant(character);
+        }
+        return new string(buffer[..count]);
     }
 
     private static void JoinListing(VoiceLobbyListing listing)
     {
         if (!IsJoinable(listing)) return;
-        if (CurrentSource() == VoiceLobbyBrowserSource.BetterCrewLink)
+        if (string.IsNullOrWhiteSpace(listing.Region))
         {
-            if (_bclJoinTask is { IsCompleted: false }) return;
-            if (!BetterCrewLinkLobbyMetadata.TryGetLobbyId(listing, out var lobbyId)) return;
-            var settings = VoiceSettings.Instance;
-            var url = settings?.BetterCrewLinkServerUrl.Value ?? "";
-            SetStatus("Joining BCL live lobby...");
-            _bclJoinTask = BetterCrewLinkLobbyBrowserClient.JoinLobbyAsync(url, lobbyId);
+            SetStatus("Join failed: listing does not include an Among Us region");
+            return;
+        }
+        if (!TrySelectRegion(listing.Region.Trim(), out var regionError))
+        {
+            SetStatus("Join failed: " + regionError);
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(listing.Code)) return;
         try
         {
             int gameId = GameCode.GameNameToInt(listing.Code.Trim());
@@ -851,8 +748,6 @@ internal static class VoiceLobbyBrowserUi
             txt.outlineColor = new Color32(0, 0, 0, 255);
             txt.outlineWidth = 0.36f;
         }
-        if (name == "Source")
-            _sourceButtonText = txt;
         return button;
     }
 

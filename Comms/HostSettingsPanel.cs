@@ -258,7 +258,7 @@ public static class HostSettingsPanel
             },
             1 => new List<OptionHolder>
             {
-                g.PublicVoiceLobby, g.LobbyBrowserBackend
+                g.PublicVoiceLobby
             },
             2 => new List<OptionHolder>
             {

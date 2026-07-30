@@ -62,20 +62,9 @@
 		     explicit so a clean restore always stages the exact files embedded below. -->
 		<PackageReference Include="System.Text.Encodings.Web" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.Text.Json" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="SocketIOClient" Version="4.0.4" GeneratePathProperty="true" />
-		<PackageReference Include="SocketIOClient.Common" Version="4.0.0" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="SocketIOClient.Serializer" Version="4.0.0.1" PrivateAssets="all" GeneratePathProperty="true" />
-		<!-- Socket.IO 4's Microsoft.Extensions 10 runtime closure is not supplied by the
-		     pinned BepInEx 6 runtime. Embed the netstandard2.0 assets so the plugin remains
-		     a self-contained single DLL on every supported launcher. -->
+		<!-- System.Text.Json's netstandard asset requires these runtime assemblies on
+		     the pinned BepInEx host, so keep them embedded with the serializer. -->
 		<PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Options" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="Microsoft.Extensions.Primitives" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 		<PackageReference Include="System.IO.Pipelines" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
 	</ItemGroup>
 
@@ -129,7 +118,6 @@
 		<EmbeddedResource Include="Libs\webrtc-fft.LICENSE" LogicalName="Licenses.WebRTC-fft-BSD-3-Clause.txt" />
 		<EmbeddedResource Include="Libs\webrtc-pffft.LICENSE" LogicalName="Licenses.WebRTC-pffft-BSD-3-Clause.txt" />
 		<EmbeddedResource Include="Libs\webrtc-rnnoise.COPYING" LogicalName="Licenses.WebRTC-rnnoise-BSD-3-Clause.txt" />
-		<EmbeddedResource Include="Libs\socketio-client-csharp.LICENSE" LogicalName="Licenses.SocketIOClient-MIT.txt" />
 		<EmbeddedResource Include="Libs\dotnet-runtime.LICENSE.TXT" LogicalName="Licenses.dotnet-runtime-MIT.txt" />
 		<EmbeddedResource Include="Libs\system-text-encodings-web.THIRD-PARTY-NOTICES.TXT" LogicalName="Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt" />
 		<EmbeddedResource Include="Libs\system-text-json.THIRD-PARTY-NOTICES.TXT" LogicalName="Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt" />
@@ -193,38 +181,8 @@
 		<EmbeddedResource Include="$(PkgSystem_Text_Json)\lib\netstandard2.0\System.Text.Json.dll">
 			<LogicalName>Lib.System.Text.Json.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgSocketIOClient)\lib\netstandard2.0\SocketIOClient.dll">
-			<LogicalName>Lib.SocketIOClient.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgSocketIOClient_Common)\lib\netstandard2.0\SocketIOClient.Common.dll">
-			<LogicalName>Lib.SocketIOClient.Common.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgSocketIOClient_Serializer)\lib\netstandard2.0\SocketIOClient.Serializer.dll">
-			<LogicalName>Lib.SocketIOClient.Serializer.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="$(PkgMicrosoft_Bcl_AsyncInterfaces)\lib\netstandard2.0\Microsoft.Bcl.AsyncInterfaces.dll">
 			<LogicalName>Lib.Microsoft.Bcl.AsyncInterfaces.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_DependencyInjection)\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.dll">
-			<LogicalName>Lib.Microsoft.Extensions.DependencyInjection.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_DependencyInjection_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.DependencyInjection.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Logging)\lib\netstandard2.0\Microsoft.Extensions.Logging.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Logging.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Logging_Abstractions)\lib\netstandard2.0\Microsoft.Extensions.Logging.Abstractions.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Logging.Abstractions.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Options)\lib\netstandard2.0\Microsoft.Extensions.Options.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Options.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgMicrosoft_Extensions_Primitives)\lib\netstandard2.0\Microsoft.Extensions.Primitives.dll">
-			<LogicalName>Lib.Microsoft.Extensions.Primitives.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="$(PkgSystem_Diagnostics_DiagnosticSource)\lib\netstandard2.0\System.Diagnostics.DiagnosticSource.dll">
-			<LogicalName>Lib.System.Diagnostics.DiagnosticSource.dll</LogicalName>
 		</EmbeddedResource>
 		<EmbeddedResource Include="$(PkgSystem_IO_Pipelines)\lib\netstandard2.0\System.IO.Pipelines.dll">
 			<LogicalName>Lib.System.IO.Pipelines.dll</LogicalName>

@@ -9,7 +9,6 @@ public class VoiceChatGameOptions
     private const string Section = "Host.VoiceChat";
 
     public ToggleHolder PublicVoiceLobby { get; }
-    public EnumHolder LobbyBrowserBackend { get; }
     public NumberHolder MaxChatDistance { get; }
     public EnumHolder FalloffMode { get; }
     public EnumHolder OcclusionMode { get; }
@@ -34,11 +33,7 @@ public class VoiceChatGameOptions
     private VoiceChatGameOptions(ConfigFile cfg)
     {
         PublicVoiceLobby = new ToggleHolder(cfg, Section, "PublicVoiceLobby", "Public Voice Lobby", false,
-            "Publishes this voice-enabled lobby to the selected public lobby directory so other Perfect Comms players can find it.");
-        LobbyBrowserBackend = new EnumHolder(cfg, Section, "LobbyBrowserBackend", "Public Lobby Directory",
-            (int)VoiceLobbyBrowserSource.BetterCrewLink, typeof(VoiceLobbyBrowserSource),
-            new[] { "BetterCrewLink Live", "Perfect Comms Registry" },
-            "Chooses which public directory receives this lobby's listing when Public Voice Lobby is enabled.");
+            "Publishes this voice-enabled lobby to the Perfect Comms live directory so other Perfect Comms players can find it.");
         MaxChatDistance = new NumberHolder(cfg, Section, "MaxChatDistance", "Max Distance", 6f, 1.5f, 20f, 0.5f, "0.0",
             "Sets the maximum task-phase distance at which nearby players can hear one another.");
         FalloffMode = new EnumHolder(cfg, Section, "FalloffMode", "Voice Falloff",
