@@ -8,6 +8,7 @@ use crate::loudness::{LookaheadLimiter, PeerLoudnessNormalizer};
 pub const GAIN_GLIDE_K: f32 = 0.002;
 pub const PLAYBACK_SOFT_LIMIT_START: f32 = 0.92;
 const PAN_FAR_SIDE: f32 = 0.25;
+const MUFFLE_CUTOFF_HZ: f32 = 1_600.0;
 
 const RADIO_DRIVE: f32 = 2.0;
 const RADIO_LEVEL: f32 = 0.75;
@@ -29,7 +30,6 @@ pub enum FilterMode {
     Ghost,
     Radio,
     WallMuffle,
-    ListenerMuffle,
 }
 
 impl FilterMode {
@@ -38,7 +38,6 @@ impl FilterMode {
             1 => FilterMode::Ghost,
             2 => FilterMode::Radio,
             3 => FilterMode::WallMuffle,
-            4 => FilterMode::ListenerMuffle,
             _ => FilterMode::None,
         }
     }
@@ -48,8 +47,11 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
     let far_gain =
         PAN_FAR_SIDE + (1.0 - PAN_FAR_SIDE) * (pan.abs() * (std::f32::consts::PI / 2.0)).cos();
-    let left = if pan > 0.0 { far_gain } else { 1.0 };
-    let right = if pan < 0.0 { far_gain } else { 1.0 };
+    let mut left = if pan > 0.0 { far_gain } else { 1.0 };
+    let mut right = if pan < 0.0 { far_gain } else { 1.0 };
+    let norm = (left * left + right * right).sqrt();
+    left /= norm;
+    right /= norm;
     (left, right)
 }
 
@@ -150,9 +152,57 @@ fn apply_filter(
             let h = hp650.process(z1, z2, s);
             (h * RADIO_DRIVE).tanh() * RADIO_LEVEL
         }
-        FilterMode::WallMuffle | FilterMode::ListenerMuffle => lp650.process(z1, z2, s),
+        FilterMode::WallMuffle => lp650.process(z1, z2, s),
         FilterMode::Ghost => s,
         FilterMode::None => s,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct MufflePath {
+    current_z1: f32,
+    current_z2: f32,
+    previous_z1: f32,
+    previous_z2: f32,
+}
+
+impl MufflePath {
+    fn begin_transition(&mut self) {
+        self.previous_z1 = self.current_z1;
+        self.previous_z2 = self.current_z2;
+        self.current_z1 = 0.0;
+        self.current_z2 = 0.0;
+    }
+
+    fn process(
+        &mut self,
+        input: f32,
+        muffled: bool,
+        previous_muffled: bool,
+        transition_remaining: usize,
+        lp1600: &Biquad,
+    ) -> f32 {
+        let current = if muffled {
+            lp1600.process(&mut self.current_z1, &mut self.current_z2, input)
+        } else {
+            input
+        };
+        if transition_remaining == 0 {
+            return current;
+        }
+
+        let previous = if previous_muffled {
+            lp1600.process(&mut self.previous_z1, &mut self.previous_z2, input)
+        } else {
+            input
+        };
+        let completed = FILTER_TRANSITION_SAMPLES - transition_remaining;
+        let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
+            1.0
+        } else {
+            completed as f32 / (FILTER_TRANSITION_SAMPLES - 1) as f32
+        };
+        previous * (1.0 - progress) + current * progress
     }
 }
 
@@ -170,7 +220,7 @@ fn add_routed_sample(
             ghost_send[2 * frame] += left;
             ghost_send[2 * frame + 1] += right;
         }
-        FilterMode::WallMuffle | FilterMode::ListenerMuffle => {
+        FilterMode::WallMuffle => {
             wall_send[2 * frame] += left;
             wall_send[2 * frame + 1] += right;
         }
@@ -298,6 +348,11 @@ struct Glide {
     previous_bz1: f32,
     previous_bz2: f32,
     transition_remaining: usize,
+    muffled: bool,
+    previous_muffled: bool,
+    muffle_path: MufflePath,
+    previous_primary_muffle_path: MufflePath,
+    muffle_transition_remaining: usize,
     seen_round: bool,
 }
 
@@ -372,6 +427,7 @@ pub struct Mixer {
     lp650: Biquad,
     hp650: Biquad,
     lp1900: Biquad,
+    lp1600: Biquad,
     ghost_reverb: Reverb,
     wall_reverb: Reverb,
     ghost_send: Vec<f32>,
@@ -400,6 +456,7 @@ impl Mixer {
             lp650: Biquad::lowpass(650.0, 0.7),
             hp650: Biquad::highpass(650.0, 0.9),
             lp1900: Biquad::lowpass(1900.0, 0.7),
+            lp1600: Biquad::lowpass(MUFFLE_CUTOFF_HZ, 0.7),
             ghost_reverb: Reverb::new(&GHOST_COMBS, &GHOST_ALLPASS, 0.82, 25),
             wall_reverb: Reverb::new(&WALL_COMBS, &WALL_ALLPASS, 0.6, 11),
             ghost_send: Vec::new(),
@@ -490,18 +547,22 @@ impl Mixer {
             }
         }
         let mut control_snapshot = MixControlSnapshot::default();
-        let (lp650, hp650) = (self.lp650, self.hp650);
+        let (lp650, hp650, lp1600) = (self.lp650, self.hp650, self.lp1600);
         let mut any_ghost = false;
         let mut any_wall = false;
         let mut had_input = false;
         for (peer_id, mono, measurement_eligible) in per_peer {
             had_input = true;
-            let (target, mode) = match snap.peers.get(peer_id) {
+            let (target, mode, muffled) = match snap.peers.get(peer_id) {
                 Some(p) => {
                     let (lg, rg) = pan_gains(p.pan);
-                    ((lg * p.gain, rg * p.gain), FilterMode::from_i32(p.mode))
+                    (
+                        (lg * p.gain, rg * p.gain),
+                        FilterMode::from_i32(p.mode),
+                        p.muffled,
+                    )
                 }
-                None => ((0.0, 0.0), FilterMode::None),
+                None => ((0.0, 0.0), FilterMode::None, false),
             };
             if !self.glide.contains_key(peer_id) {
                 self.glide.insert(
@@ -516,6 +577,11 @@ impl Mixer {
                         previous_bz1: 0.0,
                         previous_bz2: 0.0,
                         transition_remaining: 0,
+                        muffled,
+                        previous_muffled: muffled,
+                        muffle_path: MufflePath::default(),
+                        previous_primary_muffle_path: MufflePath::default(),
+                        muffle_transition_remaining: 0,
                         seen_round: true,
                     },
                 );
@@ -536,24 +602,39 @@ impl Mixer {
                 g.previous_mode = g.mode;
                 g.previous_bz1 = g.bz1;
                 g.previous_bz2 = g.bz2;
+                g.previous_primary_muffle_path = g.muffle_path;
                 g.transition_remaining = FILTER_TRANSITION_SAMPLES;
                 g.mode = mode;
                 g.bz1 = 0.0;
                 g.bz2 = 0.0;
             }
+            if g.muffled != muffled {
+                g.previous_muffled = g.muffled;
+                g.muffle_path.begin_transition();
+                g.previous_primary_muffle_path.begin_transition();
+                g.muffle_transition_remaining = FILTER_TRANSITION_SAMPLES;
+                g.muffled = muffled;
+            }
             let transition_mode = (g.transition_remaining > 0).then_some(g.previous_mode);
             for active_mode in [Some(mode), transition_mode].into_iter().flatten() {
                 match active_mode {
                     FilterMode::Ghost => any_ghost = true,
-                    FilterMode::WallMuffle | FilterMode::ListenerMuffle => any_wall = true,
+                    FilterMode::WallMuffle => any_wall = true,
                     _ => {}
                 }
             }
             let n = frames.min(mono.len());
             for (f, &sample) in mono.iter().take(n).enumerate() {
                 let normalized = sample * level_ramp.at(f, n);
-                let current =
+                let current_primary =
                     apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, normalized);
+                let current = g.muffle_path.process(
+                    current_primary,
+                    g.muffled,
+                    g.previous_muffled,
+                    g.muffle_transition_remaining,
+                    &lp1600,
+                );
                 g.left += GAIN_GLIDE_K * (target.0 - g.left);
                 g.right += GAIN_GLIDE_K * (target.1 - g.right);
                 if g.transition_remaining == 0 {
@@ -566,16 +647,24 @@ impl Mixer {
                         &mut self.ghost_send,
                         &mut self.wall_send,
                     );
+                    g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
                     continue;
                 }
 
-                let previous = apply_filter(
+                let previous_primary = apply_filter(
                     g.previous_mode,
                     &lp650,
                     &hp650,
                     &mut g.previous_bz1,
                     &mut g.previous_bz2,
                     normalized,
+                );
+                let previous = g.previous_primary_muffle_path.process(
+                    previous_primary,
+                    g.muffled,
+                    g.previous_muffled,
+                    g.muffle_transition_remaining,
+                    &lp1600,
                 );
                 let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
                 let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
@@ -602,6 +691,7 @@ impl Mixer {
                     &mut self.wall_send,
                 );
                 g.transition_remaining -= 1;
+                g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
             }
         }
 
@@ -1785,6 +1875,7 @@ mod tests {
                         gain: 1.0,
                         pan: 0.0,
                         mode: 1,
+                        muffled: false,
                     },
                 ),
                 (
@@ -1793,6 +1884,7 @@ mod tests {
                         gain: 1.0,
                         pan: 0.0,
                         mode: 3,
+                        muffled: false,
                     },
                 ),
             ],
@@ -1852,6 +1944,7 @@ mod tests {
                     gain: 1.0,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -1869,6 +1962,7 @@ mod tests {
                 gain: 1.0,
                 pan: 0.0,
                 mode: 3,
+                muffled: false,
             },
         );
         let mut after = vec![0.0f32; FRAME_SIZE * 2];
@@ -1882,6 +1976,49 @@ mod tests {
             "mode switch introduced an abrupt right-channel boundary"
         );
     }
+
+    #[test]
+    fn muffle_modifier_preserves_primary_routes_without_wall_send() {
+        let gs = gs_with(
+            LocalState { deafened: false },
+            1.0,
+            vec![
+                (
+                    "radio",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 2,
+                        muffled: true,
+                    },
+                ),
+                (
+                    "ghost",
+                    PeerState {
+                        gain: 1.0,
+                        pan: 0.0,
+                        mode: 1,
+                        muffled: true,
+                    },
+                ),
+            ],
+        );
+        let mut mixer = Mixer::new();
+        let mono = vec![0.2f32; FRAME_SIZE];
+        let per_peer = vec![
+            ("radio".to_string(), mono.as_slice()),
+            ("ghost".to_string(), mono.as_slice()),
+        ];
+        let mut out = vec![0.0f32; FRAME_SIZE * 2];
+        mixer.mix(&per_peer, &gs, &mut out);
+
+        assert_eq!(mixer.glide["radio"].mode, FilterMode::Radio);
+        assert_eq!(mixer.glide["ghost"].mode, FilterMode::Ghost);
+        assert!(mixer.glide["radio"].muffled);
+        assert!(mixer.glide["ghost"].muffled);
+        assert_eq!(mixer.wall_tail, 0);
+        assert!(mixer.ghost_tail > 0);
+    }
     #[test]
     fn deafen_transition_discards_reverb_tails_and_filter_history() {
         let gs = gs_with(
@@ -1894,6 +2031,7 @@ mod tests {
                         gain: 1.0,
                         pan: 0.0,
                         mode: 1,
+                        muffled: false,
                     },
                 ),
                 (
@@ -1902,6 +2040,7 @@ mod tests {
                         gain: 1.0,
                         pan: 0.0,
                         mode: 3,
+                        muffled: false,
                     },
                 ),
             ],
@@ -1965,16 +2104,18 @@ mod tests {
     }
 
     #[test]
-    fn pan_gains_match_csharp() {
+    fn pan_gains_preserve_far_floor_ratio_at_constant_power() {
         let (l, r) = pan_gains(0.0);
-        approx(l, 1.0);
-        approx(r, 1.0);
+        approx(l * l + r * r, 1.0);
+        approx(l, r);
+
         let (l, r) = pan_gains(1.0);
-        approx(l, 0.25);
-        approx(r, 1.0);
+        approx(l * l + r * r, 1.0);
+        approx(l / r, PAN_FAR_SIDE);
+
         let (l, r) = pan_gains(-1.0);
-        approx(l, 1.0);
-        approx(r, 0.25);
+        approx(l * l + r * r, 1.0);
+        approx(r / l, PAN_FAR_SIDE);
     }
 
     fn gs_with(local: LocalState, master: f32, peers: Vec<(&str, PeerState)>) -> GameState {
@@ -1998,6 +2139,7 @@ mod tests {
                     gain: 0.5,
                     pan: 1.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2007,8 +2149,9 @@ mod tests {
         let mut out = vec![0.0f32; 1920];
         mixer.mix(&per_peer, &gs, &mut out);
         let audible = crate::loudness::LIMITER_LOOKAHEAD_FRAMES * 2;
-        approx(out[audible], 0.1 * PAN_FAR_SIDE * 0.5);
-        approx(out[audible + 1], 0.1 * 0.5);
+        let (left_pan, right_pan) = pan_gains(1.0);
+        approx(out[audible], 0.1 * left_pan * 0.5);
+        approx(out[audible + 1], 0.1 * right_pan * 0.5);
     }
 
     #[test]
@@ -2022,6 +2165,7 @@ mod tests {
                     gain: 1.0,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2044,6 +2188,7 @@ mod tests {
                     gain: 0.5,
                     pan: 1.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2053,8 +2198,9 @@ mod tests {
         let mut out = vec![0.0f32; 1920];
         mixer.mix(&per_peer, &gs, &mut out);
         let audible = crate::loudness::LIMITER_LOOKAHEAD_FRAMES * 2;
-        approx(out[audible], 0.1 * PAN_FAR_SIDE * 0.5 * 0.5);
-        approx(out[audible + 1], 0.1 * 0.5 * 0.5);
+        let (left_pan, right_pan) = pan_gains(1.0);
+        approx(out[audible], 0.1 * left_pan * 0.5 * 0.5);
+        approx(out[audible + 1], 0.1 * right_pan * 0.5 * 0.5);
     }
 
     fn mix_first_sample(master: f32, peer_gain: f32, sample: f32) -> f32 {
@@ -2067,6 +2213,7 @@ mod tests {
                     gain: peer_gain,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2088,6 +2235,7 @@ mod tests {
                     gain: peer_gain,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2122,6 +2270,7 @@ mod tests {
                     gain: 1.0,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );
@@ -2247,6 +2396,7 @@ mod tests {
                     gain: 1.0,
                     pan: 0.0,
                     mode: 0,
+                    muffled: false,
                 },
             )],
         );

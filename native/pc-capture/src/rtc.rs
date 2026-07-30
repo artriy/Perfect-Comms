@@ -512,6 +512,14 @@ impl SharedEncoderPolicy {
     }
 
     fn evaluate(&self, now: Instant) {
+        self.evaluate_policy(now, true);
+    }
+
+    fn evaluate_immediate(&self, now: Instant) {
+        self.evaluate_policy(now, false);
+    }
+
+    fn evaluate_policy(&self, now: Instant, recovery_window: bool) {
         let mut state = self.state.lock();
         let capacity = state.peers.len().saturating_mul(2);
         let mut feedback = Vec::with_capacity(capacity);
@@ -553,9 +561,15 @@ impl SharedEncoderPolicy {
                 }
             }
         }
-        let snapshot = state
-            .controller
-            .observe_with_bandwidth(&feedback, &bandwidth_estimates);
+        let snapshot = if recovery_window {
+            state
+                .controller
+                .observe_with_bandwidth(&feedback, &bandwidth_estimates)
+        } else {
+            state
+                .controller
+                .observe_immediate_with_bandwidth(&feedback, &bandwidth_estimates)
+        };
         self.packet_loss_percent
             .store(u32::from(snapshot.packet_loss_percent), Ordering::Release);
         self.bitrate

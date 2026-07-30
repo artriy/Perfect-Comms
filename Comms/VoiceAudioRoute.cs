@@ -6,5 +6,4 @@ internal enum VoiceAudioFilterMode
     Ghost,
     Radio,
     WallMuffle,
-    ListenerMuffle,
 }

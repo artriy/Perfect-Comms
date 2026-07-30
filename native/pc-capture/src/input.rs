@@ -216,20 +216,30 @@ impl SyntheticTone {
 
 pub struct LevelCadence {
     next_emit: Instant,
-    peak: f32,
+    output_peak: f32,
+    detector_peak: f32,
 }
 
 impl LevelCadence {
     pub fn new(now: Instant) -> Self {
         Self {
             next_emit: now + TELEMETRY_INTERVAL,
-            peak: 0.0,
+            output_peak: 0.0,
+            detector_peak: 0.0,
         }
     }
 
-    pub fn observe(&mut self, now: Instant, peak: f32) -> Option<f32> {
-        if peak.is_finite() {
-            self.peak = self.peak.max(peak.clamp(0.0, 1.0));
+    pub fn observe(
+        &mut self,
+        now: Instant,
+        output_peak: f32,
+        detector_peak: f32,
+    ) -> Option<(f32, f32)> {
+        if output_peak.is_finite() {
+            self.output_peak = self.output_peak.max(output_peak.clamp(0.0, 1.0));
+        }
+        if detector_peak.is_finite() {
+            self.detector_peak = self.detector_peak.max(detector_peak.clamp(0.0, 1.0));
         }
         if now < self.next_emit {
             return None;
@@ -237,8 +247,9 @@ impl LevelCadence {
         while self.next_emit <= now {
             self.next_emit += TELEMETRY_INTERVAL;
         }
-        let result = self.peak;
-        self.peak = 0.0;
+        let result = (self.output_peak, self.detector_peak);
+        self.output_peak = 0.0;
+        self.detector_peak = 0.0;
         Some(result)
     }
 }
@@ -362,6 +373,10 @@ mod tests {
                 noise_gate_threshold: DEFAULT_NOISE_GATE_THRESHOLD,
             }
         );
+        assert_eq!(
+            InputConfig::sanitized_with_gate(1.0, DEFAULT_VAD_THRESHOLD, 0.0).noise_gate_threshold,
+            0.0
+        );
     }
 
     #[test]
@@ -441,24 +456,25 @@ mod tests {
     }
 
     #[test]
-    fn local_level_cadence_is_one_hundred_ms_and_keeps_window_peak() {
+    fn local_level_cadence_keeps_independent_output_and_detector_peaks() {
         let start = Instant::now();
         let mut cadence = LevelCadence::new(start);
         for frame in 0..4 {
             assert_eq!(
                 cadence.observe(
                     start + Duration::from_millis(frame * 20),
-                    0.1 + frame as f32
+                    0.1 + frame as f32,
+                    0.125 + frame as f32 * 0.125,
                 ),
                 None
             );
         }
         assert_eq!(
-            cadence.observe(start + Duration::from_millis(100), 0.5),
-            Some(1.0)
+            cadence.observe(start + Duration::from_millis(100), 0.5, 0.2),
+            Some((1.0, 0.5))
         );
         assert_eq!(
-            cadence.observe(start + Duration::from_millis(120), 0.2),
+            cadence.observe(start + Duration::from_millis(120), 0.2, 0.1),
             None
         );
     }

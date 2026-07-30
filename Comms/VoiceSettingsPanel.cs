@@ -525,8 +525,10 @@ public static class VoiceSettingsPanel
         Slider(defs, "Mic Volume", s.MicVolume, Pct);
         Slider(defs, "Mic Sensitivity", s.MicSensitivity, Num2);
         Slider(defs, "Speaker Volume", s.MasterVolume, Pct);
+        EnumStep(defs, "Meeting Spatial Audio", s.MeetingSpatial, new[] { "Off", "Low", "Full" });
         Section(defs, "PROCESSING");
         EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
+        Toggle(defs, "Noise Gate", s.NoiseGateEnabled);
 #if WINDOWS
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
         Toggle(defs, "Stronger Noise Suppression", s.StrongerNoiseSuppressionEnabled);

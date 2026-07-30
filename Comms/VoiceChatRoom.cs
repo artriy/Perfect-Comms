@@ -305,7 +305,7 @@ public class VoiceChatRoom
         var settings = VoiceSettings.Instance;
         _voiceBackend?.SetMicVolume(settings?.MicVolume.Value ?? 1f);
         _voiceBackend?.SetNoiseGate(
-            ApplyMicSensitivity(settings?.NoiseGateThreshold.Value ?? 0.003f, settings?.MicSensitivity.Value ?? 1f),
+            EffectiveNoiseGateThreshold(settings),
             ApplyMicSensitivity(settings?.VadThreshold.Value ?? 0.004f, settings?.MicSensitivity.Value ?? 1f));
         _voiceBackend?.SetCaptureRuntimeOptions(BuildCaptureRuntimeOptions(settings));
     }
@@ -315,6 +315,13 @@ public class VoiceChatRoom
         sensitivity = Math.Clamp(sensitivity, 0.25f, 2f);
         return threshold / sensitivity;
     }
+
+    private static float EffectiveNoiseGateThreshold(VoiceChatLocalSettings? settings)
+        => (settings?.NoiseGateEnabled.Value ?? false)
+            ? ApplyMicSensitivity(
+                settings?.NoiseGateThreshold.Value ?? 0.003f,
+                settings?.MicSensitivity.Value ?? 1f)
+            : 0f;
 
     private static VoiceCaptureRuntimeOptions BuildCaptureRuntimeOptions(VoiceChatLocalSettings? settings)
     {
@@ -1210,7 +1217,7 @@ public class VoiceChatRoom
         backend.SetMicrophonePolicy(Mute, _keepCaptureWarm);
         backend.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(settings?.MasterVolume.Value ?? 1f));
         backend.SetNoiseGate(
-            ApplyMicSensitivity(settings?.NoiseGateThreshold.Value ?? 0.003f, settings?.MicSensitivity.Value ?? 1f),
+            EffectiveNoiseGateThreshold(settings),
             ApplyMicSensitivity(settings?.VadThreshold.Value ?? 0.004f, settings?.MicSensitivity.Value ?? 1f));
         backend.SetCaptureRuntimeOptions(BuildCaptureRuntimeOptions(settings));
 #if ANDROID

@@ -871,7 +871,7 @@ fn dispatch_control(args: &PollThreadArgs, event: PionControlEvent) {
                         estimate,
                         now,
                     );
-                    args.encoder_policy.evaluate(now);
+                    args.encoder_policy.evaluate_immediate(now);
                 }
             }
         }

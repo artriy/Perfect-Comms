@@ -40,8 +40,8 @@ public sealed class SidecarGameStateSafetyTests
             master: float.NaN,
             peers: new[]
             {
-                new SidecarProtocol.GameStatePeerInput("invalid", float.NaN, float.PositiveInfinity, 0),
-                new SidecarProtocol.GameStatePeerInput("boosted", 4f, 2f, 0),
+                new SidecarProtocol.GameStatePeerInput("invalid", float.NaN, float.PositiveInfinity, 0, false),
+                new SidecarProtocol.GameStatePeerInput("boosted", 4f, 2f, 0, true),
             });
 
         Assert.True(SidecarProtocol.TryParseFrame(
@@ -55,5 +55,18 @@ public sealed class SidecarGameStateSafetyTests
         Assert.Equal(0f, peers[0].GetProperty("pan").GetSingle());
         Assert.Equal(4f, peers[1].GetProperty("gain").GetSingle());
         Assert.Equal(1f, peers[1].GetProperty("pan").GetSingle());
+        Assert.False(peers[0].GetProperty("muffled").GetBoolean());
+        Assert.True(peers[1].GetProperty("muffled").GetBoolean());
+    }
+
+    [Fact]
+    public void GameStateFingerprintIncludesMuffleModifier()
+    {
+        var clear = new[] { new SidecarProtocol.GameStatePeerInput("peer", 1f, 0f, 2, false) };
+        var muffled = new[] { new SidecarProtocol.GameStatePeerInput("peer", 1f, 0f, 2, true) };
+
+        Assert.NotEqual(
+            SidecarProtocol.GameStateFingerprint(false, 1f, clear),
+            SidecarProtocol.GameStateFingerprint(false, 1f, muffled));
     }
 }

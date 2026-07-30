@@ -64,6 +64,7 @@ internal static class VoiceAudioOcclusion
             VoiceOcclusionMode.HardBlock => new(occlusion.HasWall, occlusion.HasClosedDoor, 0f, VoiceAudioFilterMode.None),
             VoiceOcclusionMode.VisionOnly => new(occlusion.HasWall, occlusion.HasClosedDoor, 0f, VoiceAudioFilterMode.None),
             VoiceOcclusionMode.SoftMuffle => new(occlusion.HasWall, occlusion.HasClosedDoor, 0.70f, VoiceAudioFilterMode.WallMuffle),
+            VoiceOcclusionMode.SoftFade => new(occlusion.HasWall, occlusion.HasClosedDoor, 0.35f, VoiceAudioFilterMode.None),
             _ => new(occlusion.HasWall, occlusion.HasClosedDoor, 0.35f, VoiceAudioFilterMode.WallMuffle),
         };
     }

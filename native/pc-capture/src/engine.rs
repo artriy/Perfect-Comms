@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MOBILE_DIAGNOSTICS_INTERVAL: Duration = Duration::from_secs(2);
+const RECEIVE_INGRESS_DRAIN_BUDGET: Duration = Duration::from_millis(2);
 
 fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
@@ -57,6 +58,8 @@ struct DecodeState {
     decoders: HashMap<String, OpusCodec>,
     last_seq: HashMap<String, u16>,
     encoded: HashMap<String, EncodedPacketBuffer>,
+    encoded_scan: Vec<String>,
+    encoded_scan_work: Vec<String>,
     generations: HashMap<String, u32>,
     mixer: Mixer,
     jitter: PeerJitter,
@@ -125,6 +128,8 @@ impl Engine {
                 decoders: HashMap::new(),
                 last_seq: HashMap::new(),
                 encoded: HashMap::new(),
+                encoded_scan: Vec::new(),
+                encoded_scan_work: Vec::new(),
                 generations: HashMap::new(),
                 mixer: Mixer::new(),
                 // Network variance is handled while packets are still encoded. This queue only
@@ -204,12 +209,13 @@ impl Engine {
         }
         self.dsp.lock().unwrap().capture(&mut buf[..]);
         let input = *self.input.lock().unwrap();
-        input.apply_gain(&mut buf[..]);
-        let pk = peak(&buf[..]);
+        let detector_peak = peak(&buf[..]);
         self.noise_gate
             .lock()
             .unwrap()
             .process(&mut buf[..], input.noise_gate_threshold);
+        input.apply_gain(&mut buf[..]);
+        let output_peak = peak(&buf[..]);
 
         let policy = self.rtc.encoder_policy_snapshot();
         let mut encoder = self.enc.lock().unwrap();
@@ -219,15 +225,17 @@ impl Engine {
         if !self.mic_active.load(Ordering::Acquire) {
             return f32::from_bits(self.level.load(Ordering::Relaxed));
         }
-        self.level.store(pk.to_bits(), Ordering::Relaxed);
-        if let Some(window_peak) = self
+        self.level.store(output_peak.to_bits(), Ordering::Relaxed);
+        if let Some((window_output_peak, window_detector_peak)) = self
             .local_level_cadence
             .lock()
             .unwrap()
-            .observe(Instant::now(), pk)
+            .observe(Instant::now(), output_peak, detector_peak)
         {
-            self.telemetry
-                .publish_local(window_peak, window_peak >= input.vad_threshold);
+            self.telemetry.publish_local(
+                window_output_peak,
+                window_detector_peak >= input.vad_threshold,
+            );
         }
         self.rtc.record_capture_media_gap(
             skipped_before_current,
@@ -269,12 +277,13 @@ impl Engine {
         let packet_encoder_epoch = self.encoder_epoch.load(Ordering::Acquire);
         self.rtc
             .send_opus_with_media_gap(&pkt, packet_encoder_epoch, skipped_before_current);
-        pk
+        output_peak
     }
 
     pub fn pull_playback(&self, out: &mut [f32]) -> usize {
         let mut state = self.dec.lock().unwrap();
 
+        let drain_started = Instant::now();
         let mut drained = 0;
         while let Some(packet) = self.rtc.recv() {
             let peer = packet.peer_id;
@@ -282,6 +291,7 @@ impl Engine {
                 state.decoders.remove(&peer);
                 state.last_seq.remove(&peer);
                 state.encoded.remove(&peer);
+                state.encoded_scan.retain(|scheduled| scheduled != &peer);
                 state.jitter.remove(&peer);
                 state.peer_levels.remove(&peer);
                 state.mixer.reset_peer(&peer);
@@ -298,20 +308,38 @@ impl Engine {
                     arrival: packet.arrival,
                     payload: packet.payload,
                 });
+            if !state
+                .encoded_scan
+                .iter()
+                .any(|scheduled| scheduled == &peer)
+            {
+                state.encoded_scan.push(peer);
+            }
             drained += 1;
-            if drained >= 256 {
+            if drained >= 256 || drain_started.elapsed() >= RECEIVE_INGRESS_DRAIN_BUDGET {
                 break;
             }
         }
 
         let now = Instant::now();
-        let peers: Vec<String> = state.encoded.keys().cloned().collect();
-        for peer in peers {
-            let Some(packet) = state
+        let mut scan_work = std::mem::take(&mut state.encoded_scan_work);
+        std::mem::swap(&mut scan_work, &mut state.encoded_scan);
+        for peer in scan_work.drain(..) {
+            let packet = state
                 .encoded
                 .get_mut(&peer)
-                .and_then(|buffer| buffer.pop_ready(now))
-            else {
+                .and_then(|buffer| buffer.pop_ready(now));
+            // A final empty pass settles the buffer's primed/underrun state. After that, historical
+            // peers stay out of the 200 Hz scan until new ingress schedules them again.
+            let keep_scanning = packet.is_some()
+                || state
+                    .encoded
+                    .get(&peer)
+                    .is_some_and(|buffer| !buffer.is_idle());
+            let Some(packet) = packet else {
+                if keep_scanning {
+                    state.encoded_scan.push(peer);
+                }
                 continue;
             };
             if packet.reset_decoder {
@@ -340,7 +368,7 @@ impl Engine {
                     codec,
                     last,
                     packet.sequence,
-                    packet.local_media_gap_before,
+                    packet.media_gap_before,
                     &packet.payload,
                 )
             };
@@ -353,9 +381,13 @@ impl Engine {
             }
             state.jitter.push_batch(&peer, frames, recovered_frames);
             if advance {
-                state.last_seq.insert(peer, packet.sequence);
+                state.last_seq.insert(peer.clone(), packet.sequence);
+            }
+            if keep_scanning {
+                state.encoded_scan.push(peer);
             }
         }
+        state.encoded_scan_work = scan_work;
 
         if let Some(levels) = state.peer_levels.take_due(Instant::now()) {
             self.telemetry.publish_peers(levels);
@@ -473,6 +505,7 @@ impl Engine {
                     dec.decoders.remove(&peer_id);
                     dec.last_seq.remove(&peer_id);
                     dec.encoded.remove(&peer_id);
+                    dec.encoded_scan.retain(|scheduled| scheduled != &peer_id);
                     dec.jitter.remove(&peer_id);
                     dec.peer_levels.remove(&peer_id);
                     dec.mixer.reset_peer(&peer_id);
@@ -492,6 +525,7 @@ impl Engine {
                 dec.jitter.remove(&peer_id);
                 dec.last_seq.remove(&peer_id);
                 dec.encoded.remove(&peer_id);
+                dec.encoded_scan.retain(|scheduled| scheduled != &peer_id);
                 dec.generations.remove(&peer_id);
                 dec.peer_levels.remove(&peer_id);
                 dec.mixer.reset_peer(&peer_id);
@@ -587,6 +621,7 @@ impl Engine {
                                 gain: p.gain,
                                 pan: p.pan,
                                 mode: p.mode,
+                                muffled: p.muffled,
                             },
                         )
                     })

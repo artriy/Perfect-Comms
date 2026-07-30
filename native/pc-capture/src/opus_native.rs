@@ -203,11 +203,7 @@ impl OpusEncoder {
             config.complexity as i32,
             "set complexity",
         )?;
-        encoder.set_ctl(
-            sys::OPUS_SET_SIGNAL_REQUEST,
-            sys::OPUS_SIGNAL_VOICE,
-            "set signal",
-        )?;
+        encoder.set_ctl(sys::OPUS_SET_SIGNAL_REQUEST, sys::OPUS_AUTO, "set signal")?;
         encoder.set_ctl(sys::OPUS_SET_VBR_REQUEST, 1, "enable VBR")?;
         encoder.set_ctl(
             sys::OPUS_SET_VBR_CONSTRAINT_REQUEST,
@@ -215,9 +211,9 @@ impl OpusEncoder {
             "enable constrained VBR",
         )?;
         encoder.set_ctl(sys::OPUS_SET_DTX_REQUEST, 0, "disable DTX")?;
-        // Keep classic one-packet FEC as the low-cost fallback for the newest missing frame. DRED
+        // Mode 2 keeps classic one-packet FEC available for the newest missing frame while DRED
         // handles older loss; callers report the two recovery mechanisms separately.
-        encoder.set_ctl(sys::OPUS_SET_INBAND_FEC_REQUEST, 1, "enable in-band FEC")?;
+        encoder.set_ctl(sys::OPUS_SET_INBAND_FEC_REQUEST, 2, "enable in-band FEC")?;
         encoder.set_ctl(
             sys::OPUS_SET_PACKET_LOSS_PERC_REQUEST,
             config.packet_loss_percent as i32,
@@ -666,11 +662,23 @@ mod tests {
     #[test]
     fn bundled_libopus_is_1_6_1_and_dred_is_configured() {
         assert!(libopus_version().contains("1.6.1"), "{}", libopus_version());
-        let encoder = OpusEncoder::new().expect("encoder");
+        let mut encoder = OpusEncoder::new().expect("encoder");
         let decoder = OpusDecoder::new().expect("decoder");
         assert_eq!(encoder.dred_duration_10ms(), DEFAULT_DRED_DURATION_10MS);
         assert_eq!(encoder.dred_capability(), DredCapability::Available);
         assert_eq!(decoder.dred_capability(), DredCapability::Available);
+        assert_eq!(
+            encoder
+                .get_ctl(sys::OPUS_GET_SIGNAL_REQUEST, "get signal")
+                .expect("signal"),
+            sys::OPUS_AUTO
+        );
+        assert_eq!(
+            encoder
+                .get_ctl(sys::OPUS_GET_INBAND_FEC_REQUEST, "get in-band FEC")
+                .expect("in-band FEC"),
+            2
+        );
     }
 
     #[test]

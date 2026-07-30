@@ -237,13 +237,15 @@ internal static class SidecarProtocol
         public readonly float Gain;
         public readonly float Pan;
         public readonly int Mode;
+        public readonly bool Muffled;
 
-        public GameStatePeerInput(string id, float gain, float pan, int mode)
+        public GameStatePeerInput(string id, float gain, float pan, int mode, bool muffled)
         {
             Id = id;
             Gain = gain;
             Pan = pan;
             Mode = mode;
+            Muffled = muffled;
         }
     }
 
@@ -269,6 +271,7 @@ internal static class SidecarProtocol
                 w.WriteNumber("gain", NormalizePeerGain(p.Gain));
                 w.WriteNumber("pan", NormalizePan(p.Pan));
                 w.WriteNumber("mode", p.Mode);
+                w.WriteBoolean("muffled", p.Muffled);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -308,6 +311,7 @@ internal static class SidecarProtocol
             hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizePeerGain(peer.Gain))));
             hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizePan(peer.Pan))));
             hash = Mix(hash, unchecked((uint)peer.Mode));
+            hash = (hash ^ (peer.Muffled ? (byte)1 : (byte)0)) * prime;
         }
         return hash;
     }

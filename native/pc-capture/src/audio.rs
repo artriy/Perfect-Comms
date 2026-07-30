@@ -2085,11 +2085,11 @@ fn cubeb_stream_candidates(_backend_id: &[u8], preferred_rate: u32) -> Vec<Cubeb
     let mut candidates = Vec::with_capacity(8);
     push_candidate_pair(&mut candidates, CubebSampleKind::Float32, SAMPLE_RATE);
     let preferred_rate = normalize_device_rate(preferred_rate);
-    // ALSA and WinMM commonly advertise S16NE at the endpoint's preferred rate, but these
-    // same-device fallbacks are harmless and useful for strict endpoints on every backend.
+    // Prefer native-rate float before falling back to integer samples. This preserves the direct
+    // float path on devices whose preferred rate differs from the engine's 48 kHz mix rate.
+    push_candidate_pair(&mut candidates, CubebSampleKind::Float32, preferred_rate);
     push_candidate_pair(&mut candidates, CubebSampleKind::Signed16, preferred_rate);
     push_candidate_pair(&mut candidates, CubebSampleKind::Signed16, SAMPLE_RATE);
-    push_candidate_pair(&mut candidates, CubebSampleKind::Float32, preferred_rate);
     candidates
 }
 
@@ -2199,10 +2199,18 @@ impl CubebPlaybackSample for i16 {
     }
 }
 
-fn cubeb_latency_frames(context: &cubeb::Context, params: &cubeb::StreamParamsRef) -> u32 {
+fn cubeb_latency_fallback_frames(sample_rate: u32) -> u32 {
+    (sample_rate / 50).clamp(1, CUBEB_MAX_LATENCY_FRAMES)
+}
+
+fn cubeb_latency_frames(
+    context: &cubeb::Context,
+    params: &cubeb::StreamParamsRef,
+    sample_rate: u32,
+) -> u32 {
     context
         .min_latency(params)
-        .unwrap_or(FRAME_SAMPLES as u32)
+        .unwrap_or_else(|_| cubeb_latency_fallback_frames(sample_rate))
         .clamp(1, CUBEB_MAX_LATENCY_FRAMES)
 }
 
@@ -2924,7 +2932,7 @@ fn open_capture_candidate(
         .layout(layout)
         .prefs(prefs)
         .take();
-    let latency_frames = cubeb_latency_frames(context, params.as_ref());
+    let latency_frames = cubeb_latency_frames(context, params.as_ref(), candidate.rate);
     let mut resources = resources;
     resources.requested_latency_frames = latency_frames;
     resources.wasapi_preroll_filter =
@@ -3516,6 +3524,58 @@ struct PlaybackCallbackResources {
     first_callback_frames: Arc<AtomicU64>,
 }
 
+const REMOTE_PHASE_SETTLE_MS: u32 = 15;
+
+#[derive(Default)]
+struct RemotePhaseSlew {
+    step: f64,
+    remaining: u32,
+}
+
+impl RemotePhaseSlew {
+    fn reset(&mut self) {
+        self.step = 0.0;
+        self.remaining = 0;
+    }
+
+    fn advance(&mut self, position: &mut f64, sample_rate: u32, effective_ratio: f64) {
+        if sample_rate != SAMPLE_RATE || effective_ratio != 1.0 {
+            self.reset();
+            *position += effective_ratio;
+            return;
+        }
+
+        if self.remaining == 0 {
+            let phase = position.fract();
+            if phase == 0.0 {
+                *position += 1.0;
+                return;
+            }
+
+            let settle_frames = (sample_rate.saturating_mul(REMOTE_PHASE_SETTLE_MS) / 1_000).max(1);
+            self.step = (phase.round() - phase) / f64::from(settle_frames);
+            self.remaining = settle_frames;
+        }
+
+        *position += 1.0 + self.step;
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            // The accumulated adjustment is mathematically integral. Remove floating-point
+            // residue so steady 48 kHz playback can take the exact-copy path indefinitely.
+            *position = position.round();
+            self.step = 0.0;
+        }
+    }
+}
+
+fn remote_pair_at_position(s0: (f32, f32), s1: (f32, f32), position: f64) -> (f32, f32) {
+    if position == 0.0 {
+        return s0;
+    }
+    let t = position as f32;
+    (s0.0 + (s1.0 - s0.0) * t, s0.1 + (s1.1 - s0.1) * t)
+}
+
 struct PlaybackRealtime {
     resources: PlaybackCallbackResources,
     sample_rate: u32,
@@ -3524,6 +3584,7 @@ struct PlaybackRealtime {
     remote_s0_available: bool,
     remote_s1_available: bool,
     remote_pos: f64,
+    remote_phase_slew: RemotePhaseSlew,
     remote_underrun_fader: UnderrunFader,
     monitor_playout: MonitorPlayout,
     flat_output: Vec<f32>,
@@ -3539,6 +3600,7 @@ impl PlaybackRealtime {
             remote_s0_available: false,
             remote_s1_available: false,
             remote_pos: 1.0,
+            remote_phase_slew: RemotePhaseSlew::default(),
             remote_underrun_fader: UnderrunFader::for_sample_rate(sample_rate),
             monitor_playout: MonitorPlayout::for_sample_rate(sample_rate),
             flat_output: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize * 2],
@@ -3579,6 +3641,7 @@ impl PlaybackRealtime {
             self.remote_s0_available = false;
             self.remote_s1_available = false;
             self.remote_pos = 1.0;
+            self.remote_phase_slew.reset();
             self.remote_underrun_fader.mark_discontinuity();
         }
 
@@ -3613,16 +3676,14 @@ impl PlaybackRealtime {
                 }
                 self.remote_pos -= 1.0;
             }
-            let remote_t = self.remote_pos as f32;
-            let remote_pair = (
-                self.remote_s0.0 + (self.remote_s1.0 - self.remote_s0.0) * remote_t,
-                self.remote_s0.1 + (self.remote_s1.1 - self.remote_s0.1) * remote_t,
-            );
+            let remote_pair =
+                remote_pair_at_position(self.remote_s0, self.remote_s1, self.remote_pos);
             let remote_pair = self.remote_underrun_fader.process(
                 remote_pair,
                 self.remote_s0_available || self.remote_s1_available,
             );
-            self.remote_pos += effective_ratio;
+            self.remote_phase_slew
+                .advance(&mut self.remote_pos, self.sample_rate, effective_ratio);
 
             let monitor_pair = self.monitor_playout.render(
                 &resources.monitor_ring,
@@ -4060,7 +4121,7 @@ fn open_playback_candidate(
         .layout(layout)
         .prefs(prefs)
         .take();
-    let latency_frames = cubeb_latency_frames(context, params.as_ref());
+    let latency_frames = cubeb_latency_frames(context, params.as_ref(), candidate.rate);
     let stream = match (candidate.sample, candidate.channels) {
         (CubebSampleKind::Float32, 2) => open_stereo_playback_stream::<f32>(
             context,
@@ -4810,10 +4871,10 @@ mod tests {
     }
 
     #[test]
-    fn cubeb_candidates_keep_float_48k_first_then_try_native_s16() {
+    fn cubeb_candidates_keep_float_48k_first_then_try_native_float_before_s16() {
         let candidates = cubeb_stream_candidates(b"alsa", 44_100);
         assert_eq!(
-            &candidates[..4],
+            &candidates[..6],
             &[
                 CubebStreamCandidate {
                     sample: CubebSampleKind::Float32,
@@ -4823,6 +4884,16 @@ mod tests {
                 CubebStreamCandidate {
                     sample: CubebSampleKind::Float32,
                     rate: SAMPLE_RATE,
+                    channels: 1,
+                },
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Float32,
+                    rate: 44_100,
+                    channels: 2,
+                },
+                CubebStreamCandidate {
+                    sample: CubebSampleKind::Float32,
+                    rate: 44_100,
                     channels: 1,
                 },
                 CubebStreamCandidate {
@@ -4842,13 +4913,42 @@ mod tests {
             rate: SAMPLE_RATE,
             channels: 2,
         }));
-        assert!(candidates.contains(&CubebStreamCandidate {
-            sample: CubebSampleKind::Float32,
-            rate: 44_100,
-            channels: 1,
-        }));
         assert_eq!(cubeb_stream_candidates(b"winmm", 44_100), candidates);
         assert_eq!(cubeb_stream_candidates(b"wasapi", 44_100), candidates);
+    }
+
+    #[test]
+    fn cubeb_latency_fallback_is_twenty_ms_at_the_candidate_rate() {
+        for rate in [8_000, 44_100, 48_000, 96_000, 192_000, 384_000] {
+            assert_eq!(cubeb_latency_fallback_frames(rate), rate / 50);
+        }
+    }
+
+    #[test]
+    fn remote_phase_correction_settles_to_exact_copy_at_48k() {
+        let settle_frames = SAMPLE_RATE * REMOTE_PHASE_SETTLE_MS / 1_000;
+        for initial_phase in [0.375, 0.625] {
+            let mut position = initial_phase;
+            let mut slew = RemotePhaseSlew::default();
+
+            for frame in 0..settle_frames {
+                while position >= 1.0 {
+                    position -= 1.0;
+                }
+                slew.advance(&mut position, SAMPLE_RATE, 1.0);
+                if frame == 0 {
+                    assert!(slew.step.abs() <= 0.5 / f64::from(settle_frames));
+                }
+            }
+            while position >= 1.0 {
+                position -= 1.0;
+            }
+
+            assert_eq!(position, 0.0);
+            assert_eq!(slew.remaining, 0);
+            let exact = remote_pair_at_position((0.25, -0.5), (f32::NAN, f32::NAN), position);
+            assert_eq!(exact, (0.25, -0.5));
+        }
     }
 
     #[test]

@@ -67,6 +67,13 @@ public enum SpeakingBarSideLayout
 }
 
 
+public enum MeetingSpatialMode
+{
+    Off = 0,
+    Low = 1,
+    Full = 2,
+}
+
 public enum VoiceMicMode
 {
     OpenMic = 0,
@@ -237,6 +244,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<float> MicVolume { get; }
     public ConfigEntry<float> MicSensitivity { get; }
     public ConfigEntry<float> MasterVolume { get; }
+    public ConfigEntry<MeetingSpatialMode> MeetingSpatial { get; }
     public ConfigEntry<float> AliveFocusAliveVolume { get; }
     public ConfigEntry<float> AliveFocusDeadVolume { get; }
     public ConfigEntry<float> DeadFocusAliveVolume { get; }
@@ -247,6 +255,7 @@ public class VoiceChatLocalSettings
         new(DeadFocusAliveVolume.Value, DeadFocusDeadVolume.Value);
     public ConfigEntry<float> VoiceFalloffSoftness { get; }
     public ConfigEntry<VoiceMicMode> MicMode { get; }
+    public ConfigEntry<bool> NoiseGateEnabled { get; }
     public ConfigEntry<bool> NoiseSuppressionEnabled { get; }
     public ConfigEntry<bool> StrongerNoiseSuppressionEnabled { get; }
     public ConfigEntry<bool> EchoCancellationEnabled { get; }
@@ -403,6 +412,10 @@ public class VoiceChatLocalSettings
             new ConfigDescription("Adjusts the overall volume of all Perfect Comms voice audio you hear.",
                 new AcceptableValueRange<float>(0.1f, 2f)));
 
+        MeetingSpatial = config.Bind("Audio", "MeetingSpatial", MeetingSpatialMode.Low,
+            new ConfigDescription(
+                "Spreads natural meeting and end-game voices across the stereo field. Radio remains centered."));
+
         AliveFocusAliveVolume = config.Bind("Audio.HoldMix", "AliveFocusAliveVolume",
             VoiceVolumeMath.DefaultLouderVolume,
             new ConfigDescription(
@@ -435,6 +448,9 @@ public class VoiceChatLocalSettings
 
         MicMode = config.Bind("Audio", "MicMode", VoiceMicMode.OpenMic,
             new ConfigDescription("Chooses whether your mic transmits automatically when you speak or only while Push To Talk is held."));
+
+        NoiseGateEnabled = config.Bind("Audio", "NoiseGateEnabled", false,
+            new ConfigDescription("Optionally gates residual room noise between phrases. Leave this off to preserve the quietest speech, breaths, and word endings."));
 
         NoiseGateThreshold = config.Bind("Audio.Advanced", "NoiseGateThreshold", 0.003f,
             new ConfigDescription("Advanced base gate threshold. Effective value is divided by MicSensitivity.",
@@ -1585,7 +1601,8 @@ public class VoiceChatLocalSettings
             VoiceDiagnostics.SetEnabled(DebugVoiceStats.Value);
             VoiceChatRoom.Current?.RefreshLocalAudioSettings();
         }
-        else if (configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
+        else if (configEntry == NoiseGateEnabled ||
+                 configEntry == NoiseGateThreshold || configEntry == VadThreshold ||
                  configEntry == NoiseSuppressionEnabled || configEntry == StrongerNoiseSuppressionEnabled ||
                  configEntry == EchoCancellationEnabled ||
                  configEntry == SyntheticMicTone ||

@@ -2,59 +2,73 @@
 
 ## Perfect Comms v4.1.7
 
-Perfect Comms v4.1.7 adds a live owned lobby directory, gives mod developers a reference-only NuGet API package, moves TOU-Mira integration into its source mod with no reflection fallback, restores native audio startup under CrossOver on macOS, and switches desktop releases to a safer DLL-only installation.
+Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes the public Voice Lobby browser, expands modded Team Radio support, and improves desktop installation and CrossOver reliability.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
 </p>
 
-### Safer DLL-Only Installation
+### Important: Desktop Installation Change
 
-- **Desktop releases no longer bundle or overwrite BepInEx.**
-  > <sub>Starting with v4.1.7, the desktop download is the self-contained `PerfectComms.dll` plugin. Players using a mod or modpack keep the exact BepInEx installation it provides or requires and place Perfect Comms in the existing `BepInEx/plugins` folder, avoiding clashes with customized loaders, runtimes, patchers, and configuration.</sub>
+- **Desktop releases are now safer, self-contained DLL downloads.**
+  > <sub>Perfect Comms no longer bundles or overwrites BepInEx. Players using a mod or modpack keep the exact BepInEx installation it provides or requires and place `PerfectComms.dll` in the existing `BepInEx/plugins` folder, avoiding clashes with customized loaders, runtimes, patchers, and configuration.</sub>
 
 - **Fresh installations get BepInEx directly from its official build page.**
-  > <sub>Players without an existing mod installation download the matching x86 or x64 BepInEx 6 Unity IL2CPP build directly from the official BepInEx build service, run its first-time setup, and then add `PerfectComms.dll`. Release automation no longer downloads, packages, verifies, or publishes third-party BepInEx files.</sub>
+  > <sub>Players without an existing mod installation download the matching x86 or x64 BepInEx 6 Unity IL2CPP build from the official BepInEx build service, run its first-time setup, and then add `PerfectComms.dll`. Release automation no longer downloads or republishes third-party BepInEx files.</sub>
 
-### Live Public Lobby Directory
+### Clearer, More Natural Conversations
 
-- **The Voice Lobby browser now receives live Perfect Comms listings from the owned Cloudflare service.**
-  > <sub>A hibernating Durable Object sends an initial snapshot and immediate add, update, and removal events over WebSockets, replacing five-second D1 polling and the split BetterCrewLink/Cloudflare source selector. Hosts publish only while connected, hosting, and in a real lobby or match; closing the room or missing the heartbeat removes the listing.</sub>
+- **Busy meetings are easier to follow.**
+  > <sub>Natural meeting and end-game voices receive subtle, stable stereo positions instead of occupying the same point in the center. Meeting Spatial Audio offers Off, Low, and Full modes; Low is the default, Radio remains centered, and voices remain audible in both ears.</sub>
 
-- **Lobby rows now show the host's current lobby or in-game state and update player counts without manual refreshes.**
-  > <sub>Each update carries the room code, installed Among Us region, player capacity, state transition time, mod version, and Perfect Comms protocol version. Ownership tokens protect reconnect replacement but are never broadcast to browsers, and per-socket limits, payload caps, capacity limits, and expiry alarms bound abuse.</sub>
+- **One unusually loud microphone no longer affects every simultaneous speaker.**
+  > <sub>Each participant now receives independent, noise-aware loudness control before user volume, proximity, panning, and effects. Loud laughter, excitement, and shouting are protected from unnecessary double attenuation, while a linked-stereo limiter safely catches rare overlapping peaks without shifting the stereo image.</sub>
 
-- **JOIN now selects the listing's installed Among Us region before searching for its room code.**
-  > <sub>Vanilla, modded, and custom regions are matched by their installed region names. If the required region is missing, the browser stays open and shows an actionable install/enable error instead of searching the player's previous region and failing without explanation.</sub>
+- **Soft voices come through more naturally.**
+  > <sub>Mic Volume now changes only the transmitted level, not whether speech is detected. The optional gentle Noise Gate defaults off to preserve whispers, breaths, and soft word endings, while the existing High and Very High WebRTC noise-suppression choices remain unchanged.</sub>
 
-### Developer API Package
+- **Brief connection problems sound less disruptive.**
+  > <sub>The receiver recovers missing audio in chronological order using the best voice information available before synthetic concealment. It also begins from a fresh bounded tail after a stall, adapts latency more safely between talkspurts, and prevents overloaded receive work from starving the next playback round.</sub>
 
-- **Mod integrations can compile against `PerfectComms.Api` without checking in or redistributing the runtime DLL.**
-  > <sub>The `4.1.7.1` NuGet revision contains only the small `net6.0` reference assembly and XML documentation for the Perfect Comms 4.1.7 runtime. Release and CI gates compile a real package consumer, reject runtime, native, content, or build assets, and reject any build that copies `PerfectComms.dll` to the consumer output. Tagged releases publish through short-lived NuGet.org OIDC credentials while players continue installing Perfect Comms separately.</sub>
+- **Muffled and fading voices sound more intentional.**
+  > <sub>Listener muffle is now independent from Radio, Ghost, Wall, or natural voice processing, so it no longer replaces the selected route or adds wall reverb. Soft Fade reduces volume without unnecessarily changing the speaker's tone.</sub>
 
-### Source-Owned Mod Integrations
+### Fixed Voice Lobby Browser
 
-- **Role mods can now move private Team Radio onto Perfect Comms without recreating its controls or transport.**
-  > <sub>The managed-radio API adds namespaced player/pair memberships to the existing selector, labels, desktop and Android controls, Push To Talk capture gate, and synchronized radio state. Matching living members receive the radio route; living non-members are muted before permissive pair or general-channel callbacks can leak it.</sub>
+- **The public Voice Lobby browser works again.**
+  > <sub>Perfect Comms lobbies now appear and update correctly, so players can find and join hosted rooms from the browser again.</sub>
+
+### Expanded Mod and Team Radio Support
+
+- **Role mods can add private Team Radio without rebuilding Perfect Comms controls or transport.**
+  > <sub>Registered radio groups use the existing selector, labels, desktop and Android controls, Push To Talk capture gate, and synchronized radio state. Matching living members receive the radio route, while non-members remain muted before broader voice rules can expose the channel.</sub>
 
 - **TOU-Mira now owns its Perfect Comms integration end to end.**
-  > <sub>TOU-Mira registers its role rules, private radio memberships, persistent host settings, overlay privacy, animated colors, and listener effects through the public API. Perfect Comms no longer ships a TOU-specific role model, reflection resolver, duplicate settings tab, or compatibility fallback. Jailor buttons, permissions, lifecycle state, and RPCs remain in TOU-Mira, so removing Perfect Comms skips only the optional voice registration.</sub>
+  > <sub>TOU-Mira registers its role rules, private radio memberships, persistent host settings, overlay privacy, animated colors, and listener effects through the public API. Perfect Comms no longer carries a TOU-specific role model, reflection resolver, duplicate settings tab, or compatibility fallback. Jailor buttons, permissions, lifecycle state, and RPCs remain in TOU-Mira, so removing Perfect Comms skips only the optional voice integration.</sub>
 
-- **Registered host options survive restarts, and listener effects can distinguish obscured sight from muffled audio.**
-  > <sub>Bool, enum, and stepped-number values persist under encoded keys in Perfect Comms' global BepInEx config while lobby snapshots remain temporary host overrides. API 1.2 adds `SightObscured` independently of the listener low-pass filter, so Eclipsal and Grenadier vision states restrict sight-based hearing without forcing audio muffling.</sub>
-
-### Consistent Multi-Speaker Loudness
-
-- **One unusually loud microphone no longer compresses every simultaneous speaker.**
-  > <sub>Each decoded participant now receives independent speech-aware loudness control before user volume, proximity, panning, effects, and summation. Sustained overload is reduced quickly, quiet speech receives only slow signal-to-noise-limited makeup, packet-loss concealment does not create cross-peer gain coupling, and clipping evidence remains diagnostic rather than muting or punishing a player.</sub>
-
-- **A linked-stereo lookahead limiter protects the final mix without shifting the spatial image.**
-  > <sub>The receiver reserves five milliseconds of lookahead for rare overlapping peaks, applies one gain to both channels, and preserves the existing user volume, positional audio, radio, wall, and ghost routing stages. Native desktop and Android diagnostics report participant control counts, maximum gain changes, loudness estimates, overload and clipping evidence, and final-limiter activity.</sub>
+- **Registered host options survive restarts, and sight restrictions no longer imply muffled audio.**
+  > <sub>Bool, enum, and stepped-number options persist in the global BepInEx configuration while lobby snapshots remain temporary host overrides. API 1.2 separates `SightObscured` from the listener muffle effect, allowing mods such as Eclipsal and Grenadier to restrict sight-based hearing without changing voice tone.</sub>
 
 ### Reliable CrossOver Audio Startup
 
-- **CrossOver on macOS now starts the native audio helper without opening an interactive Terminal.**
-  > <sub>The mod no longer depends on CrossOver forwarding a multiline `/bin/sh -c` command or treating a macOS `.app` directory as an executable through `start.exe /unix`. It uses Wine's direct Unix process bridge to restore the embedded Mach-O's executable mode, remove quarantine, and invoke hidden LaunchServices with separated arguments. The signed, argument-free app broker then consumes nonce-bound requests, prepares the private token directory, starts the real helper child, and preserves authenticated cancellation and exit receipts. Linux Wine/Proton keeps its existing working shell-supervisor path.</sub>
+- **CrossOver on macOS now starts voice audio without opening an interactive Terminal.**
+  > <sub>The managed launcher restores the embedded helper's executable mode, removes quarantine when necessary, and starts the signed app through hidden LaunchServices. The app broker validates and supervises the real audio helper while preserving private authentication and cancellation; Linux Wine and Proton retain their existing native helper flow.</sub>
+
+### Developer API Package
+
+- **Mod integrations can compile against `PerfectComms.Api` without redistributing the runtime plugin.**
+  > <sub>The reference-only `4.1.7.1` NuGet revision contains the `net6.0` compiler assembly and XML documentation without runtime, native, content, or build assets. Release gates compile a real package consumer and ensure `PerfectComms.dll` is not copied into its output, while tagged releases publish through short-lived NuGet.org credentials.</sub>
+
+### Technical Audio Notes
+
+- **The voice codec favors natural delivery while retaining the existing bandwidth budget.**
+  > <sub>Opus now uses automatic signal classification and in-band FEC mode 2 while retaining 48 kHz mono, 48 kb/s, 20 ms frames, constrained VBR, DTX-off, complexity 10, automatic bandwidth, and 100 ms DRED. Complete RTP media-time gaps can use DRED and FEC before PLC, including timestamp-only sender omissions.</sub>
+
+- **Playback, capture, and echo processing avoid unnecessary degradation.**
+  > <sub>Playback clock correction settles back to exact 48 kHz sample copying, floating-point native-rate devices are preferred before 16-bit fallbacks, latency fallbacks scale with the device rate, identical DSP updates preserve AEC convergence, and rejected render blocks no longer train the echo reference.</sub>
+
+- **Level control and spatial processing remain bounded and expression-conscious.**
+  > <sub>The per-speaker controller combines slow, noise-aware normalization with a separate fast overload ceiling instead of stacking two full corrections. A five-millisecond linked-stereo limiter retains the true lookahead peak, pan vectors preserve constant power, microphone detection runs before manual gain, both WebRTC AGC modes remain off, and the High/Very High noise-suppression mapping is unchanged.</sub>
 
 ## Perfect Comms v4.1.6
 

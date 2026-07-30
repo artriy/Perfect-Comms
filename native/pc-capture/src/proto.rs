@@ -538,10 +538,11 @@ impl PlaybackRing {
         }
     }
 
-    pub fn push(&mut self, interleaved: &[f32]) {
+    /// Publishes the complete stereo block, returning `false` without a partial write if it does not fit.
+    pub fn push(&mut self, interleaved: &[f32]) -> bool {
         let pairs = interleaved.len() / 2;
         if pairs == 0 {
-            return;
+            return true;
         }
         let written = self.inner.write_sequence.load(Ordering::Relaxed);
         let read = self.inner.read_sequence.load(Ordering::Acquire);
@@ -553,7 +554,7 @@ impl PlaybackRing {
             self.inner
                 .pending_discontinuity
                 .store(true, Ordering::Release);
-            return;
+            return false;
         }
 
         for i in 0..pairs {
@@ -565,6 +566,7 @@ impl PlaybackRing {
         self.inner
             .write_sequence
             .store(written + pairs as u64, Ordering::Release);
+        true
     }
 
     pub fn pop_stereo(&mut self) -> Option<(f32, f32)> {
@@ -712,6 +714,8 @@ pub struct GameStatePeer {
     pub pan: f32,
     #[serde(default)]
     pub mode: i32,
+    #[serde(default)]
+    pub muffled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1358,7 +1362,7 @@ mod tests {
 
     #[test]
     fn parse_game_state_op() {
-        let json = r#"{"op":"game-state","deaf":false,"master":1.0,"peers":[{"id":"sock1","gain":1.0,"pan":0.0,"mode":0},{"id":"sock2","gain":0.5,"pan":-0.7,"mode":2}]}"#;
+        let json = r#"{"op":"game-state","deaf":false,"master":1.0,"peers":[{"id":"sock1","gain":1.0,"pan":0.0,"mode":0,"muffled":false},{"id":"sock2","gain":0.5,"pan":-0.7,"mode":2,"muffled":true}]}"#;
         match parse_inbound(json).unwrap() {
             InboundOp::GameState {
                 deaf,
@@ -1374,6 +1378,7 @@ mod tests {
                 assert_eq!(peers[1].gain, 0.5);
                 assert_eq!(peers[1].pan, -0.7);
                 assert_eq!(peers[1].mode, 2);
+                assert!(peers[1].muffled);
             }
             other => panic!("expected game-state, got {other:?}"),
         }
@@ -1388,6 +1393,7 @@ mod tests {
                 assert_eq!(peers[0].gain, 0.0);
                 assert_eq!(peers[0].pan, 0.0);
                 assert_eq!(peers[0].mode, 0);
+                assert!(!peers[0].muffled);
             }
             other => panic!("expected game-state, got {other:?}"),
         }
@@ -1601,8 +1607,8 @@ mod tests {
     fn playback_ring_rejects_new_blocks_instead_of_skipping_queued_audio() {
         let mut ring = PlaybackRing::new(2);
         let consumer = ring.consumer();
-        ring.push(&[1.0, 1.0, 2.0, 2.0]);
-        ring.push(&[3.0, 3.0]);
+        assert!(ring.push(&[1.0, 1.0, 2.0, 2.0]));
+        assert!(!ring.push(&[3.0, 3.0]));
         assert_eq!(ring.len(), 2);
         assert_eq!(ring.dropped(), 1);
         assert!(consumer.take_discontinuity());

@@ -14,6 +14,7 @@ pub struct PeerState {
     pub gain: f32,
     pub pan: f32,
     pub mode: i32,
+    pub muffled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,7 @@ fn sanitize_peer(peer: PeerState) -> PeerState {
             0.0
         },
         mode: peer.mode,
+        muffled: peer.muffled,
     }
 }
 
@@ -145,6 +147,7 @@ mod tests {
                 gain: 1.0,
                 pan: 0.0,
                 mode: 0,
+                muffled: false,
             },
         );
         gs.apply(
@@ -156,6 +159,7 @@ mod tests {
                     gain: 0.5,
                     pan: 0.3,
                     mode: 2,
+                    muffled: true,
                 },
             )],
         );
@@ -165,6 +169,7 @@ mod tests {
         assert_eq!(p.gain, 0.5);
         assert_eq!(p.pan, 0.3);
         assert_eq!(p.mode, 2);
+        assert!(p.muffled);
     }
 
     #[test]
@@ -176,6 +181,7 @@ mod tests {
                 gain: 1.0,
                 pan: 0.0,
                 mode: 0,
+                muffled: false,
             },
         );
         gs.remove_peer("p");
@@ -223,6 +229,7 @@ mod tests {
                         gain: f32::INFINITY,
                         pan: f32::NAN,
                         mode: 0,
+                        muffled: false,
                     },
                 ),
                 (
@@ -231,6 +238,7 @@ mod tests {
                         gain: 99.0,
                         pan: 2.0,
                         mode: 0,
+                        muffled: true,
                     },
                 ),
             ],
@@ -242,6 +250,7 @@ mod tests {
         assert_eq!(snapshot.peers["bad"].pan, 0.0);
         assert_eq!(snapshot.peers["boost"].gain, MAX_PEER_GAIN);
         assert_eq!(snapshot.peers["boost"].pan, 1.0);
+        assert!(snapshot.peers["boost"].muffled);
     }
 
     #[test]

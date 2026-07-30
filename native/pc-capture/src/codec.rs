@@ -150,6 +150,25 @@ impl EncoderNetworkController {
         fresh_feedback: &[EncoderFeedback],
         bandwidth_estimates: &[i32],
     ) -> EncoderPolicySnapshot {
+        self.observe_policy(fresh_feedback, bandwidth_estimates, true)
+    }
+
+    /// Applies degradation from an asynchronous estimator update immediately, but does not count
+    /// that callback as one of the periodic windows required for recovery.
+    pub fn observe_immediate_with_bandwidth(
+        &mut self,
+        fresh_feedback: &[EncoderFeedback],
+        bandwidth_estimates: &[i32],
+    ) -> EncoderPolicySnapshot {
+        self.observe_policy(fresh_feedback, bandwidth_estimates, false)
+    }
+
+    fn observe_policy(
+        &mut self,
+        fresh_feedback: &[EncoderFeedback],
+        bandwidth_estimates: &[i32],
+        recovery_window: bool,
+    ) -> EncoderPolicySnapshot {
         // With no fresh feedback, recover slowly to the safe shipped baseline rather than
         // retaining a transient bad-route clamp forever or optimistically dropping FEC to 5%.
         let desired = if fresh_feedback.is_empty() && bandwidth_estimates.is_empty() {
@@ -170,6 +189,12 @@ impl EncoderNetworkController {
             }
             self.recovery_candidate = None;
             self.recovery_windows = 0;
+            return self.current;
+        }
+
+        // Estimator callbacks may arrive in bursts. Only the fixed-rate policy loop represents a
+        // distinct recovery observation; immediate calls leave any pending candidate untouched.
+        if !recovery_window {
             return self.current;
         }
 
@@ -362,8 +387,8 @@ pub struct ReadyEncodedPacket {
     pub arrival: Instant,
     pub payload: Vec<u8>,
     pub reset_decoder: bool,
-    pub gap_before: usize,
-    pub local_media_gap_before: usize,
+    pub sequence_gap_before: usize,
+    pub media_gap_before: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,6 +494,12 @@ impl EncodedPacketBuffer {
         // Sequence/decoder state belongs to a media generation; the learned path variance does
         // not. Keep the adaptive target across normal talkspurts so every new sentence does not
         // rediscover the same high-jitter Wi-Fi route from the unsafe minimum.
+        // A verified per-peer silence boundary is a safe place to cash in stable low-jitter
+        // evidence one frame early. Active speech retains the conservative five-second decay,
+        // and independent talkspurt timing prevents synchronized peer-wide latency steps.
+        if talkspurt && self.stable_packets > 0 && self.target_frames > MIN_PLAYOUT_FRAMES {
+            self.target_frames -= 1;
+        }
         self.stable_packets = 0;
         self.primed = false;
         self.timeline_started = false;
@@ -516,6 +547,44 @@ impl EncodedPacketBuffer {
         let dropped = self.fast_forward_to_fresh_tail(self.target_frames);
         self.metrics
             .encoded_overflow_drops
+            .fetch_add(dropped as u64, Ordering::Relaxed);
+    }
+
+    /// Initial ingress can outrun the playout task before the decoder has consumed anything.
+    /// One frame beyond the acquired target is the frame due for the current playout turn, not
+    /// scheduler debt. If a normally contiguous backlog grows beyond that allowance, start from
+    /// its freshest acquired target-sized tail instead of playing stale audio.
+    fn shed_startup_debt(&mut self) {
+        if self.timeline_started || self.packets.len() <= self.target_frames.saturating_add(1) {
+            return;
+        }
+
+        let normally_spaced = {
+            let mut packets = self.packets.values();
+            let Some(mut previous) = packets.next() else {
+                return;
+            };
+            packets.all(|packet| {
+                let contiguous = packet.sequence == previous.sequence.wrapping_add(1)
+                    && packet.timestamp.wrapping_sub(previous.timestamp) == RTP_FRAME_TICKS;
+                previous = packet;
+                contiguous
+            })
+        };
+        if !normally_spaced {
+            return;
+        }
+
+        let dropped = self.packets.len() - self.target_frames;
+        for _ in 0..dropped {
+            self.packets.pop_first();
+        }
+        self.expected_extended = self
+            .packets
+            .first_key_value()
+            .map(|(sequence, _)| *sequence);
+        self.metrics
+            .latency_catchup_drops
             .fetch_add(dropped as u64, Ordering::Relaxed);
     }
 
@@ -702,6 +771,7 @@ impl EncodedPacketBuffer {
             return None;
         }
 
+        self.shed_startup_debt();
         self.shed_playout_debt();
         if !self.primed {
             if self.packets.len() < self.target_frames {
@@ -732,7 +802,7 @@ impl EncodedPacketBuffer {
 
         let expected = self.expected_extended?;
         let first = self.packets.first_key_value().map(|(key, _)| *key)?;
-        let (selected, gap_before) = if self.packets.contains_key(&expected) {
+        let (selected, sequence_gap_before) = if self.packets.contains_key(&expected) {
             self.missing_since = None;
             (expected, 0usize)
         } else if first > expected {
@@ -751,8 +821,8 @@ impl EncodedPacketBuffer {
             self.metrics
                 .deadline_losses
                 .fetch_add(gap as u64, Ordering::Relaxed);
-            // A late deadline is an immediate signal to add one frame of safety. Stable arrivals
-            // must then persist for five seconds before this latency is removed.
+            // A late deadline is an immediate signal to add one frame of safety. While voiced,
+            // stable arrivals must persist for five seconds before this latency is removed.
             self.target_frames = (self.target_frames + 1).min(MAX_PLAYOUT_FRAMES);
             self.stable_packets = 0;
             (first, gap)
@@ -782,18 +852,14 @@ impl EncodedPacketBuffer {
                 (ticks as usize / RTP_FRAME_TICKS as usize).saturating_sub(1)
             }
         });
-        let mut local_media_gap_before = timestamp_gap.saturating_sub(gap_before);
-        let gap_requires_reset =
-            gap_before.saturating_add(local_media_gap_before) > MAX_CONCEAL_FRAMES;
+        let media_gap_before = timestamp_gap.max(sequence_gap_before);
+        let gap_requires_reset = media_gap_before > MAX_CONCEAL_FRAMES;
         let reset_decoder = std::mem::take(&mut self.reset_on_next_packet) || gap_requires_reset;
-        if reset_decoder {
-            local_media_gap_before = 0;
-        }
         if gap_requires_reset {
             self.metrics.decoder_resets.fetch_add(1, Ordering::Relaxed);
         }
         self.metrics.local_media_gap_frames.fetch_add(
-            timestamp_gap.saturating_sub(gap_before) as u64,
+            timestamp_gap.saturating_sub(sequence_gap_before) as u64,
             Ordering::Relaxed,
         );
         self.last_emitted_timestamp = Some(stored.timestamp);
@@ -805,8 +871,8 @@ impl EncodedPacketBuffer {
             arrival: stored.arrival,
             payload: stored.payload,
             reset_decoder,
-            gap_before,
-            local_media_gap_before,
+            sequence_gap_before,
+            media_gap_before,
         })
     }
 
@@ -946,14 +1012,14 @@ pub fn decode_with_concealment_report(
     decode_with_media_gap_report(codec, last, seq, 0, data)
 }
 
-/// Decodes one on-wire RTP packet. `local_media_gap` comes from the RTP timestamp rather than
-/// sequence numbers: the sender intentionally omitted capture frames, so it must advance media
-/// time without making RTCP/NACK treat those local omissions as network packet loss.
+/// Decodes one on-wire RTP packet. `media_gap` is the complete RTP timestamp-derived count of
+/// missing 20 ms media slots. Sequence distance remains independent evidence for late/duplicate
+/// handling; it is only a lower bound when callers do not have timestamps.
 pub fn decode_with_media_gap_report(
     codec: &mut OpusCodec,
     last: Option<u16>,
     seq: u16,
-    local_media_gap: usize,
+    media_gap: usize,
     data: &[u8],
 ) -> (Vec<Vec<f32>>, bool, ConcealmentReport) {
     let mut frames: Vec<Vec<f32>> = Vec::new();
@@ -974,8 +1040,9 @@ pub fn decode_with_media_gap_report(
     if delta <= 0 {
         return (frames, false, report);
     }
-    let lost = (delta - 1) as usize;
-    if lost.saturating_add(local_media_gap) > MAX_CONCEAL_FRAMES {
+    let sequence_gap = (delta - 1) as usize;
+    let media_gap = media_gap.max(sequence_gap);
+    if media_gap > MAX_CONCEAL_FRAMES {
         let _ = codec.reset_decoder();
         let n = codec.decode(data, &mut pcm);
         if n > 0 {
@@ -984,21 +1051,13 @@ pub fn decode_with_media_gap_report(
         }
         return (frames, true, report);
     }
-    for _ in 0..local_media_gap {
-        let mut recovery = [0f32; FRAME_SIZE];
-        let samples = codec.decode_plc(&mut recovery);
-        if samples > 0 {
-            frames.push(recovery[..samples].to_vec());
-            report.plc_frames += 1;
-        }
-    }
 
-    if lost > 0 {
+    if media_gap > 0 {
         let dred_available = matches!(
-            codec.decoder.parse_dred(data, lost * FRAME_SIZE),
+            codec.decoder.parse_dred(data, media_gap * FRAME_SIZE),
             Ok(DredParseOutcome::Available(_))
         );
-        for offset_frames in (1..=lost).rev() {
+        for offset_frames in (1..=media_gap).rev() {
             let mut recovery = [0f32; FRAME_SIZE];
             // Opus dedicates classic LBRR/FEC to the immediately preceding frame. DRED is deep
             // history for older offsets, matching the upstream decoder chronology.
@@ -1022,14 +1081,19 @@ pub fn decode_with_media_gap_report(
                 continue;
             }
 
-            let fallback_samples = if offset_frames == 1 {
-                codec.decode_fec(data, &mut recovery)
+            let (fallback_samples, recovered_with_fec) = if offset_frames == 1 {
+                let fec_samples = codec.decode_fec(data, &mut recovery);
+                if fec_samples > 0 {
+                    (fec_samples, true)
+                } else {
+                    (codec.decode_plc(&mut recovery), false)
+                }
             } else {
-                codec.decode_plc(&mut recovery)
+                (codec.decode_plc(&mut recovery), false)
             };
             if fallback_samples > 0 {
                 frames.push(recovery[..fallback_samples].to_vec());
-                if offset_frames == 1 {
+                if recovered_with_fec {
                     report.fec_frames += 1;
                 } else {
                     report.plc_frames += 1;
@@ -1197,25 +1261,47 @@ mod tests {
     }
 
     #[test]
-    fn local_media_gap_uses_plc_without_claiming_network_packet_loss() {
+    fn timestamp_only_media_gap_uses_current_packet_redundancy() {
+        let packets = encoded_tone_packets(3);
         let mut codec = OpusCodec::new().expect("opus codec init");
-        let packet = codec.encode(&modulated_tone_frame(0));
-        let (first, advance, _) = decode_with_media_gap_report(&mut codec, None, 100, 0, &packet);
+        let (first, advance, _) =
+            decode_with_media_gap_report(&mut codec, None, 100, 0, &packets[0]);
         assert!(advance);
         assert_eq!(first.len(), 1);
 
         let (frames, advance, report) =
-            decode_with_media_gap_report(&mut codec, Some(100), 101, 2, &packet);
+            decode_with_media_gap_report(&mut codec, Some(100), 101, 1, &packets[2]);
         assert!(advance);
-        assert_eq!(frames.len(), 3);
+        assert_eq!(frames.len(), 2);
         assert_eq!(report.decoded_frames, 1);
-        assert_eq!(report.plc_frames, 2);
-        assert_eq!(report.dred_frames + report.fec_frames, 0);
+        assert_eq!(report.fec_frames, 1);
+        assert_eq!(report.dred_frames + report.plc_frames, 0);
     }
 
     #[test]
-    fn combined_network_and_local_concealment_budget_is_five_frames() {
-        fn decode_case(network_gap: usize, local_gap: usize) -> ConcealmentReport {
+    fn mixed_sequence_and_timestamp_gap_recovers_three_media_slots() {
+        let packets = encoded_tone_packets(5);
+        let mut codec = OpusCodec::new().expect("opus codec init");
+        let (_, advance, _) = decode_with_media_gap_report(&mut codec, None, 100, 0, &packets[0]);
+        assert!(advance);
+
+        // One missing RTP sequence plus two outbound timestamp-only omissions are one
+        // chronological media gap. Recovery must walk current-packet offsets 3, 2, then 1.
+        let (frames, advance, report) =
+            decode_with_media_gap_report(&mut codec, Some(100), 102, 3, &packets[4]);
+        assert!(advance);
+        assert_eq!(frames.len(), 4);
+        assert_eq!(report.decoded_frames, 1);
+        assert_eq!(report.fec_frames, 1);
+        assert_eq!(
+            report.dred_frames + report.fec_frames + report.plc_frames,
+            3
+        );
+    }
+
+    #[test]
+    fn combined_sequence_and_media_concealment_budget_is_five_frames() {
+        fn decode_case(sequence_gap: usize, media_gap: usize) -> ConcealmentReport {
             let mut codec = OpusCodec::new().expect("opus codec init");
             let packet = codec.encode(&modulated_tone_frame(0));
             let (_, advance, _) = decode_with_media_gap_report(&mut codec, None, 100, 0, &packet);
@@ -1223,8 +1309,8 @@ mod tests {
             let (frames, advance, report) = decode_with_media_gap_report(
                 &mut codec,
                 Some(100),
-                101u16.wrapping_add(network_gap as u16),
-                local_gap,
+                101u16.wrapping_add(sequence_gap as u16),
+                media_gap,
                 &packet,
             );
             assert!(advance);
@@ -1235,14 +1321,14 @@ mod tests {
             report
         }
 
-        let at_limit = decode_case(3, 2);
+        let at_limit = decode_case(3, 5);
         assert_eq!(at_limit.decoded_frames, 1);
         assert_eq!(
             at_limit.dred_frames + at_limit.fec_frames + at_limit.plc_frames,
             MAX_CONCEAL_FRAMES
         );
 
-        let over_limit = decode_case(3, 3);
+        let over_limit = decode_case(3, 6);
         assert_eq!(
             over_limit,
             ConcealmentReport {
@@ -1251,7 +1337,7 @@ mod tests {
             }
         );
 
-        let independently_allowed_but_combined_oversized = decode_case(5, 5);
+        let independently_allowed_but_combined_oversized = decode_case(5, 10);
         assert_eq!(
             independently_allowed_but_combined_oversized,
             ConcealmentReport {
@@ -1299,20 +1385,23 @@ mod tests {
 
         let at_limit = packet_after_gaps(3, 2);
         assert!(!at_limit.reset_decoder);
-        assert_eq!(at_limit.gap_before, 3);
-        assert_eq!(at_limit.local_media_gap_before, 2);
+        assert_eq!(at_limit.sequence_gap_before, 3);
+        assert_eq!(at_limit.media_gap_before, 5);
 
         let over_limit = packet_after_gaps(3, 3);
         assert!(over_limit.reset_decoder);
-        assert_eq!(over_limit.gap_before, 3);
-        assert_eq!(over_limit.local_media_gap_before, 0);
+        assert_eq!(over_limit.sequence_gap_before, 3);
+        assert_eq!(over_limit.media_gap_before, 6);
 
         let independently_allowed_but_combined_oversized = packet_after_gaps(5, 5);
         assert!(independently_allowed_but_combined_oversized.reset_decoder);
-        assert_eq!(independently_allowed_but_combined_oversized.gap_before, 5);
         assert_eq!(
-            independently_allowed_but_combined_oversized.local_media_gap_before,
-            0
+            independently_allowed_but_combined_oversized.sequence_gap_before,
+            5
+        );
+        assert_eq!(
+            independently_allowed_but_combined_oversized.media_gap_before,
+            10
         );
     }
 
@@ -1355,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_buffer_infers_local_media_gap_from_timestamp_only() {
+    fn encoded_buffer_infers_full_media_gap_from_timestamp_only() {
         let metrics = Arc::new(MediaReceiveCounters::default());
         let mut buffer = EncodedPacketBuffer::new("local-gap", metrics.clone());
         let start = Instant::now();
@@ -1367,10 +1456,10 @@ mod tests {
         assert_eq!(buffer.insert(second), PacketInsertOutcome::Accepted);
 
         let first = buffer.pop_ready(start + Duration::from_millis(60)).unwrap();
-        assert_eq!(first.local_media_gap_before, 0);
+        assert_eq!(first.media_gap_before, 0);
         let second = buffer.pop_ready(start + Duration::from_millis(80)).unwrap();
-        assert_eq!(second.gap_before, 0);
-        assert_eq!(second.local_media_gap_before, 2);
+        assert_eq!(second.sequence_gap_before, 0);
+        assert_eq!(second.media_gap_before, 2);
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.sequence_gaps, 0);
         assert_eq!(snapshot.local_media_gap_frames, 2);
@@ -1490,6 +1579,20 @@ mod tests {
     }
 
     #[test]
+    fn verified_talkspurt_boundary_cashes_in_stable_decay_evidence() {
+        let metrics = Arc::new(MediaReceiveCounters::default());
+        let mut buffer = EncodedPacketBuffer::new("boundary-decay", metrics);
+        let start = Instant::now();
+        buffer.target_frames = 5;
+        buffer.stable_packets = 1;
+        buffer.insert(rtp(0, start));
+
+        buffer.insert(rtp(1, start + TALKSPURT_RESET));
+
+        assert_eq!(buffer.target_frames(), 4);
+    }
+
+    #[test]
     fn active_talkspurt_acquires_larger_target_without_intentional_gap() {
         let metrics = Arc::new(MediaReceiveCounters::default());
         let mut buffer = EncodedPacketBuffer::new("continuous", metrics.clone());
@@ -1605,7 +1708,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(60))
             .expect("fresh consecutive packets must re-prime the retained timeline");
         assert_eq!(resumed.sequence, 12);
-        assert_eq!(resumed.gap_before, 0);
+        assert_eq!(resumed.sequence_gap_before, 0);
         assert_eq!(metrics.snapshot().late_drops, 1);
     }
 
@@ -1695,7 +1798,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(110))
             .expect("buffered cushion should satisfy the reorder deadline");
         assert_eq!(recovered.sequence, 13);
-        assert_eq!(recovered.gap_before, 1);
+        assert_eq!(recovered.sequence_gap_before, 1);
         buffer.record_decode(ConcealmentReport {
             decoded_frames: 1,
             dred_frames: 0,
@@ -1742,7 +1845,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(160))
             .expect("bounded reorder deadline must eventually release future audio");
         assert_eq!(released.sequence, 13);
-        assert_eq!(released.gap_before, 1);
+        assert_eq!(released.sequence_gap_before, 1);
     }
 
     #[test]
@@ -1776,7 +1879,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(240))
             .expect("oversized gap must release the next stream without concealment flood");
         assert_eq!(restart.sequence, 20);
-        assert_eq!(restart.gap_before, 8);
+        assert_eq!(restart.sequence_gap_before, 8);
         assert!(restart.reset_decoder);
         assert_eq!(metrics.snapshot().decoder_resets, 1);
     }
@@ -1836,7 +1939,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(2_000))
             .expect("re-primed stream must release after the buffered reorder deadline");
         assert_eq!(restarted.sequence, 99);
-        assert_eq!(restarted.gap_before, 7);
+        assert_eq!(restarted.sequence_gap_before, 7);
         assert!(
             restarted.reset_decoder,
             "a gap beyond concealment capacity must not decode against stale state"
@@ -1866,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_scheduler_stall_converges_to_the_adaptive_target() {
+    fn encoded_startup_backlog_begins_at_fresh_target_tail() {
         let metrics = Arc::new(MediaReceiveCounters::default());
         let mut buffer = EncodedPacketBuffer::new("scheduler-stall", metrics.clone());
         let start = Instant::now();
@@ -1883,9 +1986,10 @@ mod tests {
 
         let first = buffer
             .pop_ready(start + Duration::from_millis(200))
-            .expect("initial burst should be ready");
-        assert_eq!(first.sequence, 0);
-        assert_eq!(buffer.depth_frames(), 9);
+            .expect("initial burst should begin at its fresh target tail");
+        assert_eq!(first.sequence, 8);
+        assert!(!first.reset_decoder);
+        assert_eq!(buffer.depth_frames(), 1);
 
         let resumed_at = start + Duration::from_millis(200);
         assert_eq!(
@@ -1894,9 +1998,9 @@ mod tests {
         );
         let caught_up = buffer
             .pop_ready(resumed_at)
-            .expect("fresh tail should be ready after catch-up");
+            .expect("fresh tail should keep playing without a decoder jump");
         assert_eq!(caught_up.sequence, 9);
-        assert!(caught_up.reset_decoder);
+        assert!(!caught_up.reset_decoder);
         assert_eq!(
             buffer.depth_frames(),
             buffer.target_frames().saturating_sub(1)
@@ -1951,7 +2055,7 @@ mod tests {
             .pop_ready(start + Duration::from_millis(650))
             .expect("target-sized newest tail must immediately re-prime");
         assert!(first.reset_decoder);
-        assert_eq!(first.gap_before, 0);
+        assert_eq!(first.sequence_gap_before, 0);
         assert!(
             newest.wrapping_sub(first.sequence) as usize * 20 <= MAX_PLAYOUT_FRAMES * 20,
             "overflow recovery exceeded the 300 ms playout ceiling"
@@ -2205,6 +2309,36 @@ mod tests {
         }
         let recovered = controller.observe(&healthy);
         assert_eq!(recovered.packet_loss_percent, 5);
+        assert_eq!(recovered.bitrate, DEFAULT_ENCODER_BITRATE);
+        assert_eq!(recovered.generation, 2);
+    }
+
+    #[test]
+    fn immediate_bandwidth_bursts_degrade_but_do_not_advance_recovery_windows() {
+        let mut controller = EncoderNetworkController::new();
+        let degraded = controller.observe_immediate_with_bandwidth(&[], &[32_000]);
+        assert_eq!(
+            degraded.packet_loss_percent,
+            DEFAULT_ENCODER_PACKET_LOSS_PERCENT
+        );
+        assert_eq!(degraded.bitrate, MIN_ADAPTIVE_ENCODER_BITRATE);
+        assert_eq!(degraded.generation, 1);
+
+        for _ in 0..(ENCODER_POLICY_RECOVERY_WINDOWS * 2) {
+            assert_eq!(
+                controller.observe_immediate_with_bandwidth(&[], &[96_000]),
+                degraded
+            );
+        }
+        for _ in 0..ENCODER_POLICY_RECOVERY_WINDOWS - 1 {
+            assert_eq!(controller.observe(&[]), degraded);
+        }
+
+        let recovered = controller.observe(&[]);
+        assert_eq!(
+            recovered.packet_loss_percent,
+            DEFAULT_ENCODER_PACKET_LOSS_PERCENT
+        );
         assert_eq!(recovered.bitrate, DEFAULT_ENCODER_BITRATE);
         assert_eq!(recovered.generation, 2);
     }

@@ -32,12 +32,12 @@ impl DspStatus {
         let applied_agc = false;
         let applied_ns = apm_loaded && requested.ns;
         let applied_ns_very_high = applied_ns && requested.ns_very_high;
-        let applied_hpf = apm_loaded && requested.hpf;
+        let applied_hpf = apm_loaded && (requested.hpf || requested.aec || requested.ns);
         let config_fully_applied = requested.aec == applied_aec
             && requested.agc == applied_agc
             && requested.ns == applied_ns
             && (!requested.ns || requested.ns_very_high == applied_ns_very_high)
-            && requested.hpf == applied_hpf;
+            && (!requested.hpf || applied_hpf);
         Self {
             config_generation,
             requested,
@@ -178,6 +178,9 @@ impl Dsp {
     }
 
     pub fn set(&mut self, cfg: DspConfig) {
+        if cfg == self.config {
+            return;
+        }
         if cfg.aec || cfg.ns || cfg.hpf {
             if let Some(apm) = self.apm.as_mut() {
                 if let Err(e) = apm.set_config(cfg.aec, cfg.ns, cfg.ns_very_high, false, cfg.hpf) {
@@ -226,6 +229,9 @@ impl Dsp {
     }
 
     pub fn far_end(&mut self, stereo: &[f32]) {
+        if !self.config.aec {
+            return;
+        }
         let apm = match self.apm.as_mut() {
             Some(a) => a,
             None => return,
@@ -341,12 +347,13 @@ mod tests {
         assert!(loaded.applied_aec);
         assert!(loaded.applied_ns);
         assert!(loaded.applied_ns_very_high);
+        assert!(loaded.applied_hpf);
         assert!(!loaded.applied_agc);
         assert!(!loaded.config_fully_applied);
     }
 
     #[test]
-    fn dsp_status_tracks_each_reconfiguration_generation() {
+    fn identical_dsp_config_is_a_true_no_op() {
         let disabled = DspConfig {
             aec: false,
             agc: false,
@@ -360,10 +367,34 @@ mod tests {
 
         dsp.set(disabled);
         let status = dsp.status();
-        assert_eq!(status.config_generation, 2);
+        assert_eq!(status.config_generation, 1);
         assert_eq!(status.requested, disabled);
         assert!(!status.apm_loaded);
         assert!(status.config_fully_applied);
+    }
+
+    #[test]
+    fn loaded_aec_or_noise_suppression_reports_effective_hpf() {
+        for requested in [
+            DspConfig {
+                aec: true,
+                agc: false,
+                ns: false,
+                ns_very_high: false,
+                hpf: false,
+            },
+            DspConfig {
+                aec: false,
+                agc: false,
+                ns: true,
+                ns_very_high: false,
+                hpf: false,
+            },
+        ] {
+            let status = DspStatus::from_state(1, requested, true);
+            assert!(status.applied_hpf);
+            assert!(status.config_fully_applied);
+        }
     }
 
     #[test]

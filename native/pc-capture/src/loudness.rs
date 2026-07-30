@@ -223,8 +223,8 @@ impl PeerLoudnessNormalizer {
             previous_raw: 0.0,
             normalizer_gain_db: 0.0,
             desired_normalizer_gain_db: 0.0,
-            overload_gain_db: 0.0,
-            desired_overload_gain_db: 0.0,
+            overload_gain_db: CONFIDENT_MAKEUP_LIMIT_DB,
+            desired_overload_gain_db: CONFIDENT_MAKEUP_LIMIT_DB,
             peer_peak_gain: 1.0,
             active_level_db: DB_FLOOR,
             noise_level_db: DB_FLOOR,
@@ -285,10 +285,7 @@ impl PeerLoudnessNormalizer {
 
         // Peak safety still observes concealed playback: it may not train the learned level, but
         // it must not be allowed to overload the listener's final mix.
-        let level_gain = db_to_gain(
-            (self.normalizer_gain_db + self.overload_gain_db)
-                .clamp(MIN_NORMALIZER_GAIN_DB, CONFIDENT_MAKEUP_LIMIT_DB),
-        );
+        let level_gain = db_to_gain(self.level_gain_db());
         let peak_after_leveling = frame_peak * level_gain;
         let desired_peak_gain = if peak_after_leveling > PEER_PEAK_CEILING {
             PEER_PEAK_CEILING / peak_after_leveling
@@ -325,9 +322,16 @@ impl PeerLoudnessNormalizer {
         }
     }
 
+    fn level_gain_db(&self) -> f32 {
+        // The overload controller is an absolute fast ceiling, not another correction to add
+        // after the slow normalizer. Its inactive ceiling admits the normalizer's full range.
+        self.normalizer_gain_db
+            .min(self.overload_gain_db)
+            .clamp(MIN_NORMALIZER_GAIN_DB, CONFIDENT_MAKEUP_LIMIT_DB)
+    }
+
     fn combined_gain(&self) -> f32 {
-        let level_db = (self.normalizer_gain_db + self.overload_gain_db)
-            .clamp(MIN_NORMALIZER_GAIN_DB, CONFIDENT_MAKEUP_LIMIT_DB);
+        let level_db = self.level_gain_db();
         (db_to_gain(level_db) * self.peer_peak_gain).clamp(0.0, 4.0)
     }
 
@@ -443,7 +447,7 @@ impl PeerLoudnessNormalizer {
         self.desired_overload_gain_db = if self.overload_active {
             (TARGET_SPEECH_DB - latest_level_db).clamp(MIN_NORMALIZER_GAIN_DB, 0.0)
         } else {
-            0.0
+            CONFIDENT_MAKEUP_LIMIT_DB
         };
     }
 }
@@ -586,6 +590,14 @@ impl LookaheadLimiter {
 
     fn observe_peak(&mut self, peak: f32) -> f32 {
         let capacity = self.max_peaks.len();
+        let oldest = self
+            .sample_index
+            .saturating_sub(LIMITER_LOOKAHEAD_FRAMES as u64);
+        while self.max_len > 0 && self.max_indices[self.max_head] < oldest {
+            self.max_head = (self.max_head + 1) % capacity;
+            self.max_len -= 1;
+        }
+
         while self.max_len > 0 {
             let back = (self.max_head + self.max_len - 1) % capacity;
             if self.max_peaks[back] > peak {
@@ -599,13 +611,6 @@ impl LookaheadLimiter {
         self.max_indices[tail] = self.sample_index;
         self.max_len += 1;
 
-        let oldest = self
-            .sample_index
-            .saturating_sub(LIMITER_LOOKAHEAD_FRAMES as u64);
-        while self.max_len > 0 && self.max_indices[self.max_head] < oldest {
-            self.max_head = (self.max_head + 1) % capacity;
-            self.max_len -= 1;
-        }
         self.sample_index = self.sample_index.saturating_add(1);
         self.max_peaks[self.max_head]
     }

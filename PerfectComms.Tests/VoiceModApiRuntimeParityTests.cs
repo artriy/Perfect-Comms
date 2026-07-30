@@ -197,8 +197,10 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.True(processedMuffled.Audible);
         Assert.Equal(rawMuffled.NormalVolume, processedMuffled.NormalVolume);
         Assert.Equal(rawMuffled.Pan, processedMuffled.Pan);
-        Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, processedMuffled.FilterMode);
+        Assert.Equal(rawMuffled.FilterMode, processedMuffled.FilterMode);
+        Assert.True(processedMuffled.Muffled);
         Assert.Equal(VoiceAudioFilterMode.None, processedClear.FilterMode);
+        Assert.False(processedClear.Muffled);
     }
 
     [Fact]
@@ -440,7 +442,8 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
             VoiceProximityCalculator.ApplyExternalAudioEffects(raw, speaker);
         Assert.Equal(VoiceProximityReason.ModPairRoute, raw.Reason);
         AssertClose(0.75f, processed.RadioVolume);
-        Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, processed.FilterMode);
+        Assert.Equal(VoiceAudioFilterMode.Radio, processed.FilterMode);
+        Assert.True(processed.Muffled);
 
         PerfectCommsApi.RegisterVoicePairRule(
             NewModId("pair-mute"),
@@ -1006,7 +1009,8 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.True(contextualMuffle);
         Assert.Equal(1, contextualCalls);
         Assert.Equal(1, legacyCalls);
-        Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, contextuallyFiltered.FilterMode);
+        Assert.Equal(audible.FilterMode, contextuallyFiltered.FilterMode);
+        Assert.True(contextuallyFiltered.Muffled);
         Assert.Equal(audible.NormalVolume, contextuallyFiltered.NormalVolume);
         Assert.Equal(audible.Pan, contextuallyFiltered.Pan);
 
@@ -1020,7 +1024,8 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.True(legacyMuffle);
         Assert.Equal(2, contextualCalls);
         Assert.Equal(2, legacyCalls);
-        Assert.Equal(VoiceAudioFilterMode.ListenerMuffle, legacyFiltered.FilterMode);
+        Assert.Equal(audible.FilterMode, legacyFiltered.FilterMode);
+        Assert.True(legacyFiltered.Muffled);
 
         contextualActive = false;
         legacyActive = false;
@@ -1036,6 +1041,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.Equal(audible.Pan, unchanged.Pan);
         Assert.Equal(audible.FilterMode, unchanged.FilterMode);
         Assert.Equal(audible.Audible, unchanged.Audible);
+        Assert.False(unchanged.Muffled);
         Assert.Equal(audible.Reason, unchanged.Reason);
     }
 
@@ -1517,7 +1523,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         VoiceProximityResult result,
         bool listenerMuffled)
         => result.Audible && listenerMuffled
-            ? result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle }
+            ? result with { Muffled = true }
             : result;
 
     private static VoicePlayerSnapshot Player(

@@ -13,12 +13,4 @@ internal static class VoiceModBridge
         VoiceGamePhase.Tasks => VoicePhaseKind.Tasks,
         _ => VoicePhaseKind.Lobby,
     };
-
-    // ExternalVoiceState.ChannelShape (0/1/2) -> internal audio filter mode.
-    public static VoiceAudioFilterMode ToFilterMode(int channelShape) => channelShape switch
-    {
-        (int)VoiceAudioShape.Muffle => VoiceAudioFilterMode.ListenerMuffle,
-        (int)VoiceAudioShape.Proximity => VoiceAudioFilterMode.None,
-        _ => VoiceAudioFilterMode.Radio,
-    };
 }

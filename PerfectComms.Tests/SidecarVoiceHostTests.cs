@@ -28,7 +28,7 @@ public sealed class SidecarVoiceHostTests
         first.AddPeer("42", isOfferer: true, generation: 1);
         first.SendGameState(false, 1f, new[]
         {
-            new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0)
+            new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0, false)
         });
 
         first.Dispose();

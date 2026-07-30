@@ -507,8 +507,8 @@ internal static class VoiceProximityCalculator
             if (!shared) continue;
 
             float volume = Math.Clamp(targetChannel.Volume, 0f, 1f);
-            var filter = VoiceModBridge.ToFilterMode(targetChannel.Shape);
-            if (filter == VoiceAudioFilterMode.None)
+            var shape = (VoiceAudioShape)targetChannel.Shape;
+            if (shape == VoiceAudioShape.Proximity)
             {
                 Vector2 source = targetChannel.HasOrigin ? targetChannel.Origin : target.Position;
                 Vector2 listener = listenerPos ?? local.Position;
@@ -528,15 +528,12 @@ internal static class VoiceProximityCalculator
                 continue;
             }
 
-            VoiceProximityResult flatCandidate = filter switch
-            {
-                VoiceAudioFilterMode.Radio => new(0f, 0f, volume, 0f,
-                    VoiceAudioFilterMode.Radio, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
-                VoiceAudioFilterMode.ListenerMuffle => new(volume, 0f, 0f, 0f,
-                    VoiceAudioFilterMode.ListenerMuffle, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
-                _ => new(volume, 0f, 0f, 0f,
-                    VoiceAudioFilterMode.None, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient),
-            };
+            VoiceProximityResult flatCandidate = shape == VoiceAudioShape.Radio
+                ? new(0f, 0f, volume, 0f,
+                    VoiceAudioFilterMode.Radio, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient)
+                : new(volume, 0f, 0f, 0f,
+                    VoiceAudioFilterMode.None, volume > 0f, VoiceProximityReason.ModChannel, wallCoefficient,
+                    Muffled: true);
             if (!found || IsLouder(flatCandidate, best)) best = flatCandidate;
             found = true;
         }
@@ -643,7 +640,7 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceProximityReason.RoleMuted, result.WallCoefficient);
 
         if (result.Audible && (external.Muffled || external.Pair.Muffled))
-            return result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
+            return result with { Muffled = true };
 
         return result;
     }

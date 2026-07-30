@@ -50,6 +50,7 @@ const MAX_MONITOR_DELAY_MS: u32 = 1500;
 const MAX_PLAYBACK_ERROR_CHARS: usize = 512;
 const CAPTURE_EGRESS_INTERVAL: Duration = Duration::from_millis(20);
 const CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS: u64 = 100_000_000;
+const RECEIVE_INGRESS_DRAIN_BUDGET: Duration = Duration::from_millis(2);
 
 fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
@@ -447,11 +448,11 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
     }
 }
 
-fn enqueue_audio_out(playback: &Arc<Mutex<PlaybackRing>>, samples: &[f32]) -> usize {
+fn enqueue_audio_out(playback: &Arc<Mutex<PlaybackRing>>, samples: &[f32]) -> (usize, bool) {
     let mut playback = playback.lock().unwrap();
     let queued_pairs_before_frame = playback.len();
-    playback.push(samples);
-    queued_pairs_before_frame
+    let accepted = playback.push(samples);
+    (queued_pairs_before_frame, accepted)
 }
 
 #[derive(Debug, PartialEq)]
@@ -2471,18 +2472,19 @@ fn run_authenticated_session(
                     writer_capture_diagnostics.post_dsp.record(&f.samples);
                 }
                 let input = *writer_input.lock().unwrap();
-                input.apply_gain(&mut f.samples);
+                let detector_peak = peak(&f.samples);
                 if !writer_capture_diagnostics
                     .is_active_stream(f.capture_generation, f.capture_open_attempt)
                 {
                     writer_capture_diagnostics.note_stale_generation_frame();
                     continue;
                 }
+                noise_gate.process(&mut f.samples, input.noise_gate_threshold);
+                input.apply_gain(&mut f.samples);
                 if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.post_gain.record(&f.samples);
                 }
-                let pk = peak(&f.samples);
-                noise_gate.process(&mut f.samples, input.noise_gate_threshold);
+                let output_peak = peak(&f.samples);
                 if !capture_frame_authorized(
                     f.encoder_epoch,
                     active_encoder_epoch,
@@ -2500,8 +2502,13 @@ fn run_authenticated_session(
                         .unwrap()
                         .push(&monitor_stereo);
                 }
-                if let Some(window_peak) = level_cadence.observe(Instant::now(), pk) {
-                    writer_telemetry.publish_local(window_peak, window_peak >= input.vad_threshold);
+                if let Some((window_output_peak, window_detector_peak)) =
+                    level_cadence.observe(Instant::now(), output_peak, detector_peak)
+                {
+                    writer_telemetry.publish_local(
+                        window_output_peak,
+                        window_detector_peak >= input.vad_threshold,
+                    );
                     if dropped != last_dropped {
                         eprintln!("pc-capture: dropped {dropped} audio frames (backpressure)");
                         last_dropped = dropped;
@@ -2627,6 +2634,8 @@ fn run_authenticated_session(
             let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
             let mut last_seq: HashMap<String, u16> = HashMap::new();
             let mut encoded: HashMap<String, EncodedPacketBuffer> = HashMap::new();
+            let mut encoded_scan: Vec<String> = Vec::new();
+            let mut encoded_scan_work: Vec<String> = Vec::new();
             let mut generations: HashMap<String, u32> = HashMap::new();
             let mut mixer = Mixer::new();
             let mut peer_levels = PeerLevelCadence::new(Instant::now());
@@ -2649,6 +2658,7 @@ fn run_authenticated_session(
                     };
                     decoders.remove(&id);
                     encoded.remove(&id);
+                    encoded_scan.retain(|scheduled| scheduled != &id);
                     jitter.remove(&id);
                     last_seq.remove(&id);
                     peer_levels.remove(&id);
@@ -2660,12 +2670,14 @@ fn run_authenticated_session(
                     }
                 }
 
+                let drain_started = Instant::now();
                 let mut drained = 0;
                 while let Some(packet) = drain_rtc.recv() {
                     let peer = packet.peer_id;
                     if generations.get(&peer).copied() != Some(packet.generation) {
                         decoders.remove(&peer);
                         encoded.remove(&peer);
+                        encoded_scan.retain(|scheduled| scheduled != &peer);
                         jitter.remove(&peer);
                         last_seq.remove(&peer);
                         peer_levels.remove(&peer);
@@ -2675,26 +2687,36 @@ fn run_authenticated_session(
                     let media = drain_rtc.media_receive_counters();
                     encoded
                         .entry(peer.clone())
-                        .or_insert_with(|| EncodedPacketBuffer::new(peer, media))
+                        .or_insert_with(|| EncodedPacketBuffer::new(peer.clone(), media))
                         .insert(EncodedRtpPacket {
                             sequence: packet.sequence,
                             timestamp: packet.timestamp,
                             arrival: packet.arrival,
                             payload: packet.payload,
                         });
+                    if !encoded_scan.iter().any(|scheduled| scheduled == &peer) {
+                        encoded_scan.push(peer);
+                    }
                     drained += 1;
-                    if drained >= 256 {
+                    if drained >= 256 || drain_started.elapsed() >= RECEIVE_INGRESS_DRAIN_BUDGET {
                         break;
                     }
                 }
 
                 let now = Instant::now();
-                let peers: Vec<String> = encoded.keys().cloned().collect();
-                for peer in peers {
-                    let Some(packet) = encoded
+                std::mem::swap(&mut encoded_scan_work, &mut encoded_scan);
+                for peer in encoded_scan_work.drain(..) {
+                    let packet = encoded
                         .get_mut(&peer)
-                        .and_then(|buffer| buffer.pop_ready(now))
-                    else {
+                        .and_then(|buffer| buffer.pop_ready(now));
+                    // Settle primed/underrun state once after the final packet, then leave empty
+                    // historical peers out of the 200 Hz scan until new ingress schedules them.
+                    let keep_scanning = packet.is_some()
+                        || encoded.get(&peer).is_some_and(|buffer| !buffer.is_idle());
+                    let Some(packet) = packet else {
+                        if keep_scanning {
+                            encoded_scan.push(peer);
+                        }
                         continue;
                     };
                     drain_counters
@@ -2733,7 +2755,7 @@ fn run_authenticated_session(
                             codec,
                             last,
                             packet.sequence,
-                            packet.local_media_gap_before,
+                            packet.media_gap_before,
                             &packet.payload,
                         )
                     };
@@ -2754,7 +2776,10 @@ fn run_authenticated_session(
                     }
                     jitter.push_batch(&peer, frames, recovered_frames);
                     if advance {
-                        last_seq.insert(peer, packet.sequence);
+                        last_seq.insert(peer.clone(), packet.sequence);
+                    }
+                    if keep_scanning {
+                        encoded_scan.push(peer);
                     }
                 }
                 if let Some(levels) = peer_levels.take_due(Instant::now()) {
@@ -2797,20 +2822,17 @@ fn run_authenticated_session(
                         &drain_counters,
                         &drain_playback_supervision,
                     );
-                    // Feed the reverse stream before making these same samples available to the
-                    // output callback. The queue depth at that point is the render-to-analysis
-                    // component of WebRTC's required stream-delay value.
-                    drain_dsp.lock().unwrap().far_end(&stereo);
-                    let queued_pairs_before_frame = {
-                        let mut playback = drain_playback.lock().unwrap();
-                        let queued = playback.len();
-                        playback.push(&stereo);
-                        queued
-                    };
+                    // Publish the render block first. Only audio accepted in its entirety can be
+                    // paired with reverse AEC; queue depth is still observed on rejection.
+                    let (queued_pairs_before_frame, accepted) =
+                        enqueue_audio_out(&drain_playback, &stereo);
                     drain_aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
-                    drain_counters
-                        .playback_queued_pairs
-                        .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
+                    if accepted {
+                        drain_dsp.lock().unwrap().far_end(&stereo);
+                        drain_counters
+                            .playback_queued_pairs
+                            .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
+                    }
                 }
 
                 next_tick += frame_dur;
@@ -2874,13 +2896,16 @@ fn run_authenticated_session(
                 );
                 // Managed setup playback uses the already-versioned AUDIO_OUT frame to test the
                 // exact Cubeb output selected in Perfect Comms. Pace is controlled by managed code;
-                // this bounded ring still drops oldest samples if a broken caller floods it.
-                dsp.lock().unwrap().far_end(&frame.samples);
-                let queued_pairs_before_frame = enqueue_audio_out(&playback, &frame.samples);
+                // the bounded ring rejects a whole new block if a broken caller floods it.
+                let (queued_pairs_before_frame, accepted) =
+                    enqueue_audio_out(&playback, &frame.samples);
                 aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
-                counters
-                    .playback_queued_pairs
-                    .fetch_add((frame.samples.len() / 2) as u64, Ordering::Relaxed);
+                if accepted {
+                    dsp.lock().unwrap().far_end(&frame.samples);
+                    counters
+                        .playback_queued_pairs
+                        .fetch_add((frame.samples.len() / 2) as u64, Ordering::Relaxed);
+                }
             }
             Frame::Control(text) => {
                 let op = match parse_inbound(&text) {
@@ -3266,6 +3291,7 @@ fn run_authenticated_session(
                                         gain: p.gain,
                                         pan: p.pan,
                                         mode: p.mode,
+                                        muffled: p.muffled,
                                     },
                                 )
                             })
@@ -4099,10 +4125,13 @@ mod tests {
     fn audio_out_enqueue_preserves_samples_for_selected_output_playback() {
         let playback = Arc::new(Mutex::new(PlaybackRing::new(8)));
         let first = [0.25, -0.25, 0.5, -0.5];
-        assert_eq!(enqueue_audio_out(&playback, &first), 0);
+        assert_eq!(enqueue_audio_out(&playback, &first), (0, true));
 
         let second = [0.75, -0.75];
-        assert_eq!(enqueue_audio_out(&playback, &second), 2);
+        assert_eq!(enqueue_audio_out(&playback, &second), (2, true));
+
+        let rejected = [1.0; 12];
+        assert_eq!(enqueue_audio_out(&playback, &rejected), (3, false));
 
         let mut ring = playback.lock().unwrap();
         assert_eq!(ring.pop_stereo(), Some((0.25, -0.25)));

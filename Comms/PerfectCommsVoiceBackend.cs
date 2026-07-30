@@ -43,6 +43,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly Dictionary<int, PeerConnection> _canonicalRouteScratch = new();
     private readonly HashSet<int> _snapshotRouteClientIds = new();
     private readonly List<SidecarProtocol.GameStatePeerInput> _helperGameStatePeers = new(32);
+    private readonly List<byte> _meetingSpatialRosterScratch = new(32);
+    private readonly Dictionary<byte, float> _meetingSpatialPanByPlayerId = new(32);
     private readonly GameStateSendGate _gameStateSendGate = new();
     private readonly List<string> _staleSnapshotRoutePeerIds = new();
     private readonly Dictionary<int, DateTime> _duplicateRouteLogUtcByClient = new();
@@ -203,7 +205,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private Timer? _syntheticMicTimer;
     private string _lastMicDeviceName = string.Empty;
     private volatile float _micVolume = 1f;
-    private float _noiseGateThreshold;
+    private float _noiseGateThreshold = 0.003f;
     private float _vadThreshold = 0.004f;
     private volatile float _localLevel;
     private volatile bool _localSpeaking;
@@ -1065,7 +1067,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     public void SetNoiseGate(float noiseGateThreshold, float vadThreshold)
     {
         _noiseGateThreshold = float.IsFinite(noiseGateThreshold)
-            ? Mathf.Clamp(noiseGateThreshold, 0.0005f, 0.10f)
+            ? Mathf.Clamp(noiseGateThreshold, 0f, 0.10f)
             : 0.003f;
         _vadThreshold = float.IsFinite(vadThreshold)
             ? Mathf.Clamp(vadThreshold, 0.0005f, 0.080f)
@@ -3950,6 +3952,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             ?? VoiceVolumeMath.DefaultAliveFocusProfile;
         var deadFocusProfile = localSettings?.DeadFocusProfile
             ?? VoiceVolumeMath.DefaultDeadFocusProfile;
+        BuildMeetingSpatialPanMap(
+            snapshot,
+            localSettings?.MeetingSpatial.Value ?? MeetingSpatialMode.Low);
 
         long proxTicks = VoiceFrameProfiler.Begin();
         SnapshotPeersInto(_updatePeerScratch);
@@ -4030,7 +4035,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             if (snapshot.Phase != VoiceGamePhase.EndGame &&
                 result.Audible &&
                 localPlayer?.External.ListenerMuffled == true)
-                result = result with { FilterMode = VoiceAudioFilterMode.ListenerMuffle };
+                result = result with { Muffled = true };
+            result = ApplyMeetingSpatialPan(result, target, snapshot.Phase);
             peer.Apply(result);
             if (helperGameStatePeers != null && peer.ClientId >= 0)
             {
@@ -4042,7 +4048,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 float gain = VoiceVolumeMath.ResolvePeerGain(result, peer.ClientVolume, groupVolume);
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
                     peer.ClientIdText,
-                    gain, result.Pan, (int)result.FilterMode));
+                    gain, result.Pan, (int)result.FilterMode, result.Muffled));
             }
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
 
@@ -4061,6 +4067,64 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
 
         MaybeLogStats(snapshot, "ok");
+    }
+
+    private void BuildMeetingSpatialPanMap(
+        VoiceGameStateSnapshot snapshot,
+        MeetingSpatialMode mode)
+    {
+        _meetingSpatialRosterScratch.Clear();
+        _meetingSpatialPanByPlayerId.Clear();
+
+        float width = mode switch
+        {
+            MeetingSpatialMode.Low => 0.45f,
+            MeetingSpatialMode.Full => 1f,
+            _ => 0f,
+        };
+        if (width <= 0f)
+            return;
+
+        var players = snapshot.Players;
+        for (var i = 0; i < players.Count; i++)
+        {
+            var player = players[i];
+            if (!VoiceProximityCalculator.IsUnavailableTarget(player))
+                _meetingSpatialRosterScratch.Add(player.PlayerId);
+        }
+
+        _meetingSpatialRosterScratch.Sort();
+        int count = _meetingSpatialRosterScratch.Count;
+        for (var i = 0; i < count; i++)
+        {
+            float pan = count <= 1
+                ? 0f
+                : -width + 2f * width * i / (count - 1);
+            _meetingSpatialPanByPlayerId[_meetingSpatialRosterScratch[i]] = pan;
+        }
+    }
+
+    private VoiceProximityResult ApplyMeetingSpatialPan(
+        VoiceProximityResult result,
+        VoicePlayerSnapshot? target,
+        VoiceGamePhase phase)
+    {
+        if (!result.Audible ||
+            result.FilterMode != VoiceAudioFilterMode.None ||
+            result.NormalVolume <= 0f ||
+            !target.HasValue)
+            return result;
+
+        bool naturalGlobal = phase == VoiceGamePhase.EndGame ||
+            (VoiceSceneState.IsMeetingVoicePhase(phase) &&
+             result.Reason is VoiceProximityReason.MeetingLiving
+                 or VoiceProximityReason.LocalDeadHearsLiving
+                 or VoiceProximityReason.LocalDeadHearsGhost);
+        if (!naturalGlobal ||
+            !_meetingSpatialPanByPlayerId.TryGetValue(target.Value.PlayerId, out float pan))
+            return result;
+
+        return result with { Pan = pan };
     }
 
     private void SendNativeGameStateIfDue(
