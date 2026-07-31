@@ -343,6 +343,11 @@ internal static class VoiceProximityCalculator
                 return VoiceProximityResult.Muted(VoiceProximityReason.VentMuted, previousWallCoefficient);
         }
 
+        // Ghosts retain the normal sight-limited hearing radius, but walls and closed doors do not occlude it.
+        // Normalize the persisted coefficient too, including camera/virtual candidates that may win below.
+        bool applyCollisionOcclusion = !localDead;
+        float spatialRouteWallCoefficient = applyCollisionOcclusion ? previousWallCoefficient : 1f;
+
         float maxDistance = s.MaxChatDistance;
         bool listenerSightObscured = localPlayer?.External.ListenerSightObscured == true;
         if (s.OnlyHearInSight)
@@ -355,7 +360,8 @@ internal static class VoiceProximityCalculator
         bool sightBlocked = false;
         if (s.OnlyHearInSight)
         {
-            bool inSight = VoiceAudioOcclusion.Inspect(localListenerPos, targetPos).InSight;
+            bool inSight = !applyCollisionOcclusion ||
+                           VoiceAudioOcclusion.Inspect(localListenerPos, targetPos).InSight;
             if (!inSight || dist > maxDistance)
             {
                 volume = 0f;
@@ -363,9 +369,9 @@ internal static class VoiceProximityCalculator
             }
         }
 
-        float wallCoefficient = previousWallCoefficient;
+        float wallCoefficient = spatialRouteWallCoefficient;
         VoiceAudioFilterMode filterMode = VoiceAudioFilterMode.None;
-        if (volume > 0f && s.WallsBlockSound)
+        if (volume > 0f && applyCollisionOcclusion && s.WallsBlockSound)
         {
             var occlusion = VoiceAudioOcclusion.Evaluate(
                 localListenerPos,
@@ -374,11 +380,11 @@ internal static class VoiceProximityCalculator
 
             if (occlusion.TargetVolumeMultiplier <= 0f && occlusion.IsOccluded)
             {
-                var hardOcclusionVirtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, previousWallCoefficient);
+                var hardOcclusionVirtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, spatialRouteWallCoefficient);
                 if (hardOcclusionVirtualRoute.Audible)
                     return hardOcclusionVirtualRoute;
                 if (hasCameraProxy)
-                    return CalculateCameraProxy(targetPos, cameraPosition, s, previousWallCoefficient);
+                    return CalculateCameraProxy(targetPos, cameraPosition, s, spatialRouteWallCoefficient);
                 // Smooth hard occlusion toward silence instead of an instant cut at every wall edge.
                 wallCoefficient += (0f - wallCoefficient) * Math.Clamp(Time.deltaTime * 8f, 0f, 1f);
                 if (wallCoefficient < 0.02f)
@@ -400,7 +406,7 @@ internal static class VoiceProximityCalculator
         float finalVolume = volume * wallCoefficient;
         if (finalVolume < LowVolumeFloor)
             finalVolume = 0f;
-        var virtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, previousWallCoefficient);
+        var virtualRoute = CalculateVirtualRoute(target, targetPos, speakers, virtualMics, spatialRouteWallCoefficient);
         VoiceProximityReason proximityReason = sightBlocked
             ? VoiceProximityReason.SightBlocked
             : (localDead ? VoiceProximityReason.LocalDeadHearsLiving : VoiceProximityReason.Proximity);
@@ -409,8 +415,8 @@ internal static class VoiceProximityCalculator
             proximityReason,
             wallCoefficient);
         var cameraRoute = hasCameraProxy
-            ? CalculateCameraProxy(targetPos, cameraPosition, s, previousWallCoefficient)
-            : VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
+            ? CalculateCameraProxy(targetPos, cameraPosition, s, spatialRouteWallCoefficient)
+            : VoiceProximityResult.Muted(VoiceProximityReason.NoListener, spatialRouteWallCoefficient);
 
         return SelectBestNormalRoute(proximityRoute, virtualRoute, cameraRoute);
     }
@@ -745,7 +751,7 @@ internal static class VoiceProximityCalculator
         VoiceRoomSettingsSnapshot s,
         float wallCoefficient)
     {
-        // Ghosts hear each other at any distance when enabled: full volume, no falloff (walls still apply).
+        // Ghosts hear each other at any distance when enabled: full volume, no falloff or world occlusion.
         if (s.GhostsHearEachOtherUnlimited)
         {
             float fullPan = VoiceChatRoom.GetPan(listenerPos.x, targetPos.x);

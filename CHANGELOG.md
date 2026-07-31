@@ -33,6 +33,9 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 - **Muffled and fading voices sound more intentional.**
   > <sub>Listener muffle is now independent from Radio, Ghost, Wall, or natural voice processing, so it no longer replaces the selected route or adds wall reverb. Soft Fade reduces volume without unnecessarily changing the speaker's tone.</sub>
 
+- **Ghosts hear nearby living players through walls.**
+  > <sub>Dead listeners keep the same configured task-phase hearing radius, including vision-radius limits and falloff, while ignoring vision linecasts, wall obstruction, and closed-door occlusion. Living players keep the host's existing sight and wall rules.</sub>
+
 ### Fixed Voice Lobby Browser
 
 - **The public Voice Lobby browser works again.**

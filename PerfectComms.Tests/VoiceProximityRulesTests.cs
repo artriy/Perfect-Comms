@@ -141,6 +141,72 @@ public sealed class VoiceProximityRulesTests : IDisposable
     }
 
     [Fact]
+    public void DeadListenersKeepVisionHearingRadiusWithoutWorldOcclusion()
+    {
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            MaxChatDistance = 10f,
+            FalloffMode = (int)VoiceFalloffMode.Linear,
+            OcclusionMode = (int)VoiceOcclusionMode.HardBlock,
+            WallsBlockSound = true,
+            OnlyHearInSight = true,
+        });
+        var ghost = Player(0, 0f, isLocal: true, isDead: true);
+        var insideVisionRadius = Player(1, 0f) with { Position = Vector(3f, 4f) };
+        var outsideVisionRadius = Player(2, 0f) with { Position = Vector(0f, 7f) };
+
+        var heard = Task(
+            ghost,
+            insideVisionRadius,
+            localLightRadius: 6f,
+            previousWallCoefficient: 0.25f);
+
+        Assert.True(heard.Audible);
+        Assert.Equal(VoiceProximityReason.LocalDeadHearsLiving, heard.Reason);
+        Assert.InRange(heard.NormalVolume, 0.1666f, 0.1667f);
+        Assert.Equal(0f, heard.GhostVolume);
+        Assert.Equal(VoiceAudioFilterMode.None, heard.FilterMode);
+        Assert.Equal(1f, heard.WallCoefficient);
+
+        var beyondVisionRadius = Task(
+            ghost,
+            outsideVisionRadius,
+            localLightRadius: 6f,
+            previousWallCoefficient: 0.25f);
+
+        Assert.False(beyondVisionRadius.Audible);
+        Assert.Equal(VoiceProximityReason.SightBlocked, beyondVisionRadius.Reason);
+        Assert.Equal(0f, beyondVisionRadius.NormalVolume);
+        Assert.Equal(1f, beyondVisionRadius.WallCoefficient);
+    }
+
+    [Fact]
+    public void DeadListenerWorldOcclusionBypassPreservesTaskGates()
+    {
+        var ghost = Player(0, 0f, isLocal: true, isDead: true);
+        var living = Player(1, 1f);
+        var ventedLiving = Player(2, 1f, inVent: true);
+
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            OnlyGhostsCanTalk = true,
+            OcclusionMode = (int)VoiceOcclusionMode.HardBlock,
+            WallsBlockSound = true,
+            OnlyHearInSight = true,
+        });
+        Assert.Equal(VoiceProximityReason.OnlyGhostsCanTalk, Task(ghost, living).Reason);
+
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            VentPrivateChat = true,
+            OcclusionMode = (int)VoiceOcclusionMode.HardBlock,
+            WallsBlockSound = true,
+            OnlyHearInSight = true,
+        });
+        Assert.Equal(VoiceProximityReason.VentPrivateMuted, Task(ghost, ventedLiving).Reason);
+    }
+
+    [Fact]
     public void CommsAndVentRulesAreAppliedBeforeProximity()
     {
         var local = Player(0, 0f, isLocal: true);
@@ -180,12 +246,14 @@ public sealed class VoiceProximityRulesTests : IDisposable
         VoicePlayerSnapshot target,
         bool targetRadioActive = false,
         bool localInVent = false,
-        bool commsSabActive = false)
+        bool commsSabActive = false,
+        float localLightRadius = -1f,
+        float previousWallCoefficient = 1f)
         => VoiceProximityCalculator.CalculateTaskPhase(
             local,
             target,
             local.Position,
-            -1f,
+            localLightRadius,
             0,
             false,
             -1,
@@ -195,7 +263,7 @@ public sealed class VoiceProximityRulesTests : IDisposable
             localInVent,
             targetRadioActive,
             commsSabActive,
-            1f);
+            previousWallCoefficient);
 
     private static void AssertMutedUnavailable(VoiceProximityResult result)
     {
