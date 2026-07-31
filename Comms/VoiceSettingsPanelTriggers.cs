@@ -21,8 +21,6 @@ public static class VoiceSettingsPanelTriggers
     {
         VoiceUiKit.Tick();
 
-        if (!Application.isFocused || VoiceUiKit.RebindRow.ShouldSuppressKeybinds) return;
-
         bool chatOpen = false;
         if (HudManager.InstanceExists)
         {
@@ -34,20 +32,67 @@ public static class VoiceSettingsPanelTriggers
             return;
         }
 
-        if (VoiceChatPatches.ShouldBlockKeybindsForChat(chatOpen)) return;
+        bool allowAllWhileChatOpen =
+            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true;
 
-        if (VoiceChatKeybinds.OpenVoiceMenu.WasPressedThisFrame() &&
-            _lastClientFrame != Time.frameCount)
+        var clientBinding = VoiceChatKeybinds.OpenVoiceMenu;
+        if (ShouldBlockPanelBinding(
+                clientBinding, VoiceSettingsPanel.IsOpen,
+                chatOpen, allowAllWhileChatOpen))
+        {
+            clientBinding.SuppressUntilReleased();
+        }
+        else if (clientBinding.WasPressedThisFrame() &&
+                 _lastClientFrame != Time.frameCount)
         {
             _lastClientFrame = Time.frameCount;
+            bool modalWasOpen = VoiceUiKit.AnyPanelOpen;
             VoiceSettingsPanel.Toggle();
+            if (modalWasOpen || VoiceUiKit.AnyPanelOpen)
+                SuppressOtherBindingsAcrossPanelBoundary(clientBinding);
         }
 
-        if (VoiceChatKeybinds.OpenHostVoiceSettings.WasPressedThisFrame() &&
-            _lastHostFrame != Time.frameCount)
+        var hostBinding = VoiceChatKeybinds.OpenHostVoiceSettings;
+        if (ShouldBlockPanelBinding(
+                hostBinding, HostSettingsPanel.IsOpen,
+                chatOpen, allowAllWhileChatOpen))
+        {
+            hostBinding.SuppressUntilReleased();
+        }
+        else if (hostBinding.WasPressedThisFrame() &&
+                 _lastHostFrame != Time.frameCount)
         {
             _lastHostFrame = Time.frameCount;
+            bool modalWasOpen = VoiceUiKit.AnyPanelOpen;
             HostSettingsPanel.Toggle();
+            if (modalWasOpen || VoiceUiKit.AnyPanelOpen)
+                SuppressOtherBindingsAcrossPanelBoundary(hostBinding);
+        }
+    }
+
+    private static bool ShouldBlockPanelBinding(
+        VoiceKeybind binding,
+        bool ownPanelOpen,
+        bool chatOpen,
+        bool allowAllWhileChatOpen)
+    {
+        bool hardBlocked = VoiceChatPatches.ShouldHardSuppressVoiceInput(
+            Application.isFocused,
+            VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
+            VoiceUiKit.AnyPanelOpen && !ownPanelOpen,
+            Minigame.Instance != null,
+            VoiceChatPatches.IsFriendsListOpen());
+        return hardBlocked || VoiceChatPatches.ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
+    }
+
+    private static void SuppressOtherBindingsAcrossPanelBoundary(VoiceKeybind allowedCloser)
+    {
+        VoiceChatPatches.ReleaseHeldTransmitInputs();
+        foreach (var binding in VoiceChatKeybinds.AllBindings)
+        {
+            if (binding != allowedCloser)
+                binding.SuppressUntilReleased();
         }
     }
 

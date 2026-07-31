@@ -18,6 +18,7 @@ public sealed class VoiceKeybind
     private readonly ConfigEntry<KeyCode> _entry;
     private readonly ConfigEntry<KeyCode> _modifier;
     private readonly ConfigEntry<VoiceModifierMatch> _modifierMatch;
+    private readonly ConfigEntry<bool> _allowWhileChatOpen;
     private readonly List<Action> _callbacks = new();
     private bool _standaloneModifierPending;
     private bool _standaloneModifierChorded;
@@ -25,6 +26,9 @@ public sealed class VoiceKeybind
     private int _standaloneModifierEvaluatedFrame = -1;
     private bool _standaloneModifierHeldThisFrame;
     private bool _standaloneModifierPressedThisFrame;
+    private KeyCode _suppressedPrimary = KeyCode.None;
+    private KeyCode _suppressedModifierLeft = KeyCode.None;
+    private KeyCode _suppressedModifierRight = KeyCode.None;
 
     public string DisplayName { get; }
     public string HelpText { get; }
@@ -32,6 +36,7 @@ public sealed class VoiceKeybind
     public KeyCode CurrentKey => _entry.Value;
     public KeyCode Modifier => _modifier.Value;
     public VoiceModifierMatch ModifierMatch => _modifierMatch.Value;
+    public bool AllowWhileChatOpen => _allowWhileChatOpen.Value;
 
     public VoiceKeybind(
         ConfigFile config,
@@ -131,9 +136,17 @@ public sealed class VoiceKeybind
             ? defaultModifierMatch
             : LegacyModifierMatch(_modifier.Value);
         _modifierMatch = config.Bind(section, persistedKey + " Modifier Match", matchDefault);
+        _allowWhileChatOpen = config.Bind(
+            section,
+            persistedKey + " Allow While Chat Open",
+            IsRecommendedChatAllowedPrimary(_entry.Value));
     }
 
-    public void Set(KeyCode key) => _entry.Value = key;
+    public void Set(KeyCode key)
+    {
+        _entry.Value = key;
+        _allowWhileChatOpen.Value = IsRecommendedChatAllowedPrimary(key);
+    }
     public void SetModifier(KeyCode mod) => SetModifier(mod, LegacyModifierMatch(mod));
 
     public void SetModifier(KeyCode mod, VoiceModifierMatch match)
@@ -142,11 +155,15 @@ public sealed class VoiceKeybind
         _modifierMatch.Value = mod == KeyCode.None ? VoiceModifierMatch.Exact : match;
     }
 
+    public void SetAllowWhileChatOpen(bool allow)
+        => _allowWhileChatOpen.Value = allow;
+
     public void SetBinding(KeyCode key, KeyCode modifier, VoiceModifierMatch match)
     {
         _entry.Value = key;
         _modifier.Value = modifier;
         _modifierMatch.Value = modifier == KeyCode.None ? VoiceModifierMatch.Exact : match;
+        _allowWhileChatOpen.Value = IsRecommendedChatAllowedPrimary(key);
     }
 
     public void Clear()
@@ -154,6 +171,7 @@ public sealed class VoiceKeybind
         _entry.Value = KeyCode.None;
         _modifier.Value = KeyCode.None;
         _modifierMatch.Value = VoiceModifierMatch.Exact;
+        _allowWhileChatOpen.Value = false;
     }
 
     private bool ModifierHeld()
@@ -226,6 +244,10 @@ public sealed class VoiceKeybind
                 ? VoiceModifierMatch.EitherSide
                 : VoiceModifierMatch.Exact;
 
+    private static bool IsRecommendedChatAllowedPrimary(KeyCode key)
+        => key is KeyCode.RightAlt or KeyCode.RightControl
+            or KeyCode.Mouse3 or KeyCode.Mouse4 or KeyCode.Mouse5 or KeyCode.Mouse6;
+
     internal static bool ModifierMatchesKey(
         KeyCode configuredModifier,
         VoiceModifierMatch match,
@@ -290,7 +312,7 @@ public sealed class VoiceKeybind
     internal bool IsPrimaryHeldRaw()
         => Value != KeyCode.None && Input.GetKey(Value);
 
-    private void EvaluateConflictingStandaloneModifier()
+    private void EvaluateStandaloneModifier()
     {
         if (_standaloneModifierEvaluatedFrame == Time.frameCount) return;
         _standaloneModifierEvaluatedFrame = Time.frameCount;
@@ -308,7 +330,8 @@ public sealed class VoiceKeybind
         }
 
         if (_standaloneModifierPending
-            && VoiceChatKeybinds.HasActiveChordUsingModifier(Value, this))
+            && (WasOtherKeyboardOrMousePressed()
+                || VoiceChatKeybinds.HasActiveChordUsingModifier(Value, this)))
             _standaloneModifierChorded = true;
 
         _standaloneModifierHeldThisFrame = _standaloneModifierPending
@@ -332,13 +355,87 @@ public sealed class VoiceKeybind
         }
     }
 
+    private bool WasOtherKeyboardOrMousePressed()
+    {
+        foreach (var key in KeyboardAndMouseCandidates)
+        {
+            if (key != Value && Input.GetKeyDown(key)) return true;
+        }
+
+        return false;
+    }
+
+    public void SuppressUntilReleased()
+    {
+        ResetStandaloneModifierState();
+        CaptureHeldKey(Value, ref _suppressedPrimary);
+
+        var modifier = _modifier.Value;
+        if (_modifierMatch.Value == VoiceModifierMatch.EitherSide
+            && TryGetModifierPair(modifier, out var left, out var right))
+        {
+            CaptureHeldKey(left, ref _suppressedModifierLeft);
+            CaptureHeldKey(right, ref _suppressedModifierRight);
+        }
+        else
+        {
+            CaptureHeldKey(modifier, ref _suppressedModifierLeft);
+        }
+    }
+
+    private static void CaptureHeldKey(KeyCode key, ref KeyCode suppressedKey)
+    {
+        if (key != KeyCode.None && Input.GetKey(key))
+            suppressedKey = key;
+    }
+
+    private bool IsSuppressedUntilReleased()
+    {
+        if (IsHeldRaw(_suppressedPrimary)
+            || IsHeldRaw(_suppressedModifierLeft)
+            || IsHeldRaw(_suppressedModifierRight))
+            return true;
+
+        _suppressedPrimary = KeyCode.None;
+        _suppressedModifierLeft = KeyCode.None;
+        _suppressedModifierRight = KeyCode.None;
+        return false;
+    }
+
+    private static bool IsHeldRaw(KeyCode key)
+        => key != KeyCode.None && Input.GetKey(key);
+
+    private void ResetStandaloneModifierState()
+    {
+        _standaloneModifierPending = false;
+        _standaloneModifierChorded = false;
+        _standaloneModifierHeldThisFrame = false;
+        _standaloneModifierPressedThisFrame = false;
+        _standaloneModifierEvaluatedFrame = -1;
+    }
+
+    private static readonly KeyCode[] KeyboardAndMouseCandidates = BuildKeyboardAndMouseCandidates();
+
+    private static KeyCode[] BuildKeyboardAndMouseCandidates()
+    {
+        var candidates = new List<KeyCode>();
+        foreach (var value in Enum.GetValues(typeof(KeyCode)))
+        {
+            var key = (KeyCode)value;
+            var keyValue = (int)key;
+            if (keyValue > (int)KeyCode.None && keyValue <= (int)KeyCode.Mouse6)
+                candidates.Add(key);
+        }
+
+        return candidates.ToArray();
+    }
+
     public bool IsHeld()
     {
-        if (Value == KeyCode.None) return false;
-        if (_modifier.Value == KeyCode.None && IsModifierKey(Value)
-            && VoiceChatKeybinds.HasConfiguredChordUsingModifier(Value, this))
+        if (Value == KeyCode.None || IsSuppressedUntilReleased()) return false;
+        if (_modifier.Value == KeyCode.None && IsModifierKey(Value))
         {
-            EvaluateConflictingStandaloneModifier();
+            EvaluateStandaloneModifier();
             return _standaloneModifierHeldThisFrame;
         }
 
@@ -351,11 +448,10 @@ public sealed class VoiceKeybind
 
     public bool WasPressedThisFrame()
     {
-        if (Value == KeyCode.None) return false;
-        if (_modifier.Value == KeyCode.None && IsModifierKey(Value)
-            && VoiceChatKeybinds.HasConfiguredChordUsingModifier(Value, this))
+        if (Value == KeyCode.None || IsSuppressedUntilReleased()) return false;
+        if (_modifier.Value == KeyCode.None && IsModifierKey(Value))
         {
-            EvaluateConflictingStandaloneModifier();
+            EvaluateStandaloneModifier();
             return _standaloneModifierPressedThisFrame;
         }
 

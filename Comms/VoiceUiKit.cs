@@ -1124,6 +1124,7 @@ internal static class VoiceUiKit
         public override void OnMouseDown()
         {
             if (!_enabled() || !PointerWithinClip || !Contains(_buttonRt)) return;
+            RebindRow.CancelCaptureForExternalPointer();
             _onClick();
         }
 
@@ -1259,7 +1260,11 @@ internal static class VoiceUiKit
 
         public override void OnMouseDown()
         {
-            if (Contains(Root) && !HelpHovered) _set(!_get());
+            if (Contains(Root) && !HelpHovered)
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _set(!_get());
+            }
         }
 
         public override void Tick(float dt)
@@ -1435,7 +1440,12 @@ internal static class VoiceUiKit
 
         public override void OnMouseDown()
         {
-            if (Contains(_hitBand) || Contains(_knob)) { _dragging = true; ApplyFromMouse(); }
+            if (Contains(_hitBand) || Contains(_knob))
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _dragging = true;
+                ApplyFromMouse();
+            }
         }
 
         public override void OnMouseDrag()
@@ -1607,8 +1617,18 @@ internal static class VoiceUiKit
             int n = _count();
             if (n <= 0) return;
             int cur = Mathf.Clamp(_getIndex(), 0, n - 1);
-            if (Contains(_left.GetComponent<RectTransform>())) { _setIndex((cur - 1 + n) % n); Refresh(); }
-            else if (Contains(_right.GetComponent<RectTransform>())) { _setIndex((cur + 1) % n); Refresh(); }
+            if (Contains(_left.GetComponent<RectTransform>()))
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _setIndex((cur - 1 + n) % n);
+                Refresh();
+            }
+            else if (Contains(_right.GetComponent<RectTransform>()))
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _setIndex((cur + 1) % n);
+                Refresh();
+            }
         }
 
         public override void Tick(float dt)
@@ -1645,11 +1665,20 @@ internal static class VoiceUiKit
         private readonly Func<VoiceModifierMatch>? _getModMatch;
         private readonly Action? _configure;
         private readonly Func<bool>? _configureActive;
+        private readonly Func<bool>? _getAllowWhileChatOpen;
+        private readonly Action<bool>? _setAllowWhileChatOpen;
+        private readonly bool _showAllowWhileChatOpen;
         private Image _btn = null!;
         private RectTransform _btnRt = null!;
         private TextMeshProUGUI _label = null!;
         private RectTransform? _settingsRt;
         private Image? _settingsBtn;
+        private RectTransform? _chatCheckRt;
+        private Image? _chatCheckButton;
+        private Image? _chatCheckGlow;
+        private Image? _chatCheckBox;
+        private Image? _chatCheckShort;
+        private Image? _chatCheckLong;
         private RectTransform _capRow = null!;
         private Image _clearBtn = null!;
         private Image _cancelBtn = null!;
@@ -1668,6 +1697,10 @@ internal static class VoiceUiKit
         private const float CapBtnW = 150f;
         private const float SettingsW = 40f;
         private const float SettingsGap = 10f;
+        private const float ChatCheckW = 40f;
+        private const string ChatCheckTooltipTitle = "Use While Chat Is Open";
+        private const string ChatCheckTooltip =
+            "Works only while Among Us chat is open. It does not bypass tasks/minigames, the Friends List, or modals.";
 
         public RebindRow(
             Func<KeyCode> get,
@@ -1676,7 +1709,10 @@ internal static class VoiceUiKit
             Func<KeyCode>? getMod = null,
             Func<VoiceModifierMatch>? getModMatch = null,
             Action? configure = null,
-            Func<bool>? configureActive = null)
+            Func<bool>? configureActive = null,
+            Func<bool>? getAllowWhileChatOpen = null,
+            Action<bool>? setAllowWhileChatOpen = null,
+            bool showAllowWhileChatOpen = false)
         {
             _get = get;
             _set = set;
@@ -1685,11 +1721,17 @@ internal static class VoiceUiKit
             _getModMatch = getModMatch;
             _configure = configure;
             _configureActive = configureActive;
+            _getAllowWhileChatOpen = getAllowWhileChatOpen;
+            _setAllowWhileChatOpen = setAllowWhileChatOpen;
+            _showAllowWhileChatOpen = showAllowWhileChatOpen
+                && getAllowWhileChatOpen != null
+                && setAllowWhileChatOpen != null;
         }
 
         protected override float LabelColW => Mathf.Round(
             PaneW - EdgePad * 2f - ColGap - NormalBtnW
-            - (_configure == null ? 0f : SettingsW + SettingsGap));
+            - (_configure == null ? 0f : SettingsW + SettingsGap)
+            - (_showAllowWhileChatOpen ? ChatCheckW + SettingsGap : 0f));
 
         public static bool IsCapturing => _active != null;
         public static bool ShouldSuppressKeybinds
@@ -1731,6 +1773,7 @@ internal static class VoiceUiKit
 
             _normalLeft = (PaneW - EdgePad) - NormalBtnW;
             _capLeft = (PaneW - EdgePad) - (CapBtnW + ColGap + CapW);
+            float auxiliaryRight = _normalLeft - SettingsGap;
             _btnRt = Rect("Bind", Root);
             _btnRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             _btnRt.sizeDelta = new Vector2(NormalBtnW, 40f);
@@ -1746,13 +1789,39 @@ internal static class VoiceUiKit
             _label.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _label.rectTransform.offsetMin = new Vector2(10f, 0f);
             _label.rectTransform.offsetMax = new Vector2(-10f, 0f);
+            if (_showAllowWhileChatOpen)
+            {
+                _chatCheckRt = Rect("AllowWhileChatOpen", Root);
+                _chatCheckRt.Anchor(
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f));
+                _chatCheckRt.sizeDelta = new Vector2(ChatCheckW, ChatCheckW);
+                _chatCheckRt.anchoredPosition =
+                    new Vector2(auxiliaryRight - ChatCheckW, 0f);
+                _chatCheckButton = _chatCheckRt.gameObject.AddComponent<Image>();
+                _chatCheckButton.sprite = Rounded();
+                _chatCheckButton.type = Image.Type.Sliced;
+                _chatCheckButton.color = ControlBg;
+                _chatCheckButton.raycastTarget = false;
+                BuildChatCheckmark(_chatCheckRt);
+                if (_getAllowWhileChatOpen?.Invoke() == true)
+                {
+                    _chatCheckButton.color = AccentFaint;
+                    _chatCheckGlow!.color = AccentGlow;
+                    _chatCheckBox!.color = Accent;
+                    _chatCheckShort!.color = PanelInner;
+                    _chatCheckLong!.color = PanelInner;
+                }
+                auxiliaryRight -= ChatCheckW + SettingsGap;
+            }
 
             if (_configure != null)
             {
                 _settingsRt = Rect("Configure", Root);
                 _settingsRt.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
                 _settingsRt.sizeDelta = new Vector2(SettingsW, SettingsW);
-                _settingsRt.anchoredPosition = new Vector2(_normalLeft - SettingsGap - SettingsW, 0f);
+                _settingsRt.anchoredPosition = new Vector2(auxiliaryRight - SettingsW, 0f);
                 _settingsBtn = _settingsRt.gameObject.AddComponent<Image>();
                 _settingsBtn.sprite = Rounded();
                 _settingsBtn.type = Image.Type.Sliced;
@@ -1783,6 +1852,7 @@ internal static class VoiceUiKit
                 _btnRt.sizeDelta = new Vector2(CapBtnW, 40f);
                 _capRow.gameObject.SetActive(true);
                 if (_settingsRt != null) _settingsRt.gameObject.SetActive(false);
+                if (_chatCheckRt != null) _chatCheckRt.gameObject.SetActive(false);
                 if (Title != null) Title.gameObject.SetActive(false);
             }
             else
@@ -1791,6 +1861,7 @@ internal static class VoiceUiKit
                 _btnRt.sizeDelta = new Vector2(NormalBtnW, 40f);
                 _capRow.gameObject.SetActive(false);
                 if (_settingsRt != null) _settingsRt.gameObject.SetActive(true);
+                if (_chatCheckRt != null) _chatCheckRt.gameObject.SetActive(true);
                 if (Title != null) Title.gameObject.SetActive(true);
             }
         }
@@ -1821,6 +1892,47 @@ internal static class VoiceUiKit
                 knobImg.color = TextBright;
                 knobImg.raycastTarget = false;
             }
+        }
+
+        private void BuildChatCheckmark(RectTransform parent)
+        {
+            _chatCheckGlow = GlowImage("ChatCheckGlow", parent, Clear);
+            _chatCheckGlow.rectTransform.Anchor(
+                Vector2.zero,
+                Vector2.one,
+                new Vector2(0.5f, 0.5f));
+            _chatCheckGlow.rectTransform.offsetMin = new Vector2(-8f, -8f);
+            _chatCheckGlow.rectTransform.offsetMax = new Vector2(8f, 8f);
+
+            var boxRt = Rect("Checkbox", parent);
+            boxRt.Anchor(
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f));
+            boxRt.sizeDelta = new Vector2(20f, 20f);
+            _chatCheckBox = boxRt.gameObject.AddComponent<Image>();
+            _chatCheckBox.sprite = Rounded(true);
+            _chatCheckBox.type = Image.Type.Sliced;
+            _chatCheckBox.color = ToggleOffTrack;
+            _chatCheckBox.raycastTarget = false;
+
+            _chatCheckShort = Panel("CheckShort", boxRt, Clear, true, true);
+            _chatCheckShort.rectTransform.Anchor(
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f));
+            _chatCheckShort.rectTransform.sizeDelta = new Vector2(8f, 3f);
+            _chatCheckShort.rectTransform.anchoredPosition = new Vector2(-3f, -1f);
+            _chatCheckShort.rectTransform.localRotation = Quaternion.Euler(0f, 0f, -43f);
+
+            _chatCheckLong = Panel("CheckLong", boxRt, Clear, true, true);
+            _chatCheckLong.rectTransform.Anchor(
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f));
+            _chatCheckLong.rectTransform.sizeDelta = new Vector2(13f, 3f);
+            _chatCheckLong.rectTransform.anchoredPosition = new Vector2(3f, -2f);
+            _chatCheckLong.rectTransform.localRotation = Quaternion.Euler(0f, 0f, 46f);
         }
 
         private static Image CapButton(RectTransform parent, string text, Vector2 aMin, Vector2 aMax, Vector2 pos, Color32 col)
@@ -1878,15 +1990,26 @@ internal static class VoiceUiKit
         public override void OnMouseDown()
         {
             if (_capturing) return;
-            if (_configure != null && _settingsRt != null && Contains(_settingsRt))
+            if (_chatCheckRt != null
+                && _chatCheckRt.gameObject.activeInHierarchy
+                && PointerWithinClip
+                && Contains(_chatCheckRt))
             {
-                if (_active != null) _active.EndCapture();
+                CancelCaptureForExternalPointer();
+                bool allowed = _getAllowWhileChatOpen?.Invoke() == true;
+                _setAllowWhileChatOpen?.Invoke(!allowed);
+                return;
+            }
+            if (_configure != null && _settingsRt != null
+                && PointerWithinClip && Contains(_settingsRt))
+            {
+                CancelCaptureForExternalPointer();
                 _configure();
                 return;
             }
-            if (Contains(_btnRt))
+            if (PointerWithinClip && Contains(_btnRt))
             {
-                if (_active != null && _active != this) _active.EndCapture();
+                CancelCaptureForExternalPointer();
                 _capturing = true;
                 _armed = false;
                 _pendingModifier = KeyCode.None;
@@ -1899,11 +2022,17 @@ internal static class VoiceUiKit
         public override void Tick(float dt)
         {
             TickHover();
-            _btn.color = Lerp(_btn.color,
-                _capturing ? AccentFaint : (Contains(_btnRt) ? ControlHover : ControlBg), 0.25f);
+            bool bindingOver = !_capturing && PointerWithinClip && Contains(_btnRt);
+            _btn.color = Lerp(
+                _btn.color,
+                _capturing ? AccentFaint : (bindingOver ? ControlHover : ControlBg),
+                0.25f);
+            TickChatCheck();
             if (_settingsBtn != null && _settingsRt != null)
             {
-                bool settingsOver = Contains(_settingsRt);
+                bool settingsOver = !_capturing
+                    && PointerWithinClip
+                    && Contains(_settingsRt);
                 bool settingsPressed = settingsOver && Input.GetMouseButton(0);
                 bool settingsActive = _configureActive?.Invoke() == true;
                 _settingsBtn.color = Lerp(
@@ -1967,6 +2096,45 @@ internal static class VoiceUiKit
             {
                 Commit(_pendingModifier, KeyCode.None);
             }
+        }
+
+        private void TickChatCheck()
+        {
+            if (_chatCheckRt == null
+                || _chatCheckButton == null
+                || _chatCheckGlow == null
+                || _chatCheckBox == null
+                || _chatCheckShort == null
+                || _chatCheckLong == null
+                || !_chatCheckRt.gameObject.activeInHierarchy)
+                return;
+
+            bool allowed = _getAllowWhileChatOpen?.Invoke() == true;
+            bool over = !_capturing && PointerWithinClip && Contains(_chatCheckRt);
+            bool pressed = over && Input.GetMouseButton(0);
+            Color buttonTarget = allowed
+                ? (over ? AccentSoft : AccentFaint)
+                : (over ? ControlHover : ControlBg);
+
+            _chatCheckButton.color = Lerp(_chatCheckButton.color, buttonTarget, 0.25f);
+            _chatCheckGlow.color = Lerp(
+                _chatCheckGlow.color,
+                allowed || over ? AccentGlow : Clear,
+                0.25f);
+            _chatCheckBox.color = Lerp(
+                _chatCheckBox.color,
+                allowed ? Accent : ToggleOffTrack,
+                0.25f);
+            Color checkColor = allowed ? PanelInner : Clear;
+            _chatCheckShort.color = Lerp(_chatCheckShort.color, checkColor, 0.25f);
+            _chatCheckLong.color = Lerp(_chatCheckLong.color, checkColor, 0.25f);
+
+            float targetScale = pressed ? 0.9f : 1f;
+            float scale = Mathf.Lerp(_chatCheckRt.localScale.x, targetScale, 0.35f);
+            _chatCheckRt.localScale = new Vector3(scale, scale, 1f);
+
+            if (over)
+                RequestTooltip(ChatCheckTooltipTitle, ChatCheckTooltip);
         }
 
         private void Commit(KeyCode key, KeyCode modifier)
@@ -2374,8 +2542,20 @@ internal static class VoiceUiKit
 
         public override void OnMouseDown()
         {
-            if (Contains(_resetRt)) { _onChange(1f); _onCommit(); ApplyVisual(); return; }
-            if (Contains(_track) || Contains(_knob)) { _dragging = true; ApplyFromMouse(); }
+            if (Contains(_resetRt))
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _onChange(1f);
+                _onCommit();
+                ApplyVisual();
+                return;
+            }
+            if (Contains(_track) || Contains(_knob))
+            {
+                RebindRow.CancelCaptureForExternalPointer();
+                _dragging = true;
+                ApplyFromMouse();
+            }
         }
 
         public override void OnMouseDrag()

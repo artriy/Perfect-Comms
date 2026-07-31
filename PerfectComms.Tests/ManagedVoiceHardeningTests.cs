@@ -29,28 +29,66 @@ public sealed class ManagedVoiceHardeningTests
         => Assert.Equal(expected, MobileVoiceClient.NextSignalBufferSize(current));
 #endif
 
+    public static TheoryData<bool, bool, bool, bool, bool, bool> HardVoiceInputSuppressionCases
+    {
+        get
+        {
+            var cases = new TheoryData<bool, bool, bool, bool, bool, bool>();
+            for (int mask = 0; mask < 32; mask++)
+            {
+                bool focused = (mask & 1) != 0;
+                bool rebinding = (mask & 2) != 0;
+                bool modalOpen = (mask & 4) != 0;
+                bool minigameOpen = (mask & 8) != 0;
+                bool friendsListOpen = (mask & 16) != 0;
+                bool expected = !focused || rebinding || modalOpen ||
+                                minigameOpen || friendsListOpen;
+                cases.Add(
+                    focused,
+                    rebinding,
+                    modalOpen,
+                    minigameOpen,
+                    friendsListOpen,
+                    expected);
+            }
+
+            return cases;
+        }
+    }
+
     [Theory]
-    [InlineData(true, false, false, false, false, false)]
-    [InlineData(false, false, false, false, false, true)]
-    [InlineData(true, true, false, false, false, true)]
-    [InlineData(true, false, true, false, false, true)]
-    [InlineData(true, false, false, true, false, true)]
-    [InlineData(true, false, false, true, true, false)]
-    [InlineData(true, false, true, true, true, true)]
-    public void PrivacyBoundariesSuppressAllVoiceInput(
+    [MemberData(nameof(HardVoiceInputSuppressionCases))]
+    public void EveryHardPrivacyBoundarySuppressesVoiceInput(
         bool focused,
         bool rebinding,
         bool modalOpen,
-        bool chatOpen,
-        bool allowKeybindsWhileChatOpen,
+        bool minigameOpen,
+        bool friendsListOpen,
         bool expected)
     {
-        Assert.Equal(expected, VoiceChatPatches.ShouldSuppressVoiceInput(
+        Assert.Equal(expected, VoiceChatPatches.ShouldHardSuppressVoiceInput(
             focused,
             rebinding,
             modalOpen,
+            minigameOpen,
+            friendsListOpen));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, false, false, true)]
+    public void ChatPolicyBlocksOnlyBindingsWithoutAnAllowlist(
+        bool chatOpen,
+        bool allowAllWhileChatOpen,
+        bool bindingAllowedWhileChatOpen,
+        bool expected)
+    {
+        Assert.Equal(expected, VoiceChatPatches.ShouldBlockBindingForChat(
             chatOpen,
-            allowKeybindsWhileChatOpen));
+            allowAllWhileChatOpen,
+            bindingAllowedWhileChatOpen));
     }
 
     [Theory]

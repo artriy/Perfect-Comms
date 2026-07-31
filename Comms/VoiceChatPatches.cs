@@ -9,7 +9,7 @@ public static class VoiceChatPatches
     private static bool _pushToTalkInputHeld;
     private static bool _pushToMuteInputHeld;
     private static bool _radioInputHeld;
-    private static bool _transmitReleaseRequired;
+    private static bool _transmitInputQuarantinePending;
     private static int _lastMuteToggleFrame = -1;
     private static int _lastSpeakerToggleFrame = -1;
     private static int _lastVolumeToggleFrame = -1;
@@ -50,33 +50,52 @@ public static class VoiceChatPatches
     {
         try
         {
-            if (ShouldSuppressVoiceInput())
+            // A prior input-wrapper failure could not safely inspect physical keys. Quarantine
+            // them before any normal polling resumes once Unity input becomes readable again.
+            if (_transmitInputQuarantinePending)
+                ReleaseHeldTransmitInputs();
+            if (ShouldHardSuppressVoiceInput(
+                    Application.isFocused,
+                    VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
+                    VoiceUiKit.AnyPanelOpen,
+                    Minigame.Instance != null,
+                    IsFriendsListOpen()))
             {
                 ReleaseHeldTransmitInputs();
+                SuppressHardBlockedBindings();
                 return;
             }
 
-            if (!CanResumeHeldTransmitInput()) return;
+            bool chatOpen = IsChatOpen();
+            bool allowAllWhileChatOpen =
+                VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true;
 
-            VoiceChatKeybinds.ToggleMute.FireIfPressed();
-            VoiceChatKeybinds.ToggleSpeaker.FireIfPressed();
-            VoiceChatKeybinds.VolumeMenu.FireIfPressed();
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.ToggleMute, chatOpen, allowAllWhileChatOpen);
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.ToggleSpeaker, chatOpen, allowAllWhileChatOpen);
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.VolumeMenu, chatOpen, allowAllWhileChatOpen);
 
             // Player Volumes opens in this pipeline. Its Show() release must remain authoritative;
-            // never reread a still-held PTT/radio key later in the same frame and reopen capture.
+            // never dispatch another voice action later in the frame after the modal opens.
             if (VoiceUiKit.AnyPanelOpen)
             {
                 ReleaseHeldTransmitInputs();
+                SuppressHardBlockedBindings();
                 return;
             }
 
-            UpdateAliveDeadMixHold();
-            VoiceChatKeybinds.LocalVoiceRefresh.FireIfPressed();
-            VoiceChatKeybinds.CycleTeamRadioChannel.FireIfPressed();
-            VoiceChatKeybinds.ToggleMicMode.FireIfPressed();
-            UpdateTeamRadioHold();
-            UpdatePushToMuteHold();
-            UpdatePushToTalkHold();
+            UpdateAliveDeadMixHold(chatOpen, allowAllWhileChatOpen);
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.LocalVoiceRefresh, chatOpen, allowAllWhileChatOpen);
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.CycleTeamRadioChannel, chatOpen, allowAllWhileChatOpen);
+            FireIfAllowedForChat(
+                VoiceChatKeybinds.ToggleMicMode, chatOpen, allowAllWhileChatOpen);
+            UpdateTeamRadioHold(chatOpen, allowAllWhileChatOpen);
+            UpdatePushToMuteHold(chatOpen, allowAllWhileChatOpen);
+            UpdatePushToTalkHold(chatOpen, allowAllWhileChatOpen);
         }
         catch (System.Exception ex)
         {
@@ -84,11 +103,26 @@ public static class VoiceChatPatches
         }
     }
 
-    private static void UpdateTeamRadioHold()
+    private static void UpdateTeamRadioHold(bool chatOpen, bool allowAllWhileChatOpen)
     {
+        var binding = VoiceChatKeybinds.TeamRadio;
+        bool blockedForChat = ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
+        if (blockedForChat)
+            binding.SuppressUntilReleased();
+
         int frame = Time.frameCount;
-        if (_lastTeamRadioPollFrame == frame) return;
+        if (_lastTeamRadioPollFrame == frame &&
+            (!blockedForChat || !_radioInputHeld))
+            return;
         _lastTeamRadioPollFrame = frame;
+
+        if (blockedForChat)
+        {
+            var released = ReadHold(false, ref _radioInputHeld);
+            VoiceChatHudState.UpdateTeamRadioHold(false, false, released.Up);
+            return;
+        }
 
         bool canUseRadio = VoiceChatHudState.CanUseTeamRadioInput();
         bool held = false;
@@ -96,7 +130,7 @@ public static class VoiceChatPatches
         bool up = false;
         if (canUseRadio)
         {
-            var radioHold = ReadHold(VoiceChatKeybinds.TeamRadio.IsHeld(), ref _radioInputHeld);
+            var radioHold = ReadHold(binding.IsHeld(), ref _radioInputHeld);
             held = radioHold.Held;
             down = radioHold.Down;
             up = radioHold.Up;
@@ -109,29 +143,26 @@ public static class VoiceChatPatches
         VoiceChatHudState.UpdateTeamRadioHold(held, down, up);
     }
 
-    private static bool CanResumeHeldTransmitInput()
+    private static void UpdatePushToTalkHold(bool chatOpen, bool allowAllWhileChatOpen)
     {
-        if (!_transmitReleaseRequired) return true;
+        var binding = VoiceChatKeybinds.PushToTalk;
+        bool blockedForChat = ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
+        if (blockedForChat)
+            binding.SuppressUntilReleased();
 
-        // A hold that crossed a privacy boundary (chat/modal/focus/rebind/session) must be
-        // physically released before it can arm again. Otherwise closing chat while the key
-        // is still down immediately resumes capture without a new user action.
-        if (VoiceChatKeybinds.PushToTalk.IsHeld() || VoiceChatKeybinds.TeamRadio.IsHeld() ||
-            VoiceChatKeybinds.PushToMute.IsHeld())
-        {
-            ReleaseHeldTransmitInputs();
-            return false;
-        }
-
-        _transmitReleaseRequired = false;
-        return true;
-    }
-
-    private static void UpdatePushToTalkHold()
-    {
         int frame = Time.frameCount;
-        if (_lastPushToTalkPollFrame == frame) return;
+        if (_lastPushToTalkPollFrame == frame &&
+            (!blockedForChat || !_pushToTalkInputHeld))
+            return;
         _lastPushToTalkPollFrame = frame;
+
+        if (blockedForChat)
+        {
+            _pushToTalkInputHeld = false;
+            VoiceChatHudState.UpdatePushToTalkHeld(false);
+            return;
+        }
 
         if (!VoiceChatHudState.IsPushToTalkMode())
         {
@@ -140,114 +171,197 @@ public static class VoiceChatPatches
             return;
         }
 
-        bool held = ReadHold(VoiceChatKeybinds.PushToTalk.IsHeld(), ref _pushToTalkInputHeld).Held;
+        bool held = ReadHold(binding.IsHeld(), ref _pushToTalkInputHeld).Held;
         VoiceChatHudState.UpdatePushToTalkHeld(held);
     }
-    private static void UpdatePushToMuteHold()
+
+    private static void UpdatePushToMuteHold(bool chatOpen, bool allowAllWhileChatOpen)
     {
+        var binding = VoiceChatKeybinds.PushToMute;
+        bool primaryHeldRaw = binding.IsPrimaryHeldRaw();
+        bool blockedForChat = ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
+        if (blockedForChat)
+            binding.SuppressUntilReleased();
+
         int frame = Time.frameCount;
-        if (_lastPushToMutePollFrame == frame) return;
+        if (_lastPushToMutePollFrame == frame &&
+            (!blockedForChat || !_pushToMuteInputHeld || primaryHeldRaw))
+            return;
         _lastPushToMutePollFrame = frame;
 
-        bool held = ReadHold(
-            VoiceChatKeybinds.PushToMute.IsHeld(),
-            ref _pushToMuteInputHeld).Held;
+        // If Push To Mute was already active when a boundary was crossed, fail closed until
+        // its physical primary key is released. A blocked key that was not active cannot arm.
+        bool held = (!blockedForChat && binding.IsHeld()) ||
+                    (_pushToMuteInputHeld && primaryHeldRaw);
+        held = ReadHold(held, ref _pushToMuteInputHeld).Held;
         VoiceChatHudState.UpdatePushToMuteHeld(held);
     }
 
     private static void HandleTransmitInputFailure(string source, System.Exception ex)
     {
         // Never leave a capture-open hold latched because an IL2CPP object disappeared while
-        // reading input. The release path is independent from the failing Unity wrapper.
+        // reading input. If even the normal release cannot inspect physical keys, fall back to
+        // a release that performs no further input reads.
         try { ReleaseHeldTransmitInputs(); }
-        catch { SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false); }
+        catch { EmergencyReleaseHeldTransmitInputs(); }
         var now = System.DateTime.UtcNow;
         if ((now - _lastKbErrorLogUtc).TotalSeconds < 5) return;
 
         _lastKbErrorLogUtc = now;
         VoiceDiagnostics.DebugError($"[VC] {source} hold-input update failed: {ex.Message}");
     }
+    private static void EmergencyReleaseHeldTransmitInputs()
+    {
+        // Active Push To Mute must fail closed when its raw physical state cannot be trusted.
+        // Retry the full binding quarantine before normal polling on the next readable frame.
+        bool preservePushToMute = _pushToMuteInputHeld;
+        _transmitInputQuarantinePending = true;
+        _radioInputHeld = false;
+        _pushToTalkInputHeld = false;
+        _pushToMuteInputHeld = preservePushToMute;
+        try { VoiceChatHudState.ReleaseTransmitHoldsFailClosed(preservePushToMute); }
+        catch { }
+        try { SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false); }
+        catch { _aliveDeadMixFocus = VoiceAliveDeadMixFocus.Neutral; }
+    }
+
 
     internal static void ReleaseHeldTransmitInputs()
     {
-        // Transmit-opening holds are always dropped. An already-active Push To Mute remains
-        // fail-closed only while its physical key is still down, including across chat/modals.
+        // Quarantine every released hold until its physical binding is released so lifecycle
+        // callbacks cannot reopen transmission or a mix adjustment on the next unblocked frame.
+        // An already-active Push To Mute remains fail-closed while its physical primary is down.
         bool preservePushToMute = _pushToMuteInputHeld &&
-                                  VoiceChatKeybinds.PushToMute.IsHeld();
-        _transmitReleaseRequired = true;
+                                  VoiceChatKeybinds.PushToMute.IsPrimaryHeldRaw();
+        VoiceChatKeybinds.PushToTalk.SuppressUntilReleased();
+        VoiceChatKeybinds.TeamRadio.SuppressUntilReleased();
+        VoiceChatKeybinds.PushToMute.SuppressUntilReleased();
+        VoiceChatKeybinds.AliveLouderDeadQuieter.SuppressUntilReleased();
+        VoiceChatKeybinds.AliveQuieterDeadLouder.SuppressUntilReleased();
         _radioInputHeld = false;
         _pushToTalkInputHeld = false;
         _pushToMuteInputHeld = preservePushToMute;
         VoiceChatHudState.ReleaseTransmitHoldsFailClosed(preservePushToMute);
         SetAliveDeadMixFocus(VoiceAliveDeadMixFocus.Neutral, showToast: false);
+        _transmitInputQuarantinePending = false;
     }
 
-    internal static bool ShouldSuppressVoiceInput()
-    {
-        bool chatOpen = false;
-        if (HudManager.InstanceExists)
-        {
-            var chat = HudManager.Instance.Chat;
-            chatOpen = chat != null && chat.IsOpenOrOpening;
-        }
-        return ShouldSuppressVoiceInput(
-            Application.isFocused,
-            VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
-            VoiceUiKit.AnyPanelOpen,
-            chatOpen,
-            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true);
-    }
-
-    internal static bool ShouldSuppressVoiceInput(
+    internal static bool ShouldHardSuppressVoiceInput(
         bool applicationFocused,
         bool rebindCapturing,
         bool modalOpen,
-        bool chatOpen,
-        bool allowKeybindsWhileChatOpen)
+        bool minigameOpen,
+        bool friendsListOpen)
         => !applicationFocused || rebindCapturing || modalOpen ||
-           ShouldBlockKeybindsForChat(chatOpen, allowKeybindsWhileChatOpen);
+           minigameOpen || friendsListOpen;
 
-    internal static bool ShouldBlockKeybindsForChat(bool chatOpen)
-        => ShouldBlockKeybindsForChat(
-            chatOpen,
-            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true);
-
-    internal static bool ShouldBlockKeybindsForChat(
+    internal static bool ShouldBlockBindingForChat(
         bool chatOpen,
-        bool allowKeybindsWhileChatOpen)
-        => chatOpen && !allowKeybindsWhileChatOpen;
+        bool allowAllWhileChatOpen,
+        bool bindingAllowedWhileChatOpen)
+        => chatOpen && !allowAllWhileChatOpen && !bindingAllowedWhileChatOpen;
 
-    internal static bool ShouldIgnoreToggleKeybinds()
-        => ShouldSuppressVoiceInput();
+    internal static bool ShouldSuppressVoiceInput()
+    {
+        bool allowAllWhileChatOpen =
+            VoiceSettings.Instance?.AllowKeybindsWhileChatOpen.Value == true;
+        return ShouldHardSuppressVoiceInput(
+                   Application.isFocused,
+                   VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
+                   VoiceUiKit.AnyPanelOpen,
+                   Minigame.Instance != null,
+                   IsFriendsListOpen()) ||
+               ShouldBlockBindingForChat(
+                   IsChatOpen(), allowAllWhileChatOpen,
+                   bindingAllowedWhileChatOpen: false);
+    }
+
+
+    internal static bool IsFriendsListOpen()
+    {
+        var friendsList = FriendsListUI.Instance;
+        return friendsList != null && friendsList.IsOpen;
+    }
+
+    private static bool IsChatOpen()
+    {
+        if (!HudManager.InstanceExists) return false;
+        var chat = HudManager.Instance.Chat;
+        return chat != null && chat.IsOpenOrOpening;
+    }
+
+    private static void FireIfAllowedForChat(
+        VoiceKeybind binding,
+        bool chatOpen,
+        bool allowAllWhileChatOpen)
+    {
+        if (ShouldBlockBindingForChat(
+                chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen))
+        {
+            binding.SuppressUntilReleased();
+            return;
+        }
+
+        binding.FireIfPressed();
+    }
+
+    private static void SuppressHardBlockedBindings()
+    {
+        bool nonModalHardBlock = ShouldHardSuppressVoiceInput(
+            Application.isFocused,
+            VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
+            modalOpen: false,
+            Minigame.Instance != null,
+            IsFriendsListOpen());
+
+        foreach (var binding in VoiceChatKeybinds.AllBindings)
+        {
+            // A panel's own hotkey may close it, but no non-modal hard blocker may be bypassed.
+            if (!nonModalHardBlock &&
+                ((binding == VoiceChatKeybinds.OpenVoiceMenu && VoiceSettingsPanel.IsOpen) ||
+                 (binding == VoiceChatKeybinds.OpenHostVoiceSettings && HostSettingsPanel.IsOpen)))
+                continue;
+
+            binding.SuppressUntilReleased();
+        }
+    }
 
     private static void ToggleMuteFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastMuteToggleFrame)) return;
         VoiceChatHudState.ToggleMutePublic();
     }
 
     private static void ToggleSpeakerFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastSpeakerToggleFrame)) return;
         VoiceChatHudState.ToggleSpeakerPublic();
     }
 
     private static void ToggleVolumeMenuFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastVolumeToggleFrame)) return;
         VoiceVolumeMenu.Toggle();
     }
 
-    private static void UpdateAliveDeadMixHold()
+    private static void UpdateAliveDeadMixHold(
+        bool chatOpen,
+        bool allowAllWhileChatOpen)
     {
-        var focus = ShouldIgnoreToggleKeybinds()
-            ? VoiceAliveDeadMixFocus.Neutral
-            : VoiceVolumeMath.ResolveAliveDeadMixFocus(
-                VoiceChatKeybinds.AliveLouderDeadQuieter.IsHeld(),
-                VoiceChatKeybinds.AliveQuieterDeadLouder.IsHeld());
+        var aliveBinding = VoiceChatKeybinds.AliveLouderDeadQuieter;
+        bool aliveBlocked = ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, aliveBinding.AllowWhileChatOpen);
+        if (aliveBlocked) aliveBinding.SuppressUntilReleased();
+
+        var deadBinding = VoiceChatKeybinds.AliveQuieterDeadLouder;
+        bool deadBlocked = ShouldBlockBindingForChat(
+            chatOpen, allowAllWhileChatOpen, deadBinding.AllowWhileChatOpen);
+        if (deadBlocked) deadBinding.SuppressUntilReleased();
+
+        var focus = VoiceVolumeMath.ResolveAliveDeadMixFocus(
+            !aliveBlocked && aliveBinding.IsHeld(),
+            !deadBlocked && deadBinding.IsHeld());
         SetAliveDeadMixFocus(focus, showToast: true);
     }
 
@@ -284,14 +398,12 @@ public static class VoiceChatPatches
 
     private static void RequestLocalRefreshFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastLocalRefreshFrame)) return;
         VoiceChatRoom.RequestLocalVoiceRefreshFromKeybind();
     }
 
     private static void CycleTeamRadioChannelFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!VoiceChatHudState.CanUseTeamRadioInput()) return;
         if (!TryConsumeToggleFrame(ref _lastRadioChannelCycleFrame)) return;
         VoiceChatHudState.CycleTeamRadioChannel();
@@ -299,7 +411,6 @@ public static class VoiceChatPatches
 
     private static void ToggleMicModeFromInput()
     {
-        if (ShouldIgnoreToggleKeybinds()) return;
         if (!TryConsumeToggleFrame(ref _lastMicModeToggleFrame)) return;
         VoiceChatHudState.ToggleMicMode();
     }

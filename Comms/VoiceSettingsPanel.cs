@@ -60,6 +60,7 @@ public static class VoiceSettingsPanel
     private static float _animT;
     private static int _visSignature = int.MinValue;
     private static MixSettingsExpansion _expandedMixSettings;
+    private static bool _chatKeybindEditorExpanded;
     private static bool _rebuildRequested;
     private static bool _revealExpandedMix;
     private static RectTransform? _scrollbarRoot;
@@ -157,6 +158,7 @@ public static class VoiceSettingsPanel
             if (MicrophoneTestLifecyclePolicy.ShouldDisableForCategory(CategoryOrder[selectedIndex]))
                 DisableMicrophoneTest();
             _expandedMixSettings = MixSettingsExpansion.None;
+            _chatKeybindEditorExpanded = false;
             _rebuildRequested = false;
             _revealExpandedMix = false;
             RebuildRows(true);
@@ -216,6 +218,7 @@ public static class VoiceSettingsPanel
     {
         VoiceUiKit.RebindRow.CancelCapture();
         _expandedMixSettings = MixSettingsExpansion.None;
+        _chatKeybindEditorExpanded = false;
         _rebuildRequested = false;
         _revealExpandedMix = false;
         CancelScrollbarDrag();
@@ -271,6 +274,7 @@ public static class VoiceSettingsPanel
         _contentHeight = 0f;
         _visSignature = int.MinValue;
         _expandedMixSettings = MixSettingsExpansion.None;
+        _chatKeybindEditorExpanded = false;
         _rebuildRequested = false;
         _revealExpandedMix = false;
         _scrollbarRoot = null;
@@ -672,7 +676,10 @@ public static class VoiceSettingsPanel
                 () => bind.Modifier,
                 () => bind.ModifierMatch,
                 configure,
-                configureActive)
+                configureActive,
+                () => bind.AllowWhileChatOpen,
+                value => bind.SetAllowWhileChatOpen(value),
+                _chatKeybindEditorExpanded)
                 .Build(pane, bind.DisplayName, paneW, y, RowH, bind.HelpText)
         });
     }
@@ -682,12 +689,13 @@ public static class VoiceSettingsPanel
         string label,
         string buttonText,
         System.Action onClick,
-        string help)
+        string help,
+        Func<bool>? visible = null)
     {
         defs.Add(new Entry
         {
             Key = label,
-            Visible = Always,
+            Visible = visible ?? Always,
             Build = (pane, paneW, y) => new VoiceUiKit.ActionRow(onClick)
                 .Build(pane, label, buttonText, paneW, y, RowH, help)
         });
@@ -738,9 +746,34 @@ public static class VoiceSettingsPanel
         _rebuildRequested = true;
     }
 
+    private static void ToggleChatKeybindEditor()
+    {
+        _chatKeybindEditorExpanded = !_chatKeybindEditorExpanded;
+        _rebuildRequested = true;
+    }
+
     private static void BuildKeybinds(List<Entry> defs, VoiceChatLocalSettings s)
     {
-        Toggle(defs, "Allow Keybinds While Chat Is Open", s.AllowKeybindsWhileChatOpen);
+        if (s.AllowKeybindsWhileChatOpen.Value)
+            _chatKeybindEditorExpanded = false;
+        Toggle(
+            defs,
+            "Allow Keybinds While Chat Is Open",
+            () => s.AllowKeybindsWhileChatOpen.Value,
+            value =>
+            {
+                s.AllowKeybindsWhileChatOpen.Value = value;
+                if (value) _chatKeybindEditorExpanded = false;
+                _rebuildRequested = true;
+            },
+            SettingHelp(s.AllowKeybindsWhileChatOpen));
+        Action(
+            defs,
+            "Chat Keybinds",
+            _chatKeybindEditorExpanded ? "Done" : "Choose Chat Keybinds",
+            ToggleChatKeybindEditor,
+            "Choose the individual bindings that may work while the Among Us chat is open. Tasks/minigames, the Friends List, and modals still block them.",
+            () => !s.AllowKeybindsWhileChatOpen.Value);
         Rebind(defs, VoiceChatKeybinds.OpenVoiceMenu);
         Rebind(defs, VoiceChatKeybinds.OpenHostVoiceSettings);
         Rebind(defs, VoiceChatKeybinds.ToggleMute);

@@ -8,6 +8,17 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.7/assets/brand/divider.svg" alt="divider" width="900">
 </p>
 
+### Safer Voice Controls While Typing
+
+- **Mute and Deafen now use Right Alt and Right Control.**
+  > <sub>A one-time migration replaces every previous Mute and Deafen binding with the BetterCrewLink-style defaults, including customized or unbound values. The migration does not run again after players rebind either action.</sub>
+
+- **Players can choose exactly which voice controls remain available in chat.**
+  > <sub>Allow Keybinds While Chat Is Open still enables every binding, while the new Choose Chat Keybinds editor provides a persistent checkbox for each individual control when the global option is off. Right Alt, Right Control, and mouse buttons MB4–MB7 start enabled; rebinding recalculates that binding's recommended default without overwriting later manual choices.</sub>
+
+- **Typing and modal screens cannot leak delayed voice input.**
+  > <sub>Shared chat, rebinding, Perfect Comms panels, minigames, the Friends List, focus loss, and the Voice Lobby editor now use one input policy. Blocked holds and modifier chords require a physical release before they can activate again, while TOU-Mira's Jailor button hitbox and separate public/private/merged chat pools are repaired when that mod is present.</sub>
+
 ### Important: Desktop Installation Change
 
 - **Desktop releases are now safer, self-contained DLL downloads.**

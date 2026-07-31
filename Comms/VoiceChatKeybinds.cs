@@ -11,6 +11,7 @@ public static class VoiceChatKeybinds
         "Deafens or undeafens Perfect Comms. Deafening mutes voice playback and pauses microphone transmission.";
 
     private static VoiceKeybind[] _allBindings = Array.Empty<VoiceKeybind>();
+    internal static VoiceKeybind[] AllBindings => _allBindings;
 
     public static VoiceKeybind ToggleMute { get; private set; } = null!;
     public static VoiceKeybind PushToMute { get; private set; } = null!;
@@ -30,7 +31,8 @@ public static class VoiceChatKeybinds
     public static void Initialize(ConfigFile config)
     {
         const string s = "Keybinds";
-        ToggleMute = new VoiceKeybind(config, s, "Mute / Unmute Mic", KeyCode.M,
+        ToggleMute = new VoiceKeybind(config, s, "Mute / Unmute Mic", KeyCode.RightAlt,
+            KeyCode.None, VoiceModifierMatch.Exact,
             helpText: "Toggles whether your microphone sends voice.");
         // Preserve the original persisted key so existing preview-build bindings survive the rename.
         PushToMute = new VoiceKeybind(
@@ -46,8 +48,8 @@ public static class VoiceChatKeybinds
             helpText: "Switches your microphone between Open Mic and Push To Talk mode.");
         // Keep the pre-v4 persisted key so the clearer deafen label does not reset existing binds.
         ToggleSpeaker = new VoiceKeybind(
-            config, s, ToggleDeafenDisplayName, "Toggle Speaker", KeyCode.N,
-            helpText: ToggleDeafenHelpText);
+            config, s, ToggleDeafenDisplayName, "Toggle Speaker", KeyCode.RightControl,
+            ToggleDeafenHelpText);
         VolumeMenu = new VoiceKeybind(
             config, s, "Player Volumes", KeyCode.B, KeyCode.LeftShift, VoiceModifierMatch.EitherSide,
             helpText: "Opens the local per-player volume mixer. Its adjustments affect only what you hear.");
@@ -81,15 +83,13 @@ public static class VoiceChatKeybinds
             OpenHostVoiceSettings,
         };
 
-        var shiftDefaultsMigrated = config.Bind(s, "ShiftDefaultsMigrated", false,
-            new ConfigDescription("Internal one-time flag: added Shift to the default Mute (M) and deafen (N) keys. Do not edit."));
-        if (!shiftDefaultsMigrated.Value)
+        var rightModifierDefaultsMigrated = config.Bind(s, "RightModifierDefaultsMigrated", false,
+            new ConfigDescription("Internal one-time flag: changed Mute and deafen to standalone right-side modifiers. Do not edit."));
+        if (!rightModifierDefaultsMigrated.Value)
         {
-            if (ToggleMute.Value == KeyCode.M && ToggleMute.Modifier == KeyCode.None)
-                ToggleMute.SetModifier(KeyCode.LeftShift, VoiceModifierMatch.EitherSide);
-            if (ToggleSpeaker.Value == KeyCode.N && ToggleSpeaker.Modifier == KeyCode.None)
-                ToggleSpeaker.SetModifier(KeyCode.LeftShift, VoiceModifierMatch.EitherSide);
-            shiftDefaultsMigrated.Value = true;
+            ToggleMute.SetBinding(KeyCode.RightAlt, KeyCode.None, VoiceModifierMatch.Exact);
+            ToggleSpeaker.SetBinding(KeyCode.RightControl, KeyCode.None, VoiceModifierMatch.Exact);
+            rightModifierDefaultsMigrated.Value = true;
         }
 
         var playerVolumeShiftDefaultMigrated = config.Bind(s, "PlayerVolumeShiftDefaultMigrated", false,
