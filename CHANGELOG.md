@@ -17,7 +17,7 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
   > <sub>Allow Keybinds While Chat Is Open still enables every binding, while the new Choose Chat Keybinds editor provides a persistent checkbox for each individual control when the global option is off. Right Alt, Right Control, and mouse buttons MB4–MB7 start enabled; rebinding recalculates that binding's recommended default without overwriting later manual choices.</sub>
 
 - **Typing and modal screens cannot leak delayed voice input.**
-  > <sub>Shared chat, rebinding, Perfect Comms panels, minigames, the Friends List, focus loss, and the Voice Lobby editor now use one input policy. Blocked holds and modifier chords require a physical release before they can activate again, while TOU-Mira's Jailor button hitbox and separate public/private/merged chat pools are repaired when that mod is present.</sub>
+  > <sub>Shared chat, rebinding, Perfect Comms panels, minigames, the Friends List, focus loss, and the Voice Lobby editor now use one input policy. Blocked holds and modifier chords require a physical release before they can activate again.</sub>
 
 ### Important: Desktop Installation Change
 
