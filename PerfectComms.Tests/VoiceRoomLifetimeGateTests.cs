@@ -37,6 +37,95 @@ public sealed class VoiceRoomLifetimeGateTests
     }
 
     [Theory]
+    [InlineData(8675309)]
+    [InlineData(-8675309)]
+    public void SameNonzeroGameIdContinuesConfirmedSessionWithoutResettingRemotePolicy(int gameId)
+    {
+        ResetLifetimeState("same-id-setup");
+        try
+        {
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("same-id-first-confirmation", gameId);
+            var remotePolicy = DistinctiveRemotePolicy();
+            VoiceRoomSettingsState.ApplyRemote(remotePolicy, gameId);
+            int generation = VoiceRoomLifetimeGate.CurrentSessionGeneration;
+
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("same-id-continuation", gameId);
+
+            Assert.Equal(generation, VoiceRoomLifetimeGate.CurrentSessionGeneration);
+            Assert.False(VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
+            Assert.True(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(gameId));
+            Assert.True(VoiceRoomSettingsState.SessionConfirmed);
+            Assert.Equal(gameId, VoiceRoomSettingsState.SessionGameId);
+            Assert.Equal(remotePolicy.Clamp(), VoiceRoomSettingsState.RemoteSnapshot);
+        }
+        finally
+        {
+            ResetLifetimeState("same-id-cleanup");
+        }
+    }
+
+    [Fact]
+    public void ExplicitDisconnectThenSameGameIdStartsNewEpochAndClearsRemotePolicy()
+    {
+        const int gameId = 24680;
+        ResetLifetimeState("disconnect-boundary-setup");
+        try
+        {
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("disconnect-boundary-first", gameId);
+            var remotePolicy = DistinctiveRemotePolicy();
+            VoiceRoomSettingsState.ApplyRemote(remotePolicy, gameId);
+            Assert.Equal(remotePolicy.Clamp(), VoiceRoomSettingsState.RemoteSnapshot);
+            int firstGeneration = VoiceRoomLifetimeGate.CurrentSessionGeneration;
+
+            VoiceRoomLifetimeGate.MarkExplicitDisconnect("disconnect-boundary");
+            int disconnectedGeneration = VoiceRoomLifetimeGate.CurrentSessionGeneration;
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("disconnect-boundary-rejoin", gameId);
+
+            Assert.True(disconnectedGeneration > firstGeneration);
+            Assert.True(VoiceRoomLifetimeGate.CurrentSessionGeneration > disconnectedGeneration);
+            Assert.False(VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
+            Assert.True(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(gameId));
+            Assert.True(VoiceRoomSettingsState.SessionConfirmed);
+            Assert.Equal(gameId, VoiceRoomSettingsState.SessionGameId);
+            Assert.Null(VoiceRoomSettingsState.RemoteSnapshot);
+        }
+        finally
+        {
+            ResetLifetimeState("disconnect-boundary-cleanup");
+        }
+    }
+
+    [Fact]
+    public void DifferentGameIdWithoutDisconnectStartsNewEpochAndClearsRemotePolicy()
+    {
+        const int firstGameId = 13579;
+        const int nextGameId = -97531;
+        ResetLifetimeState("different-id-setup");
+        try
+        {
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("different-id-first", firstGameId);
+            var remotePolicy = DistinctiveRemotePolicy();
+            VoiceRoomSettingsState.ApplyRemote(remotePolicy, firstGameId);
+            Assert.Equal(remotePolicy.Clamp(), VoiceRoomSettingsState.RemoteSnapshot);
+            int firstGeneration = VoiceRoomLifetimeGate.CurrentSessionGeneration;
+
+            VoiceRoomLifetimeGate.ConfirmJoinedSession("different-id-next", nextGameId);
+
+            Assert.True(VoiceRoomLifetimeGate.CurrentSessionGeneration > firstGeneration);
+            Assert.False(VoiceRoomLifetimeGate.IsExplicitDisconnectLatched);
+            Assert.False(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(firstGameId));
+            Assert.True(VoiceRoomLifetimeGate.IsConfirmedJoinedGame(nextGameId));
+            Assert.True(VoiceRoomSettingsState.SessionConfirmed);
+            Assert.Equal(nextGameId, VoiceRoomSettingsState.SessionGameId);
+            Assert.Null(VoiceRoomSettingsState.RemoteSnapshot);
+        }
+        finally
+        {
+            ResetLifetimeState("different-id-cleanup");
+        }
+    }
+
+    [Theory]
     [InlineData(true, false, false, 123, true, true, true)]
     [InlineData(false, false, false, 123, true, true, false)]
     [InlineData(true, true, false, 123, true, true, false)]
@@ -259,6 +348,39 @@ public sealed class VoiceRoomLifetimeGateTests
                 havePrevious,
                 previous,
                 current));
+    }
+
+    private static VoiceRoomSettingsSnapshot DistinctiveRemotePolicy()
+        => VoiceRoomSettingsSnapshot.Defaults with
+        {
+            Backend = 42,
+            BackendServerUrl = "must-be-clamped",
+            MaxChatDistance = 200f,
+            FalloffMode = int.MaxValue,
+            OcclusionMode = int.MinValue,
+            WallsBlockSound = false,
+            OnlyHearInSight = false,
+            ImpostorHearGhosts = true,
+            HearInVent = true,
+            VentPrivateChat = false,
+            CommsSabDisables = false,
+            CameraCanHear = false,
+            TeamRadio = false,
+            TeamRadioImpostors = false,
+            OnlyGhostsCanTalk = true,
+            OnlyMeetingOrLobby = true,
+            OnlyMeetingOrLobbyAffectsGhosts = true,
+            TeamRadioInMeetings = true,
+            TeamRadioInTasks = false,
+            GhostsHearEachOtherUnlimited = true,
+            GracePeriodEnabled = true,
+            GracePeriodSeconds = 200f,
+        };
+
+    private static void ResetLifetimeState(string source)
+    {
+        VoiceRoomLifetimeGate.MarkExplicitDisconnect(source);
+        VoiceRoomSettingsState.EndSession();
     }
 
     private static VoiceGameStateSnapshot CreateSnapshot(

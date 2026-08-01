@@ -41,6 +41,9 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 - **Brief connection problems sound less disruptive.**
   > <sub>The receiver recovers missing audio in chronological order using the best voice information available before synthetic concealment. It also begins from a fresh bounded tail after a stall, adapts latency more safely between talkspurts, and prevents overloaded receive work from starving the next playback round.</sub>
 
+- **Play Again keeps voice uninterrupted from results to the lobby.**
+  > <sub>Returning to the same confirmed room retains its authenticated voice policy instead of briefly hard-muting remote players. Real disconnects, different lobbies, and reusing the same room code after disconnect still begin a safely reset voice session.</sub>
+
 - **Muffled and fading voices sound more intentional.**
   > <sub>Listener muffle is now independent from Radio, Ghost, Wall, or natural voice processing, so it no longer replaces the selected route or adds wall reverb. Soft Fade reduces volume without unnecessarily changing the speaker's tone.</sub>
 
@@ -72,17 +75,6 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 
 - **Mod integrations can compile against `PerfectComms.Api` without redistributing the runtime plugin.**
   > <sub>The reference-only `4.1.7.1` NuGet revision contains the `net6.0` compiler assembly and XML documentation without runtime, native, content, or build assets. Release gates compile a real package consumer and ensure `PerfectComms.dll` is not copied into its output, while tagged releases publish through short-lived NuGet.org credentials.</sub>
-
-### Technical Audio Notes
-
-- **The voice codec favors natural delivery while retaining the existing bandwidth budget.**
-  > <sub>Opus now uses automatic signal classification and in-band FEC mode 2 while retaining 48 kHz mono, 48 kb/s, 20 ms frames, constrained VBR, DTX-off, complexity 10, automatic bandwidth, and 100 ms DRED. Complete RTP media-time gaps can use DRED and FEC before PLC, including timestamp-only sender omissions.</sub>
-
-- **Playback, capture, and echo processing avoid unnecessary degradation.**
-  > <sub>Playback clock correction settles back to exact 48 kHz sample copying, floating-point native-rate devices are preferred before 16-bit fallbacks, latency fallbacks scale with the device rate, identical DSP updates preserve AEC convergence, and rejected render blocks no longer train the echo reference.</sub>
-
-- **Level control and spatial processing remain bounded and expression-conscious.**
-  > <sub>The per-speaker controller combines slow, noise-aware normalization with a separate fast overload ceiling instead of stacking two full corrections. A five-millisecond linked-stereo limiter retains the true lookahead peak, pan vectors preserve constant power, microphone detection runs before manual gain, both WebRTC AGC modes remain off, and the High/Very High noise-suppression mapping is unchanged.</sub>
 
 ## Perfect Comms v4.1.6
 

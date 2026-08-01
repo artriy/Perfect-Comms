@@ -212,7 +212,20 @@ internal static class VoiceRoomLifetimeGate
 
     internal static void ConfirmJoinedSession(string source, int gameId)
     {
-        // Keep compatible buffered Hellos across this callback. The mailbox is already scoped by
+        if (gameId != 0 && IsConfirmedJoinedGame(gameId))
+        {
+            int currentGeneration = CurrentSessionGeneration;
+            try
+            {
+                VoiceDiagnostics.Log(
+                    "voice.room.lifetime",
+                    $"event=session-continued source={Safe(source)} generation={currentGeneration} gameId={gameId}");
+            }
+            catch { /* continuing the session must not depend on diagnostics */ }
+            return;
+        }
+
+        // On the true-new-session path, keep compatible buffered Hellos across this callback.
         // GameId/local client, roster-filtered, TTL-bounded, and contains no SDP/ICE generation
         // state. Preserving a Hello that raced just ahead of OnGameJoined avoids adding a full
         // resend interval to initial voice bootstrap; a real disconnect clears the mailbox above.
