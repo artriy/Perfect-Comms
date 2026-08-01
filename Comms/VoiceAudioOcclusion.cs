@@ -10,17 +10,17 @@ internal static class VoiceAudioOcclusion
     private const float PositionQuantize = 4f;
     private const int MaxCacheEntries = 128;
     private static readonly int ShadowMask = LayerMask.GetMask("Shadow");
+    private static readonly int ObjectsLayer = LayerMask.NameToLayer("Objects");
     private static readonly Dictionary<OcclusionCacheKey, OcclusionCacheEntry> Cache = new();
 
-    // Closed-door world positions, rebuilt at most ONCE per frame. Previously IsClosedDoorBetween read
-    // door.transform.position (an IL2CPP managed/native boundary crossing) for EVERY door on EVERY
-    // listener/target pair that missed the occlusion cache — an O(peers x doors) burst of interop on the
-    // Unity main thread during crowded movement. Collapsing all of a frame's per-pair calls into a single
-    // per-frame rebuild keeps the per-pair check pure float math over a small Vector2 list (an empty list
-    // short-circuits the whole check) while reflecting the CURRENT frame's door state — so a door opening or
-    // closing changes occlusion as fast as it did before the cache existed, with no extra staleness stacked
-    // on top of the occlusion result cache. All access is on the Unity main thread, so no sync is needed.
-    private static readonly List<Vector2> _closedDoorPositions = new();
+    // Door geometry is authored as a finite EdgeCollider2D polyline. Resolve and transform those points only
+    // when the loaded ShipStatus changes, then rebuild the active closed-segment list at most once per frame.
+    // Per listener/target checks remain pure float math without treating the area around a door center as a
+    // blocker. Door state is refreshed before the pair cache so opening/closing invalidates stale results.
+    private static readonly List<DoorBarrier> _doorBarriers = new();
+    private static readonly List<DoorBarrierSegment> _closedDoorSegments = new();
+    private static readonly List<bool> _doorClosedStates = new();
+    private static int _doorGeometryShipId = -1;
     private static int _lastDoorScanFrame = -1;
 
     public static VoiceOcclusionDiagnostics Inspect(Vector2 listenerPos, Vector2 targetPos)
@@ -71,6 +71,7 @@ internal static class VoiceAudioOcclusion
 
     private static VoiceOcclusionResult ResolveOcclusion(Vector2 listenerPos, Vector2 targetPos)
     {
+        RefreshClosedDoorCacheIfNeeded();
         var key = OcclusionCacheKey.Create(listenerPos, targetPos);
         float now = Time.time;
         if (Cache.TryGetValue(key, out var cached) && now - cached.Time <= CacheSeconds)
@@ -306,7 +307,7 @@ internal static class VoiceAudioOcclusion
         long t = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            _lastDoorScanFrame = -1; // force the door cache to build now
+            _lastDoorScanFrame = -1; // force door geometry/state to build now
             RefreshClosedDoorCacheIfNeeded();
             Physics2D.Linecast(around, around + new Vector2(0.1f, 0f), ShadowMask); // build the physics broadphase
         }
@@ -318,52 +319,202 @@ internal static class VoiceAudioOcclusion
         }
         if (VoiceDiagnostics.IsEnabled)
             VoiceDiagnostics.Log("voice.occlusion.warm",
-                $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} doors={_closedDoorPositions.Count} shipId={id}");
+                $"ms={(System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.0} doors={_doorBarriers.Count} closedSegments={_closedDoorSegments.Count} shipId={id}");
     }
 
     private static void RefreshClosedDoorCacheIfNeeded()
     {
-        // Rebuild at most once per frame: every per-pair caller in the same frame shares one scan, but the
-        // cached door state is never more than the current frame old.
         int frame = Time.frameCount;
         if (frame == _lastDoorScanFrame) return;
         _lastDoorScanFrame = frame;
 
-        _closedDoorPositions.Clear();
-        var doors = ShipStatus.Instance?.AllDoors;
+        var ship = ShipStatus.Instance;
+        if (ship == null)
+        {
+            ResetDoorGeometry();
+            return;
+        }
+
+        int shipId = ship.GetInstanceID();
+        if (shipId != _doorGeometryShipId)
+            RebuildDoorGeometry(ship, shipId);
+
+        _closedDoorSegments.Clear();
+        bool stateChanged = false;
+        for (int i = 0; i < _doorBarriers.Count; i++)
+        {
+            var barrier = _doorBarriers[i];
+            bool closed = barrier.Door != null && !barrier.Door.IsOpen;
+            if (_doorClosedStates[i] != closed)
+            {
+                _doorClosedStates[i] = closed;
+                stateChanged = true;
+            }
+
+            if (!closed) continue;
+            var segments = barrier.Segments;
+            for (int j = 0; j < segments.Length; j++)
+                _closedDoorSegments.Add(segments[j]);
+        }
+
+        if (stateChanged)
+            Cache.Clear();
+    }
+
+    private static void RebuildDoorGeometry(ShipStatus ship, int shipId)
+    {
+        _doorBarriers.Clear();
+        _closedDoorSegments.Clear();
+        _doorClosedStates.Clear();
+        Cache.Clear();
+
+        int unresolved = 0;
+        var doors = ship.AllDoors;
         if (doors == null) return;
+        _doorGeometryShipId = shipId;
         foreach (var door in doors)
         {
-            if (door == null || door.IsOpen) continue;
-            _closedDoorPositions.Add(door.transform.position); // single interop read per closed door per refresh
+            if (door == null) continue;
+            try
+            {
+                var collider = ResolveDoorBarrierCollider(door);
+                if (collider == null)
+                {
+                    unresolved++;
+                    continue;
+                }
+
+                var segments = BuildDoorSegments(collider);
+                if (segments.Length == 0)
+                {
+                    unresolved++;
+                    continue;
+                }
+
+                _doorBarriers.Add(new DoorBarrier(door, segments));
+                _doorClosedStates.Add(false);
+            }
+            catch
+            {
+                unresolved++;
+            }
         }
+
+        if (VoiceDiagnostics.IsEnabled && unresolved > 0)
+            VoiceDiagnostics.Log("voice.occlusion.doors",
+                $"shipId={shipId} resolved={_doorBarriers.Count} unresolved={unresolved}");
+    }
+
+    private static void ResetDoorGeometry()
+    {
+        if (_doorGeometryShipId == -1 && _doorBarriers.Count == 0 && _closedDoorSegments.Count == 0)
+            return;
+
+        _doorGeometryShipId = -1;
+        _doorBarriers.Clear();
+        _closedDoorSegments.Clear();
+        _doorClosedStates.Clear();
+        Cache.Clear();
+    }
+
+    private static EdgeCollider2D? ResolveDoorBarrierCollider(OpenableDoor door)
+    {
+        var plainDoor = door.TryCast<PlainDoor>();
+        if (plainDoor != null && plainDoor.shadowCollider != null)
+        {
+            var direct = plainDoor.shadowCollider.TryCast<EdgeCollider2D>();
+            if (direct != null)
+                return direct;
+        }
+
+        // MushroomWallDoor keeps its shadow edge private. Resolve that and any future equivalent once at
+        // map load by selecting the non-trigger EdgeCollider2D authored on Among Us' Objects layer.
+        EdgeCollider2D? namedShadow = null;
+        var edges = door.GetComponentsInChildren<EdgeCollider2D>(true);
+        foreach (var edge in edges)
+        {
+            if (edge == null || edge.isTrigger) continue;
+            var edgeObject = edge.gameObject;
+            if (edgeObject != null && edgeObject.layer == ObjectsLayer)
+                return edge;
+            if (namedShadow == null &&
+                edgeObject != null &&
+                edgeObject.name.IndexOf("Shadow", StringComparison.OrdinalIgnoreCase) >= 0)
+                namedShadow = edge;
+        }
+
+        return namedShadow;
+    }
+
+    private static DoorBarrierSegment[] BuildDoorSegments(EdgeCollider2D collider)
+    {
+        var points = collider.points;
+        if (points == null || points.Length < 2)
+            return Array.Empty<DoorBarrierSegment>();
+
+        var segments = new DoorBarrierSegment[points.Length - 1];
+        var edgeTransform = collider.transform;
+        for (int i = 0; i < segments.Length; i++)
+        {
+            Vector3 a = edgeTransform.TransformPoint(new Vector3(points[i].x, points[i].y, 0f));
+            Vector3 b = edgeTransform.TransformPoint(new Vector3(points[i + 1].x, points[i + 1].y, 0f));
+            segments[i] = new DoorBarrierSegment(new Vector2(a.x, a.y), new Vector2(b.x, b.y));
+        }
+
+        return segments;
     }
 
     private static bool IsClosedDoorBetween(Vector2 listenerPos, Vector2 targetPos)
     {
-        RefreshClosedDoorCacheIfNeeded();
-        var positions = _closedDoorPositions;
-        int count = positions.Count;
-        if (count == 0) return false; // no closed doors -> skip the whole per-pair loop
-
-        for (int i = 0; i < count; i++)
+        var segments = _closedDoorSegments;
+        for (int i = 0; i < segments.Count; i++)
         {
-            if (DistancePointToSegment(positions[i], listenerPos, targetPos) <= 0.65f)
+            var segment = segments[i];
+            if (SegmentsIntersect(listenerPos, targetPos, segment.A, segment.B))
                 return true;
         }
 
         return false;
     }
 
-    private static float DistancePointToSegment(Vector2 point, Vector2 a, Vector2 b)
+    internal static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
     {
-        Vector2 ab = b - a;
-        float denom = Vector2.Dot(ab, ab);
-        if (denom <= 0.0001f) return Vector2.Distance(point, a);
+        const float epsilon = 0.00001f;
+        const float epsilonSquared = epsilon * epsilon;
+        float rx = b.x - a.x;
+        float ry = b.y - a.y;
+        float sx = d.x - c.x;
+        float sy = d.y - c.y;
+        float rLengthSquared = rx * rx + ry * ry;
+        float sLengthSquared = sx * sx + sy * sy;
+        if (rLengthSquared <= epsilonSquared || sLengthSquared <= epsilonSquared)
+            return false;
 
-        float t = Mathf.Clamp01(Vector2.Dot(point - a, ab) / denom);
-        return Vector2.Distance(point, a + ab * t);
+        float qx = c.x - a.x;
+        float qy = c.y - a.y;
+        float denominator = rx * sy - ry * sx;
+        float collinearity = qx * ry - qy * rx;
+        if (MathF.Abs(denominator) <= epsilon)
+        {
+            if (MathF.Abs(collinearity) > epsilon)
+                return false;
+
+            float t0 = (qx * rx + qy * ry) / rLengthSquared;
+            float t1 = t0 + (sx * rx + sy * ry) / rLengthSquared;
+            float start = MathF.Min(t0, t1);
+            float end = MathF.Max(t0, t1);
+            return end >= -epsilon && start <= 1f + epsilon;
+        }
+
+        float t = (qx * sy - qy * sx) / denominator;
+        float u = collinearity / denominator;
+        return t >= -epsilon && t <= 1f + epsilon &&
+               u >= -epsilon && u <= 1f + epsilon;
     }
+
+    private readonly record struct DoorBarrier(OpenableDoor Door, DoorBarrierSegment[] Segments);
+    private readonly record struct DoorBarrierSegment(Vector2 A, Vector2 B);
+
 
     private readonly record struct OcclusionCacheKey(int Ax, int Ay, int Bx, int By)
     {
