@@ -8,7 +8,7 @@ use crate::loudness::{LookaheadLimiter, PeerLoudnessNormalizer};
 pub const GAIN_GLIDE_K: f32 = 0.002;
 pub const PLAYBACK_SOFT_LIMIT_START: f32 = 0.92;
 const PAN_FAR_SIDE: f32 = 0.25;
-const MUFFLE_CUTOFF_HZ: f32 = 1_600.0;
+const MUFFLE_CUTOFF_HZ: f32 = 1_000.0;
 
 const RADIO_DRIVE: f32 = 2.0;
 const RADIO_LEVEL: f32 = 0.75;
@@ -180,10 +180,10 @@ impl MufflePath {
         muffled: bool,
         previous_muffled: bool,
         transition_remaining: usize,
-        lp1600: &Biquad,
+        muffle_lowpass: &Biquad,
     ) -> f32 {
         let current = if muffled {
-            lp1600.process(&mut self.current_z1, &mut self.current_z2, input)
+            muffle_lowpass.process(&mut self.current_z1, &mut self.current_z2, input)
         } else {
             input
         };
@@ -192,7 +192,7 @@ impl MufflePath {
         }
 
         let previous = if previous_muffled {
-            lp1600.process(&mut self.previous_z1, &mut self.previous_z2, input)
+            muffle_lowpass.process(&mut self.previous_z1, &mut self.previous_z2, input)
         } else {
             input
         };
@@ -427,7 +427,7 @@ pub struct Mixer {
     lp650: Biquad,
     hp650: Biquad,
     lp1900: Biquad,
-    lp1600: Biquad,
+    muffle_lowpass: Biquad,
     ghost_reverb: Reverb,
     wall_reverb: Reverb,
     ghost_send: Vec<f32>,
@@ -456,7 +456,7 @@ impl Mixer {
             lp650: Biquad::lowpass(650.0, 0.7),
             hp650: Biquad::highpass(650.0, 0.9),
             lp1900: Biquad::lowpass(1900.0, 0.7),
-            lp1600: Biquad::lowpass(MUFFLE_CUTOFF_HZ, 0.7),
+            muffle_lowpass: Biquad::lowpass(MUFFLE_CUTOFF_HZ, 0.7),
             ghost_reverb: Reverb::new(&GHOST_COMBS, &GHOST_ALLPASS, 0.82, 25),
             wall_reverb: Reverb::new(&WALL_COMBS, &WALL_ALLPASS, 0.6, 11),
             ghost_send: Vec::new(),
@@ -547,7 +547,7 @@ impl Mixer {
             }
         }
         let mut control_snapshot = MixControlSnapshot::default();
-        let (lp650, hp650, lp1600) = (self.lp650, self.hp650, self.lp1600);
+        let (lp650, hp650, muffle_lowpass) = (self.lp650, self.hp650, self.muffle_lowpass);
         let mut any_ghost = false;
         let mut any_wall = false;
         let mut had_input = false;
@@ -633,7 +633,7 @@ impl Mixer {
                     g.muffled,
                     g.previous_muffled,
                     g.muffle_transition_remaining,
-                    &lp1600,
+                    &muffle_lowpass,
                 );
                 g.left += GAIN_GLIDE_K * (target.0 - g.left);
                 g.right += GAIN_GLIDE_K * (target.1 - g.right);
@@ -664,7 +664,7 @@ impl Mixer {
                     g.muffled,
                     g.previous_muffled,
                     g.muffle_transition_remaining,
-                    &lp1600,
+                    &muffle_lowpass,
                 );
                 let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
                 let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
@@ -1815,6 +1815,36 @@ mod tests {
         }
         approx_tol(lp_out, 1.0, 1e-2);
         approx_tol(hp_out, 0.0, 1e-2);
+    }
+
+    fn muffle_sine_rms(frequency_hz: f32) -> f32 {
+        let filter = Biquad::lowpass(MUFFLE_CUTOFF_HZ, 0.7);
+        let mut path = MufflePath::default();
+        let warmup_samples = 960;
+        let total_samples = 4_800;
+        let mut energy = 0.0f32;
+        let mut measured = 0usize;
+        for sample_index in 0..total_samples {
+            let phase =
+                std::f32::consts::TAU * frequency_hz * sample_index as f32 / SAMPLE_RATE as f32;
+            let output = path.process(phase.sin(), true, true, 0, &filter);
+            if sample_index >= warmup_samples {
+                energy += output * output;
+                measured += 1;
+            }
+        }
+        (energy / measured as f32).sqrt()
+    }
+
+    #[test]
+    fn listener_muffle_keeps_voice_body_and_cuts_presence_band() {
+        let body_rms = muffle_sine_rms(300.0);
+        let presence_rms = muffle_sine_rms(2_000.0);
+        assert!(body_rms > 0.65, "muffle removed the voice body: {body_rms}");
+        assert!(
+            presence_rms < body_rms * 0.30,
+            "muffle left the presence band too clear: body={body_rms}, presence={presence_rms}"
+        );
     }
 
     #[test]
