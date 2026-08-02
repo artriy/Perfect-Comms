@@ -121,7 +121,6 @@ jobs:
           name: PerfectComms-standalone-dlls-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/PerfectComms.dll
-            artifacts/PerfectCommsAndroid.dll
           if-no-files-found: error
           retention-days: 14
       - name: Upload reference-only API package
@@ -179,7 +178,6 @@ jobs:
           api_package_version="$(sed -n 's:.*<PerfectCommsApiPackageVersion>\([^<]*\)</PerfectCommsApiPackageVersion>.*:\1:p' PerfectComms.csproj | head -n1)"
           api_package="artifacts/PerfectComms.Api.$api_package_version.nupkg"
           test -s artifacts/PerfectComms.dll
-          test -s artifacts/PerfectCommsAndroid.dll
           test -s "$api_package"
           python3 scripts/verify-nuget-package.py "$api_package" --expected-version "$api_package_version"
           echo "PERFECT_COMMS_API_PACKAGE=$api_package" >> "$GITHUB_ENV"
@@ -190,7 +188,6 @@ jobs:
           body_path: release-notes.md
           files: |
             artifacts/PerfectComms.dll
-            artifacts/PerfectCommsAndroid.dll
       - name: Authenticate to NuGet.org
         id: nuget-login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
