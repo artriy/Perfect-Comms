@@ -2,6 +2,9 @@
 
 ## Perfect Comms v4.1.7
 
+> [!IMPORTANT]
+> **TOU-Mira compatibility:** TOU-Mira v1.7.0 and later require Perfect Comms v4.1.7 or newer. Perfect Comms v4.1.6 and earlier support TOU-Mira only through v1.6.3.
+
 Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes the public Voice Lobby browser, expands modded Team Radio support, and improves desktop installation and CrossOver reliability.
 
 <p align="center">
@@ -80,6 +83,9 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
   > <sub>The reference-only `4.1.7.1` NuGet revision contains the `net6.0` compiler assembly and XML documentation without runtime, native, content, or build assets. Release gates compile a real package consumer and ensure `PerfectComms.dll` is not copied into its output, while tagged releases publish through short-lived NuGet.org credentials.</sub>
 
 ## Perfect Comms v4.1.6
+
+> [!IMPORTANT]
+> **TOU-Mira compatibility:** Perfect Comms v4.1.6 and earlier support TOU-Mira only through v1.6.3. TOU-Mira v1.7.0 and later require Perfect Comms v4.1.7 or newer.
 
 Perfect Comms v4.1.6 keeps living speaking avatars intact on the results screen and lets voice HUD elements reach their selected safe-screen edges without invisible padding.
 
