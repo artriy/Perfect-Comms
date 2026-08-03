@@ -193,13 +193,13 @@ internal sealed class FirstRunSetupDraft
             HideMeetingOverlay = false,
             HideConnectionStatus = false,
             ToggleMute = new FirstRunSetupBinding(
-                KeyCode.M, KeyCode.LeftShift, VoiceModifierMatch.EitherSide),
+                KeyCode.RightAlt, KeyCode.None, VoiceModifierMatch.Exact),
             PushToMute = new FirstRunSetupBinding(
                 KeyCode.None, KeyCode.None, VoiceModifierMatch.Exact),
             PushToTalk = new FirstRunSetupBinding(
                 KeyCode.C, KeyCode.None, VoiceModifierMatch.Exact),
             ToggleSpeaker = new FirstRunSetupBinding(
-                KeyCode.N, KeyCode.LeftShift, VoiceModifierMatch.EitherSide),
+                KeyCode.RightControl, KeyCode.None, VoiceModifierMatch.Exact),
             OpenVoiceSettings = new FirstRunSetupBinding(
                 KeyCode.F10, KeyCode.None, VoiceModifierMatch.Exact),
             Hud = recommendedHud,

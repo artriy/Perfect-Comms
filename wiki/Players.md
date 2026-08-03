@@ -36,10 +36,10 @@ These settings are local. They never change the host's lobby rules.
 
 | Tab | What it controls |
 | :--- | :--- |
-| **Audio** | Microphone and speaker volume, mic sensitivity, Open Mic or Push To Talk, voice falloff softness, startup mute/deafen, noise suppression, and echo cancellation. |
+| **Audio** | Microphone and speaker volume, mic sensitivity, meeting spatial audio, Open Mic or Push To Talk, optional noise gate, voice falloff softness, startup mute/deafen, noise suppression, and echo cancellation. |
 | **Devices** | Microphone selection, Windows speaker selection, live microphone monitoring, and optional delayed playback for testing how you sound. |
-| **Keybinds** (desktop) | Every keyboard or mouse binding, exact modifier chords, chat-keybind behavior, temporary alive/dead volume profiles, and voice refresh. |
-| **HUD** | Voice-control layout, mute/deafen reminder, connection status, speaking-bar presets or manual placement, live preview, meeting speaking overlay, and Jailor control placement when available. |
+| **Keybinds** (desktop) | Every keyboard or mouse binding, standalone left/right modifiers, exact modifier chords, per-binding chat behavior, temporary alive/dead volume profiles, and voice refresh. |
+| **HUD** | Voice-control layout, mute/deafen reminder, connection status, speaking-bar presets or manual placement, live preview, and meeting speaking overlay. |
 | **Advanced** | Run setup again, show a fake 15-player roster for layout testing, and enable temporary diagnostics. |
 
 Android shows Audio, Devices, HUD, and Advanced tabs. Android playback follows the current system audio route, so it does not show the Windows Speaker selector or desktop Keybinds tab.
@@ -54,19 +54,21 @@ Every binding can be changed or cleared in **Voice Settings > Keybinds**.
 | :--- | :---: |
 | Open Voice Settings | `F10` |
 | Open Host Voice Settings | `F11` |
-| Mute or unmute microphone | `Shift+M` |
+| Mute or unmute microphone | `Right Alt` |
 | Push To Talk | Hold `C` |
 | Push To Mute | Unbound |
 | Team Radio | Hold `V` |
 | Cycle Team Radio channel | `G` |
 | Toggle Open Mic / Push To Talk | Unbound |
-| Deafen or undeafen | `Shift+N` |
+| Deafen or undeafen | `Right Ctrl` |
 | Open Player Volumes | `Shift+B` |
 | Alive louder / dead quieter | Unbound |
 | Alive quieter / dead louder | Unbound |
 | Refresh local voice connection | `F7` |
 
-Voice keybinds are blocked while chat is open by default, so typing cannot also transmit or change voice state. Enable **Allow Keybinds While Chat Is Open** if you want them active while typing. Settings panels, active key rebinding, application focus loss, and other text fields still suppress them.
+Tap and release `Right Alt` or `Right Ctrl` by itself. These standalone modifier bindings do not fire when used as part of another shortcut.
+
+With the default per-binding choices, Mute and Deafen remain available while chat is open and every other Perfect Comms shortcut is blocked. Enable **Allow Keybinds While Chat Is Open** to allow them all, or leave it off and use **Chat Keybinds > Choose Chat Keybinds** to select individual shortcuts. Perfect Comms panels, active rebinding, open task/minigame screens, the Friends List, the Voice Lobby editor, and application focus loss always block desktop keybinds. Release a blocked hold or chord before it can activate again.
 
 Push To Talk keeps the selected microphone ready while connected but discards audio before encoding and transmission until the binding is held. The operating system may therefore show the microphone as active between presses.
 

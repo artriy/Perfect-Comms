@@ -59,37 +59,57 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 | Hosts set the match rules | Players set their own audio |
 | :--- | :--- |
 | Talk distance, falloff, and occlusion | Mic and speaker device |
-| Vent, ghost, and meeting voice rules | Push to talk or open mic |
-| Team Radio channels | Noise suppression and echo cancellation (desktop) |
+| Vent, ghost, and meeting voice rules | Open mic, push to talk, and an optional noise gate |
+| Team Radio channels | Meeting spatial audio, plus noise suppression and echo cancellation on desktop |
 | Role-based mutes (with supported mods) | Per-player volume and HUD layout |
 
 <br>
 
 ## Controls
 
-Defaults below. Every key is rebindable in **Voice Settings**.
+### Desktop shortcuts
 
-| Action | Key | | Action | Key |
-| :--- | :---: | :--- | :--- | :---: |
-| Open voice menu | `F10` | | Toggle deafen | `Shift+N` |
-| Open host voice settings | `F11` | | Player volumes | `Shift+B` |
-| Mute / unmute mic | `Shift+M` | | Cycle team radio channel | `G` |
-| Push to talk (hold) | `C` | | Refresh voice connection | `F7` |
-| Team radio (hold) | `V` | | Toggle open mic / push to talk | Unbound |
-| Push to Mute | Unbound | | | |
-| Alive louder / dead quieter (hold) | Unbound | | Alive quieter / dead louder (hold) | Unbound |
+| Key | Action |
+| :---: | :--- |
+| `Right Alt` | Mute / unmute microphone |
+| `Right Ctrl` | Deafen / undeafen |
+| Hold `C` | Push To Talk |
+| Hold `V` | Team Radio |
+| `G` | Cycle Team Radio channel |
+| `Shift+B` | Open Player Volumes |
+| `F7` | Refresh voice connection |
+| `F10` | Open Voice Settings |
+| `F11` | Open Host Voice Settings |
 
-Desktop voice keybinds are blocked while chat is open by default. Enable **Voice
-Settings > Keybinds > Allow Keybinds While Chat Is Open** to keep them active
-while typing; settings panels, key rebinding, and focus loss still suppress them.
+> [!NOTE]
+> **Optional shortcuts are off by default.**
+>
+> Assign any of these in **Voice Settings > Keybinds**:
+> - **Push To Mute** (hold)
+> - **Toggle Open Mic / Push To Talk**
+> - **Alive Louder / Dead Quieter** (hold)
+> - **Alive Quieter / Dead Louder** (hold)
 
-On Android, hold the mic button to transmit in push-to-talk mode. For Team
-Radio, tap its button to cycle channels or hold it to transmit. To keep a small
-**Muted** / **Deafened** reminder visible, enable **Voice Settings > HUD > Mute /
-Deafen Status Reminder**. Deafening mutes Perfect Comms playback and pauses your
-microphone transmission until you undeafen.
+> [!TIP]
+> **First time using Perfect Comms?**
+> - **Open Mic** is the default: your voice sends automatically when you speak.
+>   Tap `Right Alt` to mute or unmute your microphone.
+> - **Push To Talk:** select it in **Voice Settings > Audio**, then hold `C`
+>   whenever you want to speak.
+> - **Deafen:** tap `Right Ctrl` to stop hearing voice and pause your microphone
+>   until you undeafen.
+> - **Team Radio:** when your role and the host settings allow a private channel,
+>   hold `V` to talk and press `G` to cycle available channels.
 
-<br>
+**Platform notes**
+
+- **Desktop:** Press and release `Right Alt` to mute or unmute, and `Right Ctrl`
+  to deafen or undeafen. If you press either one together with another key,
+  Perfect Comms does not mute or deafen. Both controls work while chat is open
+  by default; choose which other shortcuts work there from **Voice Settings >
+  Keybinds**.
+- **HUD reminder:** Enable **Voice Settings > HUD > Mute / Deafen Status
+  Reminder** to keep your muted or deafened state visible.
 
 ## Install
 

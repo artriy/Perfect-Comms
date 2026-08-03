@@ -241,13 +241,13 @@ public sealed class FirstRunHudPresetTests
         Assert.False(fresh.HideConnectionStatus);
 
         Assert.Equal(new FirstRunSetupBinding(
-            KeyCode.M, KeyCode.LeftShift, VoiceModifierMatch.EitherSide), fresh.ToggleMute);
+            KeyCode.RightAlt, KeyCode.None, VoiceModifierMatch.Exact), fresh.ToggleMute);
         Assert.Equal(new FirstRunSetupBinding(
             KeyCode.None, KeyCode.None, VoiceModifierMatch.Exact), fresh.PushToMute);
         Assert.Equal(new FirstRunSetupBinding(
             KeyCode.C, KeyCode.None, VoiceModifierMatch.Exact), fresh.PushToTalk);
         Assert.Equal(new FirstRunSetupBinding(
-            KeyCode.N, KeyCode.LeftShift, VoiceModifierMatch.EitherSide), fresh.ToggleSpeaker);
+            KeyCode.RightControl, KeyCode.None, VoiceModifierMatch.Exact), fresh.ToggleSpeaker);
         Assert.Equal(new FirstRunSetupBinding(
             KeyCode.F10, KeyCode.None, VoiceModifierMatch.Exact), fresh.OpenVoiceSettings);
 
