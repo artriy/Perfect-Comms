@@ -1904,6 +1904,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, String> {
     enumerate_cubeb_devices(DeviceType::INPUT)
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CubebRouteDeviceMetadata {
     stable_id: String,
@@ -1921,6 +1922,7 @@ pub struct HfpRoutePlan {
     pub playback_override: String,
 }
 
+#[cfg(any(windows, test))]
 fn plan_hfp_route_from_metadata(
     is_windows: bool,
     backend_id: &[u8],
