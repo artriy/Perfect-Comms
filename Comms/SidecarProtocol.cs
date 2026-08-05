@@ -43,6 +43,12 @@ internal readonly record struct VoiceDeviceInfo(
             false,
             false);
 }
+internal enum SidecarCaptureMode
+{
+    Stopped,
+    Warm,
+    Transmit,
+}
 
 internal static class SidecarProtocol
 {
@@ -106,6 +112,34 @@ internal static class SidecarProtocol
 
     public static byte[] SelectOutputDeviceFrame(string id)
         => EncodeControl($"{{\"op\":\"select-output-device\",\"id\":{JsonString(id)}}}");
+    public static byte[] ConfigureAudioRouteFrame(
+        string inputId,
+        string outputId,
+        SidecarCaptureMode captureMode,
+        bool synthetic)
+        => EncodeControl(
+            $"{{\"op\":\"configure-audio-route\",\"input_id\":{JsonString(inputId)},\"output_id\":{JsonString(outputId)},\"capture_mode\":{JsonString(CaptureModeValue(captureMode))},\"synthetic\":{JsonBool(synthetic)}}}");
+
+    internal static SidecarCaptureMode ResolveCaptureMode(
+        bool captureRequested,
+        bool muted,
+        bool keepCaptureWarm,
+        bool monitorEnabled = false)
+        => captureRequested && !muted
+            ? SidecarCaptureMode.Transmit
+            : monitorEnabled || captureRequested && keepCaptureWarm
+                ? SidecarCaptureMode.Warm
+                : SidecarCaptureMode.Stopped;
+
+    internal static string CaptureModeValue(SidecarCaptureMode captureMode)
+        => captureMode switch
+        {
+            SidecarCaptureMode.Stopped => "stopped",
+            SidecarCaptureMode.Warm => "warm",
+            SidecarCaptureMode.Transmit => "transmit",
+            _ => throw new ArgumentOutOfRangeException(nameof(captureMode)),
+        };
+
 
     public static byte[] StartFrame() => EncodeControl("{\"op\":\"start\"}");
     public static byte[] WarmFrame() => EncodeControl("{\"op\":\"warm\"}");

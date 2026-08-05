@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 15;
+pub const PROTO_VERSION: u32 = 16;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -621,6 +621,14 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureMode {
+    Stopped,
+    Warm,
+    Transmit,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op")]
 pub enum InboundOp {
@@ -638,6 +646,13 @@ pub enum InboundOp {
     Ping,
     #[serde(rename = "select-output-device")]
     SelectOutputDevice { id: String },
+    #[serde(rename = "configure-audio-route")]
+    ConfigureAudioRoute {
+        input_id: String,
+        output_id: String,
+        capture_mode: CaptureMode,
+        synthetic: bool,
+    },
     #[serde(rename = "set-dsp")]
     SetDsp {
         aec: bool,
@@ -1144,7 +1159,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 15);
+        assert_eq!(PROTO_VERSION, 16);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -1186,6 +1201,73 @@ mod tests {
             InboundOp::SelectOutputDevice { id } => assert_eq!(id, "spk-1"),
             other => panic!("expected select-output-device, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_configure_audio_route() {
+        let op = parse_inbound(
+            r#"{"op":"configure-audio-route","input_id":"mic-1","output_id":"","capture_mode":"warm","synthetic":false}"#,
+        )
+        .unwrap();
+        match op {
+            InboundOp::ConfigureAudioRoute {
+                input_id,
+                output_id,
+                capture_mode,
+                synthetic,
+            } => {
+                assert_eq!(input_id, "mic-1");
+                assert_eq!(output_id, "");
+                assert_eq!(capture_mode, CaptureMode::Warm);
+                assert!(!synthetic);
+            }
+            other => panic!("expected configure-audio-route, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_audio_route_accepts_exact_capture_mode_values() {
+        for (mode, expected) in [
+            ("stopped", CaptureMode::Stopped),
+            ("warm", CaptureMode::Warm),
+            ("transmit", CaptureMode::Transmit),
+        ] {
+            let json = format!(
+                r#"{{"op":"configure-audio-route","input_id":"","output_id":"","capture_mode":"{mode}","synthetic":false}}"#
+            );
+            assert!(matches!(
+                parse_inbound(&json).unwrap(),
+                InboundOp::ConfigureAudioRoute { capture_mode, .. } if capture_mode == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_mode_serializes_to_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&CaptureMode::Stopped).unwrap(),
+            r#""stopped""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CaptureMode::Warm).unwrap(),
+            r#""warm""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CaptureMode::Transmit).unwrap(),
+            r#""transmit""#
+        );
+    }
+
+    #[test]
+    fn configure_audio_route_rejects_unknown_mode_and_missing_fields() {
+        assert!(parse_inbound(
+            r#"{"op":"configure-audio-route","input_id":"","output_id":"","capture_mode":"active","synthetic":false}"#
+        )
+        .is_err());
+        assert!(parse_inbound(
+            r#"{"op":"configure-audio-route","input_id":"","output_id":"","capture_mode":"stopped"}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -1916,7 +1998,7 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 15);
+        assert_eq!(v["proto"], 16);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

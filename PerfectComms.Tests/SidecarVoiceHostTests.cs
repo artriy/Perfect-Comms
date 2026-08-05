@@ -100,6 +100,26 @@ public sealed class SidecarVoiceHostTests
     }
 
     [Fact]
+    public void ConditionalAudioRouteDoesNotSendWhenSuperseded()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+
+        Assert.False(lease.TryConfigureAudioRouteIf(
+            "mic-stale", "spk-stale", SidecarCaptureMode.Warm, synthetic: false, () => false));
+        Assert.Empty(fake.AudioRouteCalls);
+
+        Assert.True(lease.TryConfigureAudioRouteIf(
+            "mic-current", "spk-current", SidecarCaptureMode.Transmit, synthetic: true, () => true));
+        Assert.Equal(
+            ("mic-current", "spk-current", SidecarCaptureMode.Transmit, true),
+            Assert.Single(fake.AudioRouteCalls));
+        lease.Dispose();
+    }
+
+    [Fact]
     public async Task ConcurrentEnsureStartedIsSingleFlight()
     {
         using var startEntered = new ManualResetEventSlim();
@@ -238,6 +258,7 @@ public sealed class SidecarVoiceHostTests
         public List<bool> SyntheticCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
         public List<string> OutputSelectionCalls { get; } = new();
+        public List<(string Input, string Output, SidecarCaptureMode Mode, bool Synthetic)> AudioRouteCalls { get; } = new();
         public int RemoveFailuresRemaining { get; set; }
         public List<(bool Deaf, float Master, int Peers)> GameStates { get; } = new();
 
@@ -256,7 +277,7 @@ public sealed class SidecarVoiceHostTests
 
         private int StartCountBacking;
 
-        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, bool micWarm, IEnumerable<IceServer>? iceServers) => true;
+        public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, bool micWarm, bool monitorEnabled, bool monitorDelayed, float monitorGain, IEnumerable<IceServer>? iceServers) => true;
         public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
         public void SetSynthetic(bool enabled) => SyntheticCalls.Add(enabled);
         public void SetMonitor(bool enabled, bool delayed, float gain) { }
@@ -267,6 +288,15 @@ public sealed class SidecarVoiceHostTests
         public bool SelectOutputDevice(string deviceId)
         {
             OutputSelectionCalls.Add(deviceId);
+            return true;
+        }
+        public bool ConfigureAudioRoute(
+            string inputDevice,
+            string outputDevice,
+            SidecarCaptureMode captureMode,
+            bool synthetic)
+        {
+            AudioRouteCalls.Add((inputDevice, outputDevice, captureMode, synthetic));
             return true;
         }
         public void SendOutputTestFrame(float[] interleavedStereo) { }

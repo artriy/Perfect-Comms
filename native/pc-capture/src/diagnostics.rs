@@ -342,6 +342,8 @@ pub struct CaptureDiagnosticsSnapshot {
     pub backend_preroll_frames: u64,
     pub preroll_pending_samples_discarded: u64,
     pub egress_stale_frames: u64,
+    pub egress_stale_recoveries: u64,
+    pub egress_stale_discarded_frames: u64,
     pub capture_clock_delta_seen: bool,
     pub capture_clock_delta_last_us: u64,
     pub capture_clock_expected_delta_us: u64,
@@ -404,6 +406,8 @@ pub struct CaptureDiagnostics {
     backend_preroll_frames: AtomicU64,
     preroll_pending_samples_discarded: AtomicU64,
     egress_stale_frames: AtomicU64,
+    egress_stale_recoveries: AtomicU64,
+    egress_stale_discarded_frames: AtomicU64,
     capture_clock_delta_seen: AtomicBool,
     capture_clock_delta_last_ns: AtomicU64,
     capture_clock_expected_delta_ns: AtomicU64,
@@ -452,6 +456,8 @@ impl Default for CaptureDiagnostics {
             backend_preroll_frames: AtomicU64::new(0),
             preroll_pending_samples_discarded: AtomicU64::new(0),
             egress_stale_frames: AtomicU64::new(0),
+            egress_stale_recoveries: AtomicU64::new(0),
+            egress_stale_discarded_frames: AtomicU64::new(0),
             capture_clock_delta_seen: AtomicBool::new(false),
             capture_clock_delta_last_ns: AtomicU64::new(0),
             capture_clock_expected_delta_ns: AtomicU64::new(0),
@@ -632,6 +638,11 @@ impl CaptureDiagnostics {
         self.metadata.lock().unwrap().stream_generation
     }
 
+    pub fn first_callback_seen_for_generation(&self, generation: u64) -> bool {
+        self.metadata.lock().unwrap().stream_generation == generation
+            && self.first_callback_ns.load(Ordering::Acquire) != 0
+    }
+
     pub fn current_command_seq(&self) -> u64 {
         self.command_seq.load(Ordering::Relaxed)
     }
@@ -745,8 +756,13 @@ impl CaptureDiagnostics {
             .fetch_add(samples as u64, Ordering::Relaxed);
     }
 
-    pub fn note_egress_stale_frame(&self) {
+    pub fn note_egress_stale_recovery(&self, discarded_backlog_frames: usize) {
         self.egress_stale_frames.fetch_add(1, Ordering::Relaxed);
+        self.egress_stale_recoveries.fetch_add(1, Ordering::Relaxed);
+        self.egress_stale_discarded_frames.fetch_add(
+            discarded_backlog_frames.saturating_add(1) as u64,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn observe_ring_len(&self, len: usize) {
@@ -847,6 +863,10 @@ impl CaptureDiagnostics {
                 .preroll_pending_samples_discarded
                 .load(Ordering::Relaxed),
             egress_stale_frames: self.egress_stale_frames.load(Ordering::Relaxed),
+            egress_stale_recoveries: self.egress_stale_recoveries.load(Ordering::Relaxed),
+            egress_stale_discarded_frames: self
+                .egress_stale_discarded_frames
+                .load(Ordering::Relaxed),
             capture_clock_delta_seen: self.capture_clock_delta_seen.load(Ordering::Acquire),
             capture_clock_delta_last_us: self.capture_clock_delta_last_ns.load(Ordering::Relaxed)
                 / 1_000,
@@ -1265,7 +1285,10 @@ mod tests {
     fn capture_generation_and_window_counters_are_distinct() {
         let diagnostics = CaptureDiagnostics::default();
         assert_eq!(diagnostics.begin_stream(1_000_000, false, None), 1);
+        assert!(!diagnostics.first_callback_seen_for_generation(1));
         assert!(diagnostics.observe_callback(2_000_000, 480, 48_000));
+        assert!(diagnostics.first_callback_seen_for_generation(1));
+        assert!(!diagnostics.first_callback_seen_for_generation(2));
         assert!(!diagnostics.observe_callback(12_000_000, 480, 48_000));
         let first = diagnostics.snapshot(20_000_000, 1, 8, 0, 3);
         assert_eq!(first.stream_generation, 1);
@@ -1283,6 +1306,8 @@ mod tests {
         assert!(!second.callback_interval_window_seen);
         diagnostics.mark_stopped();
         assert_eq!(diagnostics.begin_stream(30_000_000, false, Some("mic")), 2);
+        assert!(!diagnostics.first_callback_seen_for_generation(1));
+        assert!(!diagnostics.first_callback_seen_for_generation(2));
     }
 
     #[test]

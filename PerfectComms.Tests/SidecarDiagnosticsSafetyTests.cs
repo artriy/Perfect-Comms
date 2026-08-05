@@ -274,6 +274,7 @@ public sealed class SidecarDiagnosticsSafetyTests
                  "ring_oldest_frame_age_ms":0,"encoder_frame_seen":false,"encoder_window_seen":false,
                  "encoder_pop_age_last_ms":0,
                  "encoder_pop_age_max_ms":0,"stale_generation_frames":3,
+                 "egress_stale_recoveries":5,"egress_stale_discarded_frames":11,
                  "raw_input":{"samples":0,"dropped_records":4,"rms":0.0},"pre_dsp":{} },
                "playback":{"stream_generation":0,"state":"running","running":false,
                  "requested_device":"{{playbackRequested}}","resolved_device":"{{playbackResolved}}",
@@ -297,6 +298,7 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.Contains("streamGeneration=0", rendered);
         Assert.Contains("staleGenerationFrames=3", rendered);
         Assert.Contains("startToOpenMs=na openToFirstCallbackMs=na streamAgeMs=na", rendered);
+        Assert.Contains("egressStaleRecoveries=5 egressStaleDiscardedFrames=11", rendered);
         Assert.Contains("callbacksTotal=0 callbackAgeMs=na", rendered);
         Assert.Contains("callbackFramesLast=na callbackFramesMin=na callbackFramesMax=na", rendered);
         Assert.Contains("ringOldestAgeMs=na encoderPopAgeLastMs=na encoderPopAgeMaxMs=na", rendered);
@@ -593,7 +595,7 @@ public sealed class SidecarDiagnosticsSafetyTests
     {
         const string accepted = """
             {"op":"media-state","direction":"playback","state":"command-accepted",
-             "action":"select-output-device","stream_generation":0,"running":false,
+             "action":"select-output-device","stream_generation":0,"running":false,"changed":true,
              "requested_device":"Headphones","requested_default":false}
             """;
         const string started = """
@@ -613,6 +615,7 @@ public sealed class SidecarDiagnosticsSafetyTests
         Assert.Equal("command-accepted", acknowledgement.State);
         Assert.Equal("select-output-device", acknowledgement.Action);
         Assert.Equal("Headphones", acknowledgement.RequestedDevice);
+        Assert.True(acknowledgement.Changed);
 
         Assert.True(SidecarVoiceClient.TryReadPlaybackState(started, out var playback));
         Assert.Equal((ulong)9, playback.StreamGeneration);

@@ -155,6 +155,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private ulong _speakerPlaybackGeneration;
     private bool _speakerDefaultFallbackPending;
     private long _speakerSelectionRevision;
+    private long _audioRouteRevision;
     private string _speakerFallbackRetryPendingDevice = string.Empty;
     private string _speakerFallbackRetriedDevice = string.Empty;
     private int _speakerFallbackRetryEpoch;
@@ -942,26 +943,48 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if !WINDOWS
         keepCaptureWarm = false;
 #endif
-        if (_mute == mute && _keepCaptureWarm == keepCaptureWarm) return;
 #if WINDOWS
         SidecarVoiceLease? sidecarVoice;
         long sidecarSessionGeneration;
         long captureSourceGeneration;
         bool captureWasWarm;
         bool resumeSidecarDirectly;
+        string routeInputDevice;
+        string routeOutputDevice;
+        SidecarCaptureMode routeCaptureMode;
+        bool routeSynthetic;
         lock (_voiceSync)
         {
+            if (_mute == mute && _keepCaptureWarm == keepCaptureWarm) return;
             sidecarVoice = _voice;
             sidecarSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
             captureSourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
             captureWasWarm = _keepCaptureWarm;
             resumeSidecarDirectly = !mute && _microphoneReady && _voiceReady && sidecarVoice != null;
+            _keepCaptureWarm = keepCaptureWarm;
+            _mute = mute;
+            if (mute && keepCaptureWarm)
+                _microphoneRequested = true;
             if (!mute && !captureWasWarm && captureSourceGeneration > 0)
                 DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: true);
+            routeInputDevice = _lastMicDeviceName;
+            routeOutputDevice = ResolveSidecarRouteOutput(
+                _lastSpeakerDeviceName,
+                _speakerPlaybackRequestedDevice,
+                sidecarVoice != null);
+            routeCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                _microphoneRequested,
+                mute,
+                keepCaptureWarm,
+                _loopBack);
+            routeSynthetic = _captureOptions.SyntheticMicToneEnabled;
+            Interlocked.Increment(ref _audioRouteRevision);
         }
-#endif
+#else
+        if (_mute == mute && _keepCaptureWarm == keepCaptureWarm) return;
         _keepCaptureWarm = keepCaptureWarm;
         _mute = mute;
+#endif
         if (mute)
         {
             _localLevel = 0f;
@@ -974,9 +997,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             if (keepCaptureWarm)
             {
-                _microphoneRequested = true;
                 if (sidecarVoice != null)
-                    sidecarVoice.SetMicWarm();
+                    sidecarVoice.ConfigureAudioRoute(
+                        routeInputDevice,
+                        routeOutputDevice,
+                        SidecarCaptureMode.Warm,
+                        routeSynthetic);
                 else
                     QueueMicrophoneTransition(true, "ptt-warm");
             }
@@ -988,12 +1014,20 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     if (captureSourceGeneration > 0)
                         DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: false);
                 }
-                sidecarVoice?.SetMicActive(false);
+                sidecarVoice?.ConfigureAudioRoute(
+                    routeInputDevice,
+                    routeOutputDevice,
+                    routeCaptureMode,
+                    routeSynthetic);
             }
         }
         else if (resumeSidecarDirectly && sidecarVoice != null)
         {
-            sidecarVoice.SetMicActive(true);
+            sidecarVoice.ConfigureAudioRoute(
+                routeInputDevice,
+                routeOutputDevice,
+                routeCaptureMode,
+                routeSynthetic);
             if (!captureWasWarm)
             {
                 lock (_voiceSync)
@@ -1028,19 +1062,52 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         delayed &= loopBack;
         gain = float.IsFinite(gain) ? Math.Clamp(gain, 0f, 2f) : 1f;
+#if WINDOWS
+        SidecarVoiceLease? voice;
+        string routeInputDevice;
+        string routeOutputDevice;
+        SidecarCaptureMode routeCaptureMode;
+        bool routeSynthetic;
+        lock (_voiceSync)
+        {
+            if (_loopBack == loopBack && _loopBackDelayed == delayed &&
+                Math.Abs(_loopBackGain - gain) < 0.0001f) return;
+            _loopBack = loopBack;
+            _loopBackDelayed = delayed;
+            _loopBackGain = gain;
+            voice = _voice;
+            routeInputDevice = _lastMicDeviceName;
+            routeOutputDevice = ResolveSidecarRouteOutput(
+                _lastSpeakerDeviceName,
+                _speakerPlaybackRequestedDevice,
+                voice != null);
+            routeCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                _microphoneRequested,
+                _mute,
+                _keepCaptureWarm,
+                loopBack);
+            routeSynthetic = _captureOptions.SyntheticMicToneEnabled;
+            Interlocked.Increment(ref _audioRouteRevision);
+        }
+        voice?.SetMonitor(loopBack, delayed, gain);
+        voice?.ConfigureAudioRoute(
+            routeInputDevice,
+            routeOutputDevice,
+            routeCaptureMode,
+            routeSynthetic);
+#else
         if (_loopBack == loopBack && _loopBackDelayed == delayed &&
             Math.Abs(_loopBackGain - gain) < 0.0001f) return;
         _loopBack = loopBack;
         _loopBackDelayed = delayed;
         _loopBackGain = gain;
-#if WINDOWS
-        _voice?.SetMonitor(loopBack, delayed, gain);
-#elif ANDROID
+#if ANDROID
         _androidMicrophoneMonitor.Configure(loopBack, delayed, gain * _micVolume);
         if (loopBack && Mute)
             StartAndroidMicrophone("microphone-test");
         else if (!loopBack && Mute)
             StopAndroidMicrophone("microphone-test-ended");
+#endif
 #endif
     }
     private float _masterVolume = 1f;
@@ -1089,28 +1156,47 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             ? BeginSidecarCaptureSourceGeneration(
                 awaitingFirstLevel: !Mute && _microphoneRequested && _voiceReady)
             : 0;
-#endif
+        SidecarVoiceLease? captureVoice;
+        long captureSessionGeneration;
+        string routeInputDevice;
+        string routeOutputDevice;
+        SidecarCaptureMode routeCaptureMode;
+        lock (_voiceSync)
+        {
+            _captureOptions = options;
+            captureVoice = _voice;
+            captureSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
+            routeInputDevice = _lastMicDeviceName;
+            routeOutputDevice = ResolveSidecarRouteOutput(
+                _lastSpeakerDeviceName,
+                _speakerPlaybackRequestedDevice,
+                captureVoice != null);
+            routeCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                _microphoneRequested,
+                _mute,
+                _keepCaptureWarm,
+                _loopBack);
+            if (restartCapture)
+                Interlocked.Increment(ref _audioRouteRevision);
+        }
+#else
         _captureOptions = options;
-        // Lifting the signal before suppression also lifts wind and keyboard transients during
-        // speech, so the native capture path deliberately runs without automatic gain.
+#endif
         const bool automaticMicGain = false;
 
 #if WINDOWS
-        SidecarVoiceLease? captureVoice;
-        long captureSessionGeneration;
-        lock (_voiceSync)
-        {
-            captureVoice = _voice;
-            captureSessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
-        }
         captureVoice?.SetDsp(
             options.EchoCancellationEnabled,
             automaticMicGain,
             options.NoiseSuppressionEnabled,
             options.StrongerNoiseSuppressionEnabled,
             true);
-        captureVoice?.SetSynthetic(options.SyntheticMicToneEnabled);
         captureVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
+        captureVoice?.ConfigureAudioRoute(
+            routeInputDevice,
+            routeOutputDevice,
+            routeCaptureMode,
+            options.SyntheticMicToneEnabled);
         if (restartCapture)
         {
             var captureHealth = captureVoice?.Health ?? CaptureHealth.Dead;
@@ -1127,8 +1213,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
         EnsureCaptureSupervisor();
 #elif ANDROID
-        // Android intentionally uses managed synthetic PCM pushed into pc-mobile; keep native
-        // synthetic generation off and the APM/DSP path disabled.
         _mobileVoice?.SetSynthetic(false);
         _mobileVoice?.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
         if (restartCapture && !Mute && _microphoneReady)
@@ -1273,20 +1357,39 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         => forceRestart ||
            !string.Equals(previousDeviceId, currentDeviceId, StringComparison.Ordinal);
 
+    internal static string ResolveSidecarRouteOutput(
+        string selectedDevice,
+        string activeRequestedDevice,
+        bool sidecarAttached)
+        => sidecarAttached ? activeRequestedDevice : selectedDevice;
+
     public void SetMicrophone(string deviceName, float volume, bool forceRestart = false)
     {
         var normalizedName = deviceName ?? string.Empty;
+#if WINDOWS
+        bool restartSidecar;
+        lock (_voiceSync)
+        {
+            restartSidecar = ShouldRestartMicrophoneSelection(
+                _lastMicDeviceName, normalizedName, forceRestart);
+            _lastMicDeviceName = normalizedName;
+            _micVolume = NormalizeMicGain(volume);
+            if (restartSidecar)
+            {
+                _btProfileConflict = false;
+                Interlocked.Increment(ref _audioRouteRevision);
+            }
+        }
+#else
         var restartSidecar = ShouldRestartMicrophoneSelection(
             _lastMicDeviceName, normalizedName, forceRestart);
         _lastMicDeviceName = normalizedName;
         _micVolume = NormalizeMicGain(volume);
+#endif
 #if WINDOWS
         if (restartSidecar)
-        {
-            _btProfileConflict = false;
             BeginSidecarCaptureSourceGeneration(
                 awaitingFirstLevel: !Mute && _microphoneRequested && _voiceReady);
-        }
         if (Mute)
         {
             QueueMicrophoneTransition(_keepCaptureWarm, _keepCaptureWarm ? "set-warm" : "set-muted", restartSidecar);
@@ -1777,6 +1880,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     internal static bool IsConfirmedSpeakerPlaybackState(SidecarPlaybackState state)
         => state.Running && state.State == "first-callback";
+    internal static bool ShouldPreserveSpeakerReadinessOnRouteAcknowledgement(
+        SidecarPlaybackState state,
+        bool speakerReady)
+        => speakerReady &&
+           state.State == "command-accepted" &&
+           state.Action == "configure-audio-route" &&
+           !state.Changed &&
+           state.Running;
 
     internal static bool ShouldFallbackSpeakerToDefault(
         string requestedDevice,
@@ -1879,7 +1990,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         string retryDevice = string.Empty;
         int retryEpoch = 0;
         long fallbackRevision = 0;
+        long fallbackAudioRouteRevision = 0;
+        string fallbackInputDevice = string.Empty;
+        SidecarCaptureMode fallbackCaptureMode = SidecarCaptureMode.Stopped;
+        bool fallbackSynthetic = false;
         long notificationRevision = 0;
+        long notificationAudioRouteRevision = 0;
         bool fallbackRequested = false;
         bool retryPlanned = false;
         bool notifyFailure = false;
@@ -1900,18 +2016,23 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
 
             if (state.State == "command-accepted" &&
-                state.Action == "select-output-device")
+                state.Action is "select-output-device" or "configure-audio-route")
             {
+                bool preserveReadiness =
+                    ShouldPreserveSpeakerReadinessOnRouteAcknowledgement(state, _speakerReady);
                 _speakerPlaybackRequestedDevice = state.RequestedDefault
                     ? string.Empty
                     : state.RequestedDevice ?? string.Empty;
-                _speakerPlaybackGeneration = 0;
-                _speakerReady = false;
+                if (!preserveReadiness)
+                {
+                    _speakerPlaybackGeneration = 0;
+                    _speakerReady = false;
+                }
                 if (!string.IsNullOrEmpty(_speakerPlaybackRequestedDevice))
                     _speakerDefaultFallbackPending = false;
                 VoiceDiagnostics.Log(
                     "voice.speaker.state",
-                    $"state=command-accepted ready=false requested={VoiceDiagnostics.DescribeDevice(_speakerPlaybackRequestedDevice)}");
+                    $"state=command-accepted ready={_speakerReady.ToString().ToLowerInvariant()} changed={state.Changed.ToString().ToLowerInvariant()} requested={VoiceDiagnostics.DescribeDevice(_speakerPlaybackRequestedDevice)}");
                 return;
             }
 
@@ -1981,6 +2102,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     failureDetail = DescribeSpeakerPlaybackFailure(state);
                     notifyFailure = true;
                     notificationRevision = Volatile.Read(ref _speakerSelectionRevision);
+                    notificationAudioRouteRevision = Volatile.Read(ref _audioRouteRevision);
                     if (ShouldFallbackSpeakerToDefault(
                             _speakerPlaybackRequestedDevice,
                             _speakerDefaultFallbackPending,
@@ -2005,6 +2127,14 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                         _speakerPlaybackGeneration = 0;
                         fallbackVoice = _voice;
                         fallbackRevision = notificationRevision;
+                        fallbackAudioRouteRevision = notificationAudioRouteRevision;
+                        fallbackInputDevice = _lastMicDeviceName;
+                        fallbackCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                            _microphoneRequested,
+                            Mute,
+                            _keepCaptureWarm,
+                            _loopBack);
+                        fallbackSynthetic = _captureOptions.SyntheticMicToneEnabled;
                     }
                 }
 
@@ -2022,11 +2152,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         {
             try
             {
-                fallbackSent = fallbackVoice.TrySelectOutputDeviceIf(
+                fallbackSent = fallbackVoice.TryConfigureAudioRouteIf(
+                    fallbackInputDevice,
                     string.Empty,
+                    fallbackCaptureMode,
+                    fallbackSynthetic,
                     () => !_disposed &&
                         sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision));
+                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                        fallbackAudioRouteRevision == Volatile.Read(ref _audioRouteRevision));
             }
             catch (Exception ex)
             {
@@ -2038,7 +2172,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             bool fallbackStillCurrent = !_disposed &&
                 sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                fallbackRevision == Volatile.Read(ref _speakerSelectionRevision);
+                fallbackRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                fallbackAudioRouteRevision == Volatile.Read(ref _audioRouteRevision);
             if (!fallbackStillCurrent)
             {
                 // A newer user selection or voice session won the race. Its serialized command
@@ -2052,7 +2187,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 lock (_voiceSync)
                 {
                     if (sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision))
+                        fallbackRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                        fallbackAudioRouteRevision == Volatile.Read(ref _audioRouteRevision))
                     {
                         _speakerPlaybackRequestedDevice = _lastSpeakerDeviceName;
                         _speakerPlaybackGeneration = 0;
@@ -2070,7 +2206,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 if (_disposed ||
                     sessionGeneration != Volatile.Read(ref _voiceSessionGeneration) ||
-                    notificationRevision != Volatile.Read(ref _speakerSelectionRevision))
+                    notificationRevision != Volatile.Read(ref _speakerSelectionRevision) ||
+                    notificationAudioRouteRevision != Volatile.Read(ref _audioRouteRevision))
                     return;
                 string message = fallbackRequested
                     ? fallbackSent
@@ -2321,8 +2458,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 micActive = !Mute && _microphoneRequested;
                 micWarm = Mute && _keepCaptureWarm && _microphoneRequested;
                 sourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
-                // Initial configuration is a stop/select/synthetic/start command group. Disarm before
-                // sending it so no callback queued by a pre-configuration producer can mark it ready.
                 DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: micActive);
             }
             else
@@ -2356,6 +2491,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _captureOptions.SyntheticMicToneEnabled,
             micActive,
             micWarm,
+            _loopBack,
+            _loopBackDelayed,
+            _loopBackGain,
             pendingIce);
 
         if (configured)
@@ -2382,8 +2520,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 bool corrected;
                 try
                 {
-                    corrected = voice.TrySelectOutputDeviceIf(
+                    corrected = voice.TryConfigureAudioRouteIf(
+                        _lastMicDeviceName,
                         latestSpeaker,
+                        SidecarProtocol.ResolveCaptureMode(
+                            _microphoneRequested,
+                            Mute,
+                            _keepCaptureWarm,
+                            _loopBack),
+                        _captureOptions.SyntheticMicToneEnabled,
                         () => !_disposed &&
                             sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
                             latestSpeakerRevision == Volatile.Read(ref _speakerSelectionRevision));
@@ -2417,8 +2562,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             return;
         }
-
-        voice.SetMonitor(_loopBack, _loopBackDelayed, _loopBackGain);
 
         var outputDevices = voice.OutputDevices.ToArray();
         var health = voice.Health;
@@ -2730,36 +2873,51 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             // Desktop synthetic capture is generated inside the helper so it traverses the exact
             // production Opus/WebRTC path. Do not start the retired managed diagnostic timer here.
             StopSyntheticMicTone();
-            _microphoneRequested = true;
-            if (restartCapture)
-                _microphoneReady = false;
+            lock (_voiceSync)
+            {
+                if (!_microphoneRequested)
+                {
+                    _microphoneRequested = true;
+                    Interlocked.Increment(ref _audioRouteRevision);
+                }
+                if (restartCapture)
+                    _microphoneReady = false;
+            }
             EnsureVoiceSession(reason);
             SidecarVoiceLease? voice;
             long sessionGeneration;
             long sourceGeneration;
+            string routeInputDevice;
+            string routeOutputDevice;
+            SidecarCaptureMode routeCaptureMode;
+            bool routeSynthetic;
             lock (_voiceSync)
             {
                 voice = _voice;
                 sessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
                 sourceGeneration = Volatile.Read(ref _sidecarCaptureSourceGeneration);
+                routeInputDevice = _lastMicDeviceName;
+                routeOutputDevice = ResolveSidecarRouteOutput(
+                    _lastSpeakerDeviceName,
+                    _speakerPlaybackRequestedDevice,
+                    voice != null);
+                routeCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                    _microphoneRequested,
+                    _mute,
+                    _keepCaptureWarm,
+                    _loopBack);
+                routeSynthetic = _captureOptions.SyntheticMicToneEnabled;
                 if (voice != null && !Mute)
                     DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: true);
             }
             if (voice != null)
             {
-                // A native select-device while active can race the capture callback. Explicitly
-                // stop -> select/configure -> start for device changes and supervisor restarts.
-                if (restartCapture)
-                    voice.SetMicActive(false);
-                voice.SelectMicDevice(_lastMicDeviceName);
                 voice.SetInput(_micVolume, _vadThreshold, _noiseGateThreshold);
-                voice.SetSynthetic(_captureOptions.SyntheticMicToneEnabled);
-                if (!Mute)
-                    voice.SetMicActive(true);
-                else if (_keepCaptureWarm)
-                    voice.SetMicWarm();
-                else
-                    voice.SetMicActive(false);
+                voice.ConfigureAudioRoute(
+                    routeInputDevice,
+                    routeOutputDevice,
+                    routeCaptureMode,
+                    routeSynthetic);
             }
             var voiceHealth = voice?.Health ?? CaptureHealth.Dead;
             lock (_voiceSync)
@@ -2792,15 +2950,29 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void StopSidecarMicrophone(string reason)
     {
         StopSyntheticMicTone();
-        _microphoneRequested = false;
         SidecarVoiceLease? voice;
+        string routeInputDevice;
+        string routeOutputDevice;
         lock (_voiceSync)
         {
+            if (_microphoneRequested)
+            {
+                _microphoneRequested = false;
+                Interlocked.Increment(ref _audioRouteRevision);
+            }
             DisarmSidecarCaptureEvidenceLocked(awaitingFirstLevel: false);
             voice = _voice;
+            routeInputDevice = _lastMicDeviceName;
+            routeOutputDevice = ResolveSidecarRouteOutput(
+                _lastSpeakerDeviceName,
+                _speakerPlaybackRequestedDevice,
+                voice != null);
         }
-        voice?.SetMicActive(false);
-        voice?.SetSynthetic(false);
+        voice?.ConfigureAudioRoute(
+            routeInputDevice,
+            routeOutputDevice,
+            SidecarCaptureMode.Stopped,
+            synthetic: false);
         var hadMic = _microphoneReady;
         _microphoneReady = false;
         lock (_captureFrameSync)
@@ -3628,6 +3800,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     _btProfileConflict = false;
                 _lastSpeakerDeviceName = selectedDevice;
                 selectionRevision = Interlocked.Increment(ref _speakerSelectionRevision);
+                Interlocked.Increment(ref _audioRouteRevision);
                 ResetSpeakerFallbackRetryLocked();
             }
             SetSpeakerSidecar(selectedDevice, selectionRevision, recoveryRetry: false);
@@ -3663,6 +3836,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     {
         SidecarVoiceLease? voice;
         long sessionGeneration;
+        long expectedAudioRouteRevision;
+        string routeInputDevice;
+        SidecarCaptureMode routeCaptureMode;
+        bool routeSynthetic;
         lock (_voiceSync)
         {
             if (_disposed ||
@@ -3676,17 +3853,29 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _speakerPlaybackRequestedDevice = deviceName;
             _speakerPlaybackGeneration = 0;
             _speakerDefaultFallbackPending = false;
+            expectedAudioRouteRevision = Volatile.Read(ref _audioRouteRevision);
+            routeInputDevice = _lastMicDeviceName;
+            routeCaptureMode = SidecarProtocol.ResolveCaptureMode(
+                _microphoneRequested,
+                _mute,
+                _keepCaptureWarm,
+                _loopBack);
+            routeSynthetic = _captureOptions.SyntheticMicToneEnabled;
         }
         if (voice != null)
         {
             bool sent;
             try
             {
-                sent = voice.TrySelectOutputDeviceIf(
+                sent = voice.TryConfigureAudioRouteIf(
+                    routeInputDevice,
                     deviceName,
+                    routeCaptureMode,
+                    routeSynthetic,
                     () => !_disposed &&
                         sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                        expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision));
+                        expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                        expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision));
             }
             catch
             {
@@ -3695,7 +3884,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             bool commandStillCurrent = !_disposed &&
                 sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision);
+                expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision);
             if (!commandStillCurrent)
             {
                 VoiceDiagnostics.Log(
@@ -3713,6 +3903,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     if (ReferenceEquals(_voice, voice) &&
                         sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
                         expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                        expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision) &&
                         string.Equals(_speakerPlaybackRequestedDevice, deviceName, StringComparison.Ordinal) &&
                         _speakerPlaybackGeneration == 0 &&
                         !_speakerReady)
@@ -3736,17 +3927,22 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
                 try
                 {
-                    fallbackSent = voice.TrySelectOutputDeviceIf(
+                    fallbackSent = voice.TryConfigureAudioRouteIf(
+                        routeInputDevice,
                         string.Empty,
+                        routeCaptureMode,
+                        routeSynthetic,
                         () => !_disposed &&
                             sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision));
+                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                            expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision));
                 }
                 catch { fallbackSent = false; }
 
                 commandStillCurrent = !_disposed &&
                     sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                    expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision);
+                    expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                    expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision);
                 if (!commandStillCurrent) return;
 
                 if (!fallbackSent)
@@ -3755,7 +3951,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                     {
                         if (ReferenceEquals(_voice, voice) &&
                             sessionGeneration == Volatile.Read(ref _voiceSessionGeneration) &&
-                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision))
+                            expectedSelectionRevision == Volatile.Read(ref _speakerSelectionRevision) &&
+                            expectedAudioRouteRevision == Volatile.Read(ref _audioRouteRevision))
                         {
                             // The native worker may still recover the explicit endpoint. Keep its
                             // events matchable when the fallback command itself was not accepted.

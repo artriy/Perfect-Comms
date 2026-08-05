@@ -16,7 +16,8 @@ internal readonly record struct SidecarPlaybackState(
     bool FellBackToDefault,
     bool Running,
     string Error = "",
-    string ErrorCode = "");
+    string ErrorCode = "",
+    bool Changed = false);
 
 internal readonly record struct SidecarCaptureState(
     string State,
@@ -59,6 +60,9 @@ internal interface ISidecarVoiceClient : IDisposable
         bool synthetic,
         bool micActive,
         bool micWarm,
+        bool monitorEnabled,
+        bool monitorDelayed,
+        float monitorGain,
         IEnumerable<IceServer>? iceServers);
     void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf);
     void SetSynthetic(bool enabled);
@@ -68,6 +72,11 @@ internal interface ISidecarVoiceClient : IDisposable
     void SetMicWarm();
     void SelectMicDevice(string deviceId);
     bool SelectOutputDevice(string deviceId);
+    bool ConfigureAudioRoute(
+        string inputDevice,
+        string outputDevice,
+        SidecarCaptureMode captureMode,
+        bool synthetic);
     void SendOutputTestFrame(float[] interleavedStereo);
     bool AddPeer(string peerId, bool isOfferer, int generation);
     bool RemovePeer(string peerId, int generation);
@@ -223,10 +232,13 @@ internal sealed class SidecarVoiceLease : IDisposable
         bool synthetic,
         bool micActive,
         bool micWarm,
+        bool monitorEnabled,
+        bool monitorDelayed,
+        float monitorGain,
         IEnumerable<IceServer>? iceServers)
         => _host.Use(this, client => client.TryConfigureInitialCapture(
             micDevice, outputDevice, aec, agc, ns, nsVeryHigh, hpf, gain, vadThreshold, noiseGateThreshold,
-            synthetic, micActive, micWarm, iceServers), false);
+            synthetic, micActive, micWarm, monitorEnabled, monitorDelayed, monitorGain, iceServers), false);
 
     public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf)
         => _host.Use(this, client => client.SetDsp(aec, agc, ns, nsVeryHigh, hpf));
@@ -247,6 +259,22 @@ internal sealed class SidecarVoiceLease : IDisposable
     public bool TrySelectOutputDeviceIf(string deviceId, Func<bool> stillCurrent)
         => _host.Use(this, client =>
             stillCurrent() && client.SelectOutputDevice(deviceId), false);
+    public bool ConfigureAudioRoute(
+        string inputDevice,
+        string outputDevice,
+        SidecarCaptureMode captureMode,
+        bool synthetic)
+        => _host.Use(this, client => client.ConfigureAudioRoute(
+            inputDevice, outputDevice, captureMode, synthetic), false);
+    public bool TryConfigureAudioRouteIf(
+        string inputDevice,
+        string outputDevice,
+        SidecarCaptureMode captureMode,
+        bool synthetic,
+        Func<bool> stillCurrent)
+        => _host.Use(this, client =>
+            stillCurrent() && client.ConfigureAudioRoute(
+                inputDevice, outputDevice, captureMode, synthetic), false);
     public void SendOutputTestFrame(float[] interleavedStereo)
         => _host.Use(this, client => client.SendOutputTestFrame(interleavedStereo));
     public bool AddPeer(string peerId, bool isOfferer, int generation)

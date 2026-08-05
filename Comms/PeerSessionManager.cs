@@ -462,6 +462,7 @@ internal sealed class PeerSessionManager
     private long _remoteCandidatesReceived;
     private long _remoteCandidatesForwarded;
     private long _rejectedCandidates;
+    private long _lastNativeOperationProgressMs;
 
     public PeerSessionManager(
         int localClientId,
@@ -545,10 +546,13 @@ internal sealed class PeerSessionManager
         return false;
     }
 
-    private static bool IsWithinNativeOperationDeadline(long startedAtMs, long nowMs)
-        => startedAtMs > 0
-           && nowMs >= startedAtMs
-           && nowMs - startedAtMs < NativeOperationAckTimeoutMs;
+    private bool IsWithinNativeOperationDeadline(long startedAtMs, long nowMs)
+    {
+        var watchdogStartedAtMs = Math.Max(startedAtMs, _lastNativeOperationProgressMs);
+        return startedAtMs > 0
+               && nowMs >= watchdogStartedAtMs
+               && nowMs - watchdogStartedAtMs < NativeOperationAckTimeoutMs;
+    }
 
     private bool CheckNativeOperationDeadline(int clientId, PeerEntry peer, long nowMs)
     {
@@ -567,13 +571,15 @@ internal sealed class PeerSessionManager
             operation = "set-remote-sdp";
             startedAtMs = peer.NativeRemoteSdpRequestedAtMs;
         }
+        var watchdogStartedAtMs = Math.Max(startedAtMs, _lastNativeOperationProgressMs);
         if (operation == null
-            || nowMs < startedAtMs
-            || nowMs - startedAtMs < NativeOperationAckTimeoutMs)
+            || nowMs < watchdogStartedAtMs
+            || nowMs - watchdogStartedAtMs < NativeOperationAckTimeoutMs)
             return false;
 
         peer.NativeAckTimeoutReported = true;
-        var detail = $"operation={operation} client={clientId} generation={peer.Generation} waitMs={nowMs - startedAtMs}";
+        var detail =
+            $"operation={operation} client={clientId} generation={peer.Generation} waitMs={nowMs - startedAtMs} idleMs={nowMs - watchdogStartedAtMs}";
         LogReject("native-operation-ack", clientId, peer, "timeout", detail);
         _nativeOperationTimeout(detail);
         return true;
@@ -594,6 +600,7 @@ internal sealed class PeerSessionManager
             return;
         }
 
+        void RecordProgress() => _lastNativeOperationProgressMs = Math.Max(_lastNativeOperationProgressMs, nowMs);
         if (string.Equals(operation, "native-peer-added", StringComparison.Ordinal))
         {
             if (!peer.Added)
@@ -601,6 +608,7 @@ internal sealed class PeerSessionManager
                 LogReject("native-operation-ack", clientId, peer, "peer-not-added", $"operation={operation}");
                 return;
             }
+            RecordProgress();
             CompleteNativePeerAdd(clientId, peer, nowMs, operation);
             return;
         }
@@ -611,12 +619,14 @@ internal sealed class PeerSessionManager
                 LogReject("native-operation-ack", clientId, peer, "no-pending-operation", $"operation={operation}");
                 return;
             }
+            RecordProgress();
             CompletePendingRemoteSdp(clientId, peer, nowMs, operation);
             ReplayPendingCandidates(clientId, peer, peer.NegotiationId, nowMs);
             return;
         }
         if (operation is "native-peer-removed" or "native-ice-restarted")
         {
+            RecordProgress();
             LogEvent("native-operation-ack", clientId, peer, $"operation={operation} accepted=true");
             return;
         }

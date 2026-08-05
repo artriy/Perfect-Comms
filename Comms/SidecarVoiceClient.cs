@@ -15,7 +15,6 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
     private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
 
-    // Protocol 15 separates warm microphone capture from transmission for instant Push To Talk.
     // Protocol 14 generation-scopes every peer operation so stale queued SDP/ICE work cannot
     // mutate a replacement peer. Protocol 13 adds local microphone monitoring with optional
     // delayed playback. Protocol 12 adds coordinated logical ICE restart for network-interface
@@ -26,11 +25,34 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 15;
+    public const int Proto = 16;
     private const int HandshakeTimeoutMs = 4000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
     private const ulong SupportedMediaDiagnosticsSchema = 1;
+    private static readonly IReadOnlyList<string> InitialConfigurationWithoutIce =
+        Array.AsReadOnly(new[]
+        {
+            "set-dsp",
+            "set-diagnostics",
+            "set-input",
+            "set-monitor",
+            "configure-audio-route",
+        });
+    private static readonly IReadOnlyList<string> InitialConfigurationWithIce =
+        Array.AsReadOnly(new[]
+        {
+            "set-dsp",
+            "set-diagnostics",
+            "set-input",
+            "set-monitor",
+            "set-ice-servers",
+            "configure-audio-route",
+        });
+
+    internal static IReadOnlyList<string> InitialConfigurationCommandOrder(bool includesIceServers)
+        => includesIceServers ? InitialConfigurationWithIce : InitialConfigurationWithoutIce;
+
 
     private readonly Func<string, string, SidecarLaunchResult> _launch;
     private readonly object _gate = new();
@@ -284,6 +306,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         bool synthetic,
         bool micActive,
         bool micWarm,
+        bool monitorEnabled,
+        bool monitorDelayed,
+        float monitorGain,
         IEnumerable<IceServer>? iceServers)
     {
         if (!_running)
@@ -292,19 +317,6 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             return false;
         }
 
-        // Start() opens capture as part of the existing helper lifecycle. Quiesce it before
-        // applying the latest settings so a device change made during handshake cannot be
-        // lost and no frame is encoded with stale gain/VAD/synthetic state.
-        if (!SendCommand("stop", SidecarProtocol.StopFrame, "phase=initial-config")) return false;
-        // Empty ids explicitly mean the OS default device; they are not "no change".
-        if (!SendCommand(
-                "select-device",
-                () => SidecarProtocol.SelectDeviceFrame(micDevice ?? string.Empty),
-                DescribeDeviceForDiagnostics(micDevice))) return false;
-        if (!SendCommand(
-                "select-output-device",
-                () => SidecarProtocol.SelectOutputDeviceFrame(outputDevice ?? string.Empty),
-                DescribeDeviceForDiagnostics(outputDevice))) return false;
         if (!SendCommand(
                 "set-dsp",
                 () => SidecarProtocol.SetDspFrame(aec, agc, ns, nsVeryHigh, hpf),
@@ -320,9 +332,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 () => SidecarProtocol.SetInputFrame(gain, vadThreshold, noiseGateThreshold),
                 $"gain={FormatFloat(gain)} vadThreshold={FormatFloat(vadThreshold)} noiseGateThreshold={FormatFloat(noiseGateThreshold)}")) return false;
         if (!SendCommand(
-                "set-synthetic",
-                () => SidecarProtocol.SetSyntheticFrame(synthetic),
-                $"enabled={synthetic}")) return false;
+                "set-monitor",
+                () => SidecarProtocol.SetMonitorFrame(monitorEnabled, monitorDelayed, monitorGain),
+                $"enabled={monitorEnabled} delayed={monitorDelayed} gain={FormatFloat(monitorGain)}")) return false;
         if (iceServers != null)
         {
             var snapshot = SnapshotIceServers(iceServers);
@@ -331,18 +343,33 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     () => SidecarProtocol.SetIceServersFrame(snapshot),
                     DescribeIceServers(snapshot))) return false;
         }
-        if (micActive)
-        {
-            if (!SendCommand("start", SidecarProtocol.StartFrame, "phase=initial-config")) return false;
-        }
-        else if (micWarm &&
-                 !SendCommand("warm", SidecarProtocol.WarmFrame, "phase=initial-config")) return false;
+
+        var captureMode = micActive
+            ? SidecarCaptureMode.Transmit
+            : micWarm || monitorEnabled
+                ? SidecarCaptureMode.Warm
+                : SidecarCaptureMode.Stopped;
+        if (!ConfigureAudioRoute(micDevice, outputDevice, captureMode, synthetic)) return false;
 
         VoiceDiagnostics.Log(
             "sidecar.command",
-            $"op=initial-config result=complete micActive={micActive} micWarm={micWarm} input={DescribeDeviceForDiagnostics(micDevice)} output={DescribeDeviceForDiagnostics(outputDevice)}");
+            $"op=initial-config result=complete captureMode={SidecarProtocol.CaptureModeValue(captureMode)} input={DescribeDeviceForDiagnostics(micDevice)} output={DescribeDeviceForDiagnostics(outputDevice)}");
         return true;
     }
+
+    public bool ConfigureAudioRoute(
+        string inputDevice,
+        string outputDevice,
+        SidecarCaptureMode captureMode,
+        bool synthetic)
+        => SendCommand(
+            "configure-audio-route",
+            () => SidecarProtocol.ConfigureAudioRouteFrame(
+                inputDevice ?? string.Empty,
+                outputDevice ?? string.Empty,
+                captureMode,
+                synthetic),
+            $"captureMode={SidecarProtocol.CaptureModeValue(captureMode)} synthetic={synthetic} input={DescribeDeviceForDiagnostics(inputDevice)} output={DescribeDeviceForDiagnostics(outputDevice)}");
 
     public void SetMicActive(bool active)
     {
@@ -1308,7 +1335,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 ReadBool(root, "fell_back_to_default"),
                 ReadBool(root, "running"),
                 ReadString(root, "error"),
-                ReadString(root, "error_code"));
+                ReadString(root, "error_code"),
+                ReadBool(root, "changed"));
             return true;
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
@@ -1638,7 +1666,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"rate={FormatOptionalU64(capture, "sample_rate")} channels={FormatOptionalU64(capture, "channels")} sampleFormat={FormatOptionalText(capture, "sample_format", 24)} bufferMode={FormatOptionalText(capture, "buffer_mode", 48)} bufferMinFrames={FormatOptionalU64(capture, "buffer_min_frames")} bufferMaxFrames={FormatOptionalU64(capture, "buffer_max_frames")} " +
                 $"openAttempts={FormatOptionalU64(capture, "open_attempts")} streamErrors={FormatOptionalU64(capture, "stream_errors")} retryAttempt={FormatOptionalU64(capture, "retry_attempt")} startToOpenMs={FormatOptionalU64WhenPresent(capture, "start_to_open_ms", "stream_started")} openToFirstCallbackMs={FormatOptionalU64WhenPresent(capture, "open_to_first_callback_ms", "first_callback_seen")} streamAgeMs={FormatOptionalU64WhenPresent(capture, "stream_age_ms", "stream_started")} " +
                 $"callbacksTotal={FormatOptionalU64(capture, "callbacks_total")} callbacksWindow={FormatOptionalU64(capture, "callbacks_window")} callbackAgeMs={FormatOptionalU64WhenPresent(capture, "callback_age_ms", "callback_seen")} callbackFramesLast={FormatOptionalU64WhenPresent(capture, "callback_frames_last", "callback_seen")} callbackFramesMin={FormatOptionalU64WhenPresent(capture, "callback_frames_min", "callback_window_seen")} callbackFramesMax={FormatOptionalU64WhenPresent(capture, "callback_frames_max", "callback_window_seen")} callbackIntervalLastUs={FormatOptionalU64WhenPresent(capture, "callback_interval_last_us", "callback_interval_seen")} callbackIntervalMaxUs={FormatOptionalU64WhenPresent(capture, "callback_interval_max_us", "callback_interval_window_seen")} lateCallbacks={FormatOptionalU64(capture, "late_callbacks")} " +
-                $"inputFramesTotal={FormatOptionalU64(capture, "input_samples_total")} resampledSamplesTotal={FormatOptionalU64(capture, "resampled_samples_total")} framesProducedTotal={FormatOptionalU64(capture, "frames_produced_total")} accumulatorPending={FormatOptionalU64(capture, "accumulator_pending_samples")} invalidTimestamps={FormatOptionalU64(capture, "invalid_timestamps")} timestampDiscontinuities={FormatOptionalU64(capture, "timestamp_discontinuities")} backendPrerollCallbacks={FormatOptionalU64(capture, "backend_preroll_callbacks")} backendPrerollFrames={FormatOptionalU64(capture, "backend_preroll_frames")} prerollPendingDiscarded={FormatOptionalU64(capture, "preroll_pending_samples_discarded")} egressStaleFrames={FormatOptionalU64(capture, "egress_stale_frames")} " +
+                $"inputFramesTotal={FormatOptionalU64(capture, "input_samples_total")} resampledSamplesTotal={FormatOptionalU64(capture, "resampled_samples_total")} framesProducedTotal={FormatOptionalU64(capture, "frames_produced_total")} accumulatorPending={FormatOptionalU64(capture, "accumulator_pending_samples")} invalidTimestamps={FormatOptionalU64(capture, "invalid_timestamps")} timestampDiscontinuities={FormatOptionalU64(capture, "timestamp_discontinuities")} backendPrerollCallbacks={FormatOptionalU64(capture, "backend_preroll_callbacks")} backendPrerollFrames={FormatOptionalU64(capture, "backend_preroll_frames")} prerollPendingDiscarded={FormatOptionalU64(capture, "preroll_pending_samples_discarded")} egressStaleFrames={FormatOptionalU64(capture, "egress_stale_frames")} egressStaleRecoveries={FormatOptionalU64(capture, "egress_stale_recoveries")} egressStaleDiscardedFrames={FormatOptionalU64(capture, "egress_stale_discarded_frames")} " +
                 $"captureClockDeltaSeen={FormatOptionalBool(capture, "capture_clock_delta_seen")} captureClockDeltaLastUs={FormatOptionalU64WhenPresent(capture, "capture_clock_delta_last_us", "capture_clock_delta_seen")} captureClockExpectedDeltaUs={FormatOptionalU64WhenPresent(capture, "capture_clock_expected_delta_us", "capture_clock_delta_seen")} captureClockDeltaErrorUs={FormatOptionalI64WhenPresent(capture, "capture_clock_delta_error_us", "capture_clock_delta_seen")} captureClockBridgeResidualSeen={FormatOptionalBool(capture, "capture_clock_bridge_residual_seen")} captureClockBridgeResidualUs={FormatOptionalI64WhenPresent(capture, "capture_clock_bridge_residual_us", "capture_clock_bridge_residual_seen")} captureClockStatus={FormatOptionalText(capture, "capture_clock_status", 64)} lastTimestampDiscontinuityReason={FormatOptionalText(capture, "last_timestamp_discontinuity_reason", 64)} " +
                 $"ringLen={FormatOptionalU64(capture, "ring_len")} ringCapacity={FormatOptionalU64(capture, "ring_capacity")} ringHighWater={FormatOptionalU64(capture, "ring_high_water")} ringDropped={FormatOptionalU64(capture, "ring_dropped")} ringOldestAgeMs={FormatOptionalU64WhenPresent(capture, "ring_oldest_frame_age_ms", "ring_has_frames")} encoderPopAgeLastMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_last_ms", "encoder_frame_seen")} encoderPopAgeMaxMs={FormatOptionalU64WhenPresent(capture, "encoder_pop_age_max_ms", "encoder_window_seen")} payloadBytes={payloadBytes}"));
 

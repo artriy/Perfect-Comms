@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 15.
+Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 16.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -46,7 +46,7 @@ libraries. This output-level gate also catches a stale Cargo/CMake cache that
 was previously built with system-library opt-ins.
 
 Every desktop helper also implements `--build-info`. The response binds protocol
-13 to Cubeb 0.36.0, an immutable audio-contract marker, and the exact compiled
+16 to Cubeb 0.36.0, an immutable audio-contract marker, and the exact compiled
 backend set for that target. Release packaging executes this probe, and the
 managed launcher repeats it before using a native helper (including the
 host-native helper launched by Wine/CrossOver/Proton). A same-protocol helper
@@ -127,7 +127,7 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. Before launch, the mod also requires the helper's `--build-info` response to prove protocol 15, Cubeb 0.36.0, and the platform's exact backend inventory. Protocol 15 separates warm microphone capture from transmission so Push To Talk can keep the hardware stream ready while its encoder and network gate remain closed. Protocol 14 generation-scopes every native peer mutation, coalesces obsolete RTC control work, acknowledges applied peer and SDP operations, and reports bounded scheduler health. Protocol 13 adds local microphone monitoring with optional delayed playback; protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling controls, and deterministic runtime device updates.
+The helper announces `proto` in its `ready` payload. Before launch, the mod also requires the helper's `--build-info` response to prove protocol 16, Cubeb 0.36.0, and the platform's exact backend inventory. Protocol 16 atomically commits desktop input, output, source, and capture mode, and serializes qualifying Windows WASAPI Bluetooth hands-free transitions. Protocol 15 separates warm microphone capture from transmission so Push To Talk can keep the hardware stream ready while its encoder and network gate remain closed. Protocol 14 generation-scopes every native peer mutation, coalesces obsolete RTC control work, acknowledges applied peer and SDP operations, and reports bounded scheduler health. Protocol 13 adds local microphone monitoring with optional delayed playback; protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling controls, and deterministic runtime device updates.
 
 ## Media diagnostics
 

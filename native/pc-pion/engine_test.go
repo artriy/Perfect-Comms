@@ -265,6 +265,70 @@ func TestAdvanceEpochDeadlineRetiresOnlyBlockedPeerWithoutFalseSuccess(t *testin
 	}
 }
 
+func TestAdvanceEpochDeadlineBoundsCleanupAndRetiresEveryBlockedPeer(t *testing.T) {
+	e, first := queueOnlyEngineAndPeer("first", 1)
+	second := &peer{
+		engine: e, id: "second", generation: 1, instance: 2,
+		outbound: make(chan outboundFrame, outboundQueueCapacity), stop: make(chan struct{}),
+		epochGate: newEpochGate(),
+	}
+	second.active.Store(true)
+	e.peers[second.id] = second
+	current := &peer{
+		engine: e, id: "current", generation: 1, instance: 3,
+		outbound: make(chan outboundFrame, outboundQueueCapacity), stop: make(chan struct{}),
+	}
+	current.active.Store(true)
+	current.writeEpoch.Store(2)
+	current.writeInFlight.Store(true)
+	e.peers[current.id] = current
+	first.epochGate = newEpochGate()
+
+	release := make(chan struct{})
+	for _, p := range []*peer{first, second} {
+		p.writeEpoch.Store(1)
+		p.writeInFlight.Store(true)
+		if !p.startWorker(func() {
+			<-release
+			p.finishRTPWrite()
+		}) {
+			t.Fatalf("failed to start blocked writer for %s", p.id)
+		}
+	}
+
+	timeout := 25 * time.Millisecond
+	started := time.Now()
+	if e.advanceEpoch(2, timeout) {
+		t.Fatal("privacy advance reported success while old-epoch writes remained blocked")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("privacy advance exceeded its deadline bound: %v", elapsed)
+	}
+	for _, p := range []*peer{first, second} {
+		if p.active.Load() {
+			t.Fatalf("blocked peer %s remained active", p.id)
+		}
+		p.epochGate.mu.Lock()
+		closed := p.epochGate.closed
+		p.epochGate.mu.Unlock()
+		if !closed {
+			t.Fatalf("blocked peer %s retained an open epoch gate", p.id)
+		}
+	}
+	if !current.active.Load() {
+		t.Fatal("current-epoch peer was retired with blocked old-epoch peers")
+	}
+
+	close(release)
+	for _, p := range []*peer{first, second} {
+		select {
+		case <-p.startClose(""):
+		case <-time.After(time.Second):
+			t.Fatalf("blocked peer %s did not finish asynchronous cleanup", p.id)
+		}
+	}
+}
+
 func TestPerPeerEpochRaiseDrainsOriginalBeforeGateAdvance(t *testing.T) {
 	e, p := queueOnlyEngineAndPeer("peer", 1)
 	p.epochGate = newEpochGate()
@@ -309,6 +373,81 @@ func TestPerPeerEpochRaiseDrainsOriginalBeforeGateAdvance(t *testing.T) {
 	p.epochGate.mu.Unlock()
 	if floorAfterDrain != 2 {
 		t.Fatalf("per-peer gate floor = %d, want 2 after drain", floorAfterDrain)
+	}
+}
+
+func TestSameGenerationPeerEpochFailureDetachesWithoutWaitingForBlockedCleanup(t *testing.T) {
+	e, p := queueOnlyEngineAndPeer("blocked", 9)
+	p.minEpoch.Store(1)
+	p.writeEpoch.Store(1)
+	p.writeInFlight.Store(true)
+	p.epochGate = newEpochGate()
+	p.epochGate.active[1] = 1
+
+	release := make(chan struct{})
+	if !p.startWorker(func() {
+		<-release
+		p.finishRTPWrite()
+	}) {
+		t.Fatal("failed to start blocked peer writer")
+	}
+
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		result <- e.addPeer(p.id, false, false, p.generation, 2)
+	}()
+
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(privacyDrainTimeout + 250*time.Millisecond):
+		close(release)
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("same-generation peer epoch failure waited for blocked cleanup")
+	}
+	if err == nil {
+		t.Fatal("same-generation peer epoch failure returned nil")
+	}
+	if elapsed := time.Since(started); elapsed > privacyDrainTimeout+250*time.Millisecond {
+		t.Fatalf("same-generation peer epoch failure exceeded its deadline bound: %v", elapsed)
+	}
+	if current := e.peer(p.id); current != nil {
+		t.Fatal("failed same-generation peer remained in the live peer map")
+	}
+	if p.active.Load() {
+		t.Fatal("failed same-generation peer remained active")
+	}
+
+	if e.advanceEpoch(3, 25*time.Millisecond) {
+		close(release)
+		select {
+		case <-p.startClose(""):
+		case <-time.After(time.Second):
+		}
+		t.Fatal("later privacy advance ignored the retired old-epoch writer")
+	}
+
+	close(release)
+	select {
+	case <-p.startClose(""):
+	case <-time.After(time.Second):
+		t.Fatal("failed same-generation peer did not finish asynchronous cleanup")
+	}
+	if e.advanceEpoch(4, 25*time.Millisecond) {
+		p.epochGate.mu.Lock()
+		delete(p.epochGate.active, 1)
+		p.epochGate.mu.Unlock()
+		t.Fatal("later privacy advance ignored the retired interceptor write")
+	}
+	p.epochGate.mu.Lock()
+	delete(p.epochGate.active, 1)
+	p.epochGate.mu.Unlock()
+	if !e.advanceEpoch(4, time.Second) {
+		t.Fatal("privacy advance remained blocked after retired writer cleanup")
 	}
 }
 

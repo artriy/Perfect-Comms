@@ -1,6 +1,6 @@
 use crate::audio::{
-    monotonic_ns, now_ns, peak, spawn_cubeb_capture, spawn_cubeb_playback, AecTiming,
-    MicrophoneMonitorConfigChange, MicrophoneMonitorState, PlaybackProgress, ToneSource,
+    monotonic_ns, now_ns, peak, plan_hfp_audio_route, spawn_cubeb_capture, spawn_cubeb_playback,
+    AecTiming, HfpRoutePlan, MicrophoneMonitorState, PlaybackProgress, ToneSource,
 };
 use crate::codec::{
     decode_with_media_gap_report, EncodedPacketBuffer, EncodedRtpPacket, OpusCodec,
@@ -21,8 +21,8 @@ use crate::proto::{
     capture_frame_ring, encode_control, error_json, level_json, local_candidate_json,
     local_sdp_json, parse_inbound, peer_levels_json, peer_state_json, pong_json, ready_json,
     stats_json_with_diagnostics, AudioFrame, AudioOutFrame, CaptureFrameConsumer,
-    CaptureFrameMetadata, CaptureFrameProducer, DeviceInfo, Frame, InboundOp, MediaReceiveStats,
-    NetworkPathStats, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
+    CaptureFrameMetadata, CaptureFrameProducer, CaptureMode, DeviceInfo, Frame, InboundOp,
+    MediaReceiveStats, NetworkPathStats, PlaybackRing, PROTO_VERSION, RING_CAPACITY,
 };
 use crate::rtc::{LocalSignal, NativeCounters, RtcEngine};
 use parking_lot::{Condvar as ParkingCondvar, Mutex as ParkingMutex};
@@ -51,6 +51,8 @@ const MAX_PLAYBACK_ERROR_CHARS: usize = 512;
 const CAPTURE_EGRESS_INTERVAL: Duration = Duration::from_millis(20);
 const CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS: u64 = 100_000_000;
 const RECEIVE_INGRESS_DRAIN_BUDGET: Duration = Duration::from_millis(2);
+const HFP_CAPTURE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+const HFP_CAPTURE_CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
@@ -686,6 +688,17 @@ impl ProducerLifecycle {
             ProducerAction::None
         }
     }
+
+    fn configure(&mut self, selected: Option<String>, synthetic: bool) -> ProducerAction {
+        let changed = self.selected != selected || self.synthetic != synthetic;
+        self.selected = selected;
+        self.synthetic = synthetic;
+        if changed && self.running {
+            ProducerAction::Restart
+        } else {
+            ProducerAction::None
+        }
+    }
 }
 
 struct CaptureProducer {
@@ -837,6 +850,28 @@ impl CaptureProducer {
                 direction: "capture".to_string(),
                 state: "command-accepted".to_string(),
                 action: "set-synthetic".to_string(),
+                command_seq,
+                stream_generation: self.stream_generation,
+                open_attempt: self.diagnostics.current_open_attempt(),
+                changed,
+                running: self.lifecycle.running,
+                ..Default::default()
+            },
+        );
+        self.apply(action)
+    }
+
+    fn configure_source(&mut self, id: String, synthetic: bool) -> Result<(), String> {
+        let selected = if id.is_empty() { None } else { Some(id) };
+        let changed = self.lifecycle.selected != selected || self.lifecycle.synthetic != synthetic;
+        let action = self.lifecycle.configure(selected, synthetic);
+        let command_seq = self.diagnostics.next_command();
+        send_media_state(
+            &self.media_events,
+            MediaStateEvent {
+                direction: "capture".to_string(),
+                state: "command-accepted".to_string(),
+                action: "configure-audio-route".to_string(),
                 command_seq,
                 stream_generation: self.stream_generation,
                 open_attempt: self.diagnostics.current_open_attempt(),
@@ -1348,10 +1383,32 @@ fn reap_finished_playback_worker(
     true
 }
 
+fn playback_route_selection(
+    requested: &Option<String>,
+    playback_override: &Option<String>,
+) -> (Option<String>, Option<String>) {
+    (
+        playback_override.clone().or_else(|| requested.clone()),
+        requested.clone(),
+    )
+}
+
+fn playback_request_changed(
+    current: &Option<String>,
+    requested: &str,
+    playback_override: &Option<String>,
+) -> bool {
+    current.is_none()
+        || current.as_deref().unwrap_or_default() != requested
+        || playback_override.is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ensure_playback(
     out_thread: &Mutex<Option<std::thread::JoinHandle<()>>>,
     out_selected: &Mutex<Option<String>>,
+    out_override: &Mutex<Option<String>>,
+    transition: &Mutex<HfpTransitionState>,
     out_stop: &Arc<AtomicBool>,
     playback: &Arc<Mutex<PlaybackRing>>,
     monitor_playback: &Arc<Mutex<PlaybackRing>>,
@@ -1360,7 +1417,18 @@ fn ensure_playback(
     counters: &Arc<NativeCounters>,
     supervision: &PlaybackSupervision,
 ) {
+    if supervision.session.stopping.load(Ordering::Acquire) {
+        out_stop.store(true, Ordering::Release);
+        return;
+    }
+    if transition.lock().unwrap().pending {
+        return;
+    }
     let mut guard = out_thread.lock().unwrap();
+    if supervision.session.stopping.load(Ordering::Acquire) {
+        out_stop.store(true, Ordering::Release);
+        return;
+    }
     let reaped_finished_worker =
         reap_finished_playback_worker(&mut guard, &supervision.progress, &supervision.aec_timing);
     if guard.is_none() {
@@ -1370,8 +1438,10 @@ fn ensure_playback(
             return;
         }
         last_spawn_ns.store(now, Ordering::Release);
-        let dev = out_selected.lock().unwrap().clone();
-        let requested_device = dev.clone().unwrap_or_default();
+        let requested = out_selected.lock().unwrap().clone();
+        let playback_override = out_override.lock().unwrap().clone();
+        let (dev, requested) = playback_route_selection(&requested, &playback_override);
+        let requested_device = requested.clone().unwrap_or_default();
         let requested_default = requested_device.is_empty();
         let pb = playback.clone();
         let monitor_pb = monitor_playback.clone();
@@ -1393,7 +1463,9 @@ fn ensure_playback(
         }
         let media_diagnostics = supervision.media_diagnostics.clone();
         let media_events = supervision.media_events.clone();
-        let stream_generation = media_diagnostics.playback.begin_stream(dev.as_deref());
+        let stream_generation = media_diagnostics
+            .playback
+            .begin_stream(requested.as_deref());
         let playback_diagnostics = media_diagnostics.playback.clone();
         let worker_supervisor = supervision.session.clone();
         supervision.progress.reset();
@@ -1405,6 +1477,7 @@ fn ensure_playback(
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 spawn_cubeb_playback(
                     dev,
+                    requested,
                     pb,
                     monitor_pb,
                     monitor,
@@ -1931,6 +2004,10 @@ impl EncoderPrivacyEpoch {
     fn requested(&self) -> u64 {
         self.requested.load(Ordering::Acquire)
     }
+    fn is_settled(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        !state.failed && state.applied >= self.requested()
+    }
 
     fn requested_source(&self) -> Arc<AtomicU64> {
         self.requested.clone()
@@ -1980,6 +2057,142 @@ fn capture_frame_authorized(frame_epoch: u64, active_epoch: u64, requested_epoch
     frame_epoch == active_epoch && requested_epoch == active_epoch
 }
 
+#[derive(Debug, Default)]
+struct HfpTransitionState {
+    generation: u64,
+    pending: bool,
+}
+
+impl HfpTransitionState {
+    fn begin(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.pending = true;
+        self.generation
+    }
+
+    fn cancel(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.pending = false;
+    }
+
+    fn complete(&mut self, generation: u64) -> bool {
+        if self.generation != generation || !self.pending {
+            return false;
+        }
+        self.pending = false;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HfpResumeDecision {
+    Pending,
+    Stale,
+    FirstCallback,
+    Timeout,
+}
+
+fn hfp_resume_decision(
+    current_generation: u64,
+    expected_generation: u64,
+    first_callback_seen: bool,
+    now: Instant,
+    deadline: Instant,
+) -> HfpResumeDecision {
+    if current_generation != expected_generation {
+        HfpResumeDecision::Stale
+    } else if first_callback_seen {
+        HfpResumeDecision::FirstCallback
+    } else if now >= deadline {
+        HfpResumeDecision::Timeout
+    } else {
+        HfpResumeDecision::Pending
+    }
+}
+
+fn stop_capture_before_clearing_override(was_qualified: bool, capture_mode: CaptureMode) -> bool {
+    was_qualified && capture_mode == CaptureMode::Stopped
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HfpRouteRequest {
+    input_id: String,
+    output_id: String,
+    synthetic: bool,
+    capture_active: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HfpRouteCache {
+    request: Option<HfpRouteRequest>,
+    plan: Option<HfpRoutePlan>,
+}
+
+impl HfpRouteCache {
+    fn lookup(&self, request: &HfpRouteRequest) -> Option<Option<HfpRoutePlan>> {
+        (self.request.as_ref() == Some(request)).then(|| self.plan.clone())
+    }
+
+    fn store(&mut self, request: HfpRouteRequest, plan: Option<HfpRoutePlan>) {
+        self.request = Some(request);
+        self.plan = plan;
+    }
+
+    fn clear(&mut self) {
+        self.request = None;
+        self.plan = None;
+    }
+}
+
+fn close_capture_privacy(
+    capture_transmit_enabled: &AtomicBool,
+    encoder_privacy: &EncoderPrivacyEpoch,
+    ring_consumer: &CaptureFrameConsumer,
+) -> Result<(), String> {
+    let was_transmitting = capture_transmit_enabled.swap(false, Ordering::AcqRel);
+    ring_consumer.discard_all();
+    if !was_transmitting && encoder_privacy.is_settled() {
+        return Ok(());
+    }
+    let epoch = encoder_privacy.request()?;
+    encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
+}
+
+fn apply_capture_mode(
+    mode: CaptureMode,
+    producer: &mut CaptureProducer,
+    capture_warm_enabled: &mut bool,
+    capture_transmit_enabled: &AtomicBool,
+    monitor_enabled: bool,
+    encoder_privacy: &EncoderPrivacyEpoch,
+    ring_consumer: &CaptureFrameConsumer,
+) -> Result<(), String> {
+    match mode {
+        CaptureMode::Transmit => {
+            capture_transmit_enabled.store(false, Ordering::Release);
+            ring_consumer.discard_all();
+            if !*capture_warm_enabled {
+                let epoch = encoder_privacy.request()?;
+                encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)?;
+            }
+            producer.start()?;
+            capture_transmit_enabled.store(true, Ordering::Release);
+        }
+        CaptureMode::Warm => {
+            close_capture_privacy(capture_transmit_enabled, encoder_privacy, ring_consumer)?;
+            producer.warm()?;
+            *capture_warm_enabled = true;
+        }
+        CaptureMode::Stopped => {
+            close_capture_privacy(capture_transmit_enabled, encoder_privacy, ring_consumer)?;
+            *capture_warm_enabled = false;
+            if !monitor_enabled {
+                producer.stop()?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CapturePacerKey {
     encoder_epoch: u64,
@@ -2009,6 +2222,26 @@ impl CaptureFramePacer {
         let deadline = self.next_deadline.map_or(now, |old| old.max(now));
         self.next_deadline = Some(deadline + CAPTURE_EGRESS_INTERVAL);
         deadline
+    }
+}
+
+fn capture_callback_is_stale(capture_callback_ts_ns: u64, now_ns: u64) -> bool {
+    capture_callback_ts_ns != 0
+        && now_ns.saturating_sub(capture_callback_ts_ns) > CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS
+}
+
+fn recover_stale_capture_edge(
+    capture_ring: &CaptureFrameConsumer,
+    pacer: &mut CaptureFramePacer,
+    diagnostics: &CaptureDiagnostics,
+    monitor_state: &MicrophoneMonitorState,
+    monitor_playback: &Mutex<PlaybackRing>,
+) {
+    let discarded = capture_ring.discard_all();
+    pacer.reset();
+    diagnostics.note_egress_stale_recovery(discarded);
+    if monitor_state.enabled() {
+        monitor_state.reset_playout(|| monitor_playback.lock().unwrap().discard_all());
     }
 }
 
@@ -2160,6 +2393,8 @@ fn run_authenticated_session(
     let monitor_state = Arc::new(MicrophoneMonitorState::default());
     let out_stop = Arc::new(AtomicBool::new(false));
     let out_selected: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let out_override: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let hfp_transition = Arc::new(Mutex::new(HfpTransitionState::default()));
     let out_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     let out_spawn_ns = Arc::new(AtomicU64::new(0));
     let out_progress = Arc::new(PlaybackProgress::default());
@@ -2327,6 +2562,7 @@ fn run_authenticated_session(
         let mut active_encoder_epoch = 0u64;
         let mut pacer = CaptureFramePacer::default();
         let mut media_timeline = CaptureMediaTimeline::default();
+        let mut encoder_history_is_reset = false;
         let mut was_transmit_enabled = false;
         let mut monitor_stereo = vec![0.0f32; proto::AUDIO_OUT_SAMPLES];
         let silence_frame = [0.0f32; proto::FRAME_SAMPLES];
@@ -2355,6 +2591,7 @@ fn run_authenticated_session(
                     eprintln!("pc-capture: RTP privacy drain exceeded {}ms", 500);
                     return;
                 }
+                encoder_history_is_reset = true;
                 noise_gate.reset();
                 last_capture_stream = None;
                 pacer.reset();
@@ -2393,11 +2630,14 @@ fn run_authenticated_session(
                     writer_capture_diagnostics.note_stale_generation_frame();
                     continue;
                 }
-                let callback_age_ns = monotonic_ns().saturating_sub(f.capture_callback_ts_ns);
-                if f.capture_callback_ts_ns != 0
-                    && callback_age_ns > CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS
-                {
-                    writer_capture_diagnostics.note_egress_stale_frame();
+                if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                    recover_stale_capture_edge(
+                        &writer_ring,
+                        &mut pacer,
+                        &writer_capture_diagnostics,
+                        &writer_monitor_state,
+                        &writer_monitor_playback,
+                    );
                     continue;
                 }
                 let capture_stream = (f.capture_generation, f.capture_open_attempt);
@@ -2427,6 +2667,16 @@ fn run_authenticated_session(
                     }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                }
+                if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                    recover_stale_capture_edge(
+                        &writer_ring,
+                        &mut pacer,
+                        &writer_capture_diagnostics,
+                        &writer_monitor_state,
+                        &writer_monitor_playback,
+                    );
+                    continue;
                 }
                 let transmit_enabled = writer_transmit_enabled.load(Ordering::Acquire);
                 let monitor_enabled = writer_monitor_state.enabled();
@@ -2484,6 +2734,16 @@ fn run_authenticated_session(
                 if writer_capture_diagnostics.signal_windows_enabled() {
                     writer_capture_diagnostics.post_gain.record(&f.samples);
                 }
+                if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                    recover_stale_capture_edge(
+                        &writer_ring,
+                        &mut pacer,
+                        &writer_capture_diagnostics,
+                        &writer_monitor_state,
+                        &writer_monitor_playback,
+                    );
+                    continue;
+                }
                 let output_peak = peak(&f.samples);
                 if !capture_frame_authorized(
                     f.encoder_epoch,
@@ -2514,6 +2774,16 @@ fn run_authenticated_session(
                         last_dropped = dropped;
                     }
                 }
+                if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                    recover_stale_capture_edge(
+                        &writer_ring,
+                        &mut pacer,
+                        &writer_capture_diagnostics,
+                        &writer_monitor_state,
+                        &writer_monitor_playback,
+                    );
+                    continue;
+                }
                 if !transmit_enabled {
                     continue;
                 }
@@ -2531,6 +2801,16 @@ fn run_authenticated_session(
                     }
                     applied_encoder_policy_generation = policy.generation;
                 }
+                if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                    recover_stale_capture_edge(
+                        &writer_ring,
+                        &mut pacer,
+                        &writer_capture_diagnostics,
+                        &writer_monitor_state,
+                        &writer_monitor_playback,
+                    );
+                    continue;
+                }
                 let skipped_before_current = media_timeline.skipped_before(
                     pacer_key,
                     capture_sequence,
@@ -2543,17 +2823,19 @@ fn run_authenticated_session(
                         .fetch_add(skipped_before_current, Ordering::Relaxed);
                 }
                 if skipped_before_current > MAX_CONCEAL_FRAMES as u64 {
-                    if let Err(error) = encoder.reset_encoder() {
-                        writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
-                        eprintln!(
-                            "pc-capture: Opus encoder discontinuity reset failed after \
-                             {skipped_before_current} skipped capture frames: {error}"
-                        );
-                        return;
+                    if !encoder_history_is_reset {
+                        if let Err(error) = encoder.reset_encoder() {
+                            writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "pc-capture: Opus encoder discontinuity reset failed after \
+                                 {skipped_before_current} skipped capture frames: {error}"
+                            );
+                            return;
+                        }
+                        writer_counters
+                            .opus_discontinuity_resets
+                            .fetch_add(1, Ordering::Relaxed);
                     }
-                    writer_counters
-                        .opus_discontinuity_resets
-                        .fetch_add(1, Ordering::Relaxed);
                 } else {
                     // Keep Opus/FEC/DRED history chronological across a bounded local capture
                     // gap. These placeholder packets intentionally never reach RTP; the next
@@ -2576,6 +2858,7 @@ fn run_authenticated_session(
                 }
                 let pkt = encoder.encode(&f.samples);
                 if !pkt.is_empty() {
+                    encoder_history_is_reset = false;
                     if !writer_transmit_enabled.load(Ordering::Acquire)
                         || !capture_frame_authorized(
                             f.encoder_epoch,
@@ -2583,6 +2866,25 @@ fn run_authenticated_session(
                             writer_privacy.requested(),
                         )
                     {
+                        continue;
+                    }
+                    if capture_callback_is_stale(f.capture_callback_ts_ns, monotonic_ns()) {
+                        if let Err(error) = encoder.reset_encoder() {
+                            writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("pc-capture: Opus encoder stale-frame reset failed: {error}");
+                            return;
+                        }
+                        writer_counters
+                            .opus_discontinuity_resets
+                            .fetch_add(1, Ordering::Relaxed);
+                        encoder_history_is_reset = true;
+                        recover_stale_capture_edge(
+                            &writer_ring,
+                            &mut pacer,
+                            &writer_capture_diagnostics,
+                            &writer_monitor_state,
+                            &writer_monitor_playback,
+                        );
                         continue;
                     }
                     writer_counters.opus_encoded.fetch_add(1, Ordering::Relaxed);
@@ -2623,6 +2925,8 @@ fn run_authenticated_session(
     let drain_gs = game_state.clone();
     let drain_out_thread = out_thread.clone();
     let drain_out_selected = out_selected.clone();
+    let drain_out_override = out_override.clone();
+    let drain_hfp_transition = hfp_transition.clone();
     let drain_out_stop = out_stop.clone();
     let drain_out_spawn = out_spawn_ns.clone();
     let drain_playback_supervision = playback_supervision.clone();
@@ -2814,6 +3118,8 @@ fn run_authenticated_session(
                     ensure_playback(
                         &drain_out_thread,
                         &drain_out_selected,
+                        &drain_out_override,
+                        &drain_hfp_transition,
                         &drain_out_stop,
                         &drain_playback,
                         &drain_monitor_playback,
@@ -2822,16 +3128,16 @@ fn run_authenticated_session(
                         &drain_counters,
                         &drain_playback_supervision,
                     );
-                    // Publish the render block first. Only audio accepted in its entirety can be
-                    // paired with reverse AEC; queue depth is still observed on rejection.
-                    let (queued_pairs_before_frame, accepted) =
-                        enqueue_audio_out(&drain_playback, &stereo);
-                    drain_aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
-                    if accepted {
-                        drain_dsp.lock().unwrap().far_end(&stereo);
-                        drain_counters
-                            .playback_queued_pairs
-                            .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
+                    if !drain_hfp_transition.lock().unwrap().pending {
+                        let (queued_pairs_before_frame, accepted) =
+                            enqueue_audio_out(&drain_playback, &stereo);
+                        drain_aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
+                        if accepted {
+                            drain_dsp.lock().unwrap().far_end(&stereo);
+                            drain_counters
+                                .playback_queued_pairs
+                                .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
+                        }
                     }
                 }
 
@@ -2873,6 +3179,8 @@ fn run_authenticated_session(
             }
         });
 
+    let mut qualified_hfp_route = false;
+    let mut hfp_route_cache = HfpRouteCache::default();
     'control: loop {
         let frame = match read_frame_checked(&mut reader) {
             Ok(f) => f,
@@ -2886,6 +3194,8 @@ fn run_authenticated_session(
                 ensure_playback(
                     &out_thread,
                     &out_selected,
+                    &out_override,
+                    &hfp_transition,
                     &out_stop,
                     &playback,
                     &monitor_playback,
@@ -2894,9 +3204,9 @@ fn run_authenticated_session(
                     &counters,
                     &playback_supervision,
                 );
-                // Managed setup playback uses the already-versioned AUDIO_OUT frame to test the
-                // exact Cubeb output selected in Perfect Comms. Pace is controlled by managed code;
-                // the bounded ring rejects a whole new block if a broken caller floods it.
+                if hfp_transition.lock().unwrap().pending {
+                    continue 'control;
+                }
                 let (queued_pairs_before_frame, accepted) =
                     enqueue_audio_out(&playback, &frame.samples);
                 aec_timing.observe_render_queue_pairs(queued_pairs_before_frame);
@@ -2914,6 +3224,7 @@ fn run_authenticated_session(
                 };
                 match op {
                     InboundOp::SelectDevice { id } => {
+                        hfp_route_cache.clear();
                         if let Err(error) = producer.select_device(id) {
                             eprintln!(
                                 "pc-capture: critical media failure: capture device switch: {error}"
@@ -2924,6 +3235,10 @@ fn run_authenticated_session(
                     InboundOp::SelectOutputDevice { id } => {
                         let requested_output = id.clone();
                         *out_selected.lock().unwrap() = Some(id);
+                        *out_override.lock().unwrap() = None;
+                        hfp_transition.lock().unwrap().cancel();
+                        hfp_route_cache.clear();
+                        qualified_hfp_route = false;
                         monitor_state.reset_playout(|| {
                             monitor_playback.lock().unwrap().discard_all();
                         });
@@ -2954,6 +3269,7 @@ fn run_authenticated_session(
                                 action: "select-output-device".to_string(),
                                 requested_default: requested_output.is_empty(),
                                 requested_device: requested_output,
+                                changed: true,
                                 running: false,
                                 ..Default::default()
                             },
@@ -2961,6 +3277,8 @@ fn run_authenticated_session(
                         ensure_playback(
                             &out_thread,
                             &out_selected,
+                            &out_override,
+                            &hfp_transition,
                             &out_stop,
                             &playback,
                             &monitor_playback,
@@ -2970,87 +3288,457 @@ fn run_authenticated_session(
                             &playback_supervision,
                         );
                     }
-                    InboundOp::Start => {
-                        capture_transmit_enabled.store(false, Ordering::Release);
-                        ring_consumer.discard_all();
-                        if !capture_warm_enabled {
-                            let epoch = match encoder_privacy.request() {
-                                Ok(epoch) => epoch,
-                                Err(error) => {
+                    InboundOp::ConfigureAudioRoute {
+                        input_id,
+                        output_id,
+                        capture_mode,
+                        synthetic,
+                    } => {
+                        let capture_active =
+                            capture_mode != CaptureMode::Stopped || monitor_state.enabled();
+                        if capture_mode != CaptureMode::Transmit {
+                            if let Err(error) = close_capture_privacy(
+                                &capture_transmit_enabled,
+                                &encoder_privacy,
+                                &ring_consumer,
+                            ) {
+                                eprintln!(
+                                    "pc-capture: critical media failure: capture privacy boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                        }
+                        let requested_output = output_id.clone();
+                        let desired_input = if input_id.is_empty() {
+                            None
+                        } else {
+                            Some(input_id.clone())
+                        };
+                        let request = HfpRouteRequest {
+                            input_id: input_id.clone(),
+                            output_id: output_id.clone(),
+                            synthetic,
+                            capture_active,
+                        };
+                        let capture_route_live = !capture_active
+                            || (producer.lifecycle.selected == desired_input
+                                && producer.lifecycle.synthetic == synthetic
+                                && producer.lifecycle.running
+                                && producer
+                                    .handle
+                                    .as_ref()
+                                    .is_some_and(|handle| !handle.is_finished()));
+                        let playback_route_live = out_thread
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|handle| !handle.is_finished())
+                            && out_selected.lock().unwrap().as_deref().unwrap_or_default()
+                                == output_id;
+                        let hfp_plan = if capture_route_live && playback_route_live {
+                            hfp_route_cache.lookup(&request)
+                        } else {
+                            None
+                        }
+                        .unwrap_or_else(|| {
+                            let plan = plan_hfp_audio_route(
+                                &input_id,
+                                &output_id,
+                                synthetic,
+                                capture_active,
+                            );
+                            hfp_route_cache.store(request, plan.clone());
+                            plan
+                        });
+
+                        if let Some(plan) = hfp_plan {
+                            let same_qualified_route = qualified_hfp_route
+                                && capture_route_live
+                                && playback_route_live
+                                && !producer.lifecycle.synthetic
+                                && !synthetic
+                                && out_override.lock().unwrap().as_deref()
+                                    == Some(plan.playback_override.as_str());
+                            if same_qualified_route {
+                                if let Err(error) = producer
+                                    .configure_source(input_id, synthetic)
+                                    .and_then(|()| {
+                                        apply_capture_mode(
+                                            capture_mode,
+                                            &mut producer,
+                                            &mut capture_warm_enabled,
+                                            &capture_transmit_enabled,
+                                            monitor_state.enabled(),
+                                            &encoder_privacy,
+                                            &ring_consumer,
+                                        )
+                                    })
+                                {
                                     eprintln!(
-                                        "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                        "pc-capture: critical media failure: HFP capture mode: {error}"
                                     );
                                     break 'control;
                                 }
-                            };
-                            if let Err(error) =
-                                encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
-                            {
+                                send_media_state(
+                                    &playback_supervision.media_events,
+                                    MediaStateEvent {
+                                        direction: "playback".to_string(),
+                                        state: "command-accepted".to_string(),
+                                        action: "configure-audio-route".to_string(),
+                                        requested_default: requested_output.is_empty(),
+                                        requested_device: requested_output,
+                                        changed: false,
+                                        running: out_thread.lock().unwrap().is_some(),
+                                        ..Default::default()
+                                    },
+                                );
+                                continue 'control;
+                            }
+                            let transition_generation = hfp_transition.lock().unwrap().begin();
+                            if let Err(error) = stop_playback_bounded(
+                                &out_thread,
+                                &out_stop,
+                                &out_progress,
+                                PLAYBACK_STOP_TIMEOUT,
+                            ) {
                                 eprintln!(
-                                    "pc-capture: critical media failure: capture start privacy boundary: {error}"
+                                    "pc-capture: critical media failure: HFP playback stop: {error}"
                                 );
                                 break 'control;
                             }
+                            aec_timing.reset_playback_path();
+                            *out_selected.lock().unwrap() = Some(output_id);
+                            *out_override.lock().unwrap() = Some(plan.playback_override);
+                            monitor_state.reset_playout(|| {
+                                monitor_playback.lock().unwrap().discard_all();
+                            });
+                            out_stop.store(false, Ordering::Release);
+                            out_spawn_ns.store(0, Ordering::Release);
+                            playback.lock().unwrap().discard_all();
+
+                            if let Err(error) = producer.configure_source(input_id, synthetic) {
+                                eprintln!(
+                                    "pc-capture: critical media failure: HFP capture source: {error}"
+                                );
+                                break 'control;
+                            }
+                            if let Err(error) = apply_capture_mode(
+                                capture_mode,
+                                &mut producer,
+                                &mut capture_warm_enabled,
+                                &capture_transmit_enabled,
+                                monitor_state.enabled(),
+                                &encoder_privacy,
+                                &ring_consumer,
+                            ) {
+                                eprintln!(
+                                    "pc-capture: critical media failure: HFP capture mode: {error}"
+                                );
+                                break 'control;
+                            }
+                            qualified_hfp_route = true;
+                            send_media_state(
+                                &playback_supervision.media_events,
+                                MediaStateEvent {
+                                    direction: "playback".to_string(),
+                                    state: "command-accepted".to_string(),
+                                    action: "configure-audio-route".to_string(),
+                                    requested_default: requested_output.is_empty(),
+                                    requested_device: requested_output,
+                                    changed: true,
+                                    running: false,
+                                    ..Default::default()
+                                },
+                            );
+
+                            let capture_generation = media_diagnostics.capture.current_generation();
+                            let resume_transition = hfp_transition.clone();
+                            let resume_capture_diagnostics = media_diagnostics.capture.clone();
+                            let resume_session_stopping = session_stopping.clone();
+                            let resume_out_thread = out_thread.clone();
+                            let resume_out_selected = out_selected.clone();
+                            let resume_out_override = out_override.clone();
+                            let resume_out_stop = out_stop.clone();
+                            let resume_playback = playback.clone();
+                            let resume_monitor_playback = monitor_playback.clone();
+                            let resume_monitor_state = monitor_state.clone();
+                            let resume_out_spawn = out_spawn_ns.clone();
+                            let resume_counters = counters.clone();
+                            let resume_supervision = playback_supervision.clone();
+                            std::thread::spawn(move || {
+                                let deadline = Instant::now() + HFP_CAPTURE_CALLBACK_TIMEOUT;
+                                loop {
+                                    let current_generation =
+                                        resume_transition.lock().unwrap().generation;
+                                    let first_callback_seen = resume_capture_diagnostics
+                                        .first_callback_seen_for_generation(capture_generation);
+                                    match hfp_resume_decision(
+                                        current_generation,
+                                        transition_generation,
+                                        first_callback_seen,
+                                        Instant::now(),
+                                        deadline,
+                                    ) {
+                                        HfpResumeDecision::Pending => {
+                                            std::thread::sleep(HFP_CAPTURE_CALLBACK_POLL_INTERVAL);
+                                        }
+                                        HfpResumeDecision::Stale => break,
+                                        HfpResumeDecision::FirstCallback
+                                        | HfpResumeDecision::Timeout => {
+                                            if resume_session_stopping.load(Ordering::Acquire) {
+                                                break;
+                                            }
+                                            if !resume_transition
+                                                .lock()
+                                                .unwrap()
+                                                .complete(transition_generation)
+                                            {
+                                                break;
+                                            }
+                                            resume_playback.lock().unwrap().discard_all();
+                                            resume_monitor_playback.lock().unwrap().discard_all();
+                                            ensure_playback(
+                                                &resume_out_thread,
+                                                &resume_out_selected,
+                                                &resume_out_override,
+                                                &resume_transition,
+                                                &resume_out_stop,
+                                                &resume_playback,
+                                                &resume_monitor_playback,
+                                                &resume_monitor_state,
+                                                &resume_out_spawn,
+                                                &resume_counters,
+                                                &resume_supervision,
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        } else {
+                            if qualified_hfp_route {
+                                let release_generation = hfp_transition.lock().unwrap().begin();
+                                if let Err(error) = stop_playback_bounded(
+                                    &out_thread,
+                                    &out_stop,
+                                    &out_progress,
+                                    PLAYBACK_STOP_TIMEOUT,
+                                ) {
+                                    eprintln!(
+                                        "pc-capture: critical media failure: HFP playback release: {error}"
+                                    );
+                                    break 'control;
+                                }
+                                let capture_result = if stop_capture_before_clearing_override(
+                                    qualified_hfp_route,
+                                    capture_mode,
+                                ) {
+                                    apply_capture_mode(
+                                        capture_mode,
+                                        &mut producer,
+                                        &mut capture_warm_enabled,
+                                        &capture_transmit_enabled,
+                                        monitor_state.enabled(),
+                                        &encoder_privacy,
+                                        &ring_consumer,
+                                    )
+                                    .and_then(|()| producer.configure_source(input_id, synthetic))
+                                } else {
+                                    producer
+                                        .configure_source(input_id, synthetic)
+                                        .and_then(|()| {
+                                            apply_capture_mode(
+                                                capture_mode,
+                                                &mut producer,
+                                                &mut capture_warm_enabled,
+                                                &capture_transmit_enabled,
+                                                monitor_state.enabled(),
+                                                &encoder_privacy,
+                                                &ring_consumer,
+                                            )
+                                        })
+                                };
+                                if let Err(error) = capture_result {
+                                    eprintln!(
+                                        "pc-capture: critical media failure: HFP capture release: {error}"
+                                    );
+                                    break 'control;
+                                }
+                                *out_selected.lock().unwrap() = Some(output_id);
+                                *out_override.lock().unwrap() = None;
+                                qualified_hfp_route = false;
+                                monitor_state.reset_playout(|| {
+                                    monitor_playback.lock().unwrap().discard_all();
+                                });
+                                out_stop.store(false, Ordering::Release);
+                                out_spawn_ns.store(0, Ordering::Release);
+                                playback.lock().unwrap().discard_all();
+                                send_media_state(
+                                    &playback_supervision.media_events,
+                                    MediaStateEvent {
+                                        direction: "playback".to_string(),
+                                        state: "command-accepted".to_string(),
+                                        action: "configure-audio-route".to_string(),
+                                        requested_default: requested_output.is_empty(),
+                                        requested_device: requested_output,
+                                        changed: true,
+                                        running: false,
+                                        ..Default::default()
+                                    },
+                                );
+                                if !hfp_transition.lock().unwrap().complete(release_generation) {
+                                    break 'control;
+                                }
+                                ensure_playback(
+                                    &out_thread,
+                                    &out_selected,
+                                    &out_override,
+                                    &hfp_transition,
+                                    &out_stop,
+                                    &playback,
+                                    &monitor_playback,
+                                    &monitor_state,
+                                    &out_spawn_ns,
+                                    &counters,
+                                    &playback_supervision,
+                                );
+                            } else {
+                                hfp_transition.lock().unwrap().cancel();
+                                let selected = out_selected.lock().unwrap().clone();
+                                let playback_override = out_override.lock().unwrap().clone();
+                                let output_worker_missing = out_thread
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .is_none_or(|handle| handle.is_finished());
+                                let output_changed = output_worker_missing
+                                    || playback_request_changed(
+                                        &selected,
+                                        &output_id,
+                                        &playback_override,
+                                    );
+                                if output_changed {
+                                    *out_selected.lock().unwrap() = Some(output_id);
+                                    *out_override.lock().unwrap() = None;
+                                    monitor_state.reset_playout(|| {
+                                        monitor_playback.lock().unwrap().discard_all();
+                                    });
+                                    if let Err(error) = stop_playback_bounded(
+                                        &out_thread,
+                                        &out_stop,
+                                        &out_progress,
+                                        PLAYBACK_STOP_TIMEOUT,
+                                    ) {
+                                        eprintln!(
+                                        "pc-capture: critical media failure: playback route switch: {error}"
+                                    );
+                                        break 'control;
+                                    }
+                                    out_stop.store(false, Ordering::Release);
+                                    out_spawn_ns.store(0, Ordering::Release);
+                                    playback.lock().unwrap().discard_all();
+                                    send_media_state(
+                                        &playback_supervision.media_events,
+                                        MediaStateEvent {
+                                            direction: "playback".to_string(),
+                                            state: "command-accepted".to_string(),
+                                            action: "configure-audio-route".to_string(),
+                                            requested_default: requested_output.is_empty(),
+                                            requested_device: requested_output,
+                                            changed: true,
+                                            running: false,
+                                            ..Default::default()
+                                        },
+                                    );
+                                    ensure_playback(
+                                        &out_thread,
+                                        &out_selected,
+                                        &out_override,
+                                        &hfp_transition,
+                                        &out_stop,
+                                        &playback,
+                                        &monitor_playback,
+                                        &monitor_state,
+                                        &out_spawn_ns,
+                                        &counters,
+                                        &playback_supervision,
+                                    );
+                                } else {
+                                    send_media_state(
+                                        &playback_supervision.media_events,
+                                        MediaStateEvent {
+                                            direction: "playback".to_string(),
+                                            state: "command-accepted".to_string(),
+                                            action: "configure-audio-route".to_string(),
+                                            requested_default: requested_output.is_empty(),
+                                            requested_device: requested_output,
+                                            changed: false,
+                                            running: true,
+                                            ..Default::default()
+                                        },
+                                    );
+                                }
+                                if let Err(error) = producer
+                                    .configure_source(input_id, synthetic)
+                                    .and_then(|()| {
+                                        apply_capture_mode(
+                                            capture_mode,
+                                            &mut producer,
+                                            &mut capture_warm_enabled,
+                                            &capture_transmit_enabled,
+                                            monitor_state.enabled(),
+                                            &encoder_privacy,
+                                            &ring_consumer,
+                                        )
+                                    })
+                                {
+                                    eprintln!(
+                                        "pc-capture: critical media failure: capture route switch: {error}"
+                                    );
+                                    break 'control;
+                                }
+                            }
                         }
-                        if let Err(error) = producer.start() {
+                    }
+                    InboundOp::Start => {
+                        if let Err(error) = apply_capture_mode(
+                            CaptureMode::Transmit,
+                            &mut producer,
+                            &mut capture_warm_enabled,
+                            &capture_transmit_enabled,
+                            monitor_state.enabled(),
+                            &encoder_privacy,
+                            &ring_consumer,
+                        ) {
                             eprintln!("pc-capture: critical media failure: capture start: {error}");
                             break 'control;
                         }
-                        capture_transmit_enabled.store(true, Ordering::Release);
                     }
                     InboundOp::Warm => {
-                        capture_transmit_enabled.store(false, Ordering::Release);
-                        let epoch = match encoder_privacy.request() {
-                            Ok(epoch) => epoch,
-                            Err(error) => {
-                                eprintln!(
-                                    "pc-capture: critical media failure: capture warm privacy boundary: {error}"
-                                );
-                                break 'control;
-                            }
-                        };
-                        ring_consumer.discard_all();
-                        if let Err(error) =
-                            encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
-                        {
-                            eprintln!(
-                                "pc-capture: critical media failure: capture warm privacy boundary: {error}"
-                            );
-                            break 'control;
-                        }
-                        if let Err(error) = producer.warm() {
+                        if let Err(error) = apply_capture_mode(
+                            CaptureMode::Warm,
+                            &mut producer,
+                            &mut capture_warm_enabled,
+                            &capture_transmit_enabled,
+                            monitor_state.enabled(),
+                            &encoder_privacy,
+                            &ring_consumer,
+                        ) {
                             eprintln!("pc-capture: critical media failure: capture warm: {error}");
                             break 'control;
                         }
-                        capture_warm_enabled = true;
                     }
                     InboundOp::Stop => {
-                        capture_transmit_enabled.store(false, Ordering::Release);
-                        capture_warm_enabled = false;
-                        if !monitor_state.enabled() {
-                            if let Err(error) = producer.stop() {
-                                eprintln!(
-                                    "pc-capture: critical media failure: capture stop: {error}"
-                                );
-                                break 'control;
-                            }
-                        }
-                        let epoch = match encoder_privacy.request() {
-                            Ok(epoch) => epoch,
-                            Err(error) => {
-                                eprintln!(
-                                    "pc-capture: critical media failure: capture stop privacy boundary: {error}"
-                                );
-                                break 'control;
-                            }
-                        };
-                        ring_consumer.discard_all();
-                        if let Err(error) =
-                            encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
-                        {
-                            eprintln!(
-                                "pc-capture: critical media failure: capture stop privacy boundary: {error}"
-                            );
+                        if let Err(error) = apply_capture_mode(
+                            CaptureMode::Stopped,
+                            &mut producer,
+                            &mut capture_warm_enabled,
+                            &capture_transmit_enabled,
+                            monitor_state.enabled(),
+                            &encoder_privacy,
+                            &ring_consumer,
+                        ) {
+                            eprintln!("pc-capture: critical media failure: capture stop: {error}");
                             break 'control;
                         }
                     }
@@ -3104,40 +3792,9 @@ fn run_authenticated_session(
                         } else {
                             1.0
                         };
-                        let change =
-                            monitor_state.configure(enabled, delay_pairs, bounded_gain, || {
-                                monitor_playback.lock().unwrap().discard_all()
-                            });
-                        if change == MicrophoneMonitorConfigChange::Playout {
-                            if enabled {
-                                if let Err(error) = producer.start() {
-                                    eprintln!(
-                                    "pc-capture: critical media failure: monitor capture start: {error}"
-                                );
-                                    break 'control;
-                                }
-                                ensure_playback(
-                                    &out_thread,
-                                    &out_selected,
-                                    &out_stop,
-                                    &playback,
-                                    &monitor_playback,
-                                    &monitor_state,
-                                    &out_spawn_ns,
-                                    &counters,
-                                    &playback_supervision,
-                                );
-                            } else if !capture_transmit_enabled.load(Ordering::Acquire)
-                                && !capture_warm_enabled
-                            {
-                                if let Err(error) = producer.stop() {
-                                    eprintln!(
-                                    "pc-capture: critical media failure: monitor capture stop: {error}"
-                                );
-                                    break 'control;
-                                }
-                            }
-                        }
+                        monitor_state.configure(enabled, delay_pairs, bounded_gain, || {
+                            monitor_playback.lock().unwrap().discard_all()
+                        });
                     }
                     InboundOp::Ping => {
                         if write_frame(&conn, &encode_control(&pong_json(now_ns()))).is_err() {
@@ -3186,6 +3843,8 @@ fn run_authenticated_session(
                         ensure_playback(
                             &out_thread,
                             &out_selected,
+                            &out_override,
+                            &hfp_transition,
                             &out_stop,
                             &playback,
                             &monitor_playback,
@@ -3519,6 +4178,17 @@ mod tests {
     }
 
     #[test]
+    fn repeated_closed_privacy_boundary_is_idempotent() {
+        let (_, consumer) = capture_frame_ring(1);
+        let transmitting = AtomicBool::new(false);
+        let privacy = EncoderPrivacyEpoch::default();
+
+        close_capture_privacy(&transmitting, &privacy, &consumer).unwrap();
+
+        assert_eq!(privacy.requested(), 0);
+    }
+
+    #[test]
     fn privacy_boundary_discards_pre_boundary_capture_frames() {
         let (producer, consumer) = capture_frame_ring(2);
         let privacy = EncoderPrivacyEpoch::default();
@@ -3607,6 +4277,84 @@ mod tests {
     }
 
     #[test]
+    fn stale_capture_recovery_flushes_to_live_edge_and_preserves_media_time() {
+        let (producer, consumer) = capture_frame_ring(8);
+        let mut frame = AudioFrame {
+            encoder_epoch: 0,
+            capture_generation: 0,
+            capture_open_attempt: 0,
+            capture_ts_ns: 0,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
+            samples: vec![0.0; proto::FRAME_SAMPLES],
+        };
+        let metadata = |capture_ts_ns| CaptureFrameMetadata {
+            encoder_epoch: 1,
+            capture_generation: 2,
+            capture_open_attempt: 3,
+            capture_ts_ns,
+            capture_callback_ts_ns: capture_ts_ns,
+            capture_timestamp_valid: true,
+        };
+        let key = CapturePacerKey {
+            encoder_epoch: 1,
+            capture_generation: 2,
+            capture_open_attempt: 3,
+        };
+        let base = Instant::now();
+        let mut pacer = CaptureFramePacer::default();
+        assert_eq!(pacer.deadline(key, base), base);
+        assert_eq!(pacer.deadline(key, base), base + CAPTURE_EGRESS_INTERVAL);
+
+        assert!(producer.push(metadata(1_000_000_000), &[0.25; proto::FRAME_SAMPLES]));
+        assert_eq!(consumer.pop_into_with_sequence(&mut frame), Some(0));
+        let mut timeline = CaptureMediaTimeline::default();
+        assert_eq!(
+            timeline.skipped_before(key, 0, frame.capture_ts_ns, true),
+            0
+        );
+        timeline.note_sent(0, frame.capture_ts_ns, true);
+
+        for index in 1..=8 {
+            assert!(producer.push(
+                metadata(1_000_000_000 + index * CAPTURE_MEDIA_FRAME_NS),
+                &[0.25; proto::FRAME_SAMPLES],
+            ));
+        }
+        assert_eq!(consumer.pop_into_with_sequence(&mut frame), Some(1));
+        assert!(capture_callback_is_stale(
+            frame.capture_callback_ts_ns,
+            frame.capture_callback_ts_ns + CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS + 1,
+        ));
+
+        let diagnostics = CaptureDiagnostics::default();
+        let monitor_state = MicrophoneMonitorState::default();
+        let monitor_playback = Mutex::new(PlaybackRing::new(8));
+        recover_stale_capture_edge(
+            &consumer,
+            &mut pacer,
+            &diagnostics,
+            &monitor_state,
+            &monitor_playback,
+        );
+
+        assert_eq!(consumer.len(), 0);
+        let snapshot = diagnostics.snapshot(0, 0, 8, 0, 0);
+        assert_eq!(snapshot.egress_stale_frames, 1);
+        assert_eq!(snapshot.egress_stale_recoveries, 1);
+        assert_eq!(snapshot.egress_stale_discarded_frames, 8);
+        let rebased = base + Duration::from_millis(1);
+        assert_eq!(pacer.deadline(key, rebased), rebased);
+
+        assert!(producer.push(metadata(1_180_000_000), &[0.5; proto::FRAME_SAMPLES]));
+        assert_eq!(consumer.pop_into_with_sequence(&mut frame), Some(9));
+        assert_eq!(
+            timeline.skipped_before(key, 9, frame.capture_ts_ns, true),
+            8
+        );
+    }
+
+    #[test]
     fn capture_media_timeline_preserves_sequence_timestamp_and_restart_gaps() {
         let mut timeline = CaptureMediaTimeline::default();
         let first_key = CapturePacerKey {
@@ -3662,9 +4410,23 @@ mod tests {
 
     #[test]
     fn callback_age_guard_allows_two_frame_callbacks_but_rejects_backlog() {
-        assert!(Duration::from_millis(20).as_nanos() as u64 <= CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
-        assert!(Duration::from_millis(40).as_nanos() as u64 <= CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
-        assert!(Duration::from_millis(120).as_nanos() as u64 > CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS);
+        let callback_ns = 1_000_000_000;
+        assert!(!capture_callback_is_stale(
+            callback_ns,
+            callback_ns + Duration::from_millis(20).as_nanos() as u64,
+        ));
+        assert!(!capture_callback_is_stale(
+            callback_ns,
+            callback_ns + CAPTURE_EGRESS_MAX_CALLBACK_AGE_NS,
+        ));
+        assert!(capture_callback_is_stale(
+            callback_ns,
+            callback_ns + Duration::from_millis(120).as_nanos() as u64,
+        ));
+        assert!(!capture_callback_is_stale(
+            0,
+            callback_ns + Duration::from_secs(1).as_nanos() as u64,
+        ));
     }
 
     #[test]
@@ -4099,13 +4861,13 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":15,"token":"good"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":16,"token":"good"}"#).unwrap();
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":15,"token":"bad"}"#).unwrap();
+        let op = parse_inbound(r#"{"op":"hello","proto":16,"token":"bad"}"#).unwrap();
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -4166,6 +4928,130 @@ mod tests {
         assert_eq!(lifecycle.stop(), ProducerAction::None);
         assert_eq!(lifecycle.set_synthetic(false), ProducerAction::None);
         assert_eq!(lifecycle.start(), ProducerAction::Start);
+    }
+
+    #[test]
+    fn atomic_source_configuration_preserves_running_stream_when_unchanged() {
+        let mut lifecycle = ProducerLifecycle::new(false);
+        assert_eq!(
+            lifecycle.configure(Some("hfp-input".into()), false),
+            ProducerAction::None
+        );
+        assert_eq!(lifecycle.start(), ProducerAction::Start);
+        assert_eq!(
+            lifecycle.configure(Some("hfp-input".into()), false),
+            ProducerAction::None
+        );
+        assert_eq!(lifecycle.start(), ProducerAction::None);
+        assert_eq!(
+            lifecycle.configure(Some("other-input".into()), false),
+            ProducerAction::Restart
+        );
+        assert_eq!(
+            lifecycle.configure(Some("other-input".into()), true),
+            ProducerAction::Restart
+        );
+    }
+
+    #[test]
+    fn default_playback_request_identity_is_separate_from_hfp_override() {
+        let requested = Some(String::new());
+        let playback_override = Some("paired-hfp-output".to_string());
+        let (native, identity) = playback_route_selection(&requested, &playback_override);
+        assert_eq!(native.as_deref(), Some("paired-hfp-output"));
+        assert_eq!(identity.as_deref(), Some(""));
+
+        let explicit = Some("requested-output".to_string());
+        let (native, identity) = playback_route_selection(&explicit, &None);
+        assert_eq!(native, explicit);
+        assert_eq!(identity.as_deref(), Some("requested-output"));
+    }
+
+    #[test]
+    fn unchanged_normal_playback_request_does_not_restart_output() {
+        assert!(playback_request_changed(&None, "", &None));
+        assert!(!playback_request_changed(&Some(String::new()), "", &None));
+        assert!(!playback_request_changed(
+            &Some("speaker".to_string()),
+            "speaker",
+            &None
+        ));
+        assert!(playback_request_changed(
+            &Some(String::new()),
+            "",
+            &Some("paired-hfp-output".to_string())
+        ));
+    }
+    #[test]
+    fn hfp_route_cache_reuses_only_exact_live_route_classification() {
+        let request = HfpRouteRequest {
+            input_id: "input".to_string(),
+            output_id: "output".to_string(),
+            synthetic: false,
+            capture_active: true,
+        };
+        let plan = HfpRoutePlan {
+            playback_override: "paired-output".to_string(),
+        };
+        let mut cache = HfpRouteCache::default();
+        assert_eq!(cache.lookup(&request), None);
+        cache.store(request.clone(), Some(plan.clone()));
+        assert_eq!(cache.lookup(&request), Some(Some(plan)));
+        assert_eq!(
+            cache.lookup(&HfpRouteRequest {
+                output_id: "other-output".to_string(),
+                ..request.clone()
+            }),
+            None
+        );
+        cache.clear();
+        assert_eq!(cache.lookup(&request), None);
+    }
+
+    #[test]
+    fn hfp_resume_decisions_are_generation_safe_and_timeout_bounded() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        assert_eq!(
+            hfp_resume_decision(7, 7, false, now, deadline),
+            HfpResumeDecision::Pending
+        );
+        assert_eq!(
+            hfp_resume_decision(8, 7, true, now, deadline),
+            HfpResumeDecision::Stale
+        );
+        assert_eq!(
+            hfp_resume_decision(7, 7, true, now, deadline),
+            HfpResumeDecision::FirstCallback
+        );
+        assert_eq!(
+            hfp_resume_decision(7, 7, false, deadline, deadline),
+            HfpResumeDecision::Timeout
+        );
+
+        let mut transition = HfpTransitionState::default();
+        let stale = transition.begin();
+        let current = transition.begin();
+        assert!(!transition.complete(stale));
+        assert!(transition.pending);
+        assert!(transition.complete(current));
+        assert!(!transition.pending);
+    }
+
+    #[test]
+    fn stopped_hfp_route_releases_capture_before_clearing_override() {
+        assert!(stop_capture_before_clearing_override(
+            true,
+            CaptureMode::Stopped
+        ));
+        assert!(!stop_capture_before_clearing_override(
+            true,
+            CaptureMode::Warm
+        ));
+        assert!(!stop_capture_before_clearing_override(
+            false,
+            CaptureMode::Stopped
+        ));
     }
 
     #[test]
@@ -4255,7 +5141,7 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":15,"token":"listen-only"}"#,
+                r#"{"op":"hello","proto":16,"token":"listen-only"}"#,
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -4311,7 +5197,7 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":15,"token":"tok123"}"#,
+                r#"{"op":"hello","proto":16,"token":"tok123"}"#,
             ))
             .unwrap();
 
@@ -4320,7 +5206,7 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 15);
+                assert_eq!(v["proto"], 16);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -4438,7 +5324,7 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":15,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":16,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -4512,7 +5398,7 @@ mod tests {
         let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         unauthorized
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":15,"token":"wrong"}"#,
+                r#"{"op":"hello","proto":16,"token":"wrong"}"#,
             ))
             .unwrap();
         let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
@@ -4531,7 +5417,7 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":15,"token":"servetok"}"#,
+                r#"{"op":"hello","proto":16,"token":"servetok"}"#,
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

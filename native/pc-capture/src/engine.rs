@@ -631,6 +631,7 @@ impl Engine {
             InboundOp::Hello { .. }
             | InboundOp::SelectDevice { .. }
             | InboundOp::SelectOutputDevice { .. }
+            | InboundOp::ConfigureAudioRoute { .. }
             | InboundOp::SetMonitor { .. }
             | InboundOp::Warm
             | InboundOp::Ping => {}

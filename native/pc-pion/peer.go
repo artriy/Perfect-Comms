@@ -50,6 +50,7 @@ type peer struct {
 	outbound        chan outboundFrame
 	stop            chan struct{}
 	closeOnce       sync.Once
+	closeDone       chan struct{}
 	workerMu        sync.Mutex
 	workersClosed   bool
 	wg              sync.WaitGroup
@@ -714,22 +715,35 @@ func (p *peer) fail(message string) {
 	})
 }
 
-func (p *peer) close() {
+func (p *peer) startClose(failure string) <-chan struct{} {
 	p.closeOnce.Do(func() {
+		p.closeDone = make(chan struct{})
+		if failure != "" {
+			p.fail(failure)
+		}
 		p.active.Store(false)
 		p.workerMu.Lock()
 		p.workersClosed = true
 		p.workerMu.Unlock()
 		close(p.stop)
-		if p.pc != nil {
-			_ = p.pc.Close()
-		}
 		if p.epochGate != nil {
 			_ = p.epochGate.Close()
 		}
-		p.wg.Wait()
-		p.closeCompleted.Store(true)
+		done := p.closeDone
+		go func() {
+			if p.pc != nil {
+				_ = p.pc.Close()
+			}
+			p.wg.Wait()
+			p.closeCompleted.Store(true)
+			close(done)
+		}()
 	})
+	return p.closeDone
+}
+
+func (p *peer) close() {
+	<-p.startClose("")
 }
 
 func (p *peer) purgeOutboundBelow(epoch uint64) int {

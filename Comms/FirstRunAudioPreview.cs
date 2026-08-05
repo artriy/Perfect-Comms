@@ -46,6 +46,40 @@ internal static class FirstRunOutputPreviewPolicy
         => string.IsNullOrEmpty(pendingDevice)
             ? eventRequestedDefault || string.IsNullOrEmpty(eventDevice)
             : string.Equals(pendingDevice, eventDevice, StringComparison.Ordinal);
+    internal static bool CanReuseConfirmedOutput(
+        bool commandChanged,
+        bool running,
+        string? pendingDevice,
+        string? confirmedDevice,
+        ulong confirmedGeneration)
+        => !commandChanged &&
+           running &&
+           confirmedGeneration != 0 &&
+           string.Equals(
+               pendingDevice ?? string.Empty,
+               confirmedDevice ?? string.Empty,
+               StringComparison.Ordinal);
+#if WINDOWS
+    internal static (string Device, ulong Generation) ApplyPlaybackConfirmation(
+        SidecarPlaybackState state,
+        string confirmedDevice,
+        ulong confirmedGeneration)
+    {
+        if (state.State == "command-accepted" && state.Changed)
+            return (string.Empty, 0);
+        if (state.State == "first-callback" && state.Running)
+            return (
+                state.FellBackToDefault || state.RequestedDefault
+                    ? string.Empty
+                    : state.RequestedDevice ?? string.Empty,
+                state.StreamGeneration);
+        if (IsTonePlaybackTerminal(state.State) &&
+            (state.StreamGeneration == 0 || state.StreamGeneration == confirmedGeneration))
+            return (string.Empty, 0);
+        return (confirmedDevice, confirmedGeneration);
+    }
+#endif
+
 
     internal static string DescribeNativeOutputFailure(
         string? reason,
@@ -190,10 +224,14 @@ internal sealed class FirstRunAudioPreview : IDisposable
     private long _outputReadyDeadlineTick;
     private int _waitingForOutput;
     private bool _outputSelectionAccepted;
+    private string _confirmedOutputDevice = string.Empty;
+    private ulong _confirmedPlaybackGeneration;
     private bool _outputFallbackAttempted;
     private long _activeTonePlaybackGeneration;
     private long _desktopToneTerminalGeneration;
     private int _desktopTonePlaybackTerminated;
+    private string _desktopInputDevice = string.Empty;
+    private string _desktopOutputDevice = string.Empty;
 #endif
 #if ANDROID
     private AndroidMicrophone? _androidMicrophone;
@@ -444,10 +482,19 @@ internal sealed class FirstRunAudioPreview : IDisposable
             nsVeryHigh: draft.StrongerNoiseSuppression,
             hpf: true);
         _lease.SetInput(draft.MicVolume, EffectiveVadThreshold(draft), EffectiveNoiseGateThreshold(draft));
-        _lease.SelectMicDevice(draft.MicrophoneDevice);
-        _lease.SelectOutputDevice(draft.SpeakerDevice);
         _lease.SetMonitor(_monitorPlayback, _monitorDelayed, draft.MasterVolume);
-        if (!_monitorPlayback) _lease.SetMicActive(true);
+        _desktopInputDevice = draft.MicrophoneDevice ?? string.Empty;
+        _desktopOutputDevice = draft.SpeakerDevice ?? string.Empty;
+        if (!_lease.ConfigureAudioRoute(
+                _desktopInputDevice,
+                _desktopOutputDevice,
+                SidecarCaptureMode.Transmit,
+                synthetic: false))
+        {
+            FailMicrophone("Could not configure the microphone route");
+            StopDesktopLease();
+            return;
+        }
         MarkListening();
         if (microphoneRoute == MicrophoneRouteResolution.FellBackToDefault)
             SetMicrophonePriorityStatus(
@@ -584,6 +631,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
             }
         }
 
+        PauseMicrophoneForTone();
         BeginDesktopOutputTest(draft);
 #elif ANDROID
         PauseMicrophoneForTone();
@@ -681,7 +729,6 @@ internal sealed class FirstRunAudioPreview : IDisposable
         try { monitorRoom?.SetLoopBack(false); } catch { }
 #if WINDOWS
         try { _lease?.SetMonitor(false, false, 1f); } catch { }
-        try { _lease?.SetMicActive(false); } catch { }
 #elif ANDROID
         _permissionGeneration++;
         StopAndroidCaptureOnly();
@@ -741,7 +788,8 @@ internal sealed class FirstRunAudioPreview : IDisposable
     private void BeginDesktopOutputTest(FirstRunSetupDraft draft)
     {
         CancelTone();
-        while (_playbackStates.TryDequeue(out _)) { }
+        while (_playbackStates.TryDequeue(out var state))
+            UpdateConfirmedOutput(state);
         _pendingSpeakerDraft = draft;
         _pendingOutputDevice = draft.SpeakerDevice ?? string.Empty;
         _pendingPlaybackGeneration = 0;
@@ -756,7 +804,13 @@ internal sealed class FirstRunAudioPreview : IDisposable
         SetOutputStatus("Opening the selected speaker...");
         try
         {
-            if (_lease?.SelectOutputDevice(_pendingOutputDevice) != true)
+            _desktopInputDevice = draft.MicrophoneDevice ?? string.Empty;
+            _desktopOutputDevice = _pendingOutputDevice;
+            if (_lease?.ConfigureAudioRoute(
+                    _desktopInputDevice,
+                    _pendingOutputDevice,
+                    SidecarCaptureMode.Stopped,
+                    synthetic: false) != true)
             {
                 CancelDesktopOutputWait();
                 FailOutput("Could not send the selected speaker to the audio helper", 5000);
@@ -780,11 +834,22 @@ internal sealed class FirstRunAudioPreview : IDisposable
         }
         _playbackStates.Enqueue(state);
     }
+    private void UpdateConfirmedOutput(SidecarPlaybackState state)
+    {
+        var confirmation = FirstRunOutputPreviewPolicy.ApplyPlaybackConfirmation(
+            state,
+            _confirmedOutputDevice,
+            _confirmedPlaybackGeneration);
+        _confirmedOutputDevice = confirmation.Device;
+        _confirmedPlaybackGeneration = confirmation.Generation;
+    }
+
 
     private void TickDesktopOutputReadiness()
     {
         while (_playbackStates.TryDequeue(out var state))
         {
+            UpdateConfirmedOutput(state);
             if (Volatile.Read(ref _waitingForOutput) == 0)
             {
                 long activeGeneration = Volatile.Read(ref _activeTonePlaybackGeneration);
@@ -808,11 +873,24 @@ internal sealed class FirstRunAudioPreview : IDisposable
             }
 
             if (state.State == "command-accepted" &&
-                state.Action == "select-output-device" &&
+                (state.Action is "select-output-device" or "configure-audio-route") &&
                 RequestedOutputMatches(state))
             {
                 _outputSelectionAccepted = true;
-                SetOutputStatus("Waiting for the selected speaker...");
+                if (state.Action == "configure-audio-route" &&
+                    FirstRunOutputPreviewPolicy.CanReuseConfirmedOutput(
+                        state.Changed,
+                        state.Running,
+                        _pendingOutputDevice,
+                        _confirmedOutputDevice,
+                        _confirmedPlaybackGeneration))
+                {
+                    StartDesktopToneForReadyOutput(_confirmedPlaybackGeneration);
+                }
+                else
+                {
+                    SetOutputStatus("Waiting for the selected speaker...");
+                }
                 continue;
             }
             if (!_outputSelectionAccepted) continue;
@@ -844,16 +922,7 @@ internal sealed class FirstRunAudioPreview : IDisposable
                 _pendingPlaybackGeneration != 0 &&
                 state.StreamGeneration == _pendingPlaybackGeneration)
             {
-                var draft = _pendingSpeakerDraft;
-                bool usedDefaultFallback = _outputFallbackAttempted;
-                long playbackGeneration = unchecked((long)_pendingPlaybackGeneration);
-                CancelDesktopOutputWait();
-                if (draft == null) continue;
-                Volatile.Write(ref _desktopToneTerminalGeneration, 0);
-                Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
-                Volatile.Write(ref _activeTonePlaybackGeneration, playbackGeneration);
-                PauseMicrophoneForTone();
-                StartDesktopTone(draft.MasterVolume, usedDefaultFallback);
+                StartDesktopToneForReadyOutput(_pendingPlaybackGeneration);
             }
         }
 
@@ -863,6 +932,18 @@ internal sealed class FirstRunAudioPreview : IDisposable
             CancelDesktopOutputWait();
             FailOutput("The selected speaker did not become ready - try again or choose Default");
         }
+    }
+
+    private void StartDesktopToneForReadyOutput(ulong playbackGeneration)
+    {
+        var draft = _pendingSpeakerDraft;
+        bool usedDefaultFallback = _outputFallbackAttempted;
+        CancelDesktopOutputWait();
+        if (draft == null) return;
+        Volatile.Write(ref _desktopToneTerminalGeneration, 0);
+        Interlocked.Exchange(ref _desktopTonePlaybackTerminated, 0);
+        Volatile.Write(ref _activeTonePlaybackGeneration, unchecked((long)playbackGeneration));
+        StartDesktopTone(draft.MasterVolume, usedDefaultFallback);
     }
 
     private bool TryFallbackToDefault(SidecarPlaybackState state)
@@ -883,7 +964,12 @@ internal sealed class FirstRunAudioPreview : IDisposable
         SetOutputStatus(reason + " Trying Default...");
         try
         {
-            if (_lease?.SelectOutputDevice(string.Empty) != true)
+            _desktopOutputDevice = string.Empty;
+            if (_lease?.ConfigureAudioRoute(
+                    _desktopInputDevice,
+                    string.Empty,
+                    SidecarCaptureMode.Stopped,
+                    synthetic: false) != true)
             {
                 CancelDesktopOutputWait();
                 FailOutput("Could not send Default to the audio helper", 6500);
@@ -992,7 +1078,15 @@ internal sealed class FirstRunAudioPreview : IDisposable
         var lease = _lease;
         _lease = null;
         if (lease == null) return;
-        try { lease.SetMicActive(false); } catch { }
+        try
+        {
+            lease.ConfigureAudioRoute(
+                _desktopInputDevice,
+                _desktopOutputDevice,
+                SidecarCaptureMode.Stopped,
+                synthetic: false);
+        }
+        catch { }
         try { lease.Dispose(); } catch { }
     }
 

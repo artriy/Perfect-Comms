@@ -77,6 +77,19 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 - **CrossOver on macOS now starts voice audio without opening an interactive Terminal.**
   > <sub>The managed launcher restores the embedded helper's executable mode, removes quarantine when necessary, and starts the signed app through hidden LaunchServices. The app broker validates and supervises the real audio helper while preserving private authentication and cancellation; Linux Wine and Proton retain their existing native helper flow.</sub>
 
+### Coordinated Bluetooth Headset Audio
+
+- **Windows Bluetooth headset profile changes no longer restart the audio helper.**
+  > <sub>When an active microphone has one exact WASAPI hands-free speaker partner, Perfect Comms now stops the old playback stream, opens capture, then resumes the paired output after the first capture callback or a bounded timeout. Stale transitions cannot revive playback after a newer route or shutdown, and ordinary wired, USB, virtual, separate-device, macOS, and Linux routes keep their existing behavior.</sub>
+
+- **Mute, monitoring, and speaker recovery keep one atomic audio route.**
+  > <sub>Input, output, synthetic source, and stopped, warm, or transmitting capture state now cross one protocol boundary. Privacy closes before any Windows route probe, playback remains usable when an atomic update leaves its stream unchanged, and stale speaker fallback work cannot restore an older microphone policy.</sub>
+
+### Stable Full-Lobby Voice Startup
+
+- **Large lobbies no longer mistake queued RTC work for a frozen audio helper.**
+  > <sub>Each completed native peer operation now advances the shared RTC watchdog. A busy helper can finish the remaining queued peer negotiations without being restarted at the fixed three-second per-peer deadline, while a genuinely stalled queue still triggers bounded recovery after three seconds without progress.</sub>
+
 ### Developer API Package
 
 - **Mod integrations can compile against `PerfectComms.Api` without redistributing the runtime plugin.**

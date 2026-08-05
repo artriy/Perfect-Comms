@@ -424,10 +424,177 @@ public sealed class ManagedVoiceHardeningTests
         var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
         Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
         Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(15, SidecarVoiceClient.Proto);
+        Assert.Equal(16, SidecarVoiceClient.Proto);
         Assert.Equal(5, SidecarProtocol.MobileAbi);
         Assert.Equal("warm", DecodeControl(SidecarProtocol.WarmFrame()).GetProperty("op").GetString());
     }
+    [Theory]
+    [InlineData("stopped")]
+    [InlineData("warm")]
+    [InlineData("transmit")]
+    public void AtomicAudioRouteUsesExactProtocolShape(string expectedMode)
+    {
+        var captureMode = expectedMode switch
+        {
+            "stopped" => SidecarCaptureMode.Stopped,
+            "warm" => SidecarCaptureMode.Warm,
+            _ => SidecarCaptureMode.Transmit,
+        };
+        var frame = SidecarProtocol.ConfigureAudioRouteFrame(
+            "input-id",
+            "output-id",
+            captureMode,
+            synthetic: false);
+        Assert.True(SidecarProtocol.TryParseFrame(
+            frame, frame.Length, out _, out var offset, out var length, out _));
+
+        Assert.Equal(
+            $"{{\"op\":\"configure-audio-route\",\"input_id\":\"input-id\",\"output_id\":\"output-id\",\"capture_mode\":\"{expectedMode}\",\"synthetic\":false}}",
+            Encoding.UTF8.GetString(frame, offset, length));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false, "stopped")]
+    [InlineData(false, true, true, false, "stopped")]
+    [InlineData(true, false, false, false, "transmit")]
+    [InlineData(true, false, true, false, "transmit")]
+    [InlineData(true, true, false, false, "stopped")]
+    [InlineData(true, true, true, false, "warm")]
+    [InlineData(false, false, false, true, "warm")]
+    [InlineData(true, true, false, true, "warm")]
+    [InlineData(true, false, false, true, "transmit")]
+    public void DesktopRouteIntentMapsCapturePolicy(
+        bool captureRequested,
+        bool muted,
+        bool keepCaptureWarm,
+        bool monitorEnabled,
+        string expected)
+        => Assert.Equal(
+            expected,
+            SidecarProtocol.CaptureModeValue(
+                SidecarProtocol.ResolveCaptureMode(
+                    captureRequested,
+                    muted,
+                    keepCaptureWarm,
+                    monitorEnabled)));
+
+    [Theory]
+    [InlineData("failed-speaker", "", true, "")]
+    [InlineData("selected-speaker", "selected-speaker", true, "selected-speaker")]
+    [InlineData("selected-speaker", "", false, "selected-speaker")]
+    public void CaptureOnlyRouteKeepsActivePlaybackIdentity(
+        string selectedDevice,
+        string activeRequestedDevice,
+        bool sidecarAttached,
+        string expected)
+        => Assert.Equal(
+            expected,
+            PerfectCommsVoiceBackend.ResolveSidecarRouteOutput(
+                selectedDevice,
+                activeRequestedDevice,
+                sidecarAttached));
+
+    [Theory]
+    [InlineData(false, "set-dsp,set-diagnostics,set-input,set-monitor,configure-audio-route")]
+    [InlineData(true, "set-dsp,set-diagnostics,set-input,set-monitor,set-ice-servers,configure-audio-route")]
+    public void InitialDesktopConfigurationAppliesSettingsBeforeAtomicRoute(
+        bool includesIceServers,
+        string expected)
+        => Assert.Equal(
+            expected,
+            string.Join(',', SidecarVoiceClient.InitialConfigurationCommandOrder(includesIceServers)));
+    [Fact]
+    public void UnchangedRunningRouteCanReuseConfirmedSpeaker()
+    {
+        Assert.True(FirstRunOutputPreviewPolicy.CanReuseConfirmedOutput(
+            commandChanged: false,
+            running: true,
+            pendingDevice: "speaker",
+            confirmedDevice: "speaker",
+            confirmedGeneration: 7));
+        Assert.False(FirstRunOutputPreviewPolicy.CanReuseConfirmedOutput(
+            commandChanged: true,
+            running: true,
+            pendingDevice: "speaker",
+            confirmedDevice: "speaker",
+            confirmedGeneration: 7));
+        Assert.False(FirstRunOutputPreviewPolicy.CanReuseConfirmedOutput(
+            commandChanged: false,
+            running: true,
+            pendingDevice: "speaker",
+            confirmedDevice: "other",
+            confirmedGeneration: 7));
+    }
+
+#if WINDOWS
+    [Fact]
+    public void UnchangedAtomicRouteAcknowledgementPreservesConfirmedPlayback()
+    {
+        var unchanged = new SidecarPlaybackState(
+            State: "command-accepted",
+            Action: "configure-audio-route",
+            StreamGeneration: 0,
+            RequestedDevice: "speaker",
+            ResolvedDevice: string.Empty,
+            RequestedDefault: false,
+            RequestedMatched: true,
+            FellBackToDefault: false,
+            Running: true,
+            Changed: false);
+        Assert.True(PerfectCommsVoiceBackend
+            .ShouldPreserveSpeakerReadinessOnRouteAcknowledgement(unchanged, speakerReady: true));
+        Assert.False(PerfectCommsVoiceBackend
+            .ShouldPreserveSpeakerReadinessOnRouteAcknowledgement(
+                unchanged with { Changed = true },
+                speakerReady: true));
+        Assert.False(PerfectCommsVoiceBackend
+            .ShouldPreserveSpeakerReadinessOnRouteAcknowledgement(
+                unchanged,
+                speakerReady: false));
+    }
+
+    [Fact]
+    public void QueuedPlaybackConfirmationSurvivesUnchangedRouteAcknowledgement()
+    {
+        var firstCallback = new SidecarPlaybackState(
+            State: "first-callback",
+            Action: string.Empty,
+            StreamGeneration: 7,
+            RequestedDevice: "speaker",
+            ResolvedDevice: "speaker",
+            RequestedDefault: false,
+            RequestedMatched: true,
+            FellBackToDefault: false,
+            Running: true,
+            Changed: false);
+        var confirmation = FirstRunOutputPreviewPolicy.ApplyPlaybackConfirmation(
+            firstCallback,
+            string.Empty,
+            0);
+        var unchanged = firstCallback with
+        {
+            State = "command-accepted",
+            Action = "configure-audio-route",
+            StreamGeneration = 0,
+        };
+
+        confirmation = FirstRunOutputPreviewPolicy.ApplyPlaybackConfirmation(
+            unchanged,
+            confirmation.Device,
+            confirmation.Generation);
+
+        Assert.Equal("speaker", confirmation.Device);
+        Assert.Equal(7UL, confirmation.Generation);
+        Assert.True(FirstRunOutputPreviewPolicy.CanReuseConfirmedOutput(
+            commandChanged: unchanged.Changed,
+            running: unchanged.Running,
+            pendingDevice: "speaker",
+            confirmedDevice: confirmation.Device,
+            confirmedGeneration: confirmation.Generation));
+    }
+#endif
+
+
 
     [Theory]
     [InlineData(true, false, 0)]

@@ -30,6 +30,7 @@ const (
 	relayAcceptanceMinWait = 2 * time.Second
 	writeTimeout           = 100 * time.Millisecond
 	privacyDrainTimeout    = 500 * time.Millisecond
+	privacyPeerCloseGrace  = 100 * time.Millisecond
 	maxPendingCandidates   = 64
 	tcpReadPacketCapacity  = 64
 	tcpWriteBufferCapacity = 0
@@ -111,6 +112,7 @@ type engine struct {
 	mu           sync.RWMutex
 	peerOps      sync.Mutex
 	peers        map[string]*peer
+	retired      map[*peer]struct{}
 	iceServers   []webrtc.ICEServer
 	api          *webrtc.API
 	estimators   chan *feedbackAwareEstimator
@@ -217,6 +219,7 @@ func newEngine() (*engine, error) {
 	settings.SetNetworkTypes(networkTypes)
 	return &engine{
 		peers:      make(map[string]*peer),
+		retired:    make(map[*peer]struct{}),
 		iceServers: defaultICEServers(),
 		api: webrtc.NewAPI(
 			webrtc.WithMediaEngine(mediaEngine),
@@ -416,7 +419,9 @@ func (e *engine) addPeerLocked(id string, offerer, relayOnly bool, generation ui
 	if existing != nil && existing.generation == generation {
 		target := existing.raiseMinEpoch(minEpoch)
 		if !e.advancePeerEpoch(existing, target, privacyDrainTimeout) || !existing.active.Load() {
-			e.removePeerLocked(id)
+			if detached := e.detachPeerLocked(id, existing); detached != nil {
+				e.trackRetiredPeerCleanup(detached)
+			}
 			return errors.New("peer privacy epoch drain failed")
 		}
 		return nil
@@ -503,17 +508,43 @@ func (e *engine) removePeer(id string) {
 	e.removePeerLocked(id)
 }
 
-func (e *engine) removePeerLocked(id string) {
+func (e *engine) detachPeerLocked(id string, expected *peer) *peer {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	p := e.peers[id]
+	if expected != nil && (p != expected || p.instance != expected.instance) {
+		return nil
+	}
 	if p != nil {
 		delete(e.peers, id)
+		if e.retired == nil {
+			e.retired = make(map[*peer]struct{})
+		}
+		e.retired[p] = struct{}{}
 	}
 	e.control.removePeer(id)
 	e.rtp.removePeer(id)
-	e.mu.Unlock()
+	return p
+}
+
+func (e *engine) trackRetiredPeerCleanup(p *peer) <-chan struct{} {
+	done := p.startClose("")
+	go func() {
+		<-done
+		for p.writeInFlight.Load() || (p.epochGate != nil && p.epochGate.hasActiveWrites()) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		e.mu.Lock()
+		delete(e.retired, p)
+		e.mu.Unlock()
+	}()
+	return done
+}
+
+func (e *engine) removePeerLocked(id string) {
+	p := e.detachPeerLocked(id, nil)
 	if p != nil {
-		p.close()
+		<-e.trackRetiredPeerCleanup(p)
 	}
 }
 
@@ -619,9 +650,13 @@ func (e *engine) advanceEpoch(epoch uint64, timeout time.Duration) bool {
 	for {
 		if e.privacyMu.TryLock() {
 			e.mu.RLock()
-			peers = make([]*peer, 0, len(e.peers))
+			peers = make([]*peer, 0, len(e.peers)+len(e.retired))
 			var dropped uint64
 			for _, p := range e.peers {
+				peers = append(peers, p)
+				dropped += uint64(p.purgeOutboundBelow(target))
+			}
+			for p := range e.retired {
 				peers = append(peers, p)
 				dropped += uint64(p.purgeOutboundBelow(target))
 			}
@@ -662,21 +697,26 @@ func waitForPrivacyWriters(
 	timeout time.Duration,
 	blockedWriters privacyWriterBlocker,
 ) bool {
+	closeAt := deadline
+	if timeout > 0 {
+		grace := privacyPeerCloseGrace
+		if timeout < grace {
+			grace = timeout
+		}
+		closeAt = deadline.Add(-grace)
+	}
 	for {
 		blocked := blockedWriters(peers, epoch)
 		if len(blocked) == 0 {
 			return true
 		}
-		if timeout <= 0 || !time.Now().Before(deadline) {
-			// A closed peer is the privacy boundary when its transport write cannot
-			// drain; no later write can enter its closed epoch gate.
+		now := time.Now()
+		if timeout <= 0 || !now.Before(closeAt) {
 			for _, p := range blocked {
-				p.fail("privacy epoch write deadline exceeded")
-				p.close()
+				p.startClose("privacy epoch write deadline exceeded")
 			}
-			// close waits for peer workers, but an interceptor-owned NACK write may
-			// still be downstream. Never report success until the affected phase
-			// confirms that its old write is gone.
+		}
+		if timeout <= 0 || !now.Before(deadline) {
 			return len(blockedWriters(peers, epoch)) == 0
 		}
 		sleepUntilPrivacyDeadline(deadline)
@@ -718,11 +758,15 @@ func (e *engine) close() {
 		return
 	}
 	e.mu.Lock()
-	peers := make([]*peer, 0, len(e.peers))
+	peers := make([]*peer, 0, len(e.peers)+len(e.retired))
 	for _, p := range e.peers {
 		peers = append(peers, p)
 	}
+	for p := range e.retired {
+		peers = append(peers, p)
+	}
 	e.peers = make(map[string]*peer)
+	e.retired = make(map[*peer]struct{})
 	for _, p := range peers {
 		e.control.removePeer(p.id)
 		e.rtp.removePeer(p.id)

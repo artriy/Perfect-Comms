@@ -190,6 +190,45 @@ func TestBlockedNACKPreventsDrainSuccessUntilDownstreamWriteExits(t *testing.T) 
 	}
 }
 
+func TestAdvanceEpochDeadlineBoundsBlockedGateCleanupWithoutFalseSuccess(t *testing.T) {
+	gate := newEpochGate()
+	gate.active[1] = 1
+	e := &engine{peers: make(map[string]*peer), rtp: newRTPQueue()}
+	p := &peer{
+		engine: e, id: "blocked-gate", generation: 1, instance: 1, epochGate: gate,
+		outbound: make(chan outboundFrame, outboundQueueCapacity), stop: make(chan struct{}),
+	}
+	p.active.Store(true)
+	e.peers[p.id] = p
+
+	timeout := 25 * time.Millisecond
+	started := time.Now()
+	if e.advanceEpoch(2, timeout) {
+		t.Fatal("privacy advance reported success while an old-epoch gate write remained active")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("gate privacy advance exceeded its deadline bound: %v", elapsed)
+	}
+	if p.active.Load() {
+		t.Fatal("peer with a blocked old-epoch gate write remained active")
+	}
+	gate.mu.Lock()
+	closed := gate.closed
+	gate.mu.Unlock()
+	if !closed {
+		t.Fatal("blocked peer epoch gate remained open")
+	}
+
+	gate.mu.Lock()
+	delete(gate.active, 1)
+	gate.mu.Unlock()
+	select {
+	case <-p.startClose(""):
+	case <-time.After(time.Second):
+		t.Fatal("blocked-gate peer did not finish asynchronous cleanup")
+	}
+}
+
 func TestAdvanceEpochDrainsAdmittedOriginalBeforeAdvancingGate(t *testing.T) {
 	writes := make(chan uint16, 2)
 	sink := interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, _ interceptor.Attributes) (int, error) {

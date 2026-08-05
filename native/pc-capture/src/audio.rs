@@ -1904,6 +1904,131 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>, String> {
     enumerate_cubeb_devices(DeviceType::INPUT)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CubebRouteDeviceMetadata {
+    stable_id: String,
+    raw_id: Vec<u8>,
+    group_id: Option<Vec<u8>>,
+    default_rate: u32,
+    input: bool,
+    output: bool,
+    enabled: bool,
+    multimedia_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfpRoutePlan {
+    pub playback_override: String,
+}
+
+fn plan_hfp_route_from_metadata(
+    is_windows: bool,
+    backend_id: &[u8],
+    input_id: &str,
+    output_id: &str,
+    synthetic: bool,
+    capture_active: bool,
+    devices: &[CubebRouteDeviceMetadata],
+) -> Option<HfpRoutePlan> {
+    if !is_windows || !backend_id.eq_ignore_ascii_case(b"wasapi") || synthetic || !capture_active {
+        return None;
+    }
+
+    let mut inputs = devices.iter().filter(|device| {
+        device.enabled
+            && device.input
+            && if input_id.is_empty() {
+                device.multimedia_default
+            } else {
+                requested_device_matches(input_id, backend_id, &device.raw_id)
+            }
+    });
+    let input = inputs.next()?;
+    if inputs.next().is_some()
+        || input.raw_id.is_empty()
+        || input.default_rate == 0
+        || !input
+            .group_id
+            .as_deref()
+            .is_some_and(|group| group.starts_with(b"BTHHFENUM"))
+    {
+        return None;
+    }
+    let input_group = input.group_id.as_deref()?;
+
+    let mut paired_outputs = devices.iter().filter(|device| {
+        device.enabled
+            && device.output
+            && device.default_rate == input.default_rate
+            && device.group_id.as_deref() == Some(input_group)
+    });
+    let paired_output = paired_outputs.next()?;
+    if paired_outputs.next().is_some()
+        || paired_output.raw_id.is_empty()
+        || (!output_id.is_empty()
+            && !requested_device_matches(output_id, backend_id, &paired_output.raw_id))
+    {
+        return None;
+    }
+
+    Some(HfpRoutePlan {
+        playback_override: paired_output.stable_id.clone(),
+    })
+}
+
+pub fn plan_hfp_audio_route(
+    input_id: &str,
+    output_id: &str,
+    synthetic: bool,
+    capture_active: bool,
+) -> Option<HfpRoutePlan> {
+    #[cfg(not(windows))]
+    {
+        let _ = (input_id, output_id, synthetic, capture_active);
+        None
+    }
+    #[cfg(windows)]
+    {
+        if synthetic || !capture_active {
+            return None;
+        }
+        let _com = WindowsComApartment::initialize().ok()?;
+        let context = init_cubeb_context("PerfectComms route planning").ok()?;
+        let backend_id = context.backend_id_bytes();
+        if !backend_id.eq_ignore_ascii_case(b"wasapi") {
+            return None;
+        }
+        let devices = context
+            .enumerate_devices(DeviceType::INPUT | DeviceType::OUTPUT)
+            .ok()?;
+        let metadata = devices
+            .iter()
+            .map(|info| {
+                let raw_id = info.device_id_bytes().unwrap_or_default().to_vec();
+                CubebRouteDeviceMetadata {
+                    stable_id: encode_device_id(backend_id, &raw_id),
+                    raw_id,
+                    group_id: info.group_id_bytes().map(|bytes| bytes.to_vec()),
+                    default_rate: info.default_rate(),
+                    input: info.device_type().intersects(DeviceType::INPUT),
+                    output: info.device_type().intersects(DeviceType::OUTPUT),
+                    enabled: info.state() == DeviceState::Enabled,
+                    multimedia_default: cubeb_preference_is_default(info.preferred().bits()),
+                }
+            })
+            .collect::<Vec<_>>();
+        plan_hfp_route_from_metadata(
+            true,
+            backend_id,
+            input_id,
+            output_id,
+            synthetic,
+            capture_active,
+            &metadata,
+        )
+    }
+}
+
 struct SelectedDevice {
     device: DeviceId,
     // Some backends (currently ALSA) can open raw device names that their Cubeb enumerator does
@@ -4231,6 +4356,7 @@ fn open_playback_candidate(
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cubeb_playback(
     device_id: Option<String>,
+    requested_device_id: Option<String>,
     playback: Arc<Mutex<PlaybackRing>>,
     monitor_playback: Arc<Mutex<PlaybackRing>>,
     monitor_state: Arc<MicrophoneMonitorState>,
@@ -4334,12 +4460,18 @@ pub fn spawn_cubeb_playback(
     }
     let (stream, candidate, latency_frames) =
         opened.ok_or_else(|| format!("build output stream: {}", failures.join("; ")))?;
+    let requested_device = requested_device_id.unwrap_or_default();
+    let requested_default = requested_device.is_empty();
     let descriptor = StreamDescriptor {
-        requested_device: selected.requested_device.clone(),
-        resolved_device: selected.resolved_device.clone(),
-        requested_default: selected.requested_default,
-        requested_matched: selected.requested_matched,
-        fell_back_to_default: selected.fell_back_to_default,
+        requested_device: requested_device.clone(),
+        resolved_device: if requested_default {
+            String::new()
+        } else {
+            selected.resolved_device.clone()
+        },
+        requested_default,
+        requested_matched: true,
+        fell_back_to_default: false,
         sample_rate: candidate.rate,
         channels: candidate.channels,
         sample_format: candidate.sample.label().to_string(),
@@ -4792,6 +4924,141 @@ mod tests {
         assert_eq!(allowed_cubeb_backend(Some("alsa"), true), Some("alsa"));
         assert_eq!(allowed_cubeb_backend(Some("jack"), true), None);
         assert_eq!(allowed_cubeb_backend(Some("pulse"), false), None);
+    }
+
+    fn route_device(
+        raw_id: &[u8],
+        group_id: Option<&[u8]>,
+        default_rate: u32,
+        input: bool,
+        output: bool,
+        multimedia_default: bool,
+    ) -> CubebRouteDeviceMetadata {
+        CubebRouteDeviceMetadata {
+            stable_id: encode_device_id(b"wasapi", raw_id),
+            raw_id: raw_id.to_vec(),
+            group_id: group_id.map(|bytes| bytes.to_vec()),
+            default_rate,
+            input,
+            output,
+            enabled: true,
+            multimedia_default,
+        }
+    }
+
+    fn hfp_route_devices() -> Vec<CubebRouteDeviceMetadata> {
+        vec![
+            route_device(
+                b"hfp-input",
+                Some(b"BTHHFENUM\\opaque\\group"),
+                16_000,
+                true,
+                false,
+                true,
+            ),
+            route_device(
+                b"hfp-output",
+                Some(b"BTHHFENUM\\opaque\\group"),
+                16_000,
+                false,
+                true,
+                false,
+            ),
+            route_device(
+                b"stereo-output",
+                Some(b"BTHENUM\\opaque\\group"),
+                48_000,
+                false,
+                true,
+                true,
+            ),
+        ]
+    }
+
+    #[test]
+    fn wasapi_hfp_plan_resolves_default_input_and_preserves_paired_output_id() {
+        let devices = hfp_route_devices();
+        let plan =
+            plan_hfp_route_from_metadata(true, b"wasapi", "", "", false, true, &devices).unwrap();
+        assert_eq!(
+            plan.playback_override,
+            encode_device_id(b"wasapi", b"hfp-output")
+        );
+
+        let explicit_input = encode_device_id(b"wasapi", b"hfp-input");
+        let explicit_output = encode_device_id(b"wasapi", b"hfp-output");
+        assert_eq!(
+            plan_hfp_route_from_metadata(
+                true,
+                b"wasapi",
+                &explicit_input,
+                &explicit_output,
+                false,
+                true,
+                &devices,
+            ),
+            Some(plan)
+        );
+    }
+
+    #[test]
+    fn hfp_plan_excludes_unsafe_platform_route_and_mode_combinations() {
+        let devices = hfp_route_devices();
+        let explicit_input = encode_device_id(b"wasapi", b"hfp-input");
+        let other_output = encode_device_id(b"wasapi", b"stereo-output");
+        for (windows, backend, synthetic, active, input, output) in [
+            (false, b"wasapi".as_slice(), false, true, "", ""),
+            (true, b"winmm".as_slice(), false, true, "", ""),
+            (true, b"wasapi".as_slice(), true, true, "", ""),
+            (true, b"wasapi".as_slice(), false, false, "", ""),
+            (
+                true,
+                b"wasapi".as_slice(),
+                false,
+                true,
+                explicit_input.as_str(),
+                other_output.as_str(),
+            ),
+        ] {
+            assert!(plan_hfp_route_from_metadata(
+                windows, backend, input, output, synthetic, active, &devices,
+            )
+            .is_none());
+        }
+
+        let mut non_hfp = devices.clone();
+        non_hfp[0].group_id = Some(b"bthhfenum\\opaque\\group".to_vec());
+        assert!(
+            plan_hfp_route_from_metadata(true, b"wasapi", "", "", false, true, &non_hfp).is_none()
+        );
+    }
+
+    #[test]
+    fn hfp_plan_fails_closed_on_missing_malformed_or_ambiguous_metadata() {
+        let devices = hfp_route_devices();
+        for mutate in 0..6 {
+            let mut invalid = devices.clone();
+            match mutate {
+                0 => invalid[0].group_id = None,
+                1 => invalid[0].raw_id.clear(),
+                2 => invalid[0].default_rate = 0,
+                3 => invalid[1].default_rate = 48_000,
+                4 => invalid.push(invalid[0].clone()),
+                5 => invalid.push(invalid[1].clone()),
+                _ => unreachable!(),
+            }
+            assert!(
+                plan_hfp_route_from_metadata(true, b"wasapi", "", "", false, true, &invalid)
+                    .is_none(),
+                "invalid metadata case {mutate} qualified"
+            );
+        }
+
+        let mut disabled = devices;
+        disabled[1].enabled = false;
+        assert!(
+            plan_hfp_route_from_metadata(true, b"wasapi", "", "", false, true, &disabled).is_none()
+        );
     }
 
     #[test]

@@ -2583,4 +2583,36 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.False(manager.HasActiveNegotiation(5000));
     }
 
+    [Fact]
+    public void NativeOperationProgressExtendsTheSharedWatchdog()
+    {
+        var transport = new MockTransport
+        {
+            RequiresNativeOperationAcknowledgements = true
+        };
+        var timeouts = new List<string>();
+        var manager = new PeerSessionManager(
+            3,
+            transport,
+            new MockSender(),
+            nativeOperationTimeout: timeouts.Add);
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
+        manager.OnSignal(8, SignalMsgType.Hello, CompatHello(), 1000);
+
+        manager.OnNativeOperationApplied(7, transport.LatestGeneration(7), "native-peer-added", 3500);
+        manager.Tick(4000);
+        manager.Tick(6499);
+
+        Xunit.Assert.Empty(timeouts);
+        Xunit.Assert.True(manager.HasActiveNegotiation(6499));
+
+        manager.Tick(6500);
+
+        Xunit.Assert.Single(timeouts);
+        Xunit.Assert.Contains("operation=peer-add", timeouts[0]);
+        Xunit.Assert.Contains("client=8", timeouts[0]);
+        Xunit.Assert.Contains("waitMs=5500", timeouts[0]);
+        Xunit.Assert.Contains("idleMs=3000", timeouts[0]);
+    }
+
 }

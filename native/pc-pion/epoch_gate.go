@@ -159,6 +159,17 @@ func (g *epochGate) hasWriteBefore(epoch uint64) bool {
 	return false
 }
 
+func (g *epochGate) hasActiveWrites() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, count := range g.active {
+		if count != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *epochGate) Close() error {
 	g.mu.Lock()
 	g.closed = true
