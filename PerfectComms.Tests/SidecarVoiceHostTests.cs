@@ -171,6 +171,66 @@ public sealed class SidecarVoiceHostTests
     }
 
     [Fact]
+    public void RetiringHelperBlocksReplacementUntilCleanupCompletes()
+    {
+        using var allowDisposeCompletion = new ManualResetEventSlim();
+        var firstClient = new FakeSidecarVoiceClient
+        {
+            AllowDisposeCompletion = allowDisposeCompletion,
+        };
+        var secondClient = new FakeSidecarVoiceClient();
+        var created = 0;
+        var host = new SidecarVoiceHostCore(() => ++created == 1 ? firstClient : secondClient);
+        var first = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(first.EnsureStarted("mic", "spk"));
+
+        first.Dispose();
+
+        Assert.False(firstClient.CleanupComplete);
+        Assert.Null(host.TryAcquire(Callbacks(), out var failure));
+        Assert.Equal("helper-retiring", failure);
+        Assert.Equal(1, created);
+
+        allowDisposeCompletion.Set();
+        Assert.True(SpinWait.SpinUntil(
+            () => firstClient.CleanupComplete,
+            TimeSpan.FromSeconds(2)));
+        var second = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out failure));
+        Assert.Equal(string.Empty, failure);
+        Assert.True(second.EnsureStarted("mic", "spk"));
+        Assert.Equal(2, created);
+        second.Dispose();
+    }
+
+    [Fact]
+    public void ActiveLeaseDoesNotReplaceDeadHelperBeforeCleanupCompletes()
+    {
+        using var allowDisposeCompletion = new ManualResetEventSlim();
+        var firstClient = new FakeSidecarVoiceClient
+        {
+            AllowDisposeCompletion = allowDisposeCompletion,
+        };
+        var secondClient = new FakeSidecarVoiceClient();
+        var created = 0;
+        var host = new SidecarVoiceHostCore(() => ++created == 1 ? firstClient : secondClient);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+        firstClient.RaiseDead("heartbeat timeout");
+
+        Assert.False(lease.EnsureStarted("mic", "spk"));
+        Assert.False(firstClient.CleanupComplete);
+        Assert.Equal(1, created);
+
+        allowDisposeCompletion.Set();
+        Assert.True(SpinWait.SpinUntil(
+            () => firstClient.CleanupComplete,
+            TimeSpan.FromSeconds(2)));
+        Assert.True(lease.EnsureStarted("mic", "spk"));
+        Assert.Equal(2, created);
+        lease.Dispose();
+    }
+
+    [Fact]
     public void RecoverableDeviceErrorIsForwardedWithoutKillingLease()
     {
         var fake = new FakeSidecarVoiceClient();
@@ -252,8 +312,10 @@ public sealed class SidecarVoiceHostTests
             new[] { new VoiceDeviceInfo("speaker-id", "speaker", true) };
         public int StartCount => Volatile.Read(ref StartCountBacking);
         public int DisposeCount { get; private set; }
+        public bool CleanupComplete => Volatile.Read(ref CleanupCompleteBacking) != 0;
         public ManualResetEventSlim? StartEntered { get; init; }
         public ManualResetEventSlim? AllowStart { get; init; }
+        public ManualResetEventSlim? AllowDisposeCompletion { get; init; }
         public List<bool> MicActiveCalls { get; } = new();
         public List<bool> SyntheticCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
@@ -276,6 +338,7 @@ public sealed class SidecarVoiceHostTests
         }
 
         private int StartCountBacking;
+        private int CleanupCompleteBacking = 1;
 
         public bool TryConfigureInitialCapture(string micDevice, string outputDevice, bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf, float gain, float vadThreshold, float noiseGateThreshold, bool synthetic, bool micActive, bool micWarm, bool monitorEnabled, bool monitorDelayed, float monitorGain, IEnumerable<IceServer>? iceServers) => true;
         public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
@@ -328,6 +391,13 @@ public sealed class SidecarVoiceHostTests
         {
             DisposeCount++;
             Health = CaptureHealth.Dead;
+            if (AllowDisposeCompletion == null) return;
+            Volatile.Write(ref CleanupCompleteBacking, 0);
+            Task.Run(() =>
+            {
+                AllowDisposeCompletion.Wait();
+                Volatile.Write(ref CleanupCompleteBacking, 1);
+            });
         }
 
         private static int Count(Delegate? value) => value?.GetInvocationList().Length ?? 0;

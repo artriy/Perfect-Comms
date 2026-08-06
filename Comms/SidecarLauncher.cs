@@ -69,7 +69,7 @@ internal static class SidecarLauncher
         "PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;";
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
     internal const string MacBrokerRequestDirectoryName = ".perfect-comms-broker-v1";
-    internal const int WineHelperExitWaitMs = 4_500;
+    internal const int WineHelperExitWaitMs = 9_500;
     internal const string WinePrivateDirectoryScript = """
         set -eu
         umask 077

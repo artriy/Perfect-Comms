@@ -45,6 +45,7 @@ internal interface ISidecarVoiceClient : IDisposable
 
     CaptureHealth Health { get; }
     IReadOnlyList<VoiceDeviceInfo> OutputDevices { get; }
+    bool CleanupComplete { get; }
     bool Start(string? micDevice, string? spkDevice);
     bool TryConfigureInitialCapture(
         string micDevice,
@@ -315,6 +316,7 @@ internal sealed class SidecarVoiceHostCore
     private readonly object _gate = new();
     private readonly Func<ISidecarVoiceClient> _createClient;
     private ISidecarVoiceClient? _client;
+    private ISidecarVoiceClient? _retiringClient;
     private SidecarVoiceLease? _owner;
     private long _nextLeaseId;
     private bool _shutdown;
@@ -332,6 +334,15 @@ internal sealed class SidecarVoiceHostCore
             {
                 failure = "host-shutdown";
                 return null;
+            }
+            if (_retiringClient != null)
+            {
+                if (!_retiringClient.CleanupComplete)
+                {
+                    failure = "helper-retiring";
+                    return null;
+                }
+                _retiringClient = null;
             }
             if (_owner != null)
             {
@@ -360,6 +371,11 @@ internal sealed class SidecarVoiceHostCore
             if (!OwnsLocked(lease)) return false;
             if (_client != null && _client.Health == CaptureHealth.Healthy) return true;
             if (_client != null) DropClientLocked(lease, "dead-before-start");
+            if (_retiringClient != null)
+            {
+                if (!_retiringClient.CleanupComplete) return false;
+                _retiringClient = null;
+            }
 
             ISidecarVoiceClient client;
             try
@@ -513,6 +529,8 @@ internal sealed class SidecarVoiceHostCore
         if (attachedLease != null)
             try { attachedLease.Detach(client); } catch { }
         try { client.Dispose(); } catch { }
+        if (!client.CleanupComplete)
+            _retiringClient = client;
         VoiceDiagnostics.Log("sidecar.host", $"event=helper-dropped reason={reason}");
     }
 }

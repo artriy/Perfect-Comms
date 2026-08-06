@@ -777,17 +777,21 @@ public sealed class ManagedVoiceHardeningTests
         long startedAt = int.MaxValue - 10L;
 
         Assert.True(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 20));
-        Assert.True(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 3_999));
-        Assert.False(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 4_000));
+        Assert.True(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 9_999));
+        Assert.False(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt + 10_000));
         Assert.False(SidecarVoiceClient.IsHandshakePending(startedAt, startedAt - 1));
     }
 
     [Fact]
-    public void SidecarHeartbeatToleratesTransientThreeSecondSchedulingPauses()
+    public void SidecarHeartbeatCountsCompletedRoundsAndBoundsInboundGrace()
     {
         var client = new SidecarVoiceClient((_, _) => throw new InvalidOperationException());
 
-        Assert.Equal(6_000, client.PongTimeoutMs);
+        Assert.False(client.IsHeartbeatUnresponsive(5, 0, 0, 6_125));
+        Assert.False(client.IsHeartbeatUnresponsive(6, 0, 3_028, 6_078));
+        Assert.True(client.IsHeartbeatUnresponsive(6, 0, 0, 6_078));
+        Assert.False(client.IsHeartbeatUnresponsive(9, 0, 6_000, 10_000));
+        Assert.True(client.IsHeartbeatUnresponsive(10, 0, 10_000, 10_000));
     }
 
     [Fact]
@@ -842,6 +846,54 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(1, decision.ImmediateRestarts);
         Assert.True(decision.ResetRecoveryBackoff);
     }
+    [Fact]
+    public void FailedWineStartReportsCleanupOnlyAfterHelperExitReceipt()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+
+        var root = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "perfect-comms-failed-launch-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(root);
+        var control = new WineLaunchControlPaths(
+            new string('A', 64),
+            System.IO.Path.Combine(root, ".launch-owned"),
+            System.IO.Path.Combine(root, ".launch-started"),
+            System.IO.Path.Combine(root, ".launch-failed"),
+            System.IO.Path.Combine(root, ".helper-exited"),
+            System.IO.Path.Combine(root, ".launch-cancelled"));
+        const int helperPid = 4242;
+        var client = new SidecarVoiceClient((_, _) => new SidecarLaunchResult
+        {
+            Success = true,
+            Wine = true,
+            WineSupervisorOwned = true,
+            Port = port,
+            Pid = helperPid,
+            WineControl = control,
+        });
+
+        try
+        {
+            Assert.False(client.Start(null, null));
+            Assert.False(client.CleanupComplete);
+            System.IO.File.WriteAllText(
+                control.ExitPath,
+                $"perfect-comms-helper-exited-v1:{control.Nonce}:{helperPid}:0");
+            Assert.True(System.Threading.SpinWait.SpinUntil(
+                () => client.CleanupComplete,
+                TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            client.Dispose();
+            System.IO.Directory.Delete(root, true);
+        }
+    }
+
     #endif
 
     [Theory]

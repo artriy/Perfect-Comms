@@ -36,13 +36,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_FRAME_LEN: usize = 1 << 20;
-const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
+const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(8);
 const PLAYBACK_SPAWN_THROTTLE: Duration = Duration::from_secs(1);
 const PLAYBACK_START_TIMEOUT: Duration = Duration::from_secs(5);
 const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_millis(750);
-const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_millis(750);
-const ENCODER_PRIVACY_EPOCH_TIMEOUT: Duration = Duration::from_secs(2);
+const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const ENCODER_PRIVACY_EPOCH_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAYBACK_WATCHDOG_INTERVAL: Duration = Duration::from_millis(100);
 const CRITICAL_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MONITOR_RING_CAPACITY_PAIRS: usize = proto::SAMPLE_RATE as usize * 2;
@@ -2377,16 +2377,15 @@ fn run_authenticated_session(
         )));
     }
 
+    let dsp = Arc::new(Mutex::new(crate::dsp::Dsp::new(
+        crate::dsp::DspConfig::default(),
+    )));
     let devices = session_devices(cfg.synthetic);
     let output_devices = session_devices(cfg.synthetic);
     write_frame(
         &conn,
         &encode_control(&ready_json(&devices, &output_devices)),
     )?;
-
-    let dsp = Arc::new(Mutex::new(crate::dsp::Dsp::new(
-        crate::dsp::DspConfig::default(),
-    )));
 
     let playback = Arc::new(Mutex::new(PlaybackRing::new(8 * proto::AUDIO_OUT_FRAMES)));
     let monitor_playback = Arc::new(Mutex::new(PlaybackRing::new(MONITOR_RING_CAPACITY_PAIRS)));
@@ -3997,6 +3996,11 @@ fn run_authenticated_session(
     };
 
     session_stopping.store(true, Ordering::Release);
+    if let Err(error) =
+        close_capture_privacy(&capture_transmit_enabled, &encoder_privacy, &ring_consumer)
+    {
+        eprintln!("pc-capture: capture privacy teardown exceeded its bound: {error}");
+    }
     if let Err(error) = producer.stop() {
         eprintln!("pc-capture: capture teardown exceeded its bound: {error}");
     }
@@ -4100,6 +4104,14 @@ mod tests {
     }
 
     #[test]
+    fn capture_stop_allows_slow_driver_teardown_within_bound() {
+        assert!(CAPTURE_STOP_TIMEOUT > Duration::from_millis(800));
+        let worker = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(800)));
+
+        join_thread_bounded(worker, "capture worker", CAPTURE_STOP_TIMEOUT).unwrap();
+    }
+
+    #[test]
     fn absent_microphone_retry_is_capped() {
         assert_eq!(capture_retry_delay(1), Duration::from_millis(500));
         assert_eq!(capture_retry_delay(2), Duration::from_millis(1_000));
@@ -4175,6 +4187,22 @@ mod tests {
             .wait_applied(unapplied, Duration::from_millis(1))
             .unwrap_err()
             .contains("not applied"));
+    }
+
+    #[test]
+    fn encoder_privacy_allows_slow_apply_within_bound() {
+        assert!(ENCODER_PRIVACY_EPOCH_TIMEOUT > Duration::from_millis(2_100));
+        let privacy = Arc::new(EncoderPrivacyEpoch::default());
+        let epoch = privacy.request().unwrap();
+        let writer_privacy = privacy.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2_100));
+            writer_privacy.publish_applied(epoch);
+        });
+
+        let result = privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT);
+        writer.join().unwrap();
+        result.unwrap();
     }
 
     #[test]

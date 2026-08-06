@@ -13,7 +13,17 @@ internal readonly record struct SidecarDiagnosticLogLine(string Category, string
 
 internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 {
-    private readonly record struct ReaderLoopState(NetworkStream Stream, int ManagedGeneration);
+    private sealed class HeartbeatState
+    {
+        internal long SentPingRound;
+        internal long AcknowledgedPingRound;
+        internal long LastInboundTick;
+    }
+
+    private readonly record struct ReaderLoopState(
+        NetworkStream Stream,
+        int ManagedGeneration,
+        HeartbeatState Heartbeat);
 
     // Protocol 14 generation-scopes every peer operation so stale queued SDP/ICE work cannot
     // mutate a replacement peer. Protocol 13 adds local microphone monitoring with optional
@@ -26,7 +36,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
     public const int Proto = 16;
-    private const int HandshakeTimeoutMs = 4000;
+    private const int HandshakeTimeoutMs = 10_000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
     private const ulong SupportedMediaDiagnosticsSchema = 1;
@@ -67,8 +77,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private Thread? _reader;
     internal int PingIntervalMs = 1000;
     internal int MissedPongLimit = 6;
-    internal long PongTimeoutMs => (long)PingIntervalMs * MissedPongLimit;
-    private long _lastPongTick;
+    private const int HardMissedPongLimit = 10;
     private Thread? _heartbeat;
     private int _startGeneration;
     private long _lastGameStateLogTick;
@@ -76,6 +85,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private int _lastDiagnosticsEnabled = -1;
     private ulong _cachedGameStateFingerprint;
     private byte[]? _cachedGameStateFrame;
+    private int _cleanupComplete = 1;
 
     public event Action<float[], int>? OnFrame;
     public event Action<string>? OnDead;
@@ -90,6 +100,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private long _deadNotificationState;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _outputDevices;
+    public bool CleanupComplete => Volatile.Read(ref _cleanupComplete) != 0;
 
     public SidecarVoiceClient(Func<string, string, SidecarLaunchResult> launch)
     {
@@ -199,9 +210,13 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             _running = true;
             SetHealth(CaptureHealth.Healthy);
         }
-        reader.Start(new ReaderLoopState(stream, generation));
-        Volatile.Write(ref _lastPongTick, Environment.TickCount64);
-        heartbeat.Start(new ReaderLoopState(stream, generation));
+        var heartbeatState = new HeartbeatState
+        {
+            LastInboundTick = Environment.TickCount64,
+        };
+        var workerState = new ReaderLoopState(stream, generation, heartbeatState);
+        reader.Start(workerState);
+        heartbeat.Start(workerState);
         VoiceDiagnostics.Log("sidecar.lifecycle", $"event=running proto={Proto} pid={launch.Pid}");
         return true;
     }
@@ -727,31 +742,39 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
         if (stream == null && client == null && launch == null)
             return;
+        Volatile.Write(ref _cleanupComplete, 0);
 
         void Cleanup()
         {
-            if (stream != null)
+            try
             {
-                try
+                if (stream != null)
                 {
-                    var stop = SidecarProtocol.StopFrame();
-                    lock (_writeLock)
+                    try
                     {
-                        stream.Write(stop, 0, stop.Length);
-                        stream.Flush();
+                        var stop = SidecarProtocol.StopFrame();
+                        lock (_writeLock)
+                        {
+                            stream.Write(stop, 0, stop.Length);
+                            stream.Flush();
+                        }
+                        LogCommand("stop", "written", stop.Length, "phase=shutdown");
                     }
-                    LogCommand("stop", "written", stop.Length, "phase=shutdown");
+                    catch (Exception ex)
+                    {
+                        LogCommand("stop", "failed", 0, "phase=shutdown error=" + ExceptionDiagnostic(ex));
+                    }
                 }
-                catch (Exception ex)
-                {
-                    LogCommand("stop", "failed", 0, "phase=shutdown error=" + ExceptionDiagnostic(ex));
-                }
+                try { client?.Close(); } catch { }
+                KillLaunch(launch);
+                JoinWorker(reader);
+                JoinWorker(heartbeat);
             }
-            try { client?.Close(); } catch { }
-            KillLaunch(launch);
-            JoinWorker(reader);
-            JoinWorker(heartbeat);
-            VoiceDiagnostics.Log("sidecar.lifecycle", "event=stopped health=Dead cleanup=complete");
+            finally
+            {
+                Volatile.Write(ref _cleanupComplete, 1);
+                VoiceDiagnostics.Log("sidecar.lifecycle", "event=stopped health=Dead cleanup=complete");
+            }
         }
 
         try
@@ -789,29 +812,41 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private void KillLaunch()
     {
         var launch = Interlocked.Exchange(ref _launchResult, null);
-        if (launch?.Wine == true)
+        if (launch == null) return;
+        Volatile.Write(ref _cleanupComplete, 0);
+
+        void CleanupFailedLaunch()
         {
-            if (launch.WineControl is { } control)
-                SidecarLauncher.RequestWineLaunchCancellation(control);
             try
             {
-                new Thread(() => KillLaunch(launch))
-                {
-                    IsBackground = true,
-                    Name = "SidecarFailedLaunchCleanup",
-                }.Start();
+                if (launch.Wine && launch.WineControl is { } control)
+                    SidecarLauncher.RequestWineLaunchCancellation(control);
+                KillLaunch(launch);
+            }
+            finally
+            {
+                Volatile.Write(ref _cleanupComplete, 1);
                 VoiceDiagnostics.Log(
                     "sidecar.lifecycle",
-                    $"event=failed-launch-cleanup-detached pid={launch.Pid}");
-                return;
-            }
-            catch
-            {
-                // Thread creation failure is exceptional; complete cleanup synchronously rather
-                // than leaking the host supervisor. Cancellation was already published above.
+                    $"event=failed-launch-cleanup-complete pid={launch.Pid}");
             }
         }
-        KillLaunch(launch);
+
+        try
+        {
+            new Thread(CleanupFailedLaunch)
+            {
+                IsBackground = true,
+                Name = "SidecarFailedLaunchCleanup",
+            }.Start();
+            VoiceDiagnostics.Log(
+                "sidecar.lifecycle",
+                $"event=failed-launch-cleanup-detached pid={launch.Pid}");
+        }
+        catch
+        {
+            CleanupFailedLaunch();
+        }
     }
 
     private void SynchronizeDiagnosticsSampling(bool enabled)
@@ -850,8 +885,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             {
                 // The authenticated StopFrame and TCP EOF are the primary lifetime boundary.
                 // The host shell owns and waits for this exact child, then publishes a
-                // nonce-bound exit receipt. Waiting slightly beyond the native three-second EOF
-                // fail-safe avoids sending SIGTERM to a PID that may already have been reused.
+                // nonce-bound exit receipt. Waiting beyond the native bounded EOF fail-safe avoids
+                // sending SIGTERM to a PID that may already have been reused.
                 helperExitVerified = SidecarLauncher.WaitForWineHelperExit(
                     control,
                     launch.Pid,
@@ -907,6 +942,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         var readerState = (ReaderLoopState)state!;
         var stream = readerState.Stream;
         var managedGeneration = readerState.ManagedGeneration;
+        var heartbeatState = readerState.Heartbeat;
         try { stream.ReadTimeout = Timeout.Infinite; } catch { }
         var buffer = new byte[1 << 16];
         var have = 0;
@@ -960,6 +996,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 {
                     if (SidecarProtocol.TryDecodeAudio(buffer, off, len, _frameScratch, out _, out var count))
                     {
+                        Volatile.Write(ref heartbeatState.LastInboundTick, Environment.TickCount64);
                         try { OnFrame?.Invoke(_frameScratch, count); }
                         catch (Exception ex)
                         {
@@ -972,7 +1009,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 else if (type == SidecarProtocol.TypeControl)
                 {
                     var json = Encoding.UTF8.GetString(buffer, off, len);
-                    HandleStreamingControl(json, len, managedGeneration);
+                    HandleStreamingControl(json, len, managedGeneration, heartbeatState);
                 }
                 else
                     VoiceDiagnostics.Log("sidecar.frame.reject", $"reason=unknown-type type={type} payloadBytes={len}");
@@ -1007,7 +1044,11 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
     }
 
-    private void HandleStreamingControl(string json, int payloadBytes, int managedGeneration)
+    private void HandleStreamingControl(
+        string json,
+        int payloadBytes,
+        int managedGeneration,
+        HeartbeatState heartbeatState)
     {
         if (!IsWorkerGenerationCurrent(
                 _running,
@@ -1023,6 +1064,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"reason=invalid-json-or-missing-op payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
             return;
         }
+        if (IsKnownStreamingControlOp(op))
+            Volatile.Write(ref heartbeatState.LastInboundTick, Environment.TickCount64);
         if (op == "error")
         {
             if (!SidecarProtocol.TryReadError(json, out var code, out var msg))
@@ -1059,7 +1102,9 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         }
         else if (op == "pong")
         {
-            Volatile.Write(ref _lastPongTick, Environment.TickCount64);
+            Volatile.Write(
+                ref heartbeatState.AcknowledgedPingRound,
+                Volatile.Read(ref heartbeatState.SentPingRound));
         }
         else if (op == "local-sdp")
         {
@@ -1828,9 +1873,10 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     private void HeartbeatLoop(object? state)
     {
-        var heartbeatState = (ReaderLoopState)state!;
-        var stream = heartbeatState.Stream;
-        var managedGeneration = heartbeatState.ManagedGeneration;
+        var workerState = (ReaderLoopState)state!;
+        var stream = workerState.Stream;
+        var managedGeneration = workerState.ManagedGeneration;
+        var heartbeatState = workerState.Heartbeat;
         var ping = SidecarProtocol.PingFrame();
         while (IsWorkerGenerationCurrent(
                    _running,
@@ -1843,10 +1889,29 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     Volatile.Read(ref _startGeneration),
                     managedGeneration))
                 break;
+            var sentPingRound = Volatile.Read(ref heartbeatState.SentPingRound);
+            var acknowledgedPingRound = Volatile.Read(ref heartbeatState.AcknowledgedPingRound);
+            var lastInboundTick = Volatile.Read(ref heartbeatState.LastInboundTick);
+            var nowTick = Environment.TickCount64;
+            if (IsHeartbeatUnresponsive(
+                    sentPingRound,
+                    acknowledgedPingRound,
+                    lastInboundTick,
+                    nowTick))
+            {
+                var unansweredPings = Math.Max(0, sentPingRound - acknowledgedPingRound);
+                var sinceInbound = Math.Max(0, nowTick - lastInboundTick);
+                VoiceDiagnostics.Log(
+                    "sidecar",
+                    $"heartbeat: unansweredPings={unansweredPings} sinceInbound={sinceInbound}ms -> Dead");
+                RaiseDead("heartbeat pong timeout", managedGeneration);
+                break;
+            }
             try
             {
                 lock (_writeLock)
                 {
+                    Interlocked.Increment(ref heartbeatState.SentPingRound);
                     stream.Write(ping, 0, ping.Length);
                     stream.Flush();
                 }
@@ -1855,13 +1920,6 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             {
                 VoiceDiagnostics.Log("sidecar.heartbeat", $"event=write-failed error={ExceptionDiagnostic(ex)}");
                 RaiseDead("heartbeat write failed", managedGeneration);
-                break;
-            }
-            var sincePong = Environment.TickCount64 - Volatile.Read(ref _lastPongTick);
-            if (sincePong > PongTimeoutMs)
-            {
-                VoiceDiagnostics.Log("sidecar", $"heartbeat: {sincePong}ms since last pong -> Dead");
-                RaiseDead("heartbeat pong timeout", managedGeneration);
                 break;
             }
         }
@@ -1874,6 +1932,32 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
     internal static bool IsHandshakePending(long startedAt, long now)
         => now >= startedAt && now - startedAt < HandshakeTimeoutMs;
+
+    internal bool IsHeartbeatUnresponsive(
+        long sentPingRound,
+        long acknowledgedPingRound,
+        long lastInboundTick,
+        long nowTick)
+    {
+        var unansweredPings = Math.Max(0, sentPingRound - acknowledgedPingRound);
+        if (unansweredPings >= HardMissedPongLimit)
+            return true;
+        return unansweredPings >= MissedPongLimit
+            && nowTick >= lastInboundTick
+            && nowTick - lastInboundTick > (long)PingIntervalMs * MissedPongLimit;
+    }
+
+    private static bool IsKnownStreamingControlOp(string op)
+        => op is "error"
+            or "pong"
+            or "local-sdp"
+            or "local-candidate"
+            or "peer-state"
+            or "level"
+            or "peer-levels"
+            or "devices"
+            or "media-state"
+            or "stats";
 
     internal static bool IsWorkerGenerationCurrent(bool running, int currentGeneration, int workerGeneration)
         => running && currentGeneration == workerGeneration;

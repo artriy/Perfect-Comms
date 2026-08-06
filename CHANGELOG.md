@@ -88,7 +88,10 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 ### Stable Full-Lobby Voice Startup
 
 - **Large lobbies no longer mistake slow RTC work or a short scheduling pause for a frozen audio helper.**
-  > <sub>Each completed native peer operation advances a shared ten-second no-progress watchdog, and the local heartbeat tolerates a transient pause of up to six seconds. Retired Pion peers leave the live control queue immediately while their old writers finish closing in the background, so one blocked route cannot stall the remaining lobby. A genuinely frozen helper still triggers bounded recovery.</sub>
+  > <sub>Each completed native peer operation advances a shared ten-second no-progress watchdog. The managed heartbeat counts completed unanswered PING rounds, accepts recent valid inbound control or media activity as liveness, and still stops after ten unanswered rounds. Retired Pion peers leave the live control queue immediately while their old writers finish closing in the background, so one blocked route cannot stall the remaining lobby.</sub>
+
+- **Voice recovery no longer overlaps a retiring capture process.**
+  > <sub>Both a new lobby lease and same-lobby recovery wait for the old helper cleanup to finish before launching its replacement. Control EOF closes the transmit privacy fence before stopping capture, slow Windows audio teardown receives a three-second bound, and the native eight-second process fail-safe remains outside both privacy and capture deadlines.</sub>
 
 ### Developer API Package
 

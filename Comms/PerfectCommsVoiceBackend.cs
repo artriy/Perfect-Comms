@@ -1703,6 +1703,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             {
                 _microphoneReady = false;
                 VoiceDiagnostics.Log("voice.sidecar", $"ready=false reason={reason} error=\"sidecar host lease rejected: {failure}\"");
+                if (string.Equals(failure, "helper-retiring", StringComparison.Ordinal))
+                {
+                    ScheduleVoiceRecovery("helper-retiring");
+                    return;
+                }
                 HandleVoiceStartFailure("lease-rejected", reason);
                 return;
             }
