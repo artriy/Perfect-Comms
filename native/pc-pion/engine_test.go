@@ -451,6 +451,60 @@ func TestSameGenerationPeerEpochFailureDetachesWithoutWaitingForBlockedCleanup(t
 	}
 }
 
+func TestRemovePeerDetachesWithoutWaitingForBlockedCleanup(t *testing.T) {
+	e, p := queueOnlyEngineAndPeer("blocked", 9)
+	p.writeEpoch.Store(1)
+	p.writeInFlight.Store(true)
+
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	if !p.startWorker(func() {
+		<-release
+		p.finishRTPWrite()
+	}) {
+		t.Fatal("failed to start blocked peer writer")
+	}
+
+	removed := make(chan struct{})
+	go func() {
+		e.removePeer(p.id)
+		close(removed)
+	}()
+	select {
+	case <-removed:
+	case <-time.After(250 * time.Millisecond):
+		released = true
+		close(release)
+		<-removed
+		t.Fatal("peer removal waited for blocked cleanup")
+	}
+	if current := e.peer(p.id); current != nil {
+		t.Fatal("removed peer remained in the live peer map")
+	}
+	if p.active.Load() {
+		t.Fatal("removed peer remained active")
+	}
+	if e.advanceEpoch(2, 25*time.Millisecond) {
+		t.Fatal("privacy advance ignored the retired old-epoch writer")
+	}
+
+	released = true
+	close(release)
+	select {
+	case <-p.startClose(""):
+	case <-time.After(time.Second):
+		t.Fatal("removed peer did not finish asynchronous cleanup")
+	}
+	if !e.advanceEpoch(2, time.Second) {
+		t.Fatal("privacy advance remained blocked after retired writer cleanup")
+	}
+}
+
 func TestPeerInstanceFencesControlAndRTPAcrossSameGeneration(t *testing.T) {
 	e, old := queueOnlyEngineAndPeer("peer", 8)
 	old.instance = 11

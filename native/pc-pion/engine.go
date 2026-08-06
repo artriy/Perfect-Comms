@@ -544,7 +544,7 @@ func (e *engine) trackRetiredPeerCleanup(p *peer) <-chan struct{} {
 func (e *engine) removePeerLocked(id string) {
 	p := e.detachPeerLocked(id, nil)
 	if p != nil {
-		<-e.trackRetiredPeerCleanup(p)
+		e.trackRetiredPeerCleanup(p)
 	}
 }
 

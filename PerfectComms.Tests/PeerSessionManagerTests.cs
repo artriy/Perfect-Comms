@@ -2570,17 +2570,17 @@ public sealed class PeerSessionManagerTests
             nativeOperationTimeout: timeouts.Add);
         manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
 
-        Xunit.Assert.True(manager.HasActiveNegotiation(3999));
-        manager.Tick(3999);
+        Xunit.Assert.True(manager.HasActiveNegotiation(10_999));
+        manager.Tick(10_999);
         Xunit.Assert.Empty(timeouts);
 
-        manager.Tick(4000);
-        manager.Tick(5000);
+        manager.Tick(11_000);
+        manager.Tick(12_000);
 
         Xunit.Assert.Single(timeouts);
         Xunit.Assert.Contains("operation=peer-add", timeouts[0]);
         Xunit.Assert.Contains("client=7", timeouts[0]);
-        Xunit.Assert.False(manager.HasActiveNegotiation(5000));
+        Xunit.Assert.False(manager.HasActiveNegotiation(12_000));
     }
 
     [Fact]
@@ -2600,19 +2600,19 @@ public sealed class PeerSessionManagerTests
         manager.OnSignal(8, SignalMsgType.Hello, CompatHello(), 1000);
 
         manager.OnNativeOperationApplied(7, transport.LatestGeneration(7), "native-peer-added", 3500);
-        manager.Tick(4000);
-        manager.Tick(6499);
+        manager.Tick(4_000);
+        manager.Tick(13_499);
 
         Xunit.Assert.Empty(timeouts);
-        Xunit.Assert.True(manager.HasActiveNegotiation(6499));
+        Xunit.Assert.True(manager.HasActiveNegotiation(13_499));
 
-        manager.Tick(6500);
+        manager.Tick(13_500);
 
         Xunit.Assert.Single(timeouts);
         Xunit.Assert.Contains("operation=peer-add", timeouts[0]);
         Xunit.Assert.Contains("client=8", timeouts[0]);
-        Xunit.Assert.Contains("waitMs=5500", timeouts[0]);
-        Xunit.Assert.Contains("idleMs=3000", timeouts[0]);
+        Xunit.Assert.Contains("waitMs=12500", timeouts[0]);
+        Xunit.Assert.Contains("idleMs=10000", timeouts[0]);
     }
 
 }

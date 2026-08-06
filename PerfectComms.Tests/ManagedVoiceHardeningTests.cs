@@ -783,6 +783,14 @@ public sealed class ManagedVoiceHardeningTests
     }
 
     [Fact]
+    public void SidecarHeartbeatToleratesTransientThreeSecondSchedulingPauses()
+    {
+        var client = new SidecarVoiceClient((_, _) => throw new InvalidOperationException());
+
+        Assert.Equal(6_000, client.PongTimeoutMs);
+    }
+
+    [Fact]
     public void SidecarRecoveryBackoffContinuesAfterCircuitBreaker()
     {
         Assert.Equal(750, PerfectCommsVoiceBackend.VoiceRecoveryDelayMs(0));

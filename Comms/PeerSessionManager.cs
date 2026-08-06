@@ -352,7 +352,7 @@ internal sealed class PeerSessionManager
     private const long ThirdRecoveryBackoffMs = 32000;
     private const long MaxRecoveryBackoffMs = 60000;
     private const int MaxPendingLocalCandidates = 64;
-    internal const long NativeOperationAckTimeoutMs = 3000;
+    internal const long NativeOperationAckTimeoutMs = 10_000;
     private const long FailedTransportCommandRetryIntervalMs = 500;
     private const long RelayCredentialRetryIntervalMs = 5000;
     private const long MaxHelloBackoffMs = 60000;

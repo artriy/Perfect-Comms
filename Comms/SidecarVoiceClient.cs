@@ -66,7 +66,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     private volatile VoiceDeviceInfo[] _outputDevices = Array.Empty<VoiceDeviceInfo>();
     private Thread? _reader;
     internal int PingIntervalMs = 1000;
-    internal int MissedPongLimit = 3;
+    internal int MissedPongLimit = 6;
+    internal long PongTimeoutMs => (long)PingIntervalMs * MissedPongLimit;
     private long _lastPongTick;
     private Thread? _heartbeat;
     private int _startGeneration;
@@ -1857,7 +1858,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 break;
             }
             var sincePong = Environment.TickCount64 - Volatile.Read(ref _lastPongTick);
-            if (sincePong > (long)PingIntervalMs * MissedPongLimit)
+            if (sincePong > PongTimeoutMs)
             {
                 VoiceDiagnostics.Log("sidecar", $"heartbeat: {sincePong}ms since last pong -> Dead");
                 RaiseDead("heartbeat pong timeout", managedGeneration);

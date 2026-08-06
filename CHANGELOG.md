@@ -87,8 +87,8 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 
 ### Stable Full-Lobby Voice Startup
 
-- **Large lobbies no longer mistake queued RTC work for a frozen audio helper.**
-  > <sub>Each completed native peer operation now advances the shared RTC watchdog. A busy helper can finish the remaining queued peer negotiations without being restarted at the fixed three-second per-peer deadline, while a genuinely stalled queue still triggers bounded recovery after three seconds without progress.</sub>
+- **Large lobbies no longer mistake slow RTC work or a short scheduling pause for a frozen audio helper.**
+  > <sub>Each completed native peer operation advances a shared ten-second no-progress watchdog, and the local heartbeat tolerates a transient pause of up to six seconds. Retired Pion peers leave the live control queue immediately while their old writers finish closing in the background, so one blocked route cannot stall the remaining lobby. A genuinely frozen helper still triggers bounded recovery.</sub>
 
 ### Developer API Package
 
