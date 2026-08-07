@@ -306,16 +306,12 @@ internal sealed class SidecarVoiceLease : IDisposable
     public void Dispose() => _host.Release(this, "lease-dispose");
 }
 
-/// <summary>
-/// Serializes helper start, lease handoff and process shutdown. The gate is intentionally held
-/// across Start/config commands: those are rare lifecycle operations, and serialization prevents
-/// a disposed backend's async start from racing room teardown or the next lobby's configuration.
-/// </summary>
 internal sealed class SidecarVoiceHostCore
 {
     private readonly object _gate = new();
     private readonly Func<ISidecarVoiceClient> _createClient;
     private ISidecarVoiceClient? _client;
+    private ISidecarVoiceClient? _startingClient;
     private ISidecarVoiceClient? _retiringClient;
     private SidecarVoiceLease? _owner;
     private long _nextLeaseId;
@@ -335,6 +331,16 @@ internal sealed class SidecarVoiceHostCore
                 failure = "host-shutdown";
                 return null;
             }
+            if (_owner != null)
+            {
+                failure = $"lease-active:{_owner.Id}";
+                return null;
+            }
+            if (_startingClient != null)
+            {
+                failure = "helper-retiring";
+                return null;
+            }
             if (_retiringClient != null)
             {
                 if (!_retiringClient.CleanupComplete)
@@ -343,11 +349,6 @@ internal sealed class SidecarVoiceHostCore
                     return null;
                 }
                 _retiringClient = null;
-            }
-            if (_owner != null)
-            {
-                failure = $"lease-active:{_owner.Id}";
-                return null;
             }
 
             if (_client != null && _client.Health == CaptureHealth.Dead)
@@ -366,8 +367,11 @@ internal sealed class SidecarVoiceHostCore
 
     internal bool EnsureStarted(SidecarVoiceLease lease, string micDevice, string outputDevice)
     {
+        ISidecarVoiceClient client;
         lock (_gate)
         {
+            while (_startingClient != null && OwnsLocked(lease))
+                Monitor.Wait(_gate);
             if (!OwnsLocked(lease)) return false;
             if (_client != null && _client.Health == CaptureHealth.Healthy) return true;
             if (_client != null) DropClientLocked(lease, "dead-before-start");
@@ -377,11 +381,11 @@ internal sealed class SidecarVoiceHostCore
                 _retiringClient = null;
             }
 
-            ISidecarVoiceClient client;
             try
             {
                 client = _createClient();
                 _client = client;
+                _startingClient = client;
                 lease.Attach(client);
             }
             catch (Exception ex)
@@ -390,36 +394,51 @@ internal sealed class SidecarVoiceHostCore
                 _client = null;
                 return false;
             }
+        }
 
-            bool started;
-            try { started = client.Start(micDevice, outputDevice); }
-            catch (Exception ex)
-            {
-                VoiceDiagnostics.Log("sidecar.host", $"event=start-threw lease={lease.Id} error=\"{ex.Message}\"");
-                started = false;
-            }
+        bool started;
+        try { started = client.Start(micDevice, outputDevice); }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("sidecar.host", $"event=start-threw lease={lease.Id} error=\"{ex.Message}\"");
+            started = false;
+        }
 
-            if (started && client.Health == CaptureHealth.Healthy && OwnsLocked(lease))
-            {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_startingClient, client))
+                _startingClient = null;
+
+            var accepted = started
+                           && client.Health == CaptureHealth.Healthy
+                           && OwnsLocked(lease)
+                           && ReferenceEquals(_client, client);
+            if (accepted)
                 VoiceDiagnostics.Log("sidecar.host", $"event=helper-ready lease={lease.Id}");
-                return true;
+            else
+            {
+                if (ReferenceEquals(_client, client))
+                    _client = null;
+                RetireClientLocked(client, lease, "start-failed");
             }
 
-            DropClientLocked(lease, "start-failed");
-            return false;
+            Monitor.PulseAll(_gate);
+            return accepted;
         }
     }
 
     internal CaptureHealth GetHealth(SidecarVoiceLease lease)
     {
         lock (_gate)
-            return OwnsLocked(lease) ? _client?.Health ?? CaptureHealth.Dead : CaptureHealth.Dead;
+            return OwnsLocked(lease) && _startingClient == null
+                ? _client?.Health ?? CaptureHealth.Dead
+                : CaptureHealth.Dead;
     }
 
     internal IReadOnlyList<VoiceDeviceInfo> GetOutputDevices(SidecarVoiceLease lease)
     {
         lock (_gate)
-            return OwnsLocked(lease) && _client != null
+            return OwnsLocked(lease) && _startingClient == null && _client != null
                 ? _client.OutputDevices.ToArray()
                 : Array.Empty<VoiceDeviceInfo>();
     }
@@ -428,7 +447,10 @@ internal sealed class SidecarVoiceHostCore
     {
         lock (_gate)
         {
-            if (!OwnsLocked(lease) || _client == null || _client.Health == CaptureHealth.Dead) return;
+            if (!OwnsLocked(lease)
+                || _startingClient != null
+                || _client == null
+                || _client.Health == CaptureHealth.Dead) return;
             action(_client);
         }
     }
@@ -437,7 +459,10 @@ internal sealed class SidecarVoiceHostCore
     {
         lock (_gate)
         {
-            if (!OwnsLocked(lease) || _client == null || _client.Health == CaptureHealth.Dead) return fallback;
+            if (!OwnsLocked(lease)
+                || _startingClient != null
+                || _client == null
+                || _client.Health == CaptureHealth.Dead) return fallback;
             return action(_client);
         }
     }
@@ -454,23 +479,20 @@ internal sealed class SidecarVoiceHostCore
 
             lease.Deactivate();
             var client = _client;
+            var starting = ReferenceEquals(_startingClient, client);
             if (client != null)
             {
                 lease.Detach(client);
-                if (client.Health != CaptureHealth.Dead)
+                if (!starting && client.Health != CaptureHealth.Dead)
                     QuiesceLocked(client, lease.TakePeers(), reason);
                 else
                     lease.TakePeers();
             }
             _owner = null;
 
-            // A room lease is the helper's process-lifetime boundary. EndGame -> lobby transitions
-            // retain the same room and therefore never release this lease; an actual lobby exit
-            // does release it and must not leave pc-capture idle in the background. DropClientLocked
-            // disposes the IPC client/process but does not set _shutdown, so a later lobby can acquire
-            // the host and launch a fresh helper.
-            if (client != null)
+            if (client != null && !starting)
                 DropClientLocked(null, $"lease-release:{reason}");
+            Monitor.PulseAll(_gate);
 
             VoiceDiagnostics.Log(
                 "sidecar.host",
@@ -485,6 +507,7 @@ internal sealed class SidecarVoiceHostCore
             if (_shutdown && _client == null) return;
             _shutdown = true;
             var owner = _owner;
+            var starting = ReferenceEquals(_startingClient, _client);
             if (owner != null)
             {
                 owner.Deactivate();
@@ -492,7 +515,9 @@ internal sealed class SidecarVoiceHostCore
                 owner.TakePeers();
             }
             _owner = null;
-            DropClientLocked(null, $"process-shutdown:{reason}");
+            if (!starting)
+                DropClientLocked(null, $"process-shutdown:{reason}");
+            Monitor.PulseAll(_gate);
             VoiceDiagnostics.Log("sidecar.host", $"event=shutdown reason={reason}");
         }
     }
@@ -526,6 +551,14 @@ internal sealed class SidecarVoiceHostCore
         var client = _client;
         _client = null;
         if (client == null) return;
+        RetireClientLocked(client, attachedLease, reason);
+    }
+
+    private void RetireClientLocked(
+        ISidecarVoiceClient client,
+        SidecarVoiceLease? attachedLease,
+        string reason)
+    {
         if (attachedLease != null)
             try { attachedLease.Detach(client); } catch { }
         try { client.Dispose(); } catch { }

@@ -134,6 +134,8 @@ public sealed class SidecarVoiceHostTests
 
         var first = Task.Run(() => lease.EnsureStarted("mic", "spk"));
         Assert.True(startEntered.Wait(TimeSpan.FromSeconds(2)));
+        Assert.Null(host.TryAcquire(Callbacks(), out var failure));
+        Assert.StartsWith("lease-active:", failure, StringComparison.Ordinal);
         var second = Task.Run(() => lease.EnsureStarted("mic", "spk"));
 
         await Task.Delay(50);
@@ -144,6 +146,112 @@ public sealed class SidecarVoiceHostTests
         Assert.True(await second);
         Assert.Equal(1, fake.StartCount);
         lease.Dispose();
+    }
+
+    [Fact]
+    public async Task StartupDoesNotBlockHealthQueriesOrCommands()
+    {
+        using var startEntered = new ManualResetEventSlim();
+        using var allowStart = new ManualResetEventSlim();
+        var fake = new FakeSidecarVoiceClient
+        {
+            StartEntered = startEntered,
+            AllowStart = allowStart
+        };
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+
+        var start = Task.Run(() => lease.EnsureStarted("mic", "spk"));
+        Assert.True(startEntered.Wait(TimeSpan.FromSeconds(2)));
+        var probe = Task.Run(() =>
+        {
+            Assert.Equal(CaptureHealth.Dead, lease.Health);
+            Assert.Empty(lease.OutputDevices);
+            lease.SetMicActive(true);
+            lease.SetInput(1f, 0.01f, 0.02f);
+            Assert.False(lease.ConfigureAudioRoute(
+                "mic", "spk", SidecarCaptureMode.Transmit, synthetic: false));
+        });
+
+        var completed = await Task.WhenAny(probe, Task.Delay(TimeSpan.FromSeconds(2)));
+        allowStart.Set();
+
+        Assert.Same(probe, completed);
+        await probe;
+        Assert.Empty(fake.MicActiveCalls);
+        Assert.True(await start);
+
+        lease.SetMicActive(true);
+        Assert.Equal(new[] { true }, fake.MicActiveCalls);
+        lease.Dispose();
+    }
+
+    [Fact]
+    public async Task ReleaseDuringStartupDoesNotWaitForStartOrPublishStaleSuccess()
+    {
+        using var startEntered = new ManualResetEventSlim();
+        using var allowStart = new ManualResetEventSlim();
+        var fake = new FakeSidecarVoiceClient
+        {
+            StartEntered = startEntered,
+            AllowStart = allowStart
+        };
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+
+        var start = Task.Run(() => lease.EnsureStarted("mic", "spk"));
+        Assert.True(startEntered.Wait(TimeSpan.FromSeconds(2)));
+        var release = Task.Run(lease.Dispose);
+
+        var completed = await Task.WhenAny(release, Task.Delay(TimeSpan.FromSeconds(2)));
+        var releasedBeforeStartCompleted = ReferenceEquals(release, completed);
+        if (!releasedBeforeStartCompleted)
+            allowStart.Set();
+
+        Assert.True(releasedBeforeStartCompleted);
+        await release;
+        Assert.Equal(0, fake.DisposeCount);
+        allowStart.Set();
+
+        Assert.False(await start);
+        Assert.False(lease.IsActive);
+        Assert.Equal(CaptureHealth.Dead, lease.Health);
+        Assert.Equal(1, fake.DisposeCount);
+    }
+
+    [Fact]
+    public async Task ShutdownDuringStartupDoesNotWaitForStartOrPublishStaleSuccess()
+    {
+        using var startEntered = new ManualResetEventSlim();
+        using var allowStart = new ManualResetEventSlim();
+        var fake = new FakeSidecarVoiceClient
+        {
+            StartEntered = startEntered,
+            AllowStart = allowStart
+        };
+        var host = new SidecarVoiceHostCore(() => fake);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+
+        var start = Task.Run(() => lease.EnsureStarted("mic", "spk"));
+        Assert.True(startEntered.Wait(TimeSpan.FromSeconds(2)));
+        var shutdown = Task.Run(() => host.Shutdown("test-exit"));
+
+        var completed = await Task.WhenAny(shutdown, Task.Delay(TimeSpan.FromSeconds(2)));
+        var shutdownBeforeStartCompleted = ReferenceEquals(shutdown, completed);
+        if (!shutdownBeforeStartCompleted)
+            allowStart.Set();
+
+        Assert.True(shutdownBeforeStartCompleted);
+        await shutdown;
+        Assert.Equal(0, fake.DisposeCount);
+        allowStart.Set();
+
+        Assert.False(await start);
+        Assert.False(lease.IsActive);
+        Assert.Equal(CaptureHealth.Dead, lease.Health);
+        Assert.Equal(1, fake.DisposeCount);
+        Assert.Null(host.TryAcquire(Callbacks(), out var failure));
+        Assert.Equal("host-shutdown", failure);
     }
 
     [Fact]

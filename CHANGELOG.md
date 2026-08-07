@@ -93,6 +93,9 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 - **Voice recovery no longer overlaps a retiring capture process.**
   > <sub>Both a new lobby lease and same-lobby recovery wait for the old helper cleanup to finish before launching its replacement. Control EOF closes the transmit privacy fence before stopping capture, slow Windows audio teardown receives a three-second bound, and the native eight-second process fail-safe remains outside both privacy and capture deadlines.</sub>
 
+- **A failing audio helper no longer freezes the lobby client.**
+  > <sub>Helper startup now runs outside the host coordination lock. While startup is pending, microphone commands and health queries return immediately instead of blocking the Unity update loop behind the native handshake timeout, so server heartbeats continue even when local WebRTC initialization fails.</sub>
+
 ### Developer API Package
 
 - **Mod integrations can compile against `PerfectComms.Api` without redistributing the runtime plugin.**
