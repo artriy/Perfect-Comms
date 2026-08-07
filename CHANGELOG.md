@@ -1,5 +1,42 @@
 # Changelog
 
+## Perfect Comms v4.1.8
+
+Perfect Comms v4.1.8 coordinates Bluetooth headset routing, keeps full-lobby voice startup from blocking Among Us networking, aligns first-run keybinds with the documented defaults, and removes an obsolete modded matchmaking override.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.8/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Consistent First-Run Controls
+
+- **New installations now receive the documented Mute and Deafen defaults immediately.**
+  > <sub>The first-run setup now assigns Right Alt to Mute and Right Control to Deafen, matching the one-time binding migration and the controls shown throughout the player documentation.</sub>
+
+### Coordinated Bluetooth Headset Audio
+
+- **Windows Bluetooth headset profile changes no longer restart the audio helper.**
+  > <sub>When an active microphone has one exact WASAPI hands-free speaker partner, Perfect Comms now stops the old playback stream, opens capture, then resumes the paired output after the first capture callback or a bounded timeout. Stale transitions cannot revive playback after a newer route or shutdown, and ordinary wired, USB, virtual, separate-device, macOS, and Linux routes keep their existing behavior.</sub>
+
+- **Mute, monitoring, and speaker recovery keep one atomic audio route.**
+  > <sub>Input, output, synthetic source, and stopped, warm, or transmitting capture state now cross one protocol boundary. Privacy closes before any Windows route probe, playback remains usable when an atomic update leaves its stream unchanged, and stale speaker fallback work cannot restore an older microphone policy.</sub>
+
+### Stable Full-Lobby Voice Startup
+
+- **Large lobbies no longer mistake slow RTC work or a short scheduling pause for a frozen audio helper.**
+  > <sub>Each completed native peer operation advances a shared ten-second no-progress watchdog. The managed heartbeat counts completed unanswered PING rounds, accepts recent valid inbound control or media activity as liveness, and still stops after ten unanswered rounds. Retired Pion peers leave the live control queue immediately while their old writers finish closing in the background, so one blocked route cannot stall the remaining lobby.</sub>
+
+- **Voice recovery no longer overlaps a retiring capture process.**
+  > <sub>Both a new lobby lease and same-lobby recovery wait for the old helper cleanup to finish before launching its replacement. Control EOF closes the transmit privacy fence before stopping capture, slow Windows audio teardown receives a three-second bound, and the native eight-second process fail-safe remains outside both privacy and capture deadlines.</sub>
+
+- **A failing audio helper no longer freezes the lobby client.**
+  > <sub>Helper startup now runs outside the host coordination lock. While startup is pending, microphone commands and health queries return immediately instead of blocking the Unity update loop behind the native handshake timeout, so server heartbeats continue even when local WebRTC initialization fails.</sub>
+
+### Standard Lobby Matchmaking
+
+- **Perfect Comms no longer replaces Reactor's host-game request on recognized modded regions.**
+  > <sub>Lobby creation now stays on the active Among Us and Reactor matchmaking path instead of sending the obsolete custom message-25 request. Perfect Comms' independent Voice Lobby publishing, browser, room-code join, and private lobby behavior remain unchanged.</sub>
+
 ## Perfect Comms v4.1.7
 
 > [!IMPORTANT]
@@ -76,25 +113,6 @@ Perfect Comms v4.1.7 makes busy conversations clearer and more natural, fixes th
 
 - **CrossOver on macOS now starts voice audio without opening an interactive Terminal.**
   > <sub>The managed launcher restores the embedded helper's executable mode, removes quarantine when necessary, and starts the signed app through hidden LaunchServices. The app broker validates and supervises the real audio helper while preserving private authentication and cancellation; Linux Wine and Proton retain their existing native helper flow.</sub>
-
-### Coordinated Bluetooth Headset Audio
-
-- **Windows Bluetooth headset profile changes no longer restart the audio helper.**
-  > <sub>When an active microphone has one exact WASAPI hands-free speaker partner, Perfect Comms now stops the old playback stream, opens capture, then resumes the paired output after the first capture callback or a bounded timeout. Stale transitions cannot revive playback after a newer route or shutdown, and ordinary wired, USB, virtual, separate-device, macOS, and Linux routes keep their existing behavior.</sub>
-
-- **Mute, monitoring, and speaker recovery keep one atomic audio route.**
-  > <sub>Input, output, synthetic source, and stopped, warm, or transmitting capture state now cross one protocol boundary. Privacy closes before any Windows route probe, playback remains usable when an atomic update leaves its stream unchanged, and stale speaker fallback work cannot restore an older microphone policy.</sub>
-
-### Stable Full-Lobby Voice Startup
-
-- **Large lobbies no longer mistake slow RTC work or a short scheduling pause for a frozen audio helper.**
-  > <sub>Each completed native peer operation advances a shared ten-second no-progress watchdog. The managed heartbeat counts completed unanswered PING rounds, accepts recent valid inbound control or media activity as liveness, and still stops after ten unanswered rounds. Retired Pion peers leave the live control queue immediately while their old writers finish closing in the background, so one blocked route cannot stall the remaining lobby.</sub>
-
-- **Voice recovery no longer overlaps a retiring capture process.**
-  > <sub>Both a new lobby lease and same-lobby recovery wait for the old helper cleanup to finish before launching its replacement. Control EOF closes the transmit privacy fence before stopping capture, slow Windows audio teardown receives a three-second bound, and the native eight-second process fail-safe remains outside both privacy and capture deadlines.</sub>
-
-- **A failing audio helper no longer freezes the lobby client.**
-  > <sub>Helper startup now runs outside the host coordination lock. While startup is pending, microphone commands and health queries return immediately instead of blocking the Unity update loop behind the native handshake timeout, so server heartbeats continue even when local WebRTC initialization fails.</sub>
 
 ### Developer API Package
 
