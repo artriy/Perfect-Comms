@@ -2,16 +2,11 @@
 
 ## Perfect Comms v4.1.8
 
-Perfect Comms v4.1.8 coordinates Bluetooth headset routing, keeps full-lobby voice startup from blocking Among Us networking, aligns first-run keybinds with the documented defaults, and removes an obsolete modded matchmaking override.
+Perfect Comms v4.1.8 coordinates Bluetooth headset routing, keeps full-lobby voice startup from blocking Among Us networking, and removes an obsolete modded matchmaking override.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.8/assets/brand/divider.svg" alt="divider" width="900">
 </p>
-
-### Consistent First-Run Controls
-
-- **New installations now receive the documented Mute and Deafen defaults immediately.**
-  > <sub>The first-run setup now assigns Right Alt to Mute and Right Control to Deafen, matching the one-time binding migration and the controls shown throughout the player documentation.</sub>
 
 ### Coordinated Bluetooth Headset Audio
 
