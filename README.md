@@ -1,3 +1,5 @@
+
+
 <h1 align="center">Perfect Comms</h1>
 
 <p align="center">
@@ -147,6 +149,11 @@ BepInEx/
 Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
 
 Perfect Comms installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies. For BepInEx setup help, see the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html).
+
+> [!NOTE]
+> **Android support**
+>
+> An Android build (`PerfectCommsAndroid.dll`) is provided. It intentionally uses the device's native platform audio path without the desktop WebRTC APM side libraries. Place the DLL in your Android mod loader's plugin directory.
 
 <br>
 
