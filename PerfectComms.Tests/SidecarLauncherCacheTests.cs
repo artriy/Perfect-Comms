@@ -1099,6 +1099,43 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
+    public void NativeWindowsCacheSelectionEnforcesExactBudgetBoundary()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var localApplicationData = Path.Combine(root, "pc-local");
+        var underBudgetBase = InputRootForProjectedHelperPathLength(
+            SidecarLauncher.NativeWindowsLaunchPathBudget - 1);
+        var atBudgetBase = InputRootForProjectedHelperPathLength(
+            SidecarLauncher.NativeWindowsLaunchPathBudget);
+
+        var installSelection = SidecarLauncher.ResolveNativeCacheRoot(
+            underBudgetBase,
+            localApplicationData,
+            Triple,
+            TestBundleVersion,
+            windows: true,
+            wine: false,
+            static () => throw new InvalidOperationException("under-budget paths must not query elevation"));
+        var relocatedSelection = SidecarLauncher.ResolveNativeCacheRoot(
+            atBudgetBase,
+            localApplicationData,
+            Triple,
+            TestBundleVersion,
+            windows: true,
+            wine: false,
+            static () => false);
+
+        Assert.Equal("install", installSelection.RootKind);
+        Assert.Equal(
+            SidecarLauncher.NativeWindowsLaunchPathBudget - 1,
+            installSelection.InstallProjectedHelperPathLength);
+        Assert.Equal("local-app-data", relocatedSelection.RootKind);
+        Assert.Equal(
+            SidecarLauncher.NativeWindowsLaunchPathBudget,
+            relocatedSelection.InstallProjectedHelperPathLength);
+    }
+
+    [Fact]
     public void DeepNativeWindowsInstallUsesBoundedLocalApplicationDataCache()
     {
         var root = Path.GetPathRoot(Path.GetTempPath())!;
@@ -1127,11 +1164,16 @@ public sealed class SidecarLauncherCacheTests
             SidecarLauncher.NativeWindowsLaunchPathBudget);
     }
 
+
     [Theory]
     [InlineData(false, 0x2000u, false, false)]
+    [InlineData(false, 0x3000u, false, false)]
+    [InlineData(true, 0x2000u, false, false)]
     [InlineData(true, 0x3000u, false, false)]
+    [InlineData(false, 0x2000u, true, false)]
     [InlineData(false, 0x3000u, true, true)]
     [InlineData(true, 0x2000u, true, true)]
+    [InlineData(true, 0x3000u, true, true)]
     public void ElevatedCacheIsolationOnlyAppliesWithEnabledUac(
         bool tokenElevated,
         uint integrityRid,
@@ -1144,6 +1186,50 @@ public sealed class SidecarLauncherCacheTests
                 tokenElevated,
                 integrityRid,
                 uacEnabled));
+    }
+
+    [Theory]
+    [InlineData(false, 0x2000u, false, false)]
+    [InlineData(false, 0x3000u, false, false)]
+    [InlineData(true, 0x2000u, false, false)]
+    [InlineData(true, 0x3000u, false, false)]
+    [InlineData(false, 0x2000u, true, false)]
+    [InlineData(false, 0x3000u, true, true)]
+    [InlineData(true, 0x2000u, true, true)]
+    [InlineData(true, 0x3000u, true, true)]
+    public void DeepNativeWindowsInstallFollowsUacAndTokenMatrix(
+        bool tokenElevated,
+        uint integrityRid,
+        bool uacEnabled,
+        bool rejectsRelocation)
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+        var localApplicationData = Path.Combine(root, "pc-local");
+
+        NativeCacheRootSelection Select() =>
+            SidecarLauncher.ResolveNativeCacheRoot(
+                baseDirectory,
+                localApplicationData,
+                Triple,
+                TestBundleVersion,
+                windows: true,
+                wine: false,
+                () => SidecarLauncher.RequiresElevatedCacheIsolation(
+                    tokenElevated,
+                    integrityRid,
+                    uacEnabled));
+
+        if (rejectsRelocation)
+        {
+            var error = Assert.Throws<InvalidOperationException>(() => Select());
+            Assert.Contains("elevated", error.Message, StringComparison.Ordinal);
+            return;
+        }
+
+        var selection = Select();
+        Assert.Equal("local-app-data", selection.RootKind);
+        Assert.Equal("install-over-budget", selection.Reason);
     }
 
     [Fact]
@@ -1191,8 +1277,11 @@ public sealed class SidecarLauncherCacheTests
         Assert.Equal("platform-install-relative", selection.Reason);
     }
 
-    [Fact]
-    public void DeepNativeWindowsInstallFailsWhenLocalApplicationDataIsUnavailable()
+    [Theory]
+    [InlineData("")]
+    [InlineData("relative-cache")]
+    public void DeepNativeWindowsInstallFailsWhenLocalApplicationDataIsUnavailable(
+        string localApplicationData)
     {
         var root = Path.GetPathRoot(Path.GetTempPath())!;
         var baseDirectory = Path.Combine(root, new string('i', 100));
@@ -1200,7 +1289,7 @@ public sealed class SidecarLauncherCacheTests
         var error = Assert.Throws<InvalidOperationException>(() =>
             SidecarLauncher.ResolveNativeCacheRoot(
                 baseDirectory,
-                string.Empty,
+                localApplicationData,
                 Triple,
                 TestBundleVersion,
                 windows: true,
@@ -1211,22 +1300,51 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
-    public void NativeWindowsLaunchPathGuardRejectsOverBudgetPath()
+    public void DeepNativeWindowsInstallRejectsOverBudgetLocalApplicationData()
     {
         var root = Path.GetPathRoot(Path.GetTempPath())!;
-        var helperPath = Path.Combine(
-            root,
-            new string('h', SidecarLauncher.NativeWindowsLaunchPathBudget));
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+        var localApplicationData = Path.Combine(root, new string('l', 180));
 
+        var error = Assert.Throws<PathTooLongException>(() =>
+            SidecarLauncher.ResolveNativeCacheRoot(
+                baseDirectory,
+                localApplicationData,
+                Triple,
+                TestBundleVersion,
+                windows: true,
+                wine: false,
+                static () => false));
+
+        Assert.Contains("relocated native Windows helper path is still too long", error.Message,
+            StringComparison.Ordinal);
+        Assert.Contains($"budget={SidecarLauncher.NativeWindowsLaunchPathBudget}", error.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NativeWindowsLaunchPathGuardEnforcesExactBudgetBoundary()
+    {
+        var acceptedPath = AbsolutePathWithLength(
+            SidecarLauncher.NativeWindowsLaunchPathBudget - 1);
+        var rejectedPath = AbsolutePathWithLength(
+            SidecarLauncher.NativeWindowsLaunchPathBudget);
+
+        Assert.Equal(
+            acceptedPath,
+            SidecarLauncher.ValidateNativeHelperLaunchPath(
+                acceptedPath,
+                windows: true,
+                wine: false));
         Assert.Throws<PathTooLongException>(() =>
             SidecarLauncher.ValidateNativeHelperLaunchPath(
-                helperPath,
+                rejectedPath,
                 windows: true,
                 wine: false));
         Assert.Equal(
-            Path.GetFullPath(helperPath),
+            rejectedPath,
             SidecarLauncher.ValidateNativeHelperLaunchPath(
-                helperPath,
+                rejectedPath,
                 windows: true,
                 wine: true));
     }
@@ -1518,6 +1636,44 @@ public sealed class SidecarLauncherCacheTests
         {
             Directory.Delete(baseDirectory, true);
         }
+    }
+
+    private static string InputRootForProjectedHelperPathLength(int projectedLength)
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var seed = Path.Combine(root, "p");
+        var seedProjection = SidecarLauncher.ResolveNativeCacheRoot(
+            seed,
+            string.Empty,
+            Triple,
+            TestBundleVersion,
+            windows: false,
+            wine: false,
+            static () => throw new InvalidOperationException()).InstallProjectedHelperPathLength;
+        var componentLength = projectedLength - seedProjection + 1;
+        Assert.True(componentLength > 0);
+        var candidate = Path.Combine(root, new string('p', componentLength));
+        var candidateProjection = SidecarLauncher.ResolveNativeCacheRoot(
+            candidate,
+            string.Empty,
+            Triple,
+            TestBundleVersion,
+            windows: false,
+            wine: false,
+            static () => throw new InvalidOperationException()).InstallProjectedHelperPathLength;
+        Assert.Equal(projectedLength, candidateProjection);
+        return candidate;
+    }
+
+    private static string AbsolutePathWithLength(int length)
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var seed = Path.Combine(root, "p");
+        var componentLength = length - seed.Length + 1;
+        Assert.True(componentLength > 0);
+        var path = Path.Combine(root, new string('p', componentLength));
+        Assert.Equal(length, path.Length);
+        return path;
     }
 
     private static void CreateMacHelperZip(string path)
