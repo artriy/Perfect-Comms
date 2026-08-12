@@ -30,7 +30,7 @@ Perfect Comms v4.1.8 coordinates Bluetooth headset routing, keeps full-lobby voi
 ### Reliable Windows Microphone Startup
 
 - **Deep Windows install paths no longer prevent the native audio helper from launching.**
-  > <sub>Perfect Comms now measures the complete helper path before extraction. Native Windows installs that exceed the conservative 240-character launch budget use a persistent `%LOCALAPPDATA%\PerfectComms\native` cache, while shorter installs and Wine keep their existing install-relative cache. Elevated long-path hosts fail closed and must be restarted without administrator privileges rather than executing from a lower-integrity cache. Content-addressed bundles, process-lifetime leases, stale-bundle pruning, and hash verification still apply. Launch diagnostics now include the selected cache root, projected path lengths, and nested Windows native error codes.</sub>
+  > <sub>Perfect Comms now measures the complete helper path before extraction. Native Windows installs that exceed the conservative 240-character launch budget use a persistent `%LOCALAPPDATA%\PerfectComms\native` cache, while shorter installs and Wine keep their existing install-relative cache. Elevated long-path hosts with UAC enabled fail closed and must be restarted without administrator privileges rather than executing across a UAC integrity boundary. Systems with UAC disabled can use the per-user cache because no split-token boundary exists. Content-addressed bundles, process-lifetime leases, stale-bundle pruning, and hash verification still apply. Launch diagnostics now include the selected cache root, projected path lengths, and nested Windows native error codes.</sub>
 
 ### Standard Lobby Matchmaking
 

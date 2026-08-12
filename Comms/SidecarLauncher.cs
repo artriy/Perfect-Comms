@@ -11,6 +11,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32;
+using BepInEx;
 
 namespace VoiceChatPlugin.VoiceChat;
 
@@ -75,6 +77,8 @@ internal static class SidecarLauncher
         "-refresh-9999999999-00000000000000000000000000000000";
     private const string InstallCacheRootKind = "install";
     private const string LocalApplicationDataCacheRootKind = "local-app-data";
+    private const string UacPolicyRegistryKey =
+        @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
     private const uint TokenQueryAccess = 0x0008;
     private const int TokenElevationInformationClass = 20;
     private const int TokenIntegrityLevelInformationClass = 25;
@@ -415,6 +419,26 @@ internal static class SidecarLauncher
             _ => throw new PlatformNotSupportedException($"No pc-capture helper for target {triple}"),
         };
 
+    internal static string NativeCacheBaseDirectory()
+        => ResolveNativeCacheBaseDirectory(
+            Paths.GameRootPath,
+            AppContext.BaseDirectory,
+            Environment.CurrentDirectory);
+
+    internal static string ResolveNativeCacheBaseDirectory(
+        string? gameRootPath,
+        string? appContextBaseDirectory,
+        string currentDirectory)
+    {
+        var selected = !string.IsNullOrWhiteSpace(gameRootPath)
+            ? gameRootPath
+            : !string.IsNullOrWhiteSpace(appContextBaseDirectory)
+                ? appContextBaseDirectory
+                : currentDirectory;
+        ThrowIfNullOrWhiteSpace(selected, nameof(currentDirectory));
+        return Path.GetFullPath(selected);
+    }
+
     public static string EnsureHelperExtracted(Assembly assembly, string baseDirectory, bool force)
     {
         var triple = TargetTriple();
@@ -440,7 +464,7 @@ internal static class SidecarLauncher
                 canonicalBundleVersion,
                 windows,
                 wine,
-                IsCurrentProcessElevated);
+                RequiresCurrentProcessCacheIsolation);
             diagnosticPath = cache.CacheRoot;
             VoiceDiagnostics.Log(
                 "sidecar.extract",
@@ -544,10 +568,10 @@ internal static class SidecarLauncher
         string bundleVersion,
         bool windows,
         bool wine,
-        Func<bool> isCurrentProcessElevated)
+        Func<bool> requiresCurrentProcessCacheIsolation)
     {
         ThrowIfNullOrWhiteSpace(baseDirectory, nameof(baseDirectory));
-        ArgumentNullException.ThrowIfNull(isCurrentProcessElevated);
+        ArgumentNullException.ThrowIfNull(requiresCurrentProcessCacheIsolation);
         var installCacheRoot = Path.GetFullPath(
             Path.Combine(baseDirectory, "cache", "PerfectComms", "native"));
         var installProjectedHelperPathLength = ProjectedHelperPathLength(
@@ -573,7 +597,7 @@ internal static class SidecarLauncher
                 installProjectedHelperPathLength,
                 installProjectedHelperPathLength);
         }
-        if (isCurrentProcessElevated())
+        if (requiresCurrentProcessCacheIsolation())
         {
             throw new InvalidOperationException(
                 "Perfect Comms cannot relocate its native helper while the Among Us process " +
@@ -2092,7 +2116,7 @@ internal static class SidecarLauncher
             var assembly = Assembly.GetExecutingAssembly();
             if (!IsHelperAvailable(assembly))
                 return SidecarDeviceEnumerationResult.Failure;
-            var helperPath = EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
+            var helperPath = EnsureHelperExtracted(assembly, NativeCacheBaseDirectory(), force: false);
             return EnumerateDevices(helperPath, WineEnvironment.IsWine, WineEnvironment.ResolveHostPath);
         }
         catch
@@ -2646,7 +2670,7 @@ internal static class SidecarLauncher
         }
     }
 
-    private static bool IsCurrentProcessElevated()
+    private static bool RequiresCurrentProcessCacheIsolation()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return false;
@@ -2661,12 +2685,38 @@ internal static class SidecarLauncher
 
         try
         {
-            return ReadTokenElevation(tokenHandle) ||
-                   ReadTokenIntegrityRid(tokenHandle) >= SecurityMandatoryHighRid;
+            return RequiresElevatedCacheIsolation(
+                ReadTokenElevation(tokenHandle),
+                ReadTokenIntegrityRid(tokenHandle),
+                IsUserAccountControlEnabled());
         }
         finally
         {
             _ = CloseHandle(tokenHandle);
+        }
+    }
+
+    internal static bool RequiresElevatedCacheIsolation(
+        bool tokenElevated,
+        uint integrityRid,
+        bool uacEnabled)
+        => uacEnabled &&
+           (tokenElevated || integrityRid >= SecurityMandatoryHighRid);
+
+    private static bool IsUserAccountControlEnabled()
+    {
+        if (!OperatingSystem.IsWindows()) return true;
+
+        try
+        {
+            return Registry.GetValue(
+                UacPolicyRegistryKey,
+                "EnableLUA",
+                1) is not int enabled || enabled != 0;
+        }
+        catch
+        {
+            return true;
         }
     }
 

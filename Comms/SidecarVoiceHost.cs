@@ -583,7 +583,10 @@ internal static class SidecarVoiceHost
     private static SidecarLaunchResult LaunchSidecarHelper(string token, string deviceId)
     {
         var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-        var helperPath = SidecarLauncher.EnsureHelperExtracted(assembly, AppContext.BaseDirectory, force: false);
+        var helperPath = SidecarLauncher.EnsureHelperExtracted(
+            assembly,
+            SidecarLauncher.NativeCacheBaseDirectory(),
+            force: false);
         return SidecarLauncher.Launch(
             helperPath,
             token,

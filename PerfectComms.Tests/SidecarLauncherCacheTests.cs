@@ -1045,6 +1045,34 @@ public sealed class SidecarLauncherCacheTests
 #endif
 
     [Fact]
+    public void NativeCacheBaseDirectoryUsesGameRootAndSurvivesEmptyAppContext()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var gameRoot = Path.Combine(root, "game-root");
+        var appContextRoot = Path.Combine(root, "app-context-root");
+        var currentDirectory = Path.Combine(root, "current-directory");
+
+        Assert.Equal(
+            Path.GetFullPath(gameRoot),
+            SidecarLauncher.ResolveNativeCacheBaseDirectory(
+                gameRoot,
+                appContextRoot,
+                currentDirectory));
+        Assert.Equal(
+            Path.GetFullPath(appContextRoot),
+            SidecarLauncher.ResolveNativeCacheBaseDirectory(
+                string.Empty,
+                appContextRoot,
+                currentDirectory));
+        Assert.Equal(
+            Path.GetFullPath(currentDirectory),
+            SidecarLauncher.ResolveNativeCacheBaseDirectory(
+                string.Empty,
+                string.Empty,
+                currentDirectory));
+    }
+
+    [Fact]
     public void ShortNativeWindowsInstallKeepsInstallRelativeCache()
     {
         var root = Path.GetPathRoot(Path.GetTempPath())!;
@@ -1097,6 +1125,25 @@ public sealed class SidecarLauncherCacheTests
         Assert.True(
             selection.SelectedProjectedHelperPathLength <
             SidecarLauncher.NativeWindowsLaunchPathBudget);
+    }
+
+    [Theory]
+    [InlineData(false, 0x2000u, false, false)]
+    [InlineData(true, 0x3000u, false, false)]
+    [InlineData(false, 0x3000u, true, true)]
+    [InlineData(true, 0x2000u, true, true)]
+    public void ElevatedCacheIsolationOnlyAppliesWithEnabledUac(
+        bool tokenElevated,
+        uint integrityRid,
+        bool uacEnabled,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            SidecarLauncher.RequiresElevatedCacheIsolation(
+                tokenElevated,
+                integrityRid,
+                uacEnabled));
     }
 
     [Fact]
