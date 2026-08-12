@@ -27,6 +27,11 @@ Perfect Comms v4.1.8 coordinates Bluetooth headset routing, keeps full-lobby voi
 - **A failing audio helper no longer freezes the lobby client.**
   > <sub>Helper startup now runs outside the host coordination lock. While startup is pending, microphone commands and health queries return immediately instead of blocking the Unity update loop behind the native handshake timeout, so server heartbeats continue even when local WebRTC initialization fails.</sub>
 
+### Reliable Windows Microphone Startup
+
+- **Deep Windows install paths no longer prevent the native audio helper from launching.**
+  > <sub>Perfect Comms now measures the complete helper path before extraction. Native Windows installs that exceed the conservative 240-character launch budget use a persistent `%LOCALAPPDATA%\PerfectComms\native` cache, while shorter installs and Wine keep their existing install-relative cache. Elevated long-path hosts fail closed and must be restarted without administrator privileges rather than executing from a lower-integrity cache. Content-addressed bundles, process-lifetime leases, stale-bundle pruning, and hash verification still apply. Launch diagnostics now include the selected cache root, projected path lengths, and nested Windows native error codes.</sub>
+
 ### Standard Lobby Matchmaking
 
 - **Perfect Comms no longer replaces Reactor's host-game request on recognized modded regions.**

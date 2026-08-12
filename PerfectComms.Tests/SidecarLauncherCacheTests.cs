@@ -8,6 +8,7 @@ public sealed class SidecarLauncherCacheTests
 {
     private const string Triple = "x86_64-pc-windows-msvc";
     private const string CacheFixtureResource = "PerfectComms.Tests.cache-test-payload";
+    private const string TestBundleVersion = "bundle-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     [Fact]
     public void NativeLaunchArgumentsIncludeManagedOwnerPid()
@@ -1044,32 +1045,169 @@ public sealed class SidecarLauncherCacheTests
 #endif
 
     [Fact]
+    public void ShortNativeWindowsInstallKeepsInstallRelativeCache()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, "pc");
+        var localApplicationData = Path.Combine(root, "pc-local");
+
+        var selection = SidecarLauncher.ResolveNativeCacheRoot(
+            baseDirectory,
+            localApplicationData,
+            Triple,
+            TestBundleVersion,
+            windows: true,
+            wine: false,
+            static () => throw new InvalidOperationException("short paths must not query elevation"));
+
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(baseDirectory, "cache", "PerfectComms", "native")),
+            selection.CacheRoot);
+        Assert.Equal("install", selection.RootKind);
+        Assert.Equal("install-within-budget", selection.Reason);
+        Assert.True(
+            selection.SelectedProjectedHelperPathLength <
+            SidecarLauncher.NativeWindowsLaunchPathBudget);
+    }
+
+    [Fact]
+    public void DeepNativeWindowsInstallUsesBoundedLocalApplicationDataCache()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+        var localApplicationData = Path.Combine(root, "pc-local");
+
+        var selection = SidecarLauncher.ResolveNativeCacheRoot(
+            baseDirectory,
+            localApplicationData,
+            Triple,
+            TestBundleVersion,
+            windows: true,
+            wine: false,
+            static () => false);
+
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(localApplicationData, "PerfectComms", "native")),
+            selection.CacheRoot);
+        Assert.Equal("local-app-data", selection.RootKind);
+        Assert.Equal("install-over-budget", selection.Reason);
+        Assert.True(
+            selection.InstallProjectedHelperPathLength >=
+            SidecarLauncher.NativeWindowsLaunchPathBudget);
+        Assert.True(
+            selection.SelectedProjectedHelperPathLength <
+            SidecarLauncher.NativeWindowsLaunchPathBudget);
+    }
+
+    [Fact]
+    public void DeepNativeWindowsInstallRejectsElevatedLocalCache()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+        var localApplicationData = Path.Combine(root, "pc-local");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SidecarLauncher.ResolveNativeCacheRoot(
+                baseDirectory,
+                localApplicationData,
+                Triple,
+                TestBundleVersion,
+                windows: true,
+                wine: false,
+                static () => true));
+
+        Assert.Contains("elevated", error.Message, StringComparison.Ordinal);
+        Assert.Contains("without administrator privileges", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void NonNativeWindowsLaunchKeepsInstallRelativeCache(bool windows, bool wine)
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+
+        var selection = SidecarLauncher.ResolveNativeCacheRoot(
+            baseDirectory,
+            string.Empty,
+            Triple,
+            TestBundleVersion,
+            windows,
+            wine,
+            static () => throw new InvalidOperationException("other platforms must not query elevation"));
+
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(baseDirectory, "cache", "PerfectComms", "native")),
+            selection.CacheRoot);
+        Assert.Equal("install", selection.RootKind);
+        Assert.Equal("platform-install-relative", selection.Reason);
+    }
+
+    [Fact]
+    public void DeepNativeWindowsInstallFailsWhenLocalApplicationDataIsUnavailable()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, new string('i', 100));
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SidecarLauncher.ResolveNativeCacheRoot(
+                baseDirectory,
+                string.Empty,
+                Triple,
+                TestBundleVersion,
+                windows: true,
+                wine: false,
+                static () => false));
+
+        Assert.Contains("LocalApplicationData", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NativeWindowsLaunchPathGuardRejectsOverBudgetPath()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var helperPath = Path.Combine(
+            root,
+            new string('h', SidecarLauncher.NativeWindowsLaunchPathBudget));
+
+        Assert.Throws<PathTooLongException>(() =>
+            SidecarLauncher.ValidateNativeHelperLaunchPath(
+                helperPath,
+                windows: true,
+                wine: false));
+        Assert.Equal(
+            Path.GetFullPath(helperPath),
+            SidecarLauncher.ValidateNativeHelperLaunchPath(
+                helperPath,
+                windows: true,
+                wine: true));
+    }
+
+    [Fact]
     public void HelperAndDspMapToFixedNamesInsideSameVersionedBundle()
     {
         var assembly = typeof(SidecarLauncherCacheTests).Assembly;
         var version = NativeLibraryCache.BuildContentVersion(assembly, new[] { CacheFixtureResource });
-        var baseDirectory = Path.Combine(Path.GetTempPath(), "Perfect Comms cache mapping");
+        var cacheRoot = Path.Combine(Path.GetTempPath(), "Perfect Comms cache mapping", "native");
         var expectedDirectory = Path.Combine(
-            baseDirectory,
-            "cache",
-            "PerfectComms",
-            "native",
+            cacheRoot,
             Triple,
             version);
 
         var helper = NativeLibraryCache.ResolveExtractionPath(
-            baseDirectory,
+            cacheRoot,
             Triple,
             "PerfectCommsAudio.exe",
             version);
         var dsp = NativeLibraryCache.ResolveExtractionPath(
-            baseDirectory,
+            cacheRoot,
             Triple,
             "webrtc-apm.x64.dll",
             version);
 
         Assert.StartsWith("bundle-v1-", version, StringComparison.Ordinal);
-        Assert.Equal(expectedDirectory, NativeLibraryCache.BundleDirectory(baseDirectory, Triple, version));
+        Assert.Equal(expectedDirectory, NativeLibraryCache.BundleDirectory(cacheRoot, Triple, version));
         Assert.Equal(expectedDirectory, Path.GetDirectoryName(helper));
         Assert.Equal(expectedDirectory, Path.GetDirectoryName(dsp));
         Assert.Equal("PerfectCommsAudio.exe", Path.GetFileName(helper));
@@ -1235,6 +1373,54 @@ public sealed class SidecarLauncherCacheTests
         finally
         {
             Directory.Delete(baseDirectory, true);
+        }
+    }
+
+    [Fact]
+    public async Task LeaseAcquisitionRecreatesBundleWhenPruningWinsStartupRace()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var cacheRoot = NewTemporaryDirectory();
+        const string version = "bundle-v1-lease-race-test";
+        var bundleDirectory = NativeLibraryCache.BundleDirectory(cacheRoot, Triple, version);
+        var leasePath = Path.Combine(bundleDirectory, ".in-use");
+        Directory.CreateDirectory(bundleDirectory);
+        FileStream? pruningLease = null;
+
+        try
+        {
+            pruningLease = new FileStream(
+                leasePath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.Delete);
+            using var contentionObserved = new ManualResetEventSlim();
+            var acquisition = Task.Run(() =>
+                NativeLibraryCache.AcquireBundleLease(
+                    bundleDirectory,
+                    TimeSpan.FromSeconds(2),
+                    contentionObserved.Set));
+
+            var observed = contentionObserved.Wait(
+                TimeSpan.FromSeconds(1),
+                TestContext.Current.CancellationToken);
+            if (observed)
+                Directory.Delete(bundleDirectory, true);
+            pruningLease.Dispose();
+            pruningLease = null;
+
+            using var acquiredLease = await acquisition;
+            Assert.True(observed);
+            Assert.True(Directory.Exists(bundleDirectory));
+            Assert.True(File.Exists(Path.Combine(bundleDirectory, ".in-use")));
+        }
+        finally
+        {
+            pruningLease?.Dispose();
+            if (Directory.Exists(cacheRoot))
+                Directory.Delete(cacheRoot, true);
         }
     }
 

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace VoiceChatPlugin;
 
@@ -12,6 +14,8 @@ internal static class NativeLibraryCache
 {
     private const string BundlePrefix = "bundle-v1-";
     private const string BundleLeaseFileName = ".in-use";
+    private const int BundleLeaseRetryTimeoutMs = 2_000;
+    private const int BundleLeaseRetryDelayMs = 25;
     private static readonly object BundleLeaseGate = new();
     private static readonly Dictionary<string, FileStream> BundleLeases = new(StringComparer.OrdinalIgnoreCase);
 
@@ -20,10 +24,10 @@ internal static class NativeLibraryCache
         string resourceName,
         string fileName,
         string archLabel,
-        string baseDirectory,
+        string cacheRoot,
         string? bundleVersion = null)
     {
-        var target = ResolveExtractionPath(baseDirectory, archLabel, fileName, bundleVersion);
+        var target = ResolveExtractionPath(cacheRoot, archLabel, fileName, bundleVersion);
         var dir = Path.GetDirectoryName(target)
             ?? throw new InvalidOperationException($"Native cache target has no parent: {DiagnosticValue(target)}");
         var stage = "create-directory";
@@ -122,15 +126,15 @@ internal static class NativeLibraryCache
         return BundlePrefix + Convert.ToHexString(digest, 0, 16).ToLowerInvariant();
     }
 
-    public static string BundleDirectory(string baseDirectory, string archLabel, string bundleVersion)
+    public static string BundleDirectory(string cacheRoot, string archLabel, string bundleVersion)
     {
         ValidatePathSegment(archLabel, nameof(archLabel));
         ValidateBundleVersion(bundleVersion);
-        return Path.Combine(baseDirectory, "cache", "PerfectComms", "native", archLabel, bundleVersion);
+        return Path.Combine(cacheRoot, archLabel, bundleVersion);
     }
 
     public static string ResolveExtractionPath(
-        string baseDirectory,
+        string cacheRoot,
         string archLabel,
         string fileName,
         string? bundleVersion = null)
@@ -139,8 +143,8 @@ internal static class NativeLibraryCache
         ValidatePathSegment(fileName, nameof(fileName));
 
         var dir = bundleVersion == null
-            ? Path.Combine(baseDirectory, "cache", "PerfectComms", "native", archLabel)
-            : BundleDirectory(baseDirectory, archLabel, bundleVersion);
+            ? Path.Combine(cacheRoot, archLabel)
+            : BundleDirectory(cacheRoot, archLabel, bundleVersion);
         return Path.Combine(dir, fileName);
     }
 
@@ -159,12 +163,7 @@ internal static class NativeLibraryCache
 
             try
             {
-                Directory.CreateDirectory(fullDirectory);
-                var lease = new FileStream(
-                    leasePath,
-                    FileMode.OpenOrCreate,
-                    FileAccess.ReadWrite,
-                    FileShare.ReadWrite);
+                var lease = AcquireBundleLease(fullDirectory, TimeSpan.FromMilliseconds(BundleLeaseRetryTimeoutMs));
                 BundleLeases.Add(fullDirectory, lease);
             }
             catch (Exception ex)
@@ -174,12 +173,42 @@ internal static class NativeLibraryCache
         }
     }
 
+    internal static FileStream AcquireBundleLease(
+        string bundleDirectory,
+        TimeSpan timeout,
+        Action? onTransientFailure = null)
+    {
+        if (timeout < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+
+        var fullDirectory = Path.GetFullPath(bundleDirectory);
+        var leasePath = Path.Combine(fullDirectory, BundleLeaseFileName);
+        var stopwatch = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                Directory.CreateDirectory(fullDirectory);
+                return new FileStream(
+                    leasePath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.ReadWrite);
+            }
+            catch (IOException) when (stopwatch.Elapsed < timeout)
+            {
+                onTransientFailure?.Invoke();
+                Thread.Sleep(BundleLeaseRetryDelayMs);
+            }
+        }
+    }
+
     /// <summary>
     /// Deletes inactive versioned bundles only. Every failure is deliberately ignored: a
     /// locked executable, loaded DSP library, active lease, or permissions issue must never
     /// prevent the current helper from launching.
     /// </summary>
-    public static int PruneStaleBundles(string baseDirectory, string archLabel, string currentBundleVersion)
+    public static int PruneStaleBundles(string cacheRoot, string archLabel, string currentBundleVersion)
     {
         // Unix permits unlinking running executables and loaded libraries. Until cleanup has
         // a host-native liveness probe, retaining stale bundles is safer than disrupting a
@@ -187,7 +216,7 @@ internal static class NativeLibraryCache
         if (!OperatingSystem.IsWindows())
             return 0;
 
-        var currentDirectory = Path.GetFullPath(BundleDirectory(baseDirectory, archLabel, currentBundleVersion));
+        var currentDirectory = Path.GetFullPath(BundleDirectory(cacheRoot, archLabel, currentBundleVersion));
         var archDirectory = Path.GetDirectoryName(currentDirectory);
         if (string.IsNullOrEmpty(archDirectory) || !Directory.Exists(archDirectory))
             return 0;

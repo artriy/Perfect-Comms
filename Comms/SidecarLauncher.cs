@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -56,12 +57,28 @@ internal readonly record struct NativeHelperContractProbeResult(
     bool StandardOutputTruncated,
     string Diagnostic);
 
+internal readonly record struct NativeCacheRootSelection(
+    string CacheRoot,
+    string RootKind,
+    string Reason,
+    int InstallProjectedHelperPathLength,
+    int SelectedProjectedHelperPathLength);
+
 internal static class SidecarLauncher
 {
     internal const int NativeHelperContractProbeTimeoutMs = 2_000;
     private const string NativeHelperContractArgument = "--build-info";
     private const int NativeHelperContractOutputLimit = 1_024;
     private const int NativeHelperContractDiagnosticLimit = 256;
+    internal const int NativeWindowsLaunchPathBudget = 240;
+    private const string MaximumRefreshBundleSuffix =
+        "-refresh-9999999999-00000000000000000000000000000000";
+    private const string InstallCacheRootKind = "install";
+    private const string LocalApplicationDataCacheRootKind = "local-app-data";
+    private const uint TokenQueryAccess = 0x0008;
+    private const int TokenElevationInformationClass = 20;
+    private const int TokenIntegrityLevelInformationClass = 25;
+    private const uint SecurityMandatoryHighRid = 0x00003000;
     private const int NativeHelperBuildInfoSchema = 1;
     private const string NativeHelperAudioEngine = "cubeb";
     private const string NativeHelperCubebVersion = "0.36.0";
@@ -405,15 +422,34 @@ internal static class SidecarLauncher
         var isMac = resourceName.EndsWith(".zip", StringComparison.Ordinal);
         var cacheFileName = isMac ? "pc-capture.zip" : HelperFileName(triple);
         var stage = "bundle-version";
-        var diagnosticPath = Path.Combine(baseDirectory, "cache", "PerfectComms", "native", triple);
+        var diagnosticPath = baseDirectory;
 
         try
         {
-            var bundleVersion = BundleVersionFor(assembly, triple, resourceName);
-            if (force)
-                bundleVersion += $"-refresh-{Environment.ProcessId}-{Guid.NewGuid():N}";
+            var canonicalBundleVersion = BundleVersionFor(assembly, triple, resourceName);
+            stage = "select-cache-root";
+            var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+            var wine = WineEnvironment.IsWine;
+            var localApplicationData = windows && !wine
+                ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                : string.Empty;
+            var cache = ResolveNativeCacheRoot(
+                baseDirectory,
+                localApplicationData,
+                triple,
+                canonicalBundleVersion,
+                windows,
+                wine,
+                IsCurrentProcessElevated);
+            diagnosticPath = cache.CacheRoot;
+            VoiceDiagnostics.Log(
+                "sidecar.extract",
+                $"event=cache-root-selected rootKind={cache.RootKind} reason={cache.Reason} nativeWindows={(windows && !wine).ToString().ToLowerInvariant()} wine={wine.ToString().ToLowerInvariant()} triple={triple} bundle={canonicalBundleVersion} installProjectedHelperPathLength={cache.InstallProjectedHelperPathLength} selectedProjectedHelperPathLength={cache.SelectedProjectedHelperPathLength} launchPathBudget={NativeWindowsLaunchPathBudget} root={NativeLibraryCache.DiagnosticValue(cache.CacheRoot)}");
 
-            var bundleDirectory = NativeLibraryCache.BundleDirectory(baseDirectory, triple, bundleVersion);
+            var bundleVersion = force
+                ? canonicalBundleVersion + $"-refresh-{Environment.ProcessId}-{Guid.NewGuid():N}"
+                : canonicalBundleVersion;
+            var bundleDirectory = NativeLibraryCache.BundleDirectory(cache.CacheRoot, triple, bundleVersion);
             diagnosticPath = bundleDirectory;
             VoiceDiagnostics.Log(
                 "sidecar.extract",
@@ -428,7 +464,7 @@ internal static class SidecarLauncher
                 resourceName,
                 cacheFileName,
                 triple,
-                baseDirectory,
+                cache.CacheRoot,
                 bundleVersion);
             diagnosticPath = extracted;
 
@@ -436,9 +472,9 @@ internal static class SidecarLauncher
             if (isMac)
             {
                 stage = "extract-mac-app";
-                helperPath = ExtractMacApp(extracted, triple, baseDirectory, bundleVersion);
+                helperPath = ExtractMacApp(extracted, triple, cache.CacheRoot, bundleVersion);
                 diagnosticPath = helperPath;
-                if (!WineEnvironment.IsWine)
+                if (!wine)
                 {
                     stage = "make-executable";
                     MakeExecutable(helperPath);
@@ -449,7 +485,7 @@ internal static class SidecarLauncher
             else
             {
                 helperPath = extracted;
-                if (!WineEnvironment.IsWine && !RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                if (!wine && !windows)
                 {
                     stage = "make-executable";
                     MakeExecutable(helperPath);
@@ -457,16 +493,19 @@ internal static class SidecarLauncher
             }
 
             stage = "extract-dsp";
-            EnsureDspLibsExtracted(assembly, baseDirectory, triple, helperPath, bundleVersion);
+            EnsureDspLibsExtracted(assembly, cache.CacheRoot, triple, helperPath, bundleVersion);
 
             stage = "extract-pion";
-            EnsurePionLibExtracted(assembly, baseDirectory, triple, helperPath, bundleVersion);
+            EnsurePionLibExtracted(assembly, cache.CacheRoot, triple, helperPath, bundleVersion);
+
+            stage = "validate-helper-launch-path";
+            helperPath = ValidateNativeHelperLaunchPath(helperPath, windows, wine);
 
             stage = "prune-stale-bundles";
-            var pruned = NativeLibraryCache.PruneStaleBundles(baseDirectory, triple, bundleVersion);
+            var pruned = NativeLibraryCache.PruneStaleBundles(cache.CacheRoot, triple, bundleVersion);
             VoiceDiagnostics.Log(
                 "sidecar.extract",
-                $"event=complete triple={triple} bundle={bundleVersion} helper={NativeLibraryCache.DiagnosticValue(helperPath)} pruned={pruned}");
+                $"event=complete rootKind={cache.RootKind} triple={triple} bundle={bundleVersion} helper={NativeLibraryCache.DiagnosticValue(helperPath)} pruned={pruned}");
             return helperPath;
         }
         catch (Exception ex)
@@ -498,6 +537,131 @@ internal static class SidecarLauncher
             return created;
         }
     }
+    internal static NativeCacheRootSelection ResolveNativeCacheRoot(
+        string baseDirectory,
+        string localApplicationData,
+        string triple,
+        string bundleVersion,
+        bool windows,
+        bool wine,
+        Func<bool> isCurrentProcessElevated)
+    {
+        ThrowIfNullOrWhiteSpace(baseDirectory, nameof(baseDirectory));
+        ArgumentNullException.ThrowIfNull(isCurrentProcessElevated);
+        var installCacheRoot = Path.GetFullPath(
+            Path.Combine(baseDirectory, "cache", "PerfectComms", "native"));
+        var installProjectedHelperPathLength = ProjectedHelperPathLength(
+            installCacheRoot,
+            triple,
+            bundleVersion);
+        if (!windows || wine)
+        {
+            return new NativeCacheRootSelection(
+                installCacheRoot,
+                InstallCacheRootKind,
+                "platform-install-relative",
+                installProjectedHelperPathLength,
+                installProjectedHelperPathLength);
+        }
+
+        if (installProjectedHelperPathLength < NativeWindowsLaunchPathBudget)
+        {
+            return new NativeCacheRootSelection(
+                installCacheRoot,
+                InstallCacheRootKind,
+                "install-within-budget",
+                installProjectedHelperPathLength,
+                installProjectedHelperPathLength);
+        }
+        if (isCurrentProcessElevated())
+        {
+            throw new InvalidOperationException(
+                "Perfect Comms cannot relocate its native helper while the Among Us process " +
+                "is elevated. Run Among Us without administrator privileges or shorten the " +
+                "Among Us installation path.");
+        }
+
+        if (string.IsNullOrWhiteSpace(localApplicationData) ||
+            !Path.IsPathRooted(localApplicationData))
+        {
+            throw new InvalidOperationException(
+                "The Windows LocalApplicationData directory is unavailable or is not absolute");
+        }
+
+        var localCacheRoot = Path.GetFullPath(
+            Path.Combine(localApplicationData, "PerfectComms", "native"));
+        var localProjectedHelperPathLength = ProjectedHelperPathLength(
+            localCacheRoot,
+            triple,
+            bundleVersion);
+        if (localProjectedHelperPathLength >= NativeWindowsLaunchPathBudget)
+        {
+            throw new PathTooLongException(
+                $"The relocated native Windows helper path is still too long: " +
+                $"length={localProjectedHelperPathLength} budget={NativeWindowsLaunchPathBudget} " +
+                $"root={NativeLibraryCache.DiagnosticValue(localCacheRoot)}");
+        }
+
+        return new NativeCacheRootSelection(
+            localCacheRoot,
+            LocalApplicationDataCacheRootKind,
+            "install-over-budget",
+            installProjectedHelperPathLength,
+            localProjectedHelperPathLength);
+    }
+
+    internal static string ValidateNativeHelperLaunchPath(
+        string helperPath,
+        bool windows,
+        bool wine)
+    {
+        ThrowIfNullOrWhiteSpace(helperPath, nameof(helperPath));
+        var normalizedPath = Path.GetFullPath(helperPath);
+        if (windows && !wine && normalizedPath.Length >= NativeWindowsLaunchPathBudget)
+        {
+            throw new PathTooLongException(
+                $"The native Windows helper path is too long to launch: " +
+                $"length={normalizedPath.Length} budget={NativeWindowsLaunchPathBudget} " +
+                $"helper={NativeLibraryCache.DiagnosticValue(normalizedPath)}");
+        }
+        return normalizedPath;
+    }
+
+    private static int ProjectedHelperPathLength(
+        string cacheRoot,
+        string triple,
+        string bundleVersion)
+    {
+        var helperFileName = HelperFileName(triple);
+        var normalPath = NativeLibraryCache.ResolveExtractionPath(
+            cacheRoot,
+            triple,
+            helperFileName,
+            bundleVersion);
+        var refreshPath = NativeLibraryCache.ResolveExtractionPath(
+            cacheRoot,
+            triple,
+            helperFileName,
+            bundleVersion + MaximumRefreshBundleSuffix);
+        return Math.Max(Path.GetFullPath(normalPath).Length, Path.GetFullPath(refreshPath).Length);
+    }
+
+    private static string PrepareNativeHelperProcessPath(
+        string helperPath,
+        string purpose,
+        bool wine)
+    {
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var normalizedPath = ValidateNativeHelperLaunchPath(helperPath, windows, wine);
+        if (windows && !wine)
+        {
+            VoiceDiagnostics.Log(
+                "sidecar.launch",
+                $"event=process-create-prepare purpose={purpose} helperPathLength={normalizedPath.Length} launchPathBudget={NativeWindowsLaunchPathBudget} helper={NativeLibraryCache.DiagnosticValue(normalizedPath)}");
+        }
+        return normalizedPath;
+    }
+
 
     public static (string Resource, string File)[] DspLibsFor(string triple)
         => triple switch
@@ -519,7 +683,7 @@ internal static class SidecarLauncher
 
     public static void EnsureDspLibsExtracted(
         Assembly assembly,
-        string baseDirectory,
+        string cacheRoot,
         string triple,
         string helperPath,
         string bundleVersion)
@@ -553,7 +717,7 @@ internal static class SidecarLauncher
                     resource,
                     file,
                     triple,
-                    baseDirectory,
+                    cacheRoot,
                     bundleVersion);
                 var beside = Path.Combine(helperDir, file);
                 if (!string.Equals(Path.GetFullPath(extracted), Path.GetFullPath(beside), StringComparison.OrdinalIgnoreCase))
@@ -573,7 +737,7 @@ internal static class SidecarLauncher
 
     public static void EnsurePionLibExtracted(
         Assembly assembly,
-        string baseDirectory,
+        string cacheRoot,
         string triple,
         string helperPath,
         string bundleVersion)
@@ -608,7 +772,7 @@ internal static class SidecarLauncher
                 resource,
                 file,
                 triple,
-                baseDirectory,
+                cacheRoot,
                 bundleVersion);
             var beside = Path.Combine(helperDir, file);
             if (!string.Equals(
@@ -628,9 +792,9 @@ internal static class SidecarLauncher
         }
     }
 
-    public static string ExtractMacApp(string zipPath, string triple, string baseDirectory, string bundleVersion)
+    public static string ExtractMacApp(string zipPath, string triple, string cacheRoot, string bundleVersion)
     {
-        var bundleDirectory = NativeLibraryCache.BundleDirectory(baseDirectory, triple, bundleVersion);
+        var bundleDirectory = NativeLibraryCache.BundleDirectory(cacheRoot, triple, bundleVersion);
         var appDir = Path.Combine(bundleDirectory, "PerfectCommsAudio.app");
         var inner = Path.Combine(appDir, "Contents", "MacOS", "PerfectCommsAudio");
         Directory.CreateDirectory(bundleDirectory);
@@ -1801,6 +1965,10 @@ internal static class SidecarLauncher
         string helperPath,
         int timeoutMs)
     {
+        helperPath = PrepareNativeHelperProcessPath(
+            helperPath,
+            "contract-probe",
+            WineEnvironment.IsWine);
         var standardOutput = new BoundedProtocolProbeCapture(NativeHelperContractOutputLimit);
         var standardError = new BoundedProtocolProbeCapture(NativeHelperContractDiagnosticLimit);
         using var process = new Process
@@ -2016,6 +2184,7 @@ internal static class SidecarLauncher
             }
             else
             {
+                helperPath = PrepareNativeHelperProcessPath(helperPath, "enumerate", wine: false);
                 var args = BuildArguments(outPath, Environment.ProcessId, wine: false);
                 psi = new ProcessStartInfo(helperPath, $"--enumerate {args}");
             }
@@ -2272,6 +2441,7 @@ internal static class SidecarLauncher
                 return result;
             }
 
+            helperPath = PrepareNativeHelperProcessPath(helperPath, "voice", wine: false);
             var nativeArguments = BuildArguments(result.HandshakePath, Environment.ProcessId, wine: false);
             var psi = new ProcessStartInfo(helperPath, nativeArguments)
             {
@@ -2325,7 +2495,7 @@ internal static class SidecarLauncher
         }
         catch (Exception ex)
         {
-            result.FailureReason = "launch failed: " + ex.Message;
+            result.FailureReason = "launch failed: " + ExceptionDiagnostic(ex);
             if (process != null)
                 KillQuietly(process);
             return result;
@@ -2476,6 +2646,141 @@ internal static class SidecarLauncher
         }
     }
 
+    private static bool IsCurrentProcessElevated()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return false;
+
+        using var process = Process.GetCurrentProcess();
+        if (!OpenProcessToken(process.Handle, TokenQueryAccess, out var tokenHandle))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not open the current process token");
+        }
+
+        try
+        {
+            return ReadTokenElevation(tokenHandle) ||
+                   ReadTokenIntegrityRid(tokenHandle) >= SecurityMandatoryHighRid;
+        }
+        finally
+        {
+            _ = CloseHandle(tokenHandle);
+        }
+    }
+
+    private static bool ReadTokenElevation(IntPtr tokenHandle)
+    {
+        var buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            if (!GetTokenInformation(
+                    tokenHandle,
+                    TokenElevationInformationClass,
+                    buffer,
+                    sizeof(int),
+                    out _))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not query current process token elevation");
+            }
+            return Marshal.ReadInt32(buffer) != 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static uint ReadTokenIntegrityRid(IntPtr tokenHandle)
+    {
+        _ = GetTokenInformation(
+            tokenHandle,
+            TokenIntegrityLevelInformationClass,
+            IntPtr.Zero,
+            0,
+            out var requiredLength);
+        if (requiredLength <= 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not determine current process token integrity buffer size");
+        }
+
+        var buffer = Marshal.AllocHGlobal(requiredLength);
+        try
+        {
+            if (!GetTokenInformation(
+                    tokenHandle,
+                    TokenIntegrityLevelInformationClass,
+                    buffer,
+                    requiredLength,
+                    out _))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not query current process token integrity");
+            }
+
+            var label = Marshal.PtrToStructure<TokenMandatoryLabel>(buffer);
+            var countPointer = GetSidSubAuthorityCount(label.Label.Sid);
+            if (countPointer == IntPtr.Zero)
+                throw new InvalidOperationException("The current process integrity SID is invalid");
+            var subAuthorityCount = Marshal.ReadByte(countPointer);
+            if (subAuthorityCount == 0)
+                throw new InvalidOperationException("The current process integrity SID is empty");
+            var ridPointer = GetSidSubAuthority(label.Label.Sid, (uint)(subAuthorityCount - 1));
+            if (ridPointer == IntPtr.Zero)
+                throw new InvalidOperationException("The current process integrity RID is unavailable");
+            return unchecked((uint)Marshal.ReadInt32(ridPointer));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct SidAndAttributes
+    {
+        public readonly IntPtr Sid;
+        public readonly uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct TokenMandatoryLabel
+    {
+        public readonly SidAndAttributes Label;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        IntPtr tokenHandle,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        int tokenInformationLength,
+        out int returnLength);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint subAuthority);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
     private static int SafeProcessId(Process? process)
     {
         if (process == null) return -1;
@@ -2484,7 +2789,23 @@ internal static class SidecarLauncher
     }
 
     private static string ExceptionDiagnostic(Exception ex)
-        => $"{SafeDiagnosticField(ex.GetType().Name, 80)}:\"{SafeDiagnosticField(ex.Message, 240)}\"";
+    {
+        var details = new StringBuilder();
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            if (details.Length > 0)
+                details.Append(" -> ");
+            details.Append(SafeDiagnosticField(current.GetType().Name, 80));
+            details.Append("(nativeErrorCode=");
+            details.Append(current is Win32Exception win32Exception
+                ? win32Exception.NativeErrorCode.ToString()
+                : "n/a");
+            details.Append("):\"");
+            details.Append(SafeDiagnosticField(current.Message, 240));
+            details.Append('"');
+        }
+        return SafeDiagnosticField(details.ToString(), 768);
+    }
 
     private static bool ProcessExited(Process process)
     {
