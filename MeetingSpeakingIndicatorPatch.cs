@@ -83,8 +83,11 @@ public static class MeetingSpeakingIndicatorPatch
         if (meetingHud?.playerStates == null) return;
         foreach (var state in meetingHud.playerStates)
         {
-            if (state == null || state.TargetPlayerId != playerId) continue;
-            ClearBuiltInHighlight(state);
+            if (state == null
+                || !PlayerVoteAreaPlayerId.TryRead(state, out var statePlayerId)
+                || statePlayerId != playerId)
+                continue;
+            ClearBuiltInHighlight(state, statePlayerId);
         }
     }
 
@@ -151,7 +154,7 @@ public static class MeetingSpeakingIndicatorPatch
         {
             if (state == null) continue;
 
-            byte pid       = state.TargetPlayerId;
+            if (!PlayerVoteAreaPlayerId.TryRead(state, out byte pid)) continue;
             bool isTalking = _speakingLevels.TryGetValue(pid, out float level);
             _visualStates.TryGetValue(pid, out var visual);
             bool snapForPrivacy = !isTalking
@@ -173,7 +176,7 @@ public static class MeetingSpeakingIndicatorPatch
                 }
                 if (_cardGlows.TryGetValue(pid, out var staleGlow) && staleGlow != null)
                     staleGlow.enabled = false;
-                ClearBuiltInHighlight(state);
+                ClearBuiltInHighlight(state, pid);
                 continue;
             }
 
@@ -185,7 +188,7 @@ public static class MeetingSpeakingIndicatorPatch
             if (!_cardGlows.TryGetValue(pid, out var cardGlowSr) || cardGlowSr == null)
                 cardGlowSr = CreateCardGlow(meetingHud, state, pid);
 
-            SyncOverlayTransforms(meetingHud, state, cardGlowSr);
+            SyncOverlayTransforms(meetingHud, state, cardGlowSr, pid);
 
             if (visual.Visibility > 0.01f)
             {
@@ -200,12 +203,12 @@ public static class MeetingSpeakingIndicatorPatch
                     cardGlowSr.enabled = true;
                 }
 
-                ApplyBuiltInHighlight(state, playerColor, brightness, visual.Visibility);
+                ApplyBuiltInHighlight(state, pid, playerColor, brightness, visual.Visibility);
             }
             else
             {
                 if (cardGlowSr != null) cardGlowSr.enabled = false;
-                ClearBuiltInHighlight(state);
+                ClearBuiltInHighlight(state, pid);
             }
         }
 
@@ -257,7 +260,8 @@ public static class MeetingSpeakingIndicatorPatch
     private static void SyncOverlayTransforms(
         MeetingHud meetingHud,
         PlayerVoteArea state,
-        SpriteRenderer? glow)
+        SpriteRenderer? glow,
+        byte playerId)
     {
         if (glow != null)
         {
@@ -269,9 +273,9 @@ public static class MeetingSpeakingIndicatorPatch
                 if (glow.transform.parent != state.Background.transform)
                 {
                     glow.transform.SetParent(state.Background.transform, false);
-                    _glowTransformInit.Remove(state.TargetPlayerId);
+                    _glowTransformInit.Remove(playerId);
                 }
-                if (_glowTransformInit.Add(state.TargetPlayerId))
+                if (_glowTransformInit.Add(playerId))
                 {
                     glow.transform.localPosition = new Vector3(0f, 0f, -0.05f);
                     glow.transform.localScale = new Vector3(1.10f, 1.28f, 1f);
@@ -326,14 +330,14 @@ public static class MeetingSpeakingIndicatorPatch
         return visual;
     }
 
-    private static void ApplyBuiltInHighlight(PlayerVoteArea state, Color color, float brightness, float visibility)
+    private static void ApplyBuiltInHighlight(PlayerVoteArea state, byte playerId, Color color, float brightness, float visibility)
     {
         var highlight = state.HighlightedFX;
         if (highlight == null) return;
 
         // Recapture vanilla state when renderer isn't our tint (sortingOrder != Ring) so a mid-speak selection survives Restore.
-        if (highlight.sortingOrder != VCSorting.Ring || !_highlightSnapshots.ContainsKey(state.TargetPlayerId))
-            _highlightSnapshots[state.TargetPlayerId] = new BuiltInHighlightSnapshot(highlight);
+        if (highlight.sortingOrder != VCSorting.Ring || !_highlightSnapshots.ContainsKey(playerId))
+            _highlightSnapshots[playerId] = new BuiltInHighlightSnapshot(highlight);
 
         var highlightColor = color;
         highlightColor.a = Mathf.Lerp(0.20f, 0.95f, brightness) * visibility;
@@ -346,15 +350,19 @@ public static class MeetingSpeakingIndicatorPatch
 
     private static void ClearBuiltInHighlight(PlayerVoteArea state)
     {
+        if (PlayerVoteAreaPlayerId.TryRead(state, out var playerId))
+            ClearBuiltInHighlight(state, playerId);
+    }
+
+    private static void ClearBuiltInHighlight(PlayerVoteArea state, byte playerId)
+    {
         var highlight = state.HighlightedFX;
         if (highlight == null) return;
-
-        byte id = state.TargetPlayerId;
-        if (_highlightSnapshots.TryGetValue(id, out var snapshot))
+        if (_highlightSnapshots.TryGetValue(playerId, out var snapshot))
         {
             // Restore vanilla state so a live vote-target selection outline isn't clobbered.
             snapshot.Restore(highlight);
-            _highlightSnapshots.Remove(id);
+            _highlightSnapshots.Remove(playerId);
         }
         else if (highlight.sortingOrder == VCSorting.Ring)
         {
@@ -510,7 +518,7 @@ public static class MeetingSpeakingIndicatorPatch
     {
         if (state == null) return $"index={index} state=null";
 
-        byte pid = state.TargetPlayerId;
+        PlayerVoteAreaPlayerId.TryRead(state, out byte pid);
         bool talking = _speakingLevels.TryGetValue(pid, out float level);
         _cardGlows.TryGetValue(pid, out var glow);
         bool hasBounds = TryGetWorldBounds(state, out var bounds);
@@ -587,8 +595,7 @@ public static class MeetingSpeakingIndicatorPatch
         {
             if (budget <= 0) return;
             if (state == null) continue;
-            byte pid = state.TargetPlayerId;
-            if (pid == byte.MaxValue) continue;
+            if (!PlayerVoteAreaPlayerId.TryRead(state, out byte pid) || pid == byte.MaxValue) continue;
             if (_cardGlows.TryGetValue(pid, out var existing) && existing != null) continue;
             CreateCardGlow(meetingHud, state, pid);
             budget--;

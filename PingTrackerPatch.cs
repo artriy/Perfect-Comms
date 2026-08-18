@@ -288,11 +288,11 @@ public static class PingTrackerPatch
         {
             foreach (var card in meeting.playerStates)
             {
-                if (card == null) continue;
-                if (card.AmDead && !_publiclyDead.Contains(card.TargetPlayerId))
+                if (card == null || !PlayerVoteAreaPlayerId.TryRead(card, out var playerId)) continue;
+                if (card.AmDead && !_publiclyDead.Contains(playerId))
                     hasNewPublicDeath = true;
                 _publicMeetingCardRoster.Add(new SpeakingBarRosterMember(
-                    card.TargetPlayerId,
+                    playerId,
                     card.AmDead));
             }
         }

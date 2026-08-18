@@ -15,6 +15,7 @@
 		<NuGetAuditMode>all</NuGetAuditMode>
 		<NuGetAuditLevel>low</NuGetAuditLevel>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.3.31</AmongUsGameLibsVersion>
 	</PropertyGroup>
 
 	<!-- Match the platform symbols used by the referenced plugin so each configuration compiles
@@ -40,7 +41,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
+		<PackageReference Include="AmongUs.GameLibs.Steam" Version="$(AmongUsGameLibsVersion)" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.Core" Version="6.0.0-be.735" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
 		<PackageReference Include="xunit.v3" Version="3.2.2" />
@@ -53,10 +54,10 @@
 
 	<ItemGroup>
 		<Reference Include="Assembly-CSharp">
-			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\Assembly-CSharp.dll</HintPath>
+			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\Assembly-CSharp.dll</HintPath>
 		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
-			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\2026.3.31\build\UnityEngine.CoreModule.dll</HintPath>
+			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\UnityEngine.CoreModule.dll</HintPath>
 		</Reference>
 	</ItemGroup>
 

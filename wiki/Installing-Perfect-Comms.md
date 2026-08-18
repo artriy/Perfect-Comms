@@ -72,7 +72,7 @@ If those are missing, use `BepInEx/LogOutput.log` rather than waiting for a cons
 | Reactor | No | No |
 | TOU-Mira | No; optional role integration | No |
 
-Perfect Comms v4.1.9 targets Among Us `2026.3.31` and BepInEx 6 Unity IL2CPP. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
+Perfect Comms v4.1.10 supports Among Us `2026.3.31`, `2026.6.5`, and `2026.8.18` (v18.0.0) with one DLL, and requires BepInEx 6 Unity IL2CPP. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
 
 ## Updating
 

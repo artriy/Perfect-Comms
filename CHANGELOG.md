@@ -1,5 +1,18 @@
 # Changelog
 
+## Perfect Comms v4.1.10
+
+Perfect Comms v4.1.10 supports the new Among Us v18 meeting player identifiers while retaining compatibility with validated pre-v18 releases.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.10/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Among Us v18 Compatibility
+
+- **Meeting voice features continue to identify the correct player on both old and new Among Us releases.**
+  > <sub>Among Us v18 replaced each meeting card's byte `TargetPlayerId` with an `InnerNet.PlayerId` value. Perfect Comms now resolves and caches whichever representation the running game exposes, normalizes it to the existing byte identity, and avoids a static dependency on either member. This keeps meeting speaking indicators, public-death roster updates, and identity-privacy checks available on v18 without dropping the validated pre-v18 path.</sub>
+
 ## Perfect Comms v4.1.9
 
 Perfect Comms v4.1.9 restores native microphone startup from deeply nested Windows installations while preserving secure native cache isolation.

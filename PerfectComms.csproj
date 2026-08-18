@@ -8,12 +8,13 @@
 		<Product>Perfect Comms</Product>
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
-		<Version>4.1.9</Version>
+		<Version>4.1.10</Version>
 		<!-- 4.1.7 is already immutable on NuGet.org; .1 carries the completed API 1.2 reference contract without changing the mod release version. -->
 		<PerfectCommsApiPackageVersion>4.1.7.1</PerfectCommsApiPackageVersion>
-		<AssemblyVersion>4.1.9.0</AssemblyVersion>
-		<FileVersion>4.1.9.0</FileVersion>
-		<InformationalVersion>4.1.9</InformationalVersion>
+		<AssemblyVersion>4.1.10.0</AssemblyVersion>
+		<FileVersion>4.1.10.0</FileVersion>
+		<InformationalVersion>4.1.10</InformationalVersion>
+		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.3.31</AmongUsGameLibsVersion>
 		<LangVersion>preview</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -55,7 +56,7 @@
 		     BepInEx.IL2CPP.MSBuild generator. 738+ removed CecilMetadataAccess and
 		     makes clean interop generation fail before compilation. -->
 		<PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.735" Private="false" ExcludeAssets="runtime;native" />
-		<PackageReference Include="AmongUs.GameLibs.Steam" Version="2026.3.31" PrivateAssets="all" />
+		<PackageReference Include="AmongUs.GameLibs.Steam" Version="$(AmongUsGameLibsVersion)" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.AutoPlugin" Version="1.1.0" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
 		<!-- These assemblies are loaded from embedded resources at runtime. Keep them

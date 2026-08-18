@@ -646,7 +646,9 @@ internal static class VoiceIdentityPrivacyRuntime
             if (states == null) return false;
             foreach (var state in states)
             {
-                if (state != null && state.TargetPlayerId == sourcePlayerId)
+                if (state != null
+                    && PlayerVoteAreaPlayerId.TryRead(state, out var playerId)
+                    && playerId == sourcePlayerId)
                     return true;
             }
         }
