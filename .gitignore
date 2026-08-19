@@ -4,6 +4,12 @@ obj/
 *.lock.json
 !packages.lock.json
 !PerfectComms.Tests/packages.lock.json
+!Starlight/packages.media.lock.json
+!Starlight/packages.plugin.lock.json
+!Starlight/DependencySanitizer/packages.lock.json
+!Starlight/InteropProbe/packages.lock.json
+!Starlight/InteropProbe/packages.merged.lock.json
+!PerfectComms.Starlight.Tests/packages.lock.json
 .vs/
 .idea/
 .DS_Store
@@ -30,6 +36,10 @@ scripts/*
 !scripts/verify-cubeb-provenance.py
 !scripts/build-pion.sh
 !scripts/verify-pion-license-inventory.py
+!scripts/package-starlight.sh
+!scripts/package-starlight.ps1
+!scripts/starlight-pion-interop.sh
+!scripts/starlight-pion-interop.ps1
 # Track the deployable Cloudflare worker source/config/tests, but never local
 # Wrangler state or installed npm packages. TURN credentials live in bindings,
 # not in these files.

@@ -1,6 +1,8 @@
 using System;
+#if !STARLIGHT
 using System.Collections.Generic;
 using System.IO;
+#endif
 using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
@@ -25,15 +27,19 @@ public class VoiceChatPluginMain : BasePlugin
     internal static ConfigFile PluginConfig { get; private set; } = null!;
     private static PerfectCommsConfigStore? _configStore;
     public Harmony Harmony { get; } = new(Id);
+#if !STARLIGHT
     private const string ResPrefix = "Lib.";
     private static readonly Dictionary<string, Assembly> _asmCache
         = new(StringComparer.OrdinalIgnoreCase);
+#endif
 
     public static GameObject? ResidentObject { get; private set; }
 
     static VoiceChatPluginMain()
     {
+#if !STARLIGHT
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
+#endif
         AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutdownVoiceRuntime("process-exit");
         AppDomain.CurrentDomain.DomainUnload += (_, _) => ShutdownVoiceRuntime("domain-unload");
     }
@@ -53,6 +59,7 @@ public class VoiceChatPluginMain : BasePlugin
         PerfectCommsConfigStore.TryFlushPending();
     }
 
+#if !STARLIGHT
     private static Assembly? ResolveEmbeddedAssembly(object? sender, ResolveEventArgs args)
     {
         var shortName = new AssemblyName(args.Name).Name;
@@ -79,6 +86,7 @@ public class VoiceChatPluginMain : BasePlugin
 
         return null;
     }
+#endif
 
     public override void Load()
     {

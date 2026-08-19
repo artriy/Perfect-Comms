@@ -104,24 +104,38 @@ jobs:
           cp dl/pion-win-x86/pc-pion.x86.dll Libs/pion/
           cp dl/pion-linux-x64/libpc-pion.so Libs/pion/libpc-pion.linux-x64.so
           # The universal macOS Pion dylib is sealed inside the signed helper app.
-      - name: Stage Android voice engine into Libs
-        run: |
-          mkdir -p Libs/pc-mobile
-          mkdir -p Libs/pion
-          cp dl/helper-android-arm64/libpc_mobile.so Libs/pc-mobile/
-          cp dl/pion-android-arm64/libpc-pion.so Libs/pion/libpc-pion.android-arm64.so
-          # Android intentionally uses the platform audio path without desktop DSP sidecars.
       - name: Package desktop DLL
         run: bash scripts/package-release.sh Release
-      - name: Package (Android)
-        run: bash scripts/package-release.sh Android
+      - name: Build and validate Starlight tester DLL
+        run: |
+          bash scripts/package-starlight.sh Release
+          python3 scripts/verify-release-assets.py --starlight-dll artifacts/PerfectCommsStarlight.dll
+          dotnet Starlight/DependencySanitizer/bin/Release/net10.0/DependencySanitizer.dll validate \
+            --assembly artifacts/PerfectCommsStarlight.dll
+          test ! -d artifacts/PerfectComms-Starlight
+          shopt -s nocaseglob nullglob
+          for artifact in artifacts/*.dll artifacts/*.zip; do
+            case "$artifact" in
+              artifacts/PerfectComms.dll|artifacts/PerfectCommsStarlight.dll) ;;
+              *)
+                echo "Unexpected DLL or archive artifact: $artifact" >&2
+                exit 1
+                ;;
+            esac
+          done
       - name: Upload standalone DLL artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: PerfectComms-standalone-dlls-${{ github.run_id }}-${{ github.run_attempt }}
-          # Android builds remain tested, but PerfectCommsAndroid.dll publishing stays paused until explicitly re-enabled.
           path: |
             artifacts/PerfectComms.dll
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Starlight tester DLL
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PerfectComms-Starlight-testers-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/PerfectCommsStarlight.dll
           if-no-files-found: error
           retention-days: 14
       - name: Upload reference-only API package

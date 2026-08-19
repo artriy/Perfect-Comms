@@ -10,7 +10,7 @@ import subprocess
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 PE_I386 = 0x014C
@@ -43,10 +43,6 @@ MACH_N_STAB = 0xE0
 MACH_N_TYPE = 0x0E
 MACH_N_EXT = 0x01
 MACH_N_UNDF = 0x00
-ANDROID_NAME_ATTRIBUTE = "{http://schemas.android.com/apk/res/android}name"
-PC_MOBILE_ABI_EXPECTED = 5
-PC_MOBILE_ABI_MARKER_PREFIX = b"PERFECTCOMMS_PC_MOBILE_ABI="
-PC_MOBILE_ABI_MARKER_SYMBOL = b"PC_MOBILE_ABI_MARKER"
 PION_ABI_EXPECTED = 2
 PION_VERSION_EXPECTED = "4.2.17"
 PION_CONTRACT_MARKER_PREFIX = b"PERFECTCOMMS_PC_PION_ABI="
@@ -85,6 +81,18 @@ AUDIO_CONTRACT = b"PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;"
 AUDIO_BACKENDS_WINDOWS = frozenset(("wasapi", "winmm"))
 AUDIO_BACKENDS_LINUX = frozenset(("pulse", "alsa"))
 AUDIO_BACKENDS_MACOS = frozenset(("audiounit", "audiounit-rust"))
+STARLIGHT_NATIVE_SUFFIXES = (
+    ".a",
+    ".dylib",
+    ".exe",
+    ".lib",
+    ".so",
+)
+STARLIGHT_DIRECT_DEPENDENCIES = {
+    "Concentus": "2.2.2",
+    "SIPSorcery": "10.0.16",
+    "Tmds.LibC": "0.2.0",
+}
 
 
 def fail(message: str) -> None:
@@ -350,7 +358,7 @@ def assert_pion_pe_bytes(data: bytes, label: str, expected_machine: int) -> None
     if machine != expected_machine:
         fail(f"{label}: PE machine 0x{machine:04x}, expected 0x{expected_machine:04x}")
     if characteristics & PE_IMAGE_FILE_DLL == 0:
-        fail(f"{label}: Pion PE companion is not marked as a DLL")
+        fail(f"{label}: Pion PE library is not marked as a DLL")
     marker_offset = assert_exact_pion_marker(data, label)
     exports, (export_rva, export_size) = pe_exports(data, label, directories, sections)
     for symbol_name in sorted(PION_REQUIRED_EXPORTS):
@@ -527,9 +535,9 @@ def assert_elf_shared_object_bytes(data: bytes, label: str) -> None:
         for index in range(program_count)
     }
     if ELF_PT_INTERP in program_types:
-        fail(f"{label}: ELF Pion companion contains PT_INTERP and is an executable")
+        fail(f"{label}: ELF Pion library contains PT_INTERP and is an executable")
     if ELF_PT_DYNAMIC not in program_types:
-        fail(f"{label}: ELF Pion companion has no PT_DYNAMIC shared-library segment")
+        fail(f"{label}: ELF Pion library has no PT_DYNAMIC shared-library segment")
 
 
 def elf64_sections(data: bytes, label: str) -> list[tuple[int, ...]]:
@@ -699,70 +707,6 @@ def assert_pion_elf(path: Path, expected_machine: int) -> None:
     assert_pion_elf_bytes(path.read_bytes(), str(path), expected_machine)
 
 
-def expected_pc_mobile_abi_marker(expected_abi: int) -> bytes:
-    return PC_MOBILE_ABI_MARKER_PREFIX + str(expected_abi).encode("ascii") + b"\0"
-
-
-def assert_pc_mobile_abi_bytes(data: bytes, label: str, expected_abi: int) -> None:
-    expected_marker = expected_pc_mobile_abi_marker(expected_abi)
-    marker_count = data.count(PC_MOBILE_ABI_MARKER_PREFIX)
-    if marker_count != 1:
-        fail(f"{label}: expected exactly one pc-mobile ABI marker, found {marker_count}")
-
-    sections = elf64_sections(data, label)
-    matches: list[tuple[int, int, int, int, int, int]] = []
-    for section in sections:
-        if section[1] != ELF_SHT_DYNSYM:
-            continue
-        string_section_index = section[6]
-        if string_section_index >= len(sections):
-            fail(f"{label}: ELF64 dynamic symbol table has an invalid string-table link")
-        strings = section_bytes(data, sections[string_section_index], label)
-        symbols = section_bytes(data, section, label)
-        entry_size = section[9]
-        if entry_size < 24 or len(symbols) % entry_size != 0:
-            fail(f"{label}: malformed ELF64 dynamic symbol table")
-        for offset in range(0, len(symbols), entry_size):
-            name_offset, info, other, section_index, value, size = struct.unpack_from(
-                "<IBBHQQ", symbols, offset
-            )
-            if name_offset >= len(strings):
-                fail(f"{label}: ELF64 dynamic symbol has an invalid name offset")
-            name_end = strings.find(b"\0", name_offset)
-            if name_end < 0:
-                fail(f"{label}: unterminated ELF64 dynamic symbol name")
-            if strings[name_offset:name_end] == PC_MOBILE_ABI_MARKER_SYMBOL:
-                matches.append((info, other, section_index, value, size, offset))
-
-    if len(matches) != 1:
-        fail(f"{label}: expected one exported pc-mobile ABI marker symbol, found {len(matches)}")
-    info, other, section_index, value, size, _ = matches[0]
-    if (
-        info >> 4 != ELF_STB_GLOBAL
-        or info & 0x0F != ELF_STT_OBJECT
-        or other & 0x03 != ELF_STV_DEFAULT
-        or section_index == ELF_SHN_UNDEF
-    ):
-        fail(f"{label}: pc-mobile ABI marker symbol must be defined GLOBAL OBJECT DEFAULT")
-    if size != len(expected_marker):
-        fail(f"{label}: pc-mobile ABI marker size {size}, expected {len(expected_marker)}")
-    if section_index >= len(sections):
-        fail(f"{label}: pc-mobile ABI marker references an invalid ELF64 section")
-
-    marker_section = sections[section_index]
-    section_address = marker_section[3]
-    section_offset = marker_section[4]
-    section_size = marker_section[5]
-    if value < section_address or value - section_address + size > section_size:
-        fail(f"{label}: pc-mobile ABI marker lies outside its ELF64 section")
-    marker_offset = section_offset + value - section_address
-    if marker_offset + size > len(data):
-        fail(f"{label}: pc-mobile ABI marker extends past end of file")
-    marker = data[marker_offset : marker_offset + size]
-    if marker != expected_marker:
-        fail(f"{label}: pc-mobile ABI marker {marker!r}, expected {expected_marker!r}")
-
-
 def align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
 
@@ -886,110 +830,6 @@ def self_test_elf_needed(libraries: tuple[str, ...]) -> bytes:
         0,
         strings_offset,
         len(strings),
-        0,
-        0,
-        1,
-        0,
-    )
-    return bytes(data)
-
-
-def self_test_pc_mobile_elf(
-    marker: bytes | None,
-    *,
-    symbol_count: int = 1,
-    symbol_info: int = (ELF_STB_GLOBAL << 4) | ELF_STT_OBJECT,
-    symbol_other: int = ELF_STV_DEFAULT,
-    symbol_section: int = 3,
-    extra_marker_data: bytes = b"",
-) -> bytes:
-    symbol_strings = b"\0" + PC_MOBILE_ABI_MARKER_SYMBOL + b"\0"
-    marker_data = (marker if marker is not None else b"not-an-abi-marker\0") + extra_marker_data
-    symbol_size = (
-        len(marker) if marker is not None else len(expected_pc_mobile_abi_marker(PC_MOBILE_ABI_EXPECTED))
-    )
-
-    string_offset = 64
-    symbol_offset = align_up(string_offset + len(symbol_strings), 8)
-    symbols = bytearray(24)
-    for _ in range(symbol_count):
-        symbols.extend(
-            struct.pack(
-                "<IBBHQQ",
-                1,
-                symbol_info,
-                symbol_other,
-                symbol_section,
-                0x1000,
-                symbol_size,
-            )
-        )
-    marker_offset = align_up(symbol_offset + len(symbols), 8)
-    section_offset = align_up(marker_offset + len(marker_data), 8)
-    data = bytearray(section_offset + 4 * 64)
-    elf_ident = b"\x7fELF\x02\x01\x01" + b"\0" * 9
-    struct.pack_into(
-        "<16sHHIQQQIHHHHHH",
-        data,
-        0,
-        elf_ident,
-        ELF_ET_DYN,
-        ELF_AARCH64,
-        1,
-        0,
-        0,
-        section_offset,
-        0,
-        64,
-        0,
-        0,
-        64,
-        4,
-        0,
-    )
-    data[string_offset : string_offset + len(symbol_strings)] = symbol_strings
-    data[symbol_offset : symbol_offset + len(symbols)] = symbols
-    data[marker_offset : marker_offset + len(marker_data)] = marker_data
-    struct.pack_into(
-        "<IIQQQQIIQQ",
-        data,
-        section_offset + 64,
-        0,
-        3,
-        0,
-        0,
-        string_offset,
-        len(symbol_strings),
-        0,
-        0,
-        1,
-        0,
-    )
-    struct.pack_into(
-        "<IIQQQQIIQQ",
-        data,
-        section_offset + 128,
-        0,
-        ELF_SHT_DYNSYM,
-        0,
-        0,
-        symbol_offset,
-        len(symbols),
-        1,
-        1,
-        8,
-        24,
-    )
-    struct.pack_into(
-        "<IIQQQQIIQQ",
-        data,
-        section_offset + 192,
-        0,
-        1,
-        2,
-        0x1000,
-        marker_offset,
-        len(marker_data),
         0,
         0,
         1,
@@ -1464,67 +1304,6 @@ def run_self_tests() -> None:
         "audio contract marker",
     )
 
-    expected_marker = expected_pc_mobile_abi_marker(PC_MOBILE_ABI_EXPECTED)
-    valid = self_test_pc_mobile_elf(expected_marker)
-    assert_pc_mobile_abi_bytes(valid, "self-test-valid", PC_MOBILE_ABI_EXPECTED)
-
-    invalid_cases = (
-        (self_test_pc_mobile_elf(None), "expected exactly one pc-mobile ABI marker"),
-        (
-            self_test_pc_mobile_elf(expected_marker, extra_marker_data=expected_marker),
-            "expected exactly one pc-mobile ABI marker",
-        ),
-        (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"3\0"),
-            "pc-mobile ABI marker",
-        ),
-        (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"03\0"),
-            "pc-mobile ABI marker size",
-        ),
-        (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"\0"),
-            "pc-mobile ABI marker size",
-        ),
-        (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"12345678901\0"),
-            "pc-mobile ABI marker size",
-        ),
-        (
-            self_test_pc_mobile_elf(PC_MOBILE_ABI_MARKER_PREFIX + b"4"),
-            "pc-mobile ABI marker size",
-        ),
-        (
-            self_test_pc_mobile_elf(expected_marker, symbol_count=0),
-            "expected one exported pc-mobile ABI marker symbol",
-        ),
-        (
-            self_test_pc_mobile_elf(expected_marker, symbol_count=2),
-            "expected one exported pc-mobile ABI marker symbol",
-        ),
-        (
-            self_test_pc_mobile_elf(expected_marker, symbol_info=(ELF_STB_GLOBAL << 4) | 2),
-            "must be defined GLOBAL OBJECT DEFAULT",
-        ),
-        (
-            self_test_pc_mobile_elf(expected_marker, symbol_other=1),
-            "must be defined GLOBAL OBJECT DEFAULT",
-        ),
-        (
-            self_test_pc_mobile_elf(expected_marker, symbol_section=ELF_SHN_UNDEF),
-            "must be defined GLOBAL OBJECT DEFAULT",
-        ),
-    )
-    for index, (data, expected_error) in enumerate(invalid_cases, start=1):
-        try:
-            assert_pc_mobile_abi_bytes(data, f"self-test-invalid-{index}", PC_MOBILE_ABI_EXPECTED)
-        except ValueError as error:
-            if expected_error not in str(error):
-                fail(
-                    f"ABI verifier self-test {index} returned unexpected error: {error}"
-                )
-        else:
-            fail(f"ABI verifier self-test {index} unexpectedly passed")
     clean_imports = pe_imports_bytes(
         self_test_pe(("KERNEL32.DLL", "WS2_32.DLL", "MSVCRT.DLL"), PE_AMD64),
         "pe-self-test",
@@ -1753,9 +1532,16 @@ def run_self_tests() -> None:
         "pion-macho-not-universal",
         "expected exactly x86_64+arm64",
     )
-    print("release.asset.selftest.ok check=pc-mobile-abi-marker")
+    if not has_native_suffix("runtimes/linux/native/libcodec.so.1"):
+        fail("Starlight native suffix self-test missed a versioned shared library")
+    if has_native_suffix("Managed.Dependency.dll"):
+        fail("Starlight native suffix self-test rejected a managed assembly name")
+    if not has_native_resource_suffix("Embedded.Managed.Dependency.dll"):
+        fail("Starlight resource suffix self-test missed an embedded DLL")
+
     print("release.asset.selftest.ok check=windows-pe-import-parser-and-self-contained-runtime")
     print("release.asset.selftest.ok check=pion-shared-library-contract")
+    print("release.asset.selftest.ok check=starlight-managed-source-policy")
 
 
 def macho_architectures(data: bytes, label: str) -> set[int]:
@@ -2053,7 +1839,7 @@ def assert_pion_macho_bytes(data: bytes, label: str) -> None:
         if parsed_architecture != architecture:
             fail(f"{slice_label}: inconsistent Mach-O architecture")
         if file_type != MACH_MH_DYLIB:
-            fail(f"{slice_label}: Pion Mach-O companion is not a dylib")
+            fail(f"{slice_label}: Pion Mach-O library is not a dylib")
         missing = sorted(PION_REQUIRED_EXPORTS - exports)
         if missing:
             fail(f"{slice_label}: missing Mach-O exports: {', '.join(missing)}")
@@ -2098,42 +1884,288 @@ def assert_mac_bundle(path: Path) -> None:
             )
     except zipfile.BadZipFile as error:
         fail(f"{path}: invalid zip archive: {error}")
+def xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
 
-def verify_android_manifest(root: Path) -> None:
-    relative = "release-assets/android/AndroidManifest.xml"
-    path = require_file(root, relative)
+def project_items(project: ET.Element, item_name: str) -> list[ET.Element]:
+    return [
+        element
+        for element in project.iter()
+        if xml_local_name(element.tag) == item_name
+    ]
+
+
+def project_property(project: ET.Element, property_name: str, label: str) -> str:
+    values = [
+        (element.text or "").strip()
+        for element in project.iter()
+        if xml_local_name(element.tag) == property_name
+    ]
+    if len(values) != 1 or not values[0]:
+        fail(f"{label}: expected exactly one non-empty {property_name} property")
+    return values[0]
+
+
+def parse_project(path: Path) -> ET.Element:
     try:
-        manifest = ET.parse(path).getroot()
+        return ET.parse(path).getroot()
     except ET.ParseError as error:
-        fail(f"{path}: invalid Android manifest XML: {error}")
-    permissions = {
-        element.attrib.get(ANDROID_NAME_ATTRIBUTE, "")
-        for element in manifest.iter()
-        if element.tag.rsplit("}", 1)[-1] == "uses-permission"
+        fail(f"{path}: invalid project XML: {error}")
+    raise AssertionError
+
+
+def normalize_project_path(value: str) -> str:
+    return value.replace("\\", "/")
+
+
+def has_native_suffix(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith(STARLIGHT_NATIVE_SUFFIXES) or ".so." in lowered
+
+
+def has_native_resource_suffix(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith((".dll", ".zip", ".gz", ".7z")) or has_native_suffix(
+        lowered
+    )
+
+
+def has_native_resource_magic(path: Path) -> bool:
+    with path.open("rb") as stream:
+        magic = stream.read(8)
+    native_prefixes = (
+        b"MZ",
+        b"\x7fELF",
+        b"!<arch>\n",
+        b"PK\x03\x04",
+        b"\x1f\x8b",
+        b"7z\xbc\xaf\x27\x1c",
+    )
+    return magic.startswith(native_prefixes) or magic[:4] in {
+        bytes.fromhex("cffaedfe"),
+        bytes.fromhex("feedfacf"),
+        bytes.fromhex("cafebabe"),
+        bytes.fromhex("bebafeca"),
+        bytes.fromhex("cafebabf"),
+        bytes.fromhex("bfbafeca"),
     }
-    if "android.permission.RECORD_AUDIO" not in permissions:
-        fail(f"{path}: missing android.permission.RECORD_AUDIO uses-permission")
-    print(f"release.asset.ok target=android permission=android.permission.RECORD_AUDIO path={relative}")
 
 
-def verify_android(root: Path) -> None:
-    verify_android_manifest(root)
-    path = require_file(root, "Libs/pc-mobile/libpc_mobile.so")
-    data = path.read_bytes()
-    assert_elf_bytes(data, str(path), ELF_AARCH64, ELF_ET_DYN)
-    assert_pc_mobile_abi_bytes(data, str(path), PC_MOBILE_ABI_EXPECTED)
-    print(
-        "release.asset.ok target=android-arm64 format=elf64-aarch64-shared "
-        f"abi={PC_MOBILE_ABI_EXPECTED} path=Libs/pc-mobile/libpc_mobile.so"
+def project_resource_files(project_path: Path, include: str) -> list[Path]:
+    normalized = normalize_project_path(include)
+    wildcard = min(
+        (index for marker in ("*", "?") if (index := normalized.find(marker)) >= 0),
+        default=len(normalized),
     )
-    pion_path = require_file(root, "Libs/pion/libpc-pion.android-arm64.so")
-    assert_pion_elf(pion_path, ELF_AARCH64)
+    prefix = normalized[:wildcard].rstrip("/")
+    candidate = project_path.parent / prefix
+    if wildcard == len(normalized):
+        return [candidate] if candidate.is_file() else []
+    while prefix and not candidate.is_dir():
+        prefix = str(PurePosixPath(prefix).parent)
+        if prefix == ".":
+            break
+        candidate = project_path.parent / prefix
+    if not candidate.is_dir():
+        return []
+    return sorted(path for path in candidate.rglob("*") if path.is_file())
+
+
+def verify_starlight_lock(path: Path) -> None:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"{path}: invalid dependency lock: {error}")
+    frameworks = document.get("dependencies")
+    if not isinstance(frameworks, dict) or set(frameworks) != {"net10.0"}:
+        fail(f"{path}: expected exactly one net10.0 dependency graph")
+    dependencies = frameworks["net10.0"]
+    if not isinstance(dependencies, dict):
+        fail(f"{path}: net10.0 dependency graph is not an object")
+    for name, expected_version in STARLIGHT_DIRECT_DEPENDENCIES.items():
+        dependency = dependencies.get(name)
+        if not isinstance(dependency, dict):
+            fail(f"{path}: missing direct Starlight dependency metadata for {name}")
+        if dependency.get("type") != "Direct":
+            fail(f"{path}: {name} must be recorded as a direct dependency")
+        if dependency.get("resolved") != expected_version:
+            fail(
+                f"{path}: {name} resolved version {dependency.get('resolved')!r}, "
+                f"expected {expected_version!r}"
+            )
+        if not isinstance(dependency.get("contentHash"), str) or not dependency["contentHash"]:
+            fail(f"{path}: {name} is missing locked contentHash metadata")
+
+
+def verify_starlight_source(root: Path) -> None:
+    plugin_path = require_file(root, "PerfectComms.Starlight.csproj")
+    media_path = require_file(root, "Starlight/PerfectComms.Starlight.Media.csproj")
+    media_lock = require_file(root, "Starlight/packages.media.lock.json")
+    plugin_lock = require_file(root, "Starlight/packages.plugin.lock.json")
+    desktop_path = require_file(root, "PerfectComms.csproj")
+    plugin = parse_project(plugin_path)
+    media = parse_project(media_path)
+    desktop = parse_project(desktop_path)
+    for property_name in (
+        "Version",
+        "AssemblyVersion",
+        "FileVersion",
+        "InformationalVersion",
+    ):
+        desktop_value = project_property(desktop, property_name, str(desktop_path))
+        starlight_value = project_property(plugin, property_name, str(plugin_path))
+        if starlight_value != desktop_value:
+            fail(
+                f"{plugin_path}: {property_name} {starlight_value!r} does not match "
+                f"{desktop_path} value {desktop_value!r}"
+            )
+
+    if normalize_project_path(
+        project_property(media, "NuGetLockFilePath", str(media_path))
+    ) != "$(MSBuildThisFileDirectory)packages.media.lock.json":
+        fail(f"{media_path}: NuGetLockFilePath must select packages.media.lock.json")
+    if normalize_project_path(
+        project_property(plugin, "NuGetLockFilePath", str(plugin_path))
+    ) != "$(MSBuildThisFileDirectory)Starlight/packages.plugin.lock.json":
+        fail(f"{plugin_path}: NuGetLockFilePath must select Starlight/packages.plugin.lock.json")
+
+    media_references = {
+        element.attrib.get("Include"): element
+        for element in project_items(media, "PackageReference")
+    }
+    for name, expected_version in STARLIGHT_DIRECT_DEPENDENCIES.items():
+        reference = media_references.get(name)
+        if reference is None:
+            fail(f"{media_path}: missing PackageReference metadata for {name}")
+        if reference.attrib.get("Version") != expected_version:
+            fail(
+                f"{media_path}: {name} version {reference.attrib.get('Version')!r}, "
+                f"expected {expected_version!r}"
+            )
+    libc_reference = media_references["Tmds.LibC"]
+    if libc_reference.attrib.get("ExcludeAssets") != "all":
+        fail(f"{media_path}: Tmds.LibC must set ExcludeAssets=all")
+    if libc_reference.attrib.get("PrivateAssets") != "all":
+        fail(f"{media_path}: Tmds.LibC must set PrivateAssets=all")
+    plugin_package_references = {
+        element.attrib.get("Include"): element
+        for element in project_items(plugin, "PackageReference")
+    }
+    unity_reference = plugin_package_references.get("BepInEx.Unity.IL2CPP")
+    if unity_reference is None:
+        fail(f"{plugin_path}: missing BepInEx.Unity.IL2CPP dependency metadata")
+    excluded_unity_assets = {
+        value.strip().lower()
+        for value in unity_reference.attrib.get("ExcludeAssets", "").split(";")
+    }
+    if not {"native", "runtime"}.issubset(excluded_unity_assets):
+        fail(
+            f"{plugin_path}: BepInEx.Unity.IL2CPP must exclude runtime and native assets"
+        )
+
+
+    project_references = {
+        normalize_project_path(element.attrib.get("Include", ""))
+        for element in project_items(plugin, "ProjectReference")
+    }
+    if "Starlight/PerfectComms.Starlight.Media.csproj" not in project_references:
+        fail(f"{plugin_path}: missing Starlight media ProjectReference metadata")
+
+    compile_items = project_items(plugin, "Compile")
+    generated_manifest = [
+        element
+        for element in compile_items
+        if element.attrib.get("Include") == "$(StarlightDependencyManifestPath)"
+    ]
+    if len(generated_manifest) != 1:
+        fail(
+            f"{plugin_path}: missing generated Starlight dependency manifest Compile item"
+        )
+    condition = generated_manifest[0].attrib.get("Condition", "")
+    if "Exists('$(StarlightDependencyManifestPath)')" not in condition:
+        fail(
+            f"{plugin_path}: generated dependency manifest Compile item lacks an existence guard"
+        )
+    if not any(
+        normalize_project_path(element.attrib.get("Include", ""))
+        == "Starlight/StarlightDependencies.Empty.cs"
+        for element in compile_items
+    ):
+        fail(f"{plugin_path}: missing empty Starlight dependency manifest fallback")
+
+    for project_path, project in ((plugin_path, plugin), (media_path, media)):
+        for item_name in ("Content", "EmbeddedResource", "Resource"):
+            for element in project_items(project, item_name):
+                include = element.attrib.get("Include", "")
+                if has_native_resource_suffix(include):
+                    fail(f"{project_path}: native {item_name} is prohibited: {include}")
+                for resource in project_resource_files(project_path, include):
+                    if has_native_resource_suffix(
+                        resource.name
+                    ) or has_native_resource_magic(resource):
+                        relative = resource.relative_to(root)
+                        fail(
+                            f"{project_path}: native {item_name} is prohibited: {relative}"
+                        )
+
+    verify_starlight_lock(media_lock)
+    try:
+        plugin_document = json.loads(plugin_lock.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"{plugin_lock}: invalid dependency lock: {error}")
+    plugin_frameworks = plugin_document.get("dependencies")
+    if not isinstance(plugin_frameworks, dict) or "net10.0" not in plugin_frameworks:
+        fail(f"{plugin_lock}: missing net10.0 dependency metadata")
+    plugin_dependencies = plugin_frameworks["net10.0"]
+    if not isinstance(plugin_dependencies, dict):
+        fail(f"{plugin_lock}: net10.0 dependency graph is not an object")
+    for name, reference in plugin_package_references.items():
+        dependency = plugin_dependencies.get(name)
+        if not isinstance(dependency, dict) or dependency.get("type") != "Direct":
+            fail(f"{plugin_lock}: missing direct dependency metadata for {name}")
+        if dependency.get("resolved") != reference.attrib.get("Version"):
+            fail(f"{plugin_lock}: locked version does not match {name} PackageReference")
+        if (
+            not isinstance(dependency.get("contentHash"), str)
+            or not dependency["contentHash"]
+        ):
+            fail(f"{plugin_lock}: {name} is missing locked contentHash metadata")
     print(
-        "release.asset.ok target=android-arm64 format=elf64-aarch64-shared "
-        f"transport=pion abi={PION_ABI_EXPECTED} pion={PION_VERSION_EXPECTED} "
-        "path=Libs/pion/libpc-pion.android-arm64.so"
+        "release.asset.ok target=starlight source=managed-only "
+        "dependencies=locked manifest=generated"
     )
+
+
+def assert_managed_pe_bytes(data: bytes, label: str) -> None:
+    _, characteristics, directories, sections = pe_layout(data, label)
+    if not characteristics & PE_IMAGE_FILE_DLL:
+        fail(f"{label}: managed assembly is not marked as a DLL")
+    if len(directories) <= 14:
+        fail(f"{label}: PE file has no CLI metadata directory")
+    cli_rva, cli_size = directories[14]
+    if cli_rva == 0 or cli_size < 0x48:
+        fail(f"{label}: PE file has no valid CLI metadata directory")
+    cli_offset = pe_rva_offset(data, label, sections, cli_rva, 0x48)
+    header_size, _, _, metadata_rva, metadata_size = struct.unpack_from(
+        "<IHHII", data, cli_offset
+    )
+    if header_size < 0x48 or metadata_rva == 0 or metadata_size < 4:
+        fail(f"{label}: PE file has no valid CLI metadata")
+    metadata_offset = pe_rva_offset(
+        data, label, sections, metadata_rva, metadata_size
+    )
+    if data[metadata_offset : metadata_offset + 4] != b"BSJB":
+        fail(f"{label}: PE file has no valid CLI metadata")
+
+
+def verify_starlight_dll(path: Path) -> None:
+    if path.name != "PerfectCommsStarlight.dll":
+        fail(f"{path}: Starlight DLL must be named PerfectCommsStarlight.dll")
+    if not path.is_file() or path.stat().st_size == 0:
+        fail(f"missing or empty Starlight DLL: {path}")
+    assert_managed_pe_bytes(path.read_bytes(), str(path))
+    print(f"release.asset.ok target=starlight format=single-managed-dll path={path}")
 
 
 def verify_desktop(root: Path) -> None:
@@ -2193,12 +2225,7 @@ def verify_desktop(root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--configuration", choices=("Release", "Android"))
-    parser.add_argument(
-        "--manifest-only",
-        action="store_true",
-        help="validate only the Android RECORD_AUDIO manifest fragment",
-    )
+    parser.add_argument("--configuration", choices=("Release", "Windows"))
     parser.add_argument(
         "--self-test",
         action="store_true",
@@ -2228,6 +2255,16 @@ def main() -> int:
         help="execute one host-native helper and verify its linked Cubeb backend inventory",
     )
     parser.add_argument(
+        "--starlight-source",
+        action="store_true",
+        help="verify Starlight projects and locks declare managed-only dependencies",
+    )
+    parser.add_argument(
+        "--starlight-dll",
+        type=Path,
+        help="verify one managed Starlight DLL",
+    )
+    parser.add_argument(
         "--expected-protocol",
         type=int,
         default=16,
@@ -2236,10 +2273,21 @@ def main() -> int:
     args = parser.parse_args()
     root = args.root.resolve()
     try:
+        selected_modes = (
+            int(args.configuration is not None)
+            + int(args.self_test)
+            + int(args.pe_no_private_runtime is not None)
+            + int(args.elf_cubeb_runtime is not None)
+            + int(args.mac_bundle is not None)
+            + int(args.helper_build_info is not None)
+            + int(args.starlight_source)
+            + int(args.starlight_dll is not None)
+        )
+        if selected_modes > 1:
+            fail("verification modes cannot be combined")
         if args.self_test:
             if (
                 args.configuration is not None
-                or args.manifest_only
                 or args.pe_no_private_runtime
                 or args.elf_cubeb_runtime
                 or args.mac_bundle
@@ -2247,10 +2295,13 @@ def main() -> int:
             ):
                 fail("--self-test cannot be combined with other verification modes")
             run_self_tests()
+        elif args.starlight_source:
+            verify_starlight_source(root)
+        elif args.starlight_dll is not None:
+            verify_starlight_dll(args.starlight_dll.resolve())
         elif args.pe_no_private_runtime is not None:
             if (
                 args.configuration is not None
-                or args.manifest_only
                 or args.elf_cubeb_runtime
                 or args.mac_bundle
                 or args.helper_build_info
@@ -2264,7 +2315,6 @@ def main() -> int:
         elif args.elf_cubeb_runtime is not None:
             if (
                 args.configuration is not None
-                or args.manifest_only
                 or args.mac_bundle
                 or args.helper_build_info
             ):
@@ -2284,7 +2334,6 @@ def main() -> int:
         elif args.mac_bundle is not None:
             if (
                 args.configuration is not None
-                or args.manifest_only
                 or args.helper_build_info
             ):
                 fail("--mac-bundle cannot be combined with other verification modes")
@@ -2297,7 +2346,7 @@ def main() -> int:
                 f"cubeb=static path={bundle}"
             )
         elif args.helper_build_info is not None:
-            if args.configuration is not None or args.manifest_only:
+            if args.configuration is not None:
                 fail("--helper-build-info cannot be combined with other verification modes")
             helper = args.helper_build_info.resolve()
             if not helper.is_file() or helper.stat().st_size == 0:
@@ -2309,12 +2358,6 @@ def main() -> int:
             )
         elif args.configuration is None:
             fail("--configuration is required unless --self-test is used")
-        elif args.manifest_only:
-            if args.configuration != "Android":
-                fail("--manifest-only is valid only with --configuration Android")
-            verify_android_manifest(root)
-        elif args.configuration == "Android":
-            verify_android(root)
         else:
             verify_desktop(root)
     except (OSError, ValueError) as error:

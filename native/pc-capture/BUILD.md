@@ -8,7 +8,7 @@ minimum two-chunk threshold and therefore spend no DRED bits. Adding an authoriz
 advances an encoder epoch only after resetting codec/DRED history, preventing pre-join speech
 from being carried to that receiver in a later packet.
 
-The mod (`PerfectComms.dll`) is platform-agnostic. It embeds one helper binary and its matching Pion transport per target, then extracts the correct pair at runtime through the native-library cache. Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If either resource is absent, the Pion library cannot load, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged under `voice.*` diagnostics); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android intentionally captures and plays through Unity while `pc-mobile` owns Opus and mixing and loads the Android Pion companion for peer transport. Desktop WebRTC APM DSP is disabled on Android by design.
+The desktop mod (`PerfectComms.dll`) embeds one helper binary and its matching Pion transport per target, then extracts the correct pair at runtime through the native-library cache. Desktop capture and playback are sidecar-only: the in-proc BASS path was removed in 4.0. If either resource is absent, the Pion library cannot load, or the helper cannot start, the `CaptureSupervisor` exhausts its restart budget and enters an all-failed state (`_onAllFailed`, logged under `voice.*` diagnostics); there is **no** in-proc desktop fallback, so the user has no voice until the helper can start again. Android is a separate net10.0 managed Starlight target and does not consume desktop native helpers or a native Pion companion.
 
 ## Targets
 
@@ -20,15 +20,15 @@ The five Rust targets, verbatim:
 - aarch64-apple-darwin
 - x86_64-unknown-linux-gnu
 
-The Pion build additionally names its C-shared targets `win-x64`, `win-x86`,
-`linux-x64`, `mac-x64`, `mac-arm64`, `mac-universal`, and `android-arm64`.
+The Pion build additionally names its desktop C-shared targets `win-x64`,
+`win-x86`, `linux-x64`, `mac-x64`, `mac-arm64`, and `mac-universal`.
 
 ## Local build
 
 - All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Cubeb requires CMake 3.19+ and a C/C++ compiler. Linux additionally needs `pkg-config`, `libpulse-dev`, and `libasound2-dev` so the shipped helper contains its PulseAudio primary backend and ALSA fallback.
-- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|win-x86|linux-x64|android-arm64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows targets need the matching MinGW C compiler, Linux needs GCC, and Android ARM64 needs the pinned NDK through `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
+- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|win-x86|linux-x64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows targets need the matching MinGW C compiler and Linux needs GCC. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
 - macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Rust and Pion Apple slices, `lipo`s each into a universal binary, seals `libpc-pion.dylib` into a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
-- Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll`, `pc-pion.x86.dll`, `libpc-pion.linux-x64.so`, and `libpc-pion.android-arm64.so`; the macOS dylib stays inside the signed app.
+- Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll`, `pc-pion.x86.dll`, and `libpc-pion.linux-x64.so`; the macOS dylib stays inside the signed app.
 
 Cubeb is built from the pinned `cubeb-sys` vendored source as a static library
 inside every desktop helper. The build scripts clear
@@ -92,7 +92,7 @@ notarization branch and does not consume Apple signing secrets.
 
 ## Embedding
 
-The managed build embeds each helper as `Lib.pc-capture.<file>` and each standalone Pion companion as `Lib.pc-pion.<file>`, with one `<EmbeddedResource>` per frozen output name. A normal developer build may omit native resources, but release validation requires the complete platform set. At runtime the mod extracts the content-matched helper and Pion library into the per-target cache. On macOS the embedded resource is the zipped `.app`; its Pion dylib is already inside the signed bundle, so the mod preserves it while unzipping the app, setting executable permissions, and stripping quarantine. Android extracts `libpc-pion.android-arm64.so` to a content-addressed path and configures that exact path before `pc-mobile` creates its engine.
+The desktop managed build embeds each helper as `Lib.pc-capture.<file>` and each standalone Pion companion as `Lib.pc-pion.<file>`, with one `<EmbeddedResource>` per frozen output name. A normal developer build may omit native resources, but release validation requires the complete desktop platform set. At runtime the mod extracts the content-matched helper and Pion library into the per-target cache. On macOS the embedded resource is the zipped `.app`; its Pion dylib is already inside the signed bundle, so the mod preserves it while unzipping the app, setting executable permissions, and stripping quarantine.
 
 `scripts/package-release.sh` also stages the same four helper files as **side-files** in the BepInEx plugin folder (`BepInEx/plugins/pc-capture/`) so they ship alongside the DLL in the release zip. The Pion libraries are embedded in `PerfectComms.dll` (or sealed inside the macOS app) and extracted next to the selected helper at runtime. The embedded, content-matched copies are the runtime source of truth.
 
@@ -113,8 +113,18 @@ macOS. It does not route the helper's audio through Wine's emulated WASAPI
 layer. Native Windows launches use Cubeb's WASAPI backend.
 
 Android remains a separate media surface. Unity owns microphone capture and
-`AudioSource` playback while `pc-mobile` owns codec/mixing/transport; Cubeb is
-desktop-only and is not present in the Android library or APK payload.
+`AudioSource` playback, while the net10.0 managed Starlight media project owns
+Opus, mixing, and peer transport. `PerfectComms.Starlight.csproj` compiles with
+`ANDROID` and `STARLIGHT` against the locked `AmongUs.GameLibs.Android`
+package. Run `bash scripts/package-starlight.sh Release` or
+`pwsh scripts/package-starlight.ps1 -Configuration Release` to create
+`artifacts/PerfectCommsStarlight.dll`. The self-contained managed DLL includes
+the merged media dependency closure, the Perfect Comms license, the Starlight
+dependency notices, and the complete SIPSorcery terms. It has no companion
+DLLs or native Android payload and is intended only for Starlight beta or
+staff-approved local-mod testing. This does not imply public Starlight
+availability or approval. The desktop build and native media path are
+unchanged.
 
 ## Mic permission (TCC) and fallback
 
@@ -122,8 +132,8 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## CI
 
-- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64), plus Android ARM64 with the pinned NDK. It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
-- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, and packaging gates, then publishes the self-contained `PerfectComms.dll` desktop plugin and `PerfectCommsAndroid.dll`. BepInEx remains an external runtime selected by the player or modpack and is not included in release assets. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
+- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64). It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
+- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, Starlight, and packaging gates, then publishes the self-contained desktop `PerfectComms.dll`. It also retains `PerfectCommsStarlight.dll` as the sole managed Starlight tester artifact for Starlight beta or staff-approved local-mod testing. The Starlight DLL contains its merged managed dependencies and embedded legal notices; no companion DLL is required. BepInEx remains an external desktop runtime selected by the player or modpack and is not included in release assets. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 

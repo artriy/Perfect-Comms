@@ -7,27 +7,6 @@ using Xunit;
 
 public sealed class ManagedVoiceHardeningTests
 {
-#if ANDROID
-    [Theory]
-    [InlineData(0, true)]
-    [InlineData(1920, true)]
-    [InlineData(48000, true)]
-    [InlineData(48001, false)]
-    [InlineData(-1, false)]
-    public void AndroidSpeakerUsesOnePreallocatedBoundedCallbackScratch(int samples, bool expected)
-    {
-        Assert.Equal(48_000, AndroidEnginePcmSpeaker.MaximumCallbackSamples);
-        Assert.Equal(expected, AndroidEnginePcmSpeaker.IsSupportedCallbackSize(samples));
-    }
-
-    [Theory]
-    [InlineData(64 * 1024, 128 * 1024)]
-    [InlineData(512 * 1024, 1024 * 1024)]
-    [InlineData(1024 * 1024, (1024 * 1024) + 1)]
-    [InlineData((1024 * 1024) + 1, (1024 * 1024) + 1)]
-    public void AndroidSignalPollingGrowsWithoutExceedingProtocolCap(int current, int expected)
-        => Assert.Equal(expected, MobileVoiceClient.NextSignalBufferSize(current));
-#endif
 
     public static TheoryData<bool, bool, bool, bool, bool, bool> HardVoiceInputSuppressionCases
     {

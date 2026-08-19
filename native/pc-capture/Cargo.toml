@@ -10,8 +10,8 @@ license = "LGPL-2.1-only"
 name = "pc-capture"
 path = "src/main.rs"
 
-# The processing core (codec/dsp/mix/gamestate/proto/rtc) is a library so the Android
-# cdylib (native/pc-mobile) can reuse it without the desktop-only IPC server + Cubeb.
+# The processing core remains a library so the desktop helper keeps media and protocol internals
+# separate from its host-side IPC server and Cubeb device wiring.
 [lib]
 name = "pc_capture"
 path = "src/lib.rs"
@@ -24,9 +24,8 @@ pion-sys = { path = "../pion-sys" }
 opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
 parking_lot = "0.12"
 
-# Cubeb (audio device I/O) is desktop-only; on Android the C# layer captures via the Unity
-# Microphone API and plays via AudioSource, passing PCM across the FFI. Excluding it from
-# the Android build keeps the cross-compile free of desktop audio backends.
+# Cubeb is the desktop sidecar's audio-device backend. The managed Starlight Android build does not
+# compile this crate; retain the target guard for cargo tooling that inspects unsupported targets.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 cubeb = "=0.36.0"
 crossbeam-channel = "0.5"

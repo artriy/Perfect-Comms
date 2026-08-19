@@ -16,12 +16,10 @@ from pathlib import Path
 CUBEB_VERSION = "0.36.0"
 MANIFESTS = (
     "native/pc-capture/Cargo.toml",
-    "native/pc-mobile/Cargo.toml",
     "native/vendor/cubeb/Cargo.toml",
 )
 LOCKS = (
     "native/pc-capture/Cargo.lock",
-    "native/pc-mobile/Cargo.lock",
     "native/vendor/cubeb/Cargo.lock",
 )
 REQUIRED_VENDOR_LOCKS = (

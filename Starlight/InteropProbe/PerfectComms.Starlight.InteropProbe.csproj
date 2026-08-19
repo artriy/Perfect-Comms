@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\starlight\interop-probe\bin\</BaseOutputPath>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(MergedStarlightAssemblyPath)' == ''">$(MSBuildThisFileDirectory)packages.lock.json</NuGetLockFilePath>
+    <NuGetLockFilePath Condition="'$(MergedStarlightAssemblyPath)' != ''">$(MSBuildThisFileDirectory)packages.merged.lock.json</NuGetLockFilePath>
+    <MergedStarlightReferenceDirectory Condition="'$(MergedStarlightAssemblyPath)' != ''">$(BaseIntermediateOutputPath)$(Configuration)/$(TargetFramework)/merged-reference/</MergedStarlightReferenceDirectory>
+    <MergedStarlightReferencePath Condition="'$(MergedStarlightAssemblyPath)' != ''">$(MergedStarlightReferenceDirectory)PerfectComms.dll</MergedStarlightReferencePath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MergedStarlightAssemblyPath)' == ''">
+    <ProjectReference Include="..\PerfectComms.Starlight.Media.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MergedStarlightAssemblyPath)' != ''">
+    <Reference Include="PerfectComms">
+      <HintPath>$(MergedStarlightReferencePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions"
+                      Version="8.0.0"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="PrepareMergedStarlightReference"
+          BeforeTargets="ResolveAssemblyReferences"
+          Condition="'$(MergedStarlightAssemblyPath)' != ''">
+    <Error Condition="!Exists('$(MergedStarlightAssemblyPath)')"
+           Text="Merged Starlight assembly not found: $(MergedStarlightAssemblyPath)" />
+    <MakeDir Directories="$(MergedStarlightReferenceDirectory)" />
+    <Copy SourceFiles="$(MergedStarlightAssemblyPath)"
+          DestinationFiles="$(MergedStarlightReferencePath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

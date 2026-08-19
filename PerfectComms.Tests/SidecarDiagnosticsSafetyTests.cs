@@ -231,17 +231,6 @@ public sealed class SidecarDiagnosticsSafetyTests
             """;
         const string malformedJson = "{not-json";
 
-#if ANDROID
-        Assert.True(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(current, out var mobileCurrent));
-        Assert.True(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(missing, out var mobileMissing));
-        Assert.False(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(invalidValueKind, out var mobileInvalid));
-        Assert.False(MobileVoiceClient.TryDescribeMediaReceiveForDiagnostics(malformedJson, out var mobileMalformed));
-        Assert.Contains("latencyCatchupDrops=7", mobileCurrent);
-        Assert.Contains("latencyCatchupDrops=0", mobileMissing);
-        Assert.Equal(string.Empty, mobileInvalid);
-        Assert.Equal(string.Empty, mobileMalformed);
-#endif
-
         Assert.True(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(current, out var sidecarCurrent));
         Assert.True(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(missing, out var sidecarMissing));
         Assert.False(SidecarVoiceClient.TryDescribeNativeMediaReceiveForDiagnostics(invalidValueKind, out var sidecarInvalid));
@@ -653,7 +642,6 @@ public sealed class SidecarDiagnosticsSafetyTests
 
         Assert.True(SidecarVoiceClient.TryReadCaptureState(callback, out var ready));
         Assert.Equal("first-callback", ready.State);
-#if WINDOWS
         Assert.True(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(7, ready));
         Assert.False(PerfectCommsVoiceBackend.CaptureStateGenerationMatches(
             8,
@@ -686,7 +674,6 @@ public sealed class SidecarDiagnosticsSafetyTests
             microphoneRequested: true,
             muted: true,
             keepCaptureWarm: false));
-#endif
         Assert.False(SidecarVoiceClient.TryReadCaptureState(
             "{\"direction\":\"playback\",\"state\":\"first-callback\",\"stream_generation\":7}",
             out _));

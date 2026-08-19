@@ -3,7 +3,7 @@
 
 cubeb-sys builds its macOS AudioUnit implementation with a nested Cargo
 invocation. That locked dependency graph is intentionally separate from
-pc-mobile/Cargo.lock, so it needs its own cargo-about report. Perfect Comms'
+pc-capture/Cargo.lock, so it needs its own cargo-about report. Perfect Comms'
 Linux build selects Cubeb's C PulseAudio/ALSA backends instead.
 """
 
@@ -44,7 +44,7 @@ def cubeb_packages(root: Path) -> tuple[Path, Path]:
                 "--format-version",
                 "1",
                 "--manifest-path",
-                str(root / "native/pc-mobile/Cargo.toml"),
+                str(root / "native/pc-capture/Cargo.toml"),
             ]
         )
     )

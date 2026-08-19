@@ -3,18 +3,26 @@
 Perfect Comms puts proximity voice, team channels, player volumes, and speaking indicators inside Among Us. Your local settings control what you send, hear, and see; the lobby host controls the match-wide voice rules.
 
 > [!TIP]
-> Installing for the first time? Start with **[Installing Perfect Comms](Installing-Perfect-Comms)**. It has separate instructions for modpacks that provide BepInEx and installations where BepInEx is not provided.
+> Installing for the first time? Start with **[Installing Perfect Comms](Installing-Perfect-Comms)**. It covers desktop BepInEx setup and the approved Starlight testing path.
 
 ## Install and verify
 
-1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and place the correct plugin DLL in `BepInEx/plugins`.
-   - Desktop uses `PerfectComms.dll`.
-   - A BepInEx-enabled ARM64 Android mod build uses `PerfectCommsAndroid.dll`; the release is not an APK.
+1. Follow [Installing Perfect Comms](Installing-Perfect-Comms) and use the
+   package for your platform.
+   - Desktop uses `PerfectComms.dll` in `BepInEx/plugins`.
+   - Android testing uses `PerfectCommsStarlight.dll` through a Starlight beta
+     or staff-approved local-mod testing build. The DLL is self-contained and
+     includes its managed dependencies and legal notices. It has no companion
+     DLLs or native payload. This testing path does not imply public Starlight
+     availability or approval.
 2. Launch Among Us. A new installation opens the guided setup automatically.
 3. Confirm that **Voice Settings** appears in the Among Us Options menu and that the voice HUD appears in a lobby.
 4. The main menu should also show **Voice Lobbies**. Hosts additionally see **Host Voice Settings** at the lobby game-settings console.
 
 On desktop, press `F10` to open Voice Settings. Hosts can press `F11` to open Host Voice Settings.
+
+Managed Starlight players and desktop `PerfectComms.dll` players interoperate in
+the same voice lobby. The desktop installation and media stack are unchanged.
 
 ## First-time setup
 
@@ -121,11 +129,12 @@ Compatible mods can register additional tabs under **Mod Behaviour**. Those tabs
 
 ## Troubleshooting
 
-- **No Voice Settings, HUD, or Voice Lobbies:** confirm the plugin DLL is directly inside `BepInEx/plugins`, not inside another folder. Then check `BepInEx/LogOutput.log` for load errors.
+- **No Voice Settings, HUD, or Voice Lobbies on desktop:** confirm `PerfectComms.dll` is directly inside `BepInEx/plugins`, not inside another folder. Then check `BepInEx/LogOutput.log` for load errors.
 - **Connection is stuck or needs rebuilding:** press `F7` to refresh only your local voice session. Refresh has a 10-second cooldown.
 - **You cannot hear another player:** confirm you are not deafened, check Speaker Volume and that player's slider in **Player Volumes**, then confirm the selected output device.
 - **Others cannot hear you:** confirm you are not muted, hold Push To Talk if selected, check Mic Volume and Mic Sensitivity, and test the selected microphone in the Devices tab.
-- **Microphone or speaker is unavailable:** check operating-system permissions and device routing, then reopen Voice Settings. On Android, grant microphone permission to the rebuilt app.
+- **Microphone or speaker is unavailable:** check operating-system permissions and device routing, then reopen Voice Settings. On Android, grant microphone permission to Starlight.
+- **The Starlight test does not load:** confirm the approved test received `PerfectCommsStarlight.dll`, then follow the beta or staff-approved local-mod testing build's log instructions.
 - **A Windows audio helper is blocked:** check whether security software quarantined it. Restore or allow it only when Perfect Comms came from the official release.
 - **A problem needs detailed logs:** enable **Voice Settings > Advanced > Diagnostics**, reproduce the problem, and collect the BepInEx log. Diagnostics turns itself off on the next launch.
 

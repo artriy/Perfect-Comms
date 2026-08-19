@@ -28,7 +28,6 @@ jobs:
           python3 -m py_compile scripts/generate-cubeb-license-inventories.py
           python3 -m py_compile scripts/verify-cubeb-provenance.py
           python3 scripts/verify-release-assets.py --self-test
-          python3 scripts/verify-release-assets.py --root . --configuration Android --manifest-only
           bash -n scripts/package-release.sh scripts/package-api.sh scripts/build-helpers.sh scripts/build-mac.sh scripts/build-pion.sh scripts/ci-smoke-helper.sh
           bash scripts/package-release.sh --validate-source
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -44,12 +43,8 @@ jobs:
         run: dotnet build PerfectComms.csproj -c Release --no-restore --nologo
       - name: Pack and smoke-test developer API
         run: bash scripts/package-api.sh Release
-      - name: Build Android managed code
-        run: dotnet build PerfectComms.csproj -c Android --no-restore --nologo
       - name: Run managed tests
         run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore --nologo
-      - name: Run Android managed tests
-        run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Android --no-restore --nologo
       - name: Test meeting compatibility against Among Us v18 bindings
         run: >-
           dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --nologo
@@ -57,6 +52,91 @@ jobs:
           -p:AmongUsGameLibsVersion=2026.8.18
           -p:NuGetLockFilePath=obj/compat-v18/packages.lock.json
           -p:RestoreLockedMode=false
+
+  starlight:
+    name: Starlight managed build, tests, and single-DLL validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Verify Starlight source policy
+        run: |
+          python3 scripts/verify-release-assets.py --root . --starlight-source
+          bash -n scripts/package-starlight.sh scripts/starlight-pion-interop.sh
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: |
+            Starlight/packages.media.lock.json
+            Starlight/packages.plugin.lock.json
+            Starlight/DependencySanitizer/packages.lock.json
+            PerfectComms.Starlight.Tests/packages.lock.json
+      - name: Restore locked Starlight dependencies
+        run: |
+          dotnet restore Starlight/DependencySanitizer/DependencySanitizer.csproj --locked-mode --nologo
+          dotnet restore PerfectComms.Starlight.Tests/PerfectComms.Starlight.Tests.csproj --locked-mode --nologo
+      - name: Build and self-test dependency sanitizer
+        run: |
+          dotnet build Starlight/DependencySanitizer/DependencySanitizer.csproj -c Release --no-restore --nologo
+          dotnet Starlight/DependencySanitizer/bin/Release/net10.0/DependencySanitizer.dll self-test
+      - name: Build and test managed Starlight media
+        run: |
+          dotnet build PerfectComms.Starlight.Tests/PerfectComms.Starlight.Tests.csproj -c Release --no-restore --nologo
+          dotnet test PerfectComms.Starlight.Tests/PerfectComms.Starlight.Tests.csproj -c Release --no-build --no-restore --nologo
+      - name: Build and validate Starlight DLL
+        run: |
+          bash scripts/package-starlight.sh Release
+          python3 scripts/verify-release-assets.py --starlight-dll artifacts/PerfectCommsStarlight.dll
+          dotnet Starlight/DependencySanitizer/bin/Release/net10.0/DependencySanitizer.dll validate \
+            --assembly artifacts/PerfectCommsStarlight.dll
+          test ! -d artifacts/PerfectComms-Starlight
+          shopt -s nocaseglob nullglob
+          for artifact in artifacts/*.dll artifacts/*.zip; do
+            test "$artifact" = "artifacts/PerfectCommsStarlight.dll" || {
+              echo "Unexpected Starlight artifact: $artifact" >&2
+              exit 1
+            }
+          done
+
+  starlight-desktop-interop:
+    name: Starlight and desktop Pion interoperability
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: |
+            Starlight/packages.media.lock.json
+            Starlight/packages.plugin.lock.json
+            Starlight/DependencySanitizer/packages.lock.json
+            Starlight/InteropProbe/packages.lock.json
+      - name: Build deterministic merged Starlight DLL
+        shell: pwsh
+        run: .\scripts\package-starlight.ps1 Release
+      - name: Restore locked interoperability dependencies
+        env:
+          MERGED_STARLIGHT_ASSEMBLY_PATH: ${{ github.workspace }}\artifacts\PerfectCommsStarlight.dll
+        run: >-
+          dotnet restore
+          Starlight/InteropProbe/PerfectComms.Starlight.InteropProbe.csproj
+          --locked-mode
+          --nologo
+          -p:MergedStarlightAssemblyPath="$env:MERGED_STARLIGHT_ASSEMBLY_PATH"
+      - name: Test merged managed WebRTC against the desktop Pion transport
+        env:
+          MERGED_STARLIGHT_ASSEMBLY_PATH: ${{ github.workspace }}\artifacts\PerfectCommsStarlight.dll
+          PC_PION_TEST_DISABLE_MDNS: "1"
+        run: >-
+          dotnet run
+          --project Starlight/InteropProbe/PerfectComms.Starlight.InteropProbe.csproj
+          --configuration Release
+          --no-restore
+          -p:MergedStarlightAssemblyPath="$env:MERGED_STARLIGHT_ASSEMBLY_PATH"
+          --
+          --pion "${{ github.workspace }}\Libs\pion\pc-pion.x64.dll"
+
 
   native-quality:
     name: Native format, lint, and tests
@@ -78,7 +158,6 @@ jobs:
       - name: Rust formatting
         run: |
           cargo fmt --manifest-path native/pc-capture/Cargo.toml --all -- --check
-          cargo fmt --manifest-path native/pc-mobile/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/vendor/cubeb/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/vendor/cubeb-sys/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/apm-sys/Cargo.toml --all -- --check
@@ -87,16 +166,13 @@ jobs:
         shell: bash
         run: |
           python3 scripts/verify-cubeb-provenance.py --root .
-          ! grep -q '^name = "cpal"$' native/pc-capture/Cargo.lock native/pc-mobile/Cargo.lock
+          ! grep -q '^name = "cpal"$' native/pc-capture/Cargo.lock
           linux_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i cubeb-sys)"
           mac_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-apple-darwin -e features -i cubeb-sys)"
           windows_features="$(cargo tree --locked --manifest-path native/pc-capture/Cargo.toml --target x86_64-pc-windows-msvc -e features -i cubeb-sys)"
-          android_tree="$(cargo tree --locked --manifest-path native/pc-mobile/Cargo.toml --target aarch64-linux-android)"
           [[ "$linux_features" == *'cubeb-sys feature "unittest-build"'* ]]
           [[ "$mac_features" != *'cubeb-sys feature "unittest-build"'* ]]
           [[ "$windows_features" != *'cubeb-sys feature "unittest-build"'* ]]
-          [[ "$android_tree" != *'cubeb v0.36.0'* ]]
-          [[ "$android_tree" != *'cubeb-sys v0.36.0'* ]]
       - name: Test patched Cubeb callback ownership and libcubeb binding
         run: |
           cargo check --locked --manifest-path native/vendor/cubeb-sys/Cargo.toml --features unittest-build
@@ -111,15 +187,12 @@ jobs:
           bash scripts/build-pion.sh linux-x64
       - name: Lint desktop shared core
         run: cargo clippy --locked --manifest-path native/pc-capture/Cargo.toml --all-targets -- -D warnings
-      - name: Lint mobile wrapper
-        run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-audit@0.22.2
       - name: Audit native dependency locks
         run: |
           cargo audit --file native/pc-capture/Cargo.lock
-          cargo audit --no-fetch --file native/pc-mobile/Cargo.lock
           cargo audit --no-fetch --file native/vendor/cubeb-sys/libcubeb/src/cubeb-coreaudio-rs/Cargo.lock
           cargo audit --no-fetch --file native/vendor/cubeb-sys/libcubeb/src/cubeb-pulse-rs/Cargo.lock
           cargo audit --no-fetch --file native/apm-sys/Cargo.lock
@@ -138,12 +211,9 @@ jobs:
       - name: Verify native dependency license inventory
         run: |
           python3 scripts/verify-native-license-inventory.py --self-test
-          python3 scripts/verify-native-license-inventory.py \
-            --subset-lock native/pc-capture/Cargo.lock \
-            --superset-lock native/pc-mobile/Cargo.lock
-          cargo fetch --locked --manifest-path native/pc-mobile/Cargo.toml
+          cargo fetch --locked --manifest-path native/pc-capture/Cargo.toml
           cargo about generate \
-            --manifest-path native/pc-mobile/Cargo.toml \
+            --manifest-path native/pc-capture/Cargo.toml \
             --config native/cargo-about.toml \
             native/cargo-about.hbs \
             --frozen --fail \

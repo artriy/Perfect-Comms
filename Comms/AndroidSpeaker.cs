@@ -7,8 +7,8 @@ using UnityEngine;
 namespace VoiceChatPlugin.VoiceChat;
 
 /// <summary>
-/// Unity playback surface for the Android pc-mobile engine. Unity pulls interleaved stereo
-/// directly from Rust; no legacy managed voice graph or external backend is involved.
+/// Unity playback surface for the managed Starlight engine. Unity pulls interleaved stereo
+/// from MobileVoiceClient's lock-free playback ring; no external backend is involved.
 /// </summary>
 internal sealed class AndroidEnginePcmSpeaker : IDisposable
 {
@@ -56,7 +56,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         _source.volume = 1f;
 
         _clip = AudioClip.Create(
-            "VCPcMobile",
+            "VCManagedStarlight",
             ClipFrames,
             Channels,
             SampleRate,
@@ -68,7 +68,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         _source.Play();
         _lastReadMs = Environment.TickCount64;
 
-        VoiceDiagnostics.DebugInfo($"[VC] Android pc-mobile speaker initialised ({SampleRate} Hz, {Channels} ch).");
+        VoiceDiagnostics.DebugInfo($"[VC] Android managed-starlight speaker initialised ({SampleRate} Hz, {Channels} ch).");
     }
 
     private readonly float[] _scratch = new float[MaximumCallbackSamples];
@@ -127,7 +127,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         {
             _reportedReadErrors = readErrors;
             VoiceDiagnostics.DebugWarning(
-                $"[VC] Android pc-mobile speaker emitted silence after playback read errors count={readErrors}.");
+                $"[VC] Android managed-starlight speaker emitted silence after playback read errors count={readErrors}.");
         }
         var oversizeCallbacks = Volatile.Read(ref _oversizeCallbacks);
         if (oversizeCallbacks != _reportedOversizeCallbacks)
@@ -201,7 +201,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         try { _source.Stop(); } catch { }
         try { if (_source != null) UnityEngine.Object.Destroy(_source); } catch { }
         try { if (_clip != null) UnityEngine.Object.Destroy(_clip); } catch { }
-        VoiceDiagnostics.DebugInfo("[VC] Android pc-mobile speaker disposed.");
+        VoiceDiagnostics.DebugInfo("[VC] Android managed-starlight speaker disposed.");
     }
 }
 #endif

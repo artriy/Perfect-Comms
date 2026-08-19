@@ -1,13 +1,12 @@
 name: Pion RTC shared-core gate
 
-# Desktop and Android use the same Rust media core and Pion v4.2.17 transport.
-# This gate exercises the production Go C ABI, offer/answer/ICE, and Opus path.
+# This gate exercises the production Go C ABI, offer/answer/ICE, and Opus path
+# used by the desktop helper.
 on:
   push:
     branches: [main]
     paths:
       - "native/pc-capture/**"
-      - "native/pc-mobile/**"
       - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
@@ -17,7 +16,6 @@ on:
   pull_request:
     paths:
       - "native/pc-capture/**"
-      - "native/pc-mobile/**"
       - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
@@ -81,20 +79,3 @@ jobs:
       - name: Two-helper Cloudflare TURN relay and voice gate
         if: runner.os == 'Linux'
         run: python3 scripts/live-turn-smoke.py native/pc-capture/target/release/pc-capture --timeout 45
-
-  mobile-shared-core:
-    name: Mobile wrapper uses the shared RTC core
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-          components: clippy
-      - name: Linux Cubeb build dependencies (PulseAudio + ALSA)
-        run: sudo apt-get update && sudo apt-get install -y build-essential libpulse-dev libasound2-dev pkg-config cmake nasm
-      - name: Lint host build of pc-mobile
-        run: cargo clippy --locked --manifest-path native/pc-mobile/Cargo.toml --all-targets -- -D warnings

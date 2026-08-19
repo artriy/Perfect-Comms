@@ -15,8 +15,8 @@ namespace VoiceChatPlugin.VoiceChat;
 ///   micAudioClip.GetData(audioData, lastPosition.Value);
 /// </code>
 ///
-/// Perfect Comms reads newly captured frames and pushes them directly into the native pc-mobile
-/// engine for WebRTC encoding and transport.
+/// Perfect Comms forwards newly captured frames directly into the managed Starlight pipeline for
+/// Opus encoding and WebRTC transport.
 /// </summary>
 internal sealed class AndroidMicrophone : IDisposable, ICaptureSource
 {

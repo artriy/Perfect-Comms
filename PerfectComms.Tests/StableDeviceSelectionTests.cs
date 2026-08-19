@@ -122,7 +122,6 @@ public sealed class StableDeviceSelectionTests
         Assert.False(resolved?.IsAvailable);
     }
 
-#if WINDOWS
     [Fact]
     public void LegacyDesktopMicrophoneIdPrefersExactRawCubebEndpoint()
     {
@@ -225,18 +224,6 @@ public sealed class StableDeviceSelectionTests
         Assert.False(VoiceChatLocalSettings.LegacyDesktopDeviceIdMatchesCubeb(
             "cubeb-v2::00", CubebV2("wasapi", "\0")));
     }
-#endif
-
-#if ANDROID
-    [Fact]
-    public void AndroidDoesNotTreatDesktopDeviceIdsAsMigrationCandidates()
-    {
-        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
-            "wasapi:endpoint"));
-        Assert.False(VoiceChatLocalSettings.ShouldRecoverLegacyDesktopDeviceId(
-            CubebV1("endpoint")));
-    }
-#endif
 
     [Fact]
     public void OpaqueStableIdsAreCaseSensitive()

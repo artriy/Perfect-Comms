@@ -297,8 +297,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
         VoiceDiagnostics.Log("voice.engine.created",
             $"{VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} signaling=among-us-rpc");
+#if WINDOWS
         if (WineEnvironment.IsWine)
             VoiceDiagnostics.Log("env.wine", "detected=true");
+#endif
     }
 
     private void ApplyIceServers(List<IceServer> servers)
@@ -3322,14 +3324,18 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         mv.OnLevel += (peak, speaking) =>
         {
             if (!IsCurrentMobileVoice(mv, callbackGeneration)) return;
-            if (Mute && !_loopBack)
+            _mainThreadActions.Enqueue(() =>
             {
-                _localLevel = 0f;
-                _localSpeaking = false;
-                return;
-            }
-            _localLevel = peak;
-            _localSpeaking = speaking;
+                if (!IsCurrentMobileVoice(mv, callbackGeneration)) return;
+                if (Mute && !_loopBack)
+                {
+                    _localLevel = 0f;
+                    _localSpeaking = false;
+                    return;
+                }
+                _localLevel = peak;
+                _localSpeaking = speaking;
+            });
         };
         mv.OnPeerLevels += levels =>
         {
@@ -3370,7 +3376,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         _gameStateSendGate.Reset();
         _mobileVoice = mv;
         EnsureMobileSpeaker(mv, nowMs, force: true);
-        VoiceDiagnostics.Log("voice.mobile", $"state=started backend=pc-mobile generation={callbackGeneration} dsp=platform-passthrough");
+        VoiceDiagnostics.Log("voice.mobile", $"state=started backend=managed-starlight generation={callbackGeneration} dsp=platform-passthrough");
     }
 
     private bool IsCurrentMobileVoice(MobileVoiceClient voice, int generation)
@@ -3434,7 +3440,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 _mobileSpeakerRetryAttempts, 250, 30_000);
             _mobileSpeakerRetryAtMs = nowMs + retryMs;
             VoiceDiagnostics.Log("voice.speaker",
-                $"ready=false backend=pc-mobile retryAfterMs={retryMs} error=\"{ex.Message}\"");
+                $"ready=false backend=managed-starlight retryAfterMs={retryMs} error=\"{ex.Message}\"");
         }
     }
 
@@ -3485,8 +3491,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _syntheticTonePhase = phase;
             Interlocked.Increment(ref _syntheticFrames);
 #if ANDROID
-            // pc-mobile owns Opus/WebRTC on Android. Synthetic diagnostics must enter that native
-            // encoder just like real microphone PCM; the managed preprocessing tail is telemetry-only.
+            // The managed Starlight engine owns Opus/WebRTC on Android. Synthetic diagnostics enter
+            // that encoder just like microphone PCM; the preprocessing tail is telemetry-only.
             _mobileVoice?.PushMic(frame, frame.Length);
 #else
             ProcessMicrophoneFrame(frame, frame.Length, "synthetic");
@@ -3551,7 +3557,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
 #if ANDROID
             // Open only after the source reports ready. MobileVoiceClient drops PCM until the
-            // native Start reset succeeds, so a failed source or control call stays fail-closed.
+            // managed Start reset succeeds, so a failed source or control call stays fail-closed.
             _mobileVoice?.SetMicActive(_microphoneReady && !Mute);
 #endif
 
@@ -3567,13 +3573,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void StopAndroidMicrophone(string reason)
     {
 #if ANDROID
-        // Close native transmission and clear Opus/DRED history before source teardown. Mute is
-        // already visible to capture callbacks, and the managed client closes its PCM gate first.
+        // Close managed transmission and clear codec history before source teardown. Mute is
+        // already visible to capture callbacks, and the client closes its PCM gate first.
         try { _mobileVoice?.SetMicActive(false); } catch { }
 #endif
         StopSyntheticMicTone();
         // Invalidate queued/device-old PCM before waiting for either Unity or the encode worker.
-        // The worker rechecks both this epoch and Mute immediately before entering pc-mobile.
+        // The worker rechecks both this epoch and Mute immediately before entering the media engine.
         lock (_captureFrameSync)
         {
             _captureEpoch++;
@@ -3826,7 +3832,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var mobileVoice = _mobileVoice;
         if (mobileVoice != null)
             EnsureMobileSpeaker(mobileVoice, Environment.TickCount64, force: true);
-        VoiceDiagnostics.Log("voice.speaker", $"ready={_speakerReady} device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=pc-mobile");
+        VoiceDiagnostics.Log("voice.speaker", $"ready={_speakerReady} device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=managed-starlight");
 #else
         _speakerReady = false;
 #endif
@@ -4826,9 +4832,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (captureOptions.MicCalibrationDiagnostics)
             MaybeLogMicCalibration(source, decision, false, speakingThreshold, nearClipSamples, zeroCrossings, samples, agcGain);
 
-        // The native sidecar/pc-mobile engine performs Opus encoding and WebRTC transmission. The C# capture
-        // path now only computes local mic level/VAD for the overlay and diagnostics. ponytail: encode/send
-        // tail removed (it fed the dead data-channel transport), not stubbed.
+        // The selected media engine performs Opus encoding and WebRTC transmission. The C# capture
+        // path computes local mic level/VAD for the overlay and diagnostics.
         _ = transmitGain;
     }
 
@@ -5103,6 +5108,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var micZeroCrossRate = micWindowSamples <= 1 ? 0f : micZeroCrossings / (float)(micWindowSamples - 1);
         var micCrest = micRms <= 0.0 ? 0.0 : micPeak / micRms;
         var mobilePlaybackText = string.Empty;
+#if STARLIGHT
+        const string mediaBackend = "managed-starlight";
+#else
+        const string mediaBackend = "native-engine";
+#endif
 #if ANDROID
         var mobileVoice = _mobileVoice;
         mobilePlaybackText = mobileVoice == null
@@ -5110,7 +5120,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             : $" mobilePlaybackDepthSamples={mobileVoice.PlaybackDepthSamples} mobilePlaybackHighWaterSamples={mobileVoice.PlaybackHighWaterSamples} mobilePlaybackDroppedSamples={mobileVoice.PlaybackDroppedSamples} mobilePlaybackSkippedSamples={mobileVoice.PlaybackSkippedSamples} mobilePlaybackZeroFilledSamples={mobileVoice.PlaybackZeroFilledSamples} mobilePlaybackPrimingZeroFilledSamples={mobileVoice.PlaybackPrimingZeroFilledSamples} mobilePlaybackClockCorrectionSamples={mobileVoice.PlaybackClockCorrectionSamples} mobilePlaybackClockCorrectionCallbacks={mobileVoice.PlaybackClockCorrectionCallbacks} mobilePlaybackLateCycles={mobileVoice.PlaybackPumpLateCycles} mobilePlaybackEmptyPulls={mobileVoice.PlaybackNativeEmptyPulls}";
 #endif
         VoiceDiagnostics.Log("voice.stats",
-            $"reason={reason} {VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} media=native-engine signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +
+            $"reason={reason} {VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} media={mediaBackend} signaling=among-us-rpc phase={snapshot?.Phase.ToString() ?? "none"} " +
             $"routeRecords={routeRecords} engineRouteTargets={engineRouteTargets} audibleRoutes={peers.Count(peer => peer.CurrentRoute.Audible)} speakingRoutes={peers.Count(peer => peer.IsSpeaking)} {rpcDiagnosticsText} " +
             $"localLevel={LocalLevel:0.000} localSpeaking={LocalSpeaking} mute={Mute} remoteLevelMax={remoteMax:0.000} " +
             $"routeSamples={peerTicks} audibleTicks={audibleTicks} audibleSilentTicks={audibleSilentTicks} silentPct={silentPct:0.0} routeWindows={peerWindows} effectiveRoutes={effectiveRoutes} " +
@@ -5198,7 +5208,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"targetName=\"{(target?.PlayerName ?? "<none>")}\" targetPlayerId={(target.HasValue ? target.Value.PlayerId : (byte)255)} targetClientId={(target.HasValue ? target.Value.ClientId : -1)}");
     }
 
-    // The sidecar/pc-mobile engine owns each WebRTC peer connection, Opus decode, jitter buffering and the
+    // The selected media engine owns each WebRTC peer connection, Opus decode, jitter buffering and the
     // mixer. The C# PeerConnection is now only a roster + proximity-route record: it carries the
     // socket/client/player identity and the computed gain/pan/radio used to build the engine game-state.
     private sealed class PeerConnection : IDisposable

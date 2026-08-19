@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "ILRepack.Lib": {
+        "type": "Direct",
+        "requested": "[2.0.46, 2.0.46]",
+        "resolved": "2.0.46",
+        "contentHash": "m2Ex+I1dFBi0yPxoC67HbjQO3BwkbsQ3/DsOLYToiRYUUeRP4PTkQK+VvBwBCle/r9NRQ8U6KmyeEPPjyu/thg=="
+      },
+      "Mono.Cecil": {
+        "type": "Direct",
+        "requested": "[0.11.6, )",
+        "resolved": "0.11.6",
+        "contentHash": "f33RkDtZO8VlGXCtmQIviOtxgnUdym9xx/b1p9h91CRGOsJFxCFOFK1FDbVt1OCf1aWwYejUFa2MOQyFWTFjbA=="
+      }
+    }
+  }
+}

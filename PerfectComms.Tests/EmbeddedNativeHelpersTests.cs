@@ -10,10 +10,6 @@ public sealed class EmbeddedNativeHelpersTests
     [Fact]
     public void EmbeddedDesktopHelpersMatchStagedFiles()
     {
-#if ANDROID
-        // Android embeds the in-process pc-mobile engine instead of desktop sidecars.
-        return;
-#else
         var repositoryRoot = FindRepositoryRoot();
         var helpers = new[]
         {
@@ -70,7 +66,6 @@ public sealed class EmbeddedNativeHelpersTests
                 Assert.Contains(helper.ResourceName, embeddedResources);
             });
         }
-#endif
     }
 
     [Theory]
@@ -157,33 +152,6 @@ public sealed class EmbeddedNativeHelpersTests
             if (Directory.Exists(workspace))
                 Directory.Delete(workspace, true);
         }
-    }
-
-    [Fact]
-    public void EmbeddedAndroidNativePayloadsMatchStagedFiles()
-    {
-#if ANDROID
-        var repositoryRoot = FindRepositoryRoot();
-        var payloads = new[]
-        {
-            new HelperResource(
-                "Lib.pc-mobile.libpc_mobile.so",
-                Path.Combine(repositoryRoot, "Libs", "pc-mobile", "libpc_mobile.so")),
-            new HelperResource(
-                "Lib.pc-pion.libpc-pion.android-arm64.so",
-                Path.Combine(repositoryRoot, "Libs", "pion", "libpc-pion.android-arm64.so")),
-        };
-        var pluginAssembly = typeof(VoiceLobbyRegistryPublisher).Assembly;
-        var embeddedResources = pluginAssembly
-            .GetManifestResourceNames()
-            .ToHashSet(StringComparer.Ordinal);
-
-        Assert.DoesNotContain(
-            embeddedResources,
-            resource => resource.StartsWith("Lib.pc-capture.", StringComparison.Ordinal));
-        foreach (var payload in payloads)
-            AssertEmbeddedFileParity(pluginAssembly, embeddedResources, payload);
-#endif
     }
 
     private static void AssertEmbeddedFileParity(

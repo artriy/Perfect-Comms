@@ -595,8 +595,8 @@ impl Engine {
                 *self.synthetic.lock().unwrap() = enabled.then(SyntheticTone::new);
             }
             InboundOp::Start => {
-                // Start remains closed until the reset succeeds. A panic is caught by pc-mobile
-                // and marks the engine unhealthy, which is safer than retaining prior speech.
+                // Start remains closed until the reset succeeds, so a failed privacy reset
+                // cannot retain prior speech.
                 self.reset_encoder_history();
                 self.level.store(0, Ordering::Relaxed);
                 self.mic_active.store(true, Ordering::Release);

@@ -1,6 +1,6 @@
 # pc-capture
 
-PerfectComms native host-side microphone capture helper.
+PerfectComms native desktop microphone capture helper.
 
 Captures and plays audio through Mozilla Cubeb, using WASAPI (with Cubeb's
 WinMM fallback) on Windows,
@@ -14,9 +14,7 @@ libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and th
 Pion WebRTC v4.2.17 peer transport with proximity mixing, so mic, peer audio,
 and playback all live in this helper. The Rust media core loads Pion through
 the companion C-shared library built from `native/pc-pion`; transport startup
-fails closed if the matching library is missing. Android uses the same
-DRED-capable media core while intentionally leaving the desktop WebRTC-APM DSP
-path disabled. Protocol version 16.
+fails closed if the matching library is missing. Protocol version 16.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -86,7 +84,7 @@ cargo check --all-targets          # fast gate the CI matrix reuses per target
 `cargo build` produces the Rust helper only. From the repository root, use
 `scripts/build-pion.sh` with Go 1.26.2 to produce its required Pion companion,
 for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64/x86,
-Linux x64, macOS x64/arm64/universal, and Android ARM64 targets are supported.
+Linux x64, and macOS x64/arm64/universal targets are supported.
 
 ## CI build targets
 
@@ -132,11 +130,10 @@ argument-bearing audio child directly. This avoids CrossOver opening an
 interactive Terminal and dropping `/bin/sh -c` arguments while preserving the
 existing authenticated cancellation and exit receipts.
 
-Per-target helper binaries ship as side-files in the BepInEx plugin folder and
-as embedded resources. On Windows and Linux, the mod extracts the embedded,
-content-matched Pion library beside the helper; macOS uses the copy already
-inside the signed app. Android extracts its Pion resource and passes the exact
-absolute path to `pc-mobile` before creating the transport.
+Per-target desktop helper binaries ship as side-files in the BepInEx plugin
+folder and as embedded resources. On Windows and Linux, the mod extracts the
+embedded, content-matched Pion library beside the helper; macOS uses the copy
+already inside the signed app.
 
 Cubeb itself is compiled from the version pinned by `Cargo.lock` and statically
 linked into each desktop helper. There is no `cubeb.dll`, `libcubeb.so`, or
@@ -176,7 +173,3 @@ The headless build gates validate backend selection policy and binary linkage,
 not physical endpoint routing. Headsets, wired-jack route changes, hot-plugging,
 and OS permissions still require real-device validation on each host audio
 stack.
-
-Android audio is deliberately outside this dependency: `pc-mobile` continues
-to receive Unity `Microphone` PCM and returns mixed PCM to a Unity
-`AudioSource`. The Android build does not compile or link Cubeb.

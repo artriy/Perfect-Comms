@@ -18,13 +18,8 @@
 		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.3.31</AmongUsGameLibsVersion>
 	</PropertyGroup>
 
-	<!-- Match the platform symbols used by the referenced plugin so each configuration compiles
-	     and executes only tests for APIs that actually exist in that platform assembly. -->
-	<PropertyGroup Condition="'$(Configuration)' != 'Android'">
+	<PropertyGroup>
 		<DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
-	</PropertyGroup>
-	<PropertyGroup Condition="'$(Configuration)' == 'Android'">
-		<DefineConstants>$(DefineConstants);ANDROID</DefineConstants>
 	</PropertyGroup>
 
 	<!-- Program.cs is a local legacy console harness for the retired managed

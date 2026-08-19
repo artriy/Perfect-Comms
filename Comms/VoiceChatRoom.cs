@@ -15,8 +15,9 @@ namespace VoiceChatPlugin.VoiceChat;
 ///
 /// C# owns game-state routing and Among Us custom-RPC signaling. Those callbacks identify the
 /// dispatched PlayerControl object but do not expose authenticated packet sender provenance.
-/// Native pc-capture/pc-mobile engines own capture, WebRTC RTP media, jitter buffering, mixing,
-/// and playback.
+/// On desktop, native pc-capture owns capture, WebRTC RTP media, jitter buffering, mixing, and
+/// playback. On Android, managed Starlight owns Opus/WebRTC and mixing around Unity capture and
+/// playback surfaces.
 /// </summary>
 public class VoiceChatRoom
 {
@@ -77,7 +78,7 @@ public class VoiceChatRoom
     private readonly RadioStateSyncTracker _radioStateSync = new(
         TimeSpan.FromMilliseconds(250),
         TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
-    // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the native media session.
+    // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the active media session.
     private bool _forceBackendRebuild;
     private string? _activeRoomCode;
     private string? _activeRegion;
@@ -711,7 +712,7 @@ public class VoiceChatRoom
 
     internal void FailClosedAfterUpdateFailure()
     {
-        // A partially-applied transition can leave the native mixer holding the previous route
+        // A partially-applied transition can leave the active mixer holding the previous route
         // generation. Mute capture and explicitly publish a null game state so stale routes cannot
         // remain audible while the managed update loop recovers.
         SetMute(true);
@@ -988,8 +989,8 @@ public class VoiceChatRoom
                 $"reason=host-snapshot-timeout waited={waited:0.000}s action=use-local-policy transport=native-engine");
         }
 
-        // This is a policy-only compatibility fallback for vanilla/older hosts. The native media
-        // session and Among Us custom-RPC signaling were already allowed to bootstrap immediately.
+        // This is a policy-only compatibility fallback for vanilla/older hosts. The media session
+        // and Among Us custom-RPC signaling were already allowed to bootstrap immediately.
         return true;
     }
 
@@ -1037,7 +1038,7 @@ public class VoiceChatRoom
         TrackHostSettingsAuthority(snapshot);
         var settings = VoiceSettings.Instance;
 
-        // Bootstrap native media and Among Us custom-RPC signaling immediately. Host settings are policy,
+        // Bootstrap media and Among Us custom-RPC signaling immediately. Host settings are policy,
         // not transport identity, and synchronize independently below.
         EnsureVoiceBackend(snapshot, settings);
         SendHostSettingsSnapshot(force: false, reason: "periodic-or-roster-change");
@@ -1396,7 +1397,7 @@ public class VoiceChatRoom
             if (recovered < 0)
             {
                 ClearVoiceUiForLifecycleReset("missing peer recovery");
-                // Rebuild the native session when targeted recovery is unavailable.
+                // Rebuild the media session when targeted recovery is unavailable.
                 _forceBackendRebuild = true;
                 ResetSettingsSyncState(preserveHostAuthority: true);
                 StartBootstrapWindow("missing voice backend peer");

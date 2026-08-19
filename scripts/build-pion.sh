@@ -17,14 +17,14 @@ linker_flags="-s -w -buildid="
 if [[ "${2:-}" == "--stage" ]]; then
   stage=1
 elif [[ -n "${2:-}" ]]; then
-  echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal|android-arm64> [--stage]" >&2
+  echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
   exit 2
 fi
 
 case "$target" in
-  win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal|android-arm64) ;;
+  win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal) ;;
   *)
-    echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal|android-arm64> [--stage]" >&2
+    echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
     exit 2
     ;;
 esac
@@ -95,39 +95,6 @@ case "$target" in
     lipo "$output" -verify_arch x86_64 arm64
     lipo -info "$output"
     stage_path="$root/Libs/pion/libpc-pion.dylib"
-    ;;
-  android-arm64)
-    ndk_root="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
-    [[ -n "$ndk_root" ]] || {
-      echo "ANDROID_NDK_HOME or ANDROID_NDK_ROOT is required for android-arm64." >&2
-      exit 1
-    }
-    ndk_cc_suffix=""
-    case "$(uname -s)-$(uname -m)" in
-      Linux-x86_64) ndk_host=linux-x86_64 ;;
-      Darwin-x86_64) ndk_host=darwin-x86_64 ;;
-      Darwin-arm64) ndk_host=darwin-x86_64 ;;
-      MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64)
-        ndk_host=windows-x86_64
-        ndk_cc_suffix=".cmd"
-        ndk_root="$(cygpath -u "$ndk_root")"
-        ;;
-      *) echo "Unsupported Android NDK build host: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-    esac
-    android_api="${PC_ANDROID_API:-21}"
-    export GOOS=android GOARCH=arm64 CGO_ENABLED=1
-    default_cc="$ndk_root/toolchains/llvm/prebuilt/$ndk_host/bin/aarch64-linux-android${android_api}-clang${ndk_cc_suffix}"
-    if [[ -n "$ndk_cc_suffix" ]]; then
-      # Go is a native Windows executable under Git Bash, so hand it a Windows-compatible path.
-      default_cc="$(cygpath -m "$default_cc")"
-    fi
-    export CC="${CC:-$default_cc}"
-    # Pion's Android interface enumeration uses wlynxg/anet, whose documented
-    # Go 1.23+ build contract requires this linker opt-in for net.zoneCache.
-    linker_flags="$linker_flags -checklinkname=0"
-    output="$artifact_root/android-arm64/libpc-pion.so"
-    stage_path="$root/Libs/pion/libpc-pion.android-arm64.so"
-    mkdir -p "$(dirname "$output")"
     ;;
 esac
 

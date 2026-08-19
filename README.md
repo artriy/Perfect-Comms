@@ -113,10 +113,10 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 
 ## Install
 
-> Starting with v4.1.7, Perfect Comms is distributed as a plugin DLL only. It does not include BepInEx.
+> Starting with v4.1.7, the desktop build is distributed as a plugin DLL only. It does not include BepInEx.
 
 > [!TIP]
-> **If your mod provides BepInEx**
+> **Desktop: if your mod provides BepInEx**
 >
 > 1. Close Among Us.
 > 2. Keep the BepInEx installation supplied by the mod or modpack. **Do not install or merge another copy over it.**
@@ -124,7 +124,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 > 4. Place or replace the DLL in `BepInEx/plugins`.
 
 > [!IMPORTANT]
-> **If BepInEx is not provided**
+> **Desktop: if BepInEx is not provided**
 >
 > Use this path if your mod does not provide BepInEx, or if you are not using another mod.
 >
@@ -136,7 +136,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 > 4. Launch the game once to complete BepInEx setup, then close it.
 > 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
 
-### Final folder layout
+### Desktop folder layout
 
 ```text
 BepInEx/
@@ -144,7 +144,26 @@ BepInEx/
    └─ PerfectComms.dll
 ```
 
-Launch Among Us. Open Perfect Comms from the Options menu (`F10`). Hosts open Voice Settings from the lobby game-settings console (`F11`).
+### Android on Starlight
+
+The managed Android tester artifact is `PerfectCommsStarlight.dll`. It is a
+self-contained managed assembly: the required managed media stack is merged
+into the DLL, and the managed dependency notices and complete SIPSorcery terms
+are embedded in it. It has no companion DLLs.
+
+Use `PerfectCommsStarlight.dll` only through an All Of Us staff-approved test
+or a Starlight beta/local-mod testing build, following the
+[Starlight developer testing guide](https://allofus.dev/guides/starlight-dev-guide/#testing).
+This testing path does not imply public Starlight availability or approval.
+There is no Perfect Comms APK or native Android payload. No APK, manifest, or
+native-library staging is involved.
+
+The Starlight build interoperates with desktop `PerfectComms.dll` players in
+the same voice lobby. The desktop build and its native media stack are
+unchanged.
+
+Launch Among Us and open Perfect Comms from the Options menu. On desktop, `F10`
+opens Voice Settings and `F11` opens Host Voice Settings.
 
 Perfect Comms installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies. For BepInEx setup help, see the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html).
 

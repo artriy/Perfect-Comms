@@ -18,13 +18,13 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
   `speexdsp`. Its BSD 3-Clause notice is embedded as
   `Licenses.cubeb-speex-resampler-BSD-3-Clause.txt`.
 
-## libopus (voice codec inside native media engines)
+## libopus (voice codec inside the desktop native media engine)
 
-- Files: statically linked inside the platform `pc-capture` and `pc-mobile` binaries; there is no
+- Files: statically linked inside the Windows, Linux, and macOS `pc-capture` helpers; there is no
   separately loaded managed-code Opus DLL.
 - Upstream: https://github.com/xiph/opus. Perfect Comms pins libopus 1.6.1 through
   `opusic-c` 1.6.1 / `opusic-sys` 0.7.3, builds it from the binding's bundled source, and enables
-  the upstream DRED feature on desktop and Android.
+  the upstream DRED feature on desktop.
 - License: BSD 3-Clause (Xiph.org Foundation), embedded as
   `Licenses.libopus-BSD-3-Clause.txt`.
 - Rust binding license: BSD 3-Clause (Douman), embedded as
@@ -48,9 +48,8 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
 ## Pion WebRTC v4.2.17 (peer-to-peer transport)
 
 - Release files: `Libs/pion/pc-pion.x64.dll`, `Libs/pion/pc-pion.x86.dll`,
-  `Libs/pion/libpc-pion.linux-x64.so`, the signed
-  `PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib` inside `pc-capture-mac.zip`, and
-  `Libs/pion/libpc-pion.android-arm64.so` in the Android build.
+  `Libs/pion/libpc-pion.linux-x64.so`, and the signed
+  `PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib` inside `pc-capture-mac.zip`.
 - Upstream: https://github.com/pion/webrtc, pinned to v4.2.17 together with the exact module graph
   in `native/pc-pion/go.mod` and `native/pc-pion/go.sum`.
 - License: MIT for Pion; the c-shared binary also incorporates the BSD-licensed Go runtime and
@@ -68,10 +67,10 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 
 ## Native Rust dependencies
 
-The native desktop and Android media engines statically link locked Rust dependency graphs,
-including the Pion dynamic-loading facade, serialization, audio I/O, codec, DSP integration, and
-platform support crates. A deterministic cargo-about inventory covering every shipped desktop
-target and Android ARM64 is generated from `native/pc-mobile/Cargo.lock` and embedded as
-`Licenses.native-rust-dependencies.html`. Cubeb's separately locked macOS Rust AudioUnit graph is
-embedded as `Licenses.cubeb-coreaudio-rust-dependencies.html`. CI regenerates both inventories
-from their locks and rejects drift.
+The native desktop `pc-capture` helpers statically link a locked Rust dependency graph, including
+the Pion dynamic-loading facade, serialization, audio I/O, codec, DSP integration, and platform
+support crates. A deterministic cargo-about inventory for that graph is generated from
+`native/pc-capture/Cargo.lock` and embedded as `Licenses.native-rust-dependencies.html`. Cubeb's
+separately locked macOS Rust AudioUnit graph is embedded as
+`Licenses.cubeb-coreaudio-rust-dependencies.html`. CI regenerates both inventories from their locks
+and rejects drift.

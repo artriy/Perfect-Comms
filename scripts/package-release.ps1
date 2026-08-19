@@ -2,6 +2,7 @@
 # Keep the protocol unchanged for compatible releases; increment it only when the
 # managed DLL <-> native sidecar contract changes.
 param(
+    [ValidateSet("All", "Release", "Windows")]
     [string]$Configuration = "All",
     [string]$Version,
     [int]$SidecarProtocolVersion = 0
@@ -11,14 +12,14 @@ $ErrorActionPreference = "Stop"
 
 if ($Configuration -eq "All") {
     & $PSCommandPath -Configuration Release -Version $Version -SidecarProtocolVersion $SidecarProtocolVersion
-    & $PSCommandPath -Configuration Android -Version $Version -SidecarProtocolVersion $SidecarProtocolVersion
+    & $PSCommandPath -Configuration Windows -Version $Version -SidecarProtocolVersion $SidecarProtocolVersion
     return
 }
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $project = Join-Path $root "PerfectComms.csproj"
 $dll = Join-Path $root "bin\$Configuration\net6.0\PerfectComms.dll"
-$releaseDllName = if ($Configuration -eq "Android") { "PerfectCommsAndroid.dll" } else { "PerfectComms.dll" }
+$releaseDllName = "PerfectComms.dll"
 $releaseDll = Join-Path $root "artifacts\$releaseDllName"
 
 function Write-ArtifactHash([string]$Path) {
@@ -92,27 +93,20 @@ if ($SidecarProtocolVersion -gt 0 -and $SidecarProtocolVersion.ToString() -ne $m
 }
 Write-Host "release.package.protocol network=$networkProtocol sidecar=$managedSidecarProtocol requested_sidecar=$SidecarProtocolVersion"
 
-if ($Configuration -eq "Android") {
-    Assert-ReleaseAsset "Libs\pc-mobile\libpc_mobile.so"
-    Assert-ReleaseAsset "Libs\pion\libpc-pion.android-arm64.so"
-    Assert-ReleaseAsset "release-assets\android\AndroidManifest.xml"
-    Assert-ReleaseAsset "release-assets\android\README.md"
-} else {
-    @(
-        "Libs\pc-capture\pc-capture-win-x64.exe",
-        "Libs\pc-capture\pc-capture-win-x86.exe",
-        "Libs\pc-capture\pc-capture-linux-x64",
-        "Libs\pc-capture\pc-capture-mac.zip",
-        "Libs\dsp\webrtc-apm.x64.dll",
-        "Libs\dsp\webrtc-apm.x86.dll",
-        "Libs\dsp\libwebrtc-apm.so",
-        "Libs\pion\pc-pion.x64.dll",
-        "Libs\pion\pc-pion.x86.dll",
-        "Libs\pion\libpc-pion.linux-x64.so"
-    ) | ForEach-Object { Assert-ReleaseAsset $_ }
-    Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
-    Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol
-}
+@(
+    "Libs\pc-capture\pc-capture-win-x64.exe",
+    "Libs\pc-capture\pc-capture-win-x86.exe",
+    "Libs\pc-capture\pc-capture-linux-x64",
+    "Libs\pc-capture\pc-capture-mac.zip",
+    "Libs\dsp\webrtc-apm.x64.dll",
+    "Libs\dsp\webrtc-apm.x86.dll",
+    "Libs\dsp\libwebrtc-apm.so",
+    "Libs\pion\pc-pion.x64.dll",
+    "Libs\pion\pc-pion.x86.dll",
+    "Libs\pion\libpc-pion.linux-x64.so"
+) | ForEach-Object { Assert-ReleaseAsset $_ }
+Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
+Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol
 Assert-NativeAssetLayouts $Configuration
 
 if ($Version) {
@@ -145,23 +139,19 @@ if ($buildExit -ne 0) { throw "dotnet build failed with exit code $buildExit" }
 $warningCount = @($buildOutput | Select-String -Pattern "warning ").Count
 Write-Host "release.package.build_ok configuration=$Configuration warnings=$warningCount"
 
-if ($Configuration -ne "Android") {
-    $helperResourceTest = & dotnet test (Join-Path $root "PerfectComms.Tests\PerfectComms.Tests.csproj") `
-        -c $Configuration --nologo --filter "FullyQualifiedName~EmbeddedDesktopHelpersMatchStagedFiles" `
-        -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
-    $helperResourceTestExit = $LASTEXITCODE
-    $helperResourceTest | ForEach-Object { Write-Host $_ }
-    if ($helperResourceTestExit -ne 0) {
-        throw "embedded native helper verification failed with exit code $helperResourceTestExit"
-    }
-    Write-Host "release.package.embedded_helpers_match configuration=$Configuration"
+$helperResourceTest = & dotnet test (Join-Path $root "PerfectComms.Tests\PerfectComms.Tests.csproj") `
+    -c $Configuration --nologo --filter "FullyQualifiedName~EmbeddedDesktopHelpersMatchStagedFiles" `
+    -p:RestoreLockedMode=true -p:ValidateReleaseAssets=true 2>&1
+$helperResourceTestExit = $LASTEXITCODE
+$helperResourceTest | ForEach-Object { Write-Host $_ }
+if ($helperResourceTestExit -ne 0) {
+    throw "embedded native helper verification failed with exit code $helperResourceTestExit"
 }
+Write-Host "release.package.embedded_helpers_match configuration=$Configuration"
 
-if ($Configuration -ne "Android") {
-    & (Join-Path $root "scripts\package-api.ps1") -Configuration $Configuration
-    if ($LASTEXITCODE -ne 0) {
-        throw "PerfectComms.Api packaging failed with exit code $LASTEXITCODE"
-    }
+& (Join-Path $root "scripts\package-api.ps1") -Configuration $Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "PerfectComms.Api packaging failed with exit code $LASTEXITCODE"
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root "artifacts") | Out-Null

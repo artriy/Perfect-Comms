@@ -13,6 +13,17 @@ Perfect Comms v4.1.10 supports the new Among Us v18 meeting player identifiers w
 - **Meeting voice features continue to identify the correct player on both old and new Among Us releases.**
   > <sub>Among Us v18 replaced each meeting card's byte `TargetPlayerId` with an `InnerNet.PlayerId` value. Perfect Comms now resolves and caches whichever representation the running game exposes, normalizes it to the existing byte identity, and avoids a static dependency on either member. This keeps meeting speaking indicators, public-death roster updates, and identity-privacy checks available on v18 without dropping the validated pre-v18 path.</sub>
 
+### Managed Starlight Android Build
+
+- **Android voice now runs through a security-compatible managed backend.**
+  > <sub>The Starlight build uses managed SIPSorcery WebRTC and Concentus Opus around Unity capture and playback, with no pc-mobile library, native DSP engine, or undeclared native interop. Validation rejects native binaries and verifies the managed dependency closure merged into the final assembly.</sub>
+
+- **Starlight and desktop now build against their own game and runtime contracts.**
+  > <sub>The Android plugin is a dedicated `net10.0` project compiled against `AmongUs.GameLibs.Android` with `ANDROID` and `STARLIGHT`, while the existing `net6.0` desktop plugin keeps its native pc-capture and Pion media path unchanged. A managed-to-Pion interop probe covers signaling, ICE, connection, and audible Opus media.</sub>
+
+- **Testers receive one verified managed DLL.**
+  > <sub>`artifacts/PerfectCommsStarlight.dll` is the complete Starlight tester artifact. Its managed media dependencies are merged into the assembly, and the Perfect Comms license, managed dependency notices, and complete SIPSorcery terms are embedded in the DLL. No companion DLL or ZIP is required.</sub>
+
 ## Perfect Comms v4.1.9
 
 Perfect Comms v4.1.9 restores native microphone startup from deeply nested Windows installations while preserving secure native cache isolation.

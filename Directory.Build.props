@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'PerfectComms.Starlight'">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\starlight\plugin\obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'PerfectComms.Starlight.Media'">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\starlight\media\obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>
