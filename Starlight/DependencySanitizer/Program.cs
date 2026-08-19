@@ -26,7 +26,7 @@ internal static class Program
             ["Licenses.THIRD_PARTY_NOTICES.md"] =
                 "98E571B2A4D4325A005607A29929405E153E4ADAB523E29F2698C5D17D7EAC36",
             ["Licenses.SIPSorcery-LICENSE.md"] =
-                "6675C4A1E6ECDA95CFC1D55540D264A08EBB61EF3EC5C0DFA2076D112F60C042"
+                "C6806C324232D99B9F1BE116B55D376589C817EF22C6A514C1365C428499835A"
         };
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);

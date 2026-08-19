@@ -7,3 +7,6 @@ Libs/system-text-encodings-web.THIRD-PARTY-NOTICES.TXT -text -diff -whitespace
 Libs/system-text-json.THIRD-PARTY-NOTICES.TXT -text -diff -whitespace
 native/cargo-about.hbs text eol=lf
 native/cargo-about.toml text eol=lf
+LICENSE text eol=lf
+Starlight/THIRD_PARTY_NOTICES.md text eol=lf
+Starlight/licenses/SIPSorcery-LICENSE.md text eol=lf
