@@ -13,6 +13,7 @@ public sealed class ManagedWebRtcPeer : IDisposable
     private static readonly byte[] EmptyAudio = Array.Empty<byte>();
 
     private readonly object _signalGate = new();
+    private readonly object _negotiationQueueGate = new();
     private readonly SemaphoreSlim _negotiationGate = new(1, 1);
     private readonly RTCPeerConnection _connection;
     private readonly string?[] _pendingRemoteCandidates = new string[MaximumPendingCandidates];
@@ -24,6 +25,10 @@ public sealed class ManagedWebRtcPeer : IDisposable
     private int _localSignalState;
     private string? _currentLocalUfrag;
     private int _connected;
+    private int _pendingRemoteDescriptions;
+    private int _sendFailed;
+    private int _appliedRemoteCandidatesForTest;
+    private Task _negotiationTail = Task.CompletedTask;
     private int _disposed;
 
     public ManagedWebRtcPeer(
@@ -58,11 +63,12 @@ public sealed class ManagedWebRtcPeer : IDisposable
     public event Action<string, string>? LocalSdp;
     public event Action<string>? LocalCandidate;
     public event Action<string>? StateChanged;
-    public event Action<ushort, uint, ArraySegment<byte>>? OpusPacketReceived;
+    public event Action<uint, ushort, uint, ArraySegment<byte>>? OpusPacketReceived;
 
     public string PeerId { get; }
     public int Generation { get; }
-    public bool IsConnected => Volatile.Read(ref _connected) != 0;
+    public bool IsConnected => Volatile.Read(ref _sendFailed) == 0 &&
+        Volatile.Read(ref _connected) != 0;
 
     public bool Start(bool createOffer)
     {
@@ -80,9 +86,12 @@ public sealed class ManagedWebRtcPeer : IDisposable
             return false;
         if (!TryParseSdpType(sdpType, out RTCSdpType type) || type is RTCSdpType.rollback or RTCSdpType.pranswer)
             return false;
-        if (type == RTCSdpType.offer)
-            PrepareAnswerSignals();
 
+        lock (_signalGate)
+        {
+            _pendingRemoteDescriptions++;
+            _remoteDescriptionSet = false;
+        }
         QueueNegotiation(() => ApplyRemoteSdpAsync(type, sdp));
         return true;
     }
@@ -118,57 +127,45 @@ public sealed class ManagedWebRtcPeer : IDisposable
         if (Volatile.Read(ref _disposed) != 0)
             return false;
 
-        try
-        {
-            ResetLocalSignals();
-            _connection.restartIce();
-            if (createOffer)
-                QueueNegotiation(CreateOfferAsync);
-            return true;
-        }
-        catch
-        {
-            PublishState("failed");
-            return false;
-        }
+        lock (_signalGate) _remoteDescriptionSet = false;
+        Interlocked.Exchange(ref _sendFailed, 0);
+        QueueNegotiation(() => RestartIceAsync(createOffer));
+        return true;
     }
 
     public bool SendEncodedOpus(byte[] packet, int length)
     {
-        if (Volatile.Read(ref _disposed) != 0 || !IsConnected ||
-            packet is null || length <= 0 || length > packet.Length)
+        if (Volatile.Read(ref _disposed) != 0 || Volatile.Read(ref _sendFailed) != 0 ||
+            !IsConnected || packet is null || length <= 0 || length > packet.Length)
             return false;
 
         try
         {
-            AudioStream? stream = _connection.AudioStream;
-            if (stream is null)
+            if (!TrySendAudio(ManagedOpusEncoder.FrameSamples, new ArraySegment<byte>(packet, 0, length)))
                 return false;
-            stream.SendAudio(ManagedOpusEncoder.FrameSamples, new ArraySegment<byte>(packet, 0, length));
             return true;
         }
         catch
         {
-            PublishState("failed");
+            FailSend();
             return false;
         }
     }
     public bool AdvanceAudioTimestamp(uint durationRtpUnits)
     {
-        if (Volatile.Read(ref _disposed) != 0 || !IsConnected || durationRtpUnits == 0)
+        if (Volatile.Read(ref _disposed) != 0 || Volatile.Read(ref _sendFailed) != 0 ||
+            !IsConnected || durationRtpUnits == 0)
             return false;
 
         try
         {
-            AudioStream? stream = _connection.AudioStream;
-            if (stream is null)
+            if (!TrySendAudio(durationRtpUnits, new ArraySegment<byte>(EmptyAudio)))
                 return false;
-            stream.SendAudio(durationRtpUnits, new ArraySegment<byte>(EmptyAudio));
             return true;
         }
         catch
         {
-            PublishState("failed");
+            FailSend();
             return false;
         }
     }
@@ -217,6 +214,56 @@ public sealed class ManagedWebRtcPeer : IDisposable
         }
     }
 
+    internal Action<uint, ArraySegment<byte>>? SendAudioForTest { get; set; }
+    internal int PendingRemoteCandidateCountForTest
+    {
+        get { lock (_signalGate) return _pendingRemoteCandidateCount; }
+    }
+    internal bool RemoteDescriptionPendingForTest
+    {
+        get { lock (_signalGate) return _pendingRemoteDescriptions != 0; }
+    }
+    internal bool RemoteDescriptionReadyForTest
+    {
+        get { lock (_signalGate) return _remoteDescriptionSet; }
+    }
+    internal void SetConnectedForTest() =>
+        OnConnectionStateChanged(RTCPeerConnectionState.connected);
+    internal int AppliedRemoteCandidateCountForTest =>
+        Volatile.Read(ref _appliedRemoteCandidatesForTest);
+    internal int LocalSignalStateForTest
+    {
+        get { lock (_signalGate) return _localSignalState; }
+    }
+    internal void SetLocalSignalsPublishedForTest()
+    {
+        lock (_signalGate) _localSignalState = 2;
+    }
+    internal void SetRemoteDescriptionReadyForTest()
+    {
+        lock (_signalGate) _remoteDescriptionSet = true;
+    }
+    internal Task WaitForNegotiationForTest()
+    {
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        QueueNegotiation(() =>
+        {
+            completed.TrySetResult();
+            return Task.CompletedTask;
+        });
+        return completed.Task;
+    }
+    internal Task HoldNegotiationForTest(Task release)
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        QueueNegotiation(async () =>
+        {
+            entered.TrySetResult();
+            await release.ConfigureAwait(false);
+        });
+        return entered.Task;
+    }
+
     private static List<RTCIceServer> MapIceServers(IReadOnlyList<ManagedIceServer> servers)
     {
         var mapped = new List<RTCIceServer>(servers.Count);
@@ -261,32 +308,50 @@ public sealed class ManagedWebRtcPeer : IDisposable
         type = default;
         return false;
     }
-
     private void QueueNegotiation(Func<Task> negotiation)
     {
-        _ = Task.Run(async () =>
+        lock (_negotiationQueueGate)
+            _negotiationTail = RunQueuedNegotiationAsync(_negotiationTail, negotiation);
+    }
+
+    private async Task RunQueuedNegotiationAsync(Task previous, Func<Task> negotiation)
+    {
+        await Task.Yield();
+        await previous.ConfigureAwait(false);
+        await RunNegotiationAsync(negotiation).ConfigureAwait(false);
+    }
+
+
+    private async Task RunNegotiationAsync(Func<Task> negotiation)
+    {
+        try
         {
+            await _negotiationGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                await _negotiationGate.WaitAsync().ConfigureAwait(false);
-                try
-                {
-                    if (Volatile.Read(ref _disposed) == 0)
-                        await negotiation().ConfigureAwait(false);
-                }
-                finally
-                {
-                    _negotiationGate.Release();
-                }
+                if (Volatile.Read(ref _disposed) == 0)
+                    await negotiation().ConfigureAwait(false);
             }
-            catch (ObjectDisposedException)
+            finally
             {
+                _negotiationGate.Release();
             }
-            catch
-            {
-                PublishState("failed");
-            }
-        });
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch
+        {
+            PublishState("failed");
+        }
+    }
+
+    private async Task RestartIceAsync(bool createOffer)
+    {
+        ResetLocalSignals();
+        _connection.restartIce();
+        if (createOffer)
+            await CreateOfferAsync().ConfigureAwait(false);
     }
 
     private async Task CreateOfferAsync()
@@ -302,15 +367,27 @@ public sealed class ManagedWebRtcPeer : IDisposable
 
     private async Task ApplyRemoteSdpAsync(RTCSdpType type, string sdp)
     {
-        SetDescriptionResultEnum setResult = _connection.setRemoteDescription(new RTCSessionDescriptionInit
-        {
-            type = type,
-            sdp = sdp
-        });
-        if (setResult != SetDescriptionResultEnum.OK)
-            throw new InvalidOperationException($"Remote SDP was rejected: {setResult}.");
+        if (type == RTCSdpType.offer)
+            PrepareAnswerSignals();
 
-        FlushRemoteCandidates();
+        try
+        {
+            SetDescriptionResultEnum setResult = _connection.setRemoteDescription(new RTCSessionDescriptionInit
+            {
+                type = type,
+                sdp = sdp
+            });
+            if (setResult != SetDescriptionResultEnum.OK)
+                throw new InvalidOperationException($"Remote SDP was rejected: {setResult}.");
+        }
+        catch
+        {
+            CompleteRemoteDescription(success: false);
+            throw;
+        }
+
+        if (CompleteRemoteDescription(success: true))
+            FlushRemoteCandidates();
         if (type != RTCSdpType.offer)
             return;
 
@@ -342,6 +419,16 @@ public sealed class ManagedWebRtcPeer : IDisposable
         }
     }
 
+    private bool CompleteRemoteDescription(bool success)
+    {
+        lock (_signalGate)
+        {
+            if (_pendingRemoteDescriptions > 0)
+                _pendingRemoteDescriptions--;
+            return success && _pendingRemoteDescriptions == 0;
+        }
+    }
+
     private bool ApplyIceCandidate(string candidate)
     {
         try
@@ -352,6 +439,7 @@ public sealed class ManagedWebRtcPeer : IDisposable
                 sdpMid = "0",
                 sdpMLineIndex = 0
             });
+            Interlocked.Increment(ref _appliedRemoteCandidatesForTest);
             return true;
         }
         catch
@@ -367,8 +455,6 @@ public sealed class ManagedWebRtcPeer : IDisposable
             _localSignalState = 0;
             _currentLocalUfrag = null;
             _remoteDescriptionSet = false;
-            Array.Clear(_pendingRemoteCandidates, 0, _pendingRemoteCandidateCount);
-            _pendingRemoteCandidateCount = 0;
             Array.Clear(_pendingLocalCandidates, 0, _pendingLocalCandidateCount);
             Array.Clear(_pendingLocalCandidateUfrags, 0, _pendingLocalCandidateCount);
             _pendingLocalCandidateCount = 0;
@@ -426,8 +512,10 @@ public sealed class ManagedWebRtcPeer : IDisposable
 
     private void PublishLocalSdp(string type, string sdp)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
         LocalSdp?.Invoke(type, sdp);
-        while (true)
+        while (Volatile.Read(ref _disposed) == 0)
         {
             string[] candidates;
             lock (_signalGate)
@@ -447,7 +535,7 @@ public sealed class ManagedWebRtcPeer : IDisposable
                 }
                 _pendingLocalCandidateCount = 0;
             }
-            for (int i = 0; i < candidates.Length; i++)
+            for (int i = 0; i < candidates.Length && Volatile.Read(ref _disposed) == 0; i++)
                 LocalCandidate?.Invoke(candidates[i]);
         }
     }
@@ -490,15 +578,43 @@ public sealed class ManagedWebRtcPeer : IDisposable
         }
         if (overflow)
             PublishState("failed");
-        else if (publishNow)
+        else if (publishNow && Volatile.Read(ref _disposed) == 0)
             LocalCandidate?.Invoke(candidate);
     }
 
     private void OnConnectionStateChanged(RTCPeerConnectionState state)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
         bool connected = state == RTCPeerConnectionState.connected;
+        if (connected)
+            Interlocked.Exchange(ref _sendFailed, 0);
         Volatile.Write(ref _connected, connected ? 1 : 0);
-        PublishState(state.ToString());
+        if (connected || Volatile.Read(ref _sendFailed) == 0)
+            PublishState(state.ToString());
+    }
+
+    private bool TrySendAudio(uint durationRtpUnits, ArraySegment<byte> packet)
+    {
+        Action<uint, ArraySegment<byte>>? testSender = SendAudioForTest;
+        if (testSender is not null)
+        {
+            testSender(durationRtpUnits, packet);
+            return true;
+        }
+        AudioStream? stream = _connection.AudioStream;
+        if (stream is null)
+            return false;
+        stream.SendAudio(durationRtpUnits, packet);
+        return true;
+    }
+
+    private void FailSend()
+    {
+        bool publish = Interlocked.Exchange(ref _sendFailed, 1) == 0;
+        Volatile.Write(ref _connected, 0);
+        if (publish)
+            PublishState("failed");
     }
 
     private void PublishState(string state)
@@ -520,6 +636,7 @@ public sealed class ManagedWebRtcPeer : IDisposable
         if (payloadLength <= 0 || payloadLength > ManagedOpusEncoder.MaxPacketBytes)
             return;
         OpusPacketReceived?.Invoke(
+            packet.Header.SyncSource,
             packet.Header.SequenceNumber,
             packet.Header.Timestamp,
             packet.GetPayloadSegment(0, payloadLength));

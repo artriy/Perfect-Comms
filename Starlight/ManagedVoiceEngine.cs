@@ -52,11 +52,14 @@ public sealed class ManagedVoiceEngine : IDisposable
     private bool _levelSpeaking;
     private int _levelFrameCount;
     private bool _deafened;
+    private long _playbackVersion;
     private int _running;
     private int _micActive;
     private int _synthetic;
     private int _eventDispatchRunning;
     private int _eventCount;
+    private int _eventReadyDisposed;
+    private int _disposeEventReadyOnExit;
     private int _diagnosticsEnabled;
     private int _disposed;
     private int _failed;
@@ -191,11 +194,19 @@ public sealed class ManagedVoiceEngine : IDisposable
                 context.RequestMediaReset();
             Enqueue(EngineEvent.ForState(peerId, generation, state));
         };
-        peer.OpusPacketReceived += context.OnOpusPacket = (sequence, timestamp, payload) =>
+        peer.OpusPacketReceived += context.OnOpusPacket = (ssrc, sequence, timestamp, payload) =>
         {
-            if (context.Ingress.TryWrite(sequence, timestamp, payload))
+            bool accepted;
+            bool dropped = false;
+            lock (_peerGate)
+            {
+                accepted = _peers.TryGetValue(peerId, out PeerContext? current) &&
+                    ReferenceEquals(current, context) &&
+                    context.TryAcceptOpus(ssrc, sequence, timestamp, payload, out dropped);
+            }
+            if (accepted)
                 Interlocked.Increment(ref _receivedPackets);
-            else
+            if (!accepted || dropped)
                 Interlocked.Increment(ref _rejectedPackets);
         };
 
@@ -330,12 +341,13 @@ public sealed class ManagedVoiceEngine : IDisposable
     public void ConfigureGameState(bool deafened, float master, IReadOnlyList<ManagedPeerRoute> routes)
     {
         ArgumentNullException.ThrowIfNull(routes);
+        lock (_mixerGate) _mixer.Configure(deafened, master, routes);
         lock (_playbackGate)
         {
-            lock (_mixerGate) _mixer.Configure(deafened, master, routes);
             if (deafened && !_deafened)
                 _playback.DiscardQueued();
             _deafened = deafened;
+            Interlocked.Increment(ref _playbackVersion);
         }
     }
 
@@ -387,6 +399,56 @@ public sealed class ManagedVoiceEngine : IDisposable
 
     internal bool EnqueueLocalLevelForTest() => Enqueue(EngineEvent.ForLocalLevel(0f, false));
     internal bool EnqueuePeerStateForTest() => Enqueue(EngineEvent.ForState("event-overflow", 1, "failed"));
+    internal Action? BeforeMixerWorkForTest { get; set; }
+    internal Action? BeforePlaybackWriteForTest { get; set; }
+    internal void PumpPlaybackFrameForTest() => PumpPlaybackFrame();
+    internal void AddPeerForTest(string peerId)
+    {
+        var peer = new ManagedWebRtcPeer(peerId, 1, Array.Empty<ManagedIceServer>());
+        lock (_peerGate) _peers.Add(peerId, new PeerContext(peer));
+    }
+    internal bool IngestOpusForTest(
+        string peerId,
+        int generation,
+        uint ssrc,
+        ushort sequence,
+        uint timestamp,
+        byte[] payload)
+    {
+        lock (_peerGate)
+        {
+            if (!_peers.TryGetValue(peerId, out PeerContext? context) ||
+                context.Peer.Generation != generation)
+                return false;
+            return context.TryAcceptOpus(
+                ssrc,
+                sequence,
+                timestamp,
+                new ArraySegment<byte>(payload),
+                out _);
+        }
+    }
+
+    internal float PeerDecodedPeakForTest(string peerId)
+    {
+        lock (_peerGate)
+        {
+            if (!_peers.TryGetValue(peerId, out PeerContext? context))
+                return 0f;
+            float peak = 0f;
+            for (int i = 0; i < context.DecodedSamples.Length; i++)
+                peak = Math.Max(peak, Math.Abs(context.DecodedSamples[i]));
+            return peak;
+        }
+    }
+
+    internal int PeerSourceEpochForTest(string peerId)
+    {
+        lock (_peerGate)
+            return _peers.TryGetValue(peerId, out PeerContext? context)
+                ? context.SourceEpoch
+                : -1;
+    }
 
     public void ResetMicInput() { lock (_micGate) ResetMicInputLocked(); }
 
@@ -395,9 +457,15 @@ public sealed class ManagedVoiceEngine : IDisposable
         lock (_lifecycleGate)
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            lock (_shutdownGate)
+            {
+                Volatile.Write(ref _disposeEventReadyOnExit, 1);
+                Volatile.Write(ref _eventDispatchRunning, 0);
+                SignalEventLoop();
+                _stopSource?.Cancel();
+            }
             Volatile.Write(ref _micActive, 0);
             Volatile.Write(ref _running, 0);
-            lock (_shutdownGate) _stopSource?.Cancel();
             bool playbackStopped = JoinBounded(_playbackThread);
             if (playbackStopped) _playbackThread = null;
 
@@ -410,10 +478,9 @@ public sealed class ManagedVoiceEngine : IDisposable
             }
             for (int i = 0; i < peers.Length; i++) peers[i].Dispose();
 
-            Volatile.Write(ref _eventDispatchRunning, 0);
-            _eventReady.Set();
             bool eventStopped = JoinBounded(_eventThread);
-            if (eventStopped) _eventThread = null;
+            if (eventStopped)
+                _eventThread = null;
             lock (_micGate)
             {
                 _encoder?.Reset();
@@ -434,7 +501,7 @@ public sealed class ManagedVoiceEngine : IDisposable
                     _stopSource?.Dispose();
                     _stopSource = null;
                 }
-                if (eventStopped) _eventReady.Dispose();
+                if (eventStopped) DisposeEventReady();
             }
         }
     }
@@ -577,6 +644,11 @@ public sealed class ManagedVoiceEngine : IDisposable
                 bool measurementEligible;
                 try
                 {
+                    if (decision.Kind == RtpJitterDecisionKind.Discontinuity)
+                    {
+                        context.ResetDecoder();
+                        decision = context.Jitter.GetDecision(now, context.PacketScratch);
+                    }
                     switch (decision.Kind)
                     {
                         case RtpJitterDecisionKind.Packet:
@@ -608,10 +680,17 @@ public sealed class ManagedVoiceEngine : IDisposable
                 _decodedFrames.Add(new DecodedPeerFrame(context.Peer.PeerId, context.DecodedSamples, decoded, measurementEligible));
             }
         }
+        long playbackVersion = Interlocked.Read(ref _playbackVersion);
+        lock (_mixerGate)
+        {
+            BeforeMixerWorkForTest?.Invoke();
+            _mixer.Mix(_decodedFrames, _mixedStereo, _peerLevels);
+        }
+        BeforePlaybackWriteForTest?.Invoke();
         lock (_playbackGate)
         {
-            lock (_mixerGate) _mixer.Mix(_decodedFrames, _mixedStereo, _peerLevels);
-            _playback.Write(_mixedStereo);
+            if (playbackVersion == Interlocked.Read(ref _playbackVersion))
+                _playback.Write(_mixedStereo);
         }
     }
 
@@ -626,45 +705,75 @@ public sealed class ManagedVoiceEngine : IDisposable
 
     private void EventLoop()
     {
-        while (Volatile.Read(ref _eventDispatchRunning) != 0 || Volatile.Read(ref _eventCount) != 0)
+        try
         {
-            if (!_events.TryDequeue(out EngineEvent e)) { _eventReady.WaitOne(100); continue; }
-            Interlocked.Decrement(ref _eventCount);
-            try
+            while (Volatile.Read(ref _eventDispatchRunning) != 0 ||
+                   Volatile.Read(ref _eventCount) != 0)
             {
-                switch (e.Kind)
+                if (!_events.TryDequeue(out EngineEvent e))
                 {
-                    case EngineEventKind.LocalSdp:
-                        if (IsCurrentGeneration(e.PeerId!, e.Generation))
-                            LocalSdp?.Invoke(e.PeerId!, e.Generation, e.Value!, e.Sdp!);
-                        break;
-                    case EngineEventKind.LocalCandidate:
-                        if (IsCurrentGeneration(e.PeerId!, e.Generation))
-                            LocalCandidate?.Invoke(e.PeerId!, e.Generation, e.Value!);
-                        break;
-                    case EngineEventKind.PeerState:
-                        if (IsCurrentGeneration(e.PeerId!, e.Generation))
-                        {
-                            ResetEncoderIfTransmissionClosed();
-                            PeerState?.Invoke(e.PeerId!, e.Generation, e.Value!);
-                        }
-                        break;
-                    case EngineEventKind.LocalLevel: LocalLevel?.Invoke(e.Peak, e.Speaking); break;
-                    case EngineEventKind.PeerLevels:
-                        try
-                        {
+                    _eventReady.WaitOne(100);
+                    continue;
+                }
+                Interlocked.Decrement(ref _eventCount);
+                if (Volatile.Read(ref _eventDispatchRunning) == 0 ||
+                    Volatile.Read(ref _disposed) != 0)
+                {
+                    ReleaseEvent(e);
+                    continue;
+                }
+                try
+                {
+                    switch (e.Kind)
+                    {
+                        case EngineEventKind.LocalSdp:
+                            if (IsCurrentGeneration(e.PeerId!, e.Generation))
+                                LocalSdp?.Invoke(e.PeerId!, e.Generation, e.Value!, e.Sdp!);
+                            break;
+                        case EngineEventKind.LocalCandidate:
+                            if (IsCurrentGeneration(e.PeerId!, e.Generation))
+                                LocalCandidate?.Invoke(e.PeerId!, e.Generation, e.Value!);
+                            break;
+                        case EngineEventKind.PeerState:
+                            if (IsCurrentGeneration(e.PeerId!, e.Generation))
+                            {
+                                ResetEncoderIfTransmissionClosed();
+                                PeerState?.Invoke(e.PeerId!, e.Generation, e.Value!);
+                            }
+                            break;
+                        case EngineEventKind.LocalLevel:
+                            LocalLevel?.Invoke(e.Peak, e.Speaking);
+                            break;
+                        case EngineEventKind.PeerLevels:
                             PeerLevels?.Invoke(e.Levels);
-                        }
-                        finally
-                        {
-                            if (e.Levels.Array is not null)
-                                ArrayPool<ManagedPeerLevel>.Shared.Return(e.Levels.Array, clearArray: true);
-                        }
-                        break;
+                            break;
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    ReleaseEvent(e);
                 }
             }
-            catch { }
         }
+        finally
+        {
+            while (_events.TryDequeue(out EngineEvent e))
+            {
+                Interlocked.Decrement(ref _eventCount);
+                ReleaseEvent(e);
+            }
+            if (Volatile.Read(ref _disposeEventReadyOnExit) != 0)
+                DisposeEventReady();
+        }
+    }
+
+    private static void ReleaseEvent(EngineEvent e)
+    {
+        if (e.Kind == EngineEventKind.PeerLevels && e.Levels.Array is not null)
+            ArrayPool<ManagedPeerLevel>.Shared.Return(e.Levels.Array, clearArray: true);
     }
 
     private bool IsCurrentGeneration(string peerId, int generation)
@@ -709,7 +818,7 @@ public sealed class ManagedVoiceEngine : IDisposable
             return false;
         }
         _events.Enqueue(e);
-        _eventReady.Set();
+        SignalEventLoop();
         return true;
     }
 
@@ -723,7 +832,7 @@ public sealed class ManagedVoiceEngine : IDisposable
             Volatile.Write(ref _running, 0);
             _stopSource?.Cancel();
             Volatile.Write(ref _eventDispatchRunning, 0);
-            _eventReady.Set();
+            SignalEventLoop();
         }
     }
 
@@ -753,6 +862,24 @@ public sealed class ManagedVoiceEngine : IDisposable
         return thread.Join(ShutdownTimeoutMilliseconds);
     }
 
+    private void SignalEventLoop()
+    {
+        lock (_shutdownGate)
+        {
+            if (Volatile.Read(ref _eventReadyDisposed) == 0)
+                _eventReady.Set();
+        }
+    }
+
+    private void DisposeEventReady()
+    {
+        lock (_shutdownGate)
+        {
+            if (Interlocked.Exchange(ref _eventReadyDisposed, 1) == 0)
+                _eventReady.Dispose();
+        }
+    }
+
     private sealed class PeerContext : IDisposable
     {
         public readonly ManagedWebRtcPeer Peer;
@@ -763,60 +890,128 @@ public sealed class ManagedVoiceEngine : IDisposable
         public readonly float[] DecodedSamples = new float[FrameSamples];
         public int ConcealmentFrames;
         private int _resetMediaRequested;
+        public int SourceEpoch;
+        private int _sourceResetRequested;
         public Action<string, string>? OnLocalSdp;
         public Action<string>? OnLocalCandidate;
         public Action<string>? OnStateChanged;
-        public Action<ushort, uint, ArraySegment<byte>>? OnOpusPacket;
+        public Action<uint, ushort, uint, ArraySegment<byte>>? OnOpusPacket;
+        private readonly HashSet<uint> _retiredSources = new();
+        private uint _activeSource;
+        private bool _hasActiveSource;
         public PeerContext(ManagedWebRtcPeer peer) => Peer = peer;
+        public bool TryAcceptOpus(
+            uint ssrc,
+            ushort sequence,
+            uint timestamp,
+            ArraySegment<byte> payload,
+            out bool dropped)
+        {
+            dropped = false;
+            if (!_hasActiveSource)
+            {
+                _activeSource = ssrc;
+                _hasActiveSource = true;
+            }
+            else if (_activeSource != ssrc)
+            {
+                if (_retiredSources.Contains(ssrc) || _retiredSources.Count >= MaximumPeers)
+                    return false;
+                _retiredSources.Add(_activeSource);
+                Interlocked.Exchange(ref _resetMediaRequested, 0);
+                Ingress.Reset();
+                Volatile.Write(ref _sourceResetRequested, 1);
+                _activeSource = ssrc;
+            }
+            return Ingress.TryWrite(sequence, timestamp, payload, out dropped);
+        }
         public void DrainIngress(long now)
         {
             if (Interlocked.Exchange(ref _resetMediaRequested, 0) != 0)
+            {
                 ResetMedia();
+                _retiredSources.Clear();
+                _hasActiveSource = false;
+                Volatile.Write(ref _sourceResetRequested, 0);
+            }
+            else if (Interlocked.Exchange(ref _sourceResetRequested, 0) != 0)
+            {
+                ResetDecoder();
+                Jitter.Reset();
+                SourceEpoch++;
+            }
             while (Ingress.TryRead(PacketScratch, out ushort sequence, out uint timestamp, out int length))
                 Jitter.Push(sequence, timestamp, PacketScratch.AsSpan(0, length), now);
         }
         public void RequestMediaReset() => Volatile.Write(ref _resetMediaRequested, 1);
-        public void ResetDecoder() { Decoder.Reset(); DecodedSamples.AsSpan().Clear(); ConcealmentFrames = 0; }
-        public void ResetMedia() { ResetDecoder(); Jitter.Reset(); Ingress.Reset(); }
+        public void ResetDecoder()
+        {
+            Decoder.Reset();
+            DecodedSamples.AsSpan().Clear();
+            ConcealmentFrames = 0;
+        }
+        public void ResetMedia()
+        {
+            ResetDecoder();
+            Jitter.Reset();
+            Ingress.Reset();
+        }
         public void Dispose()
         {
             if (OnLocalSdp is not null) Peer.LocalSdp -= OnLocalSdp;
             if (OnLocalCandidate is not null) Peer.LocalCandidate -= OnLocalCandidate;
             if (OnStateChanged is not null) Peer.StateChanged -= OnStateChanged;
             if (OnOpusPacket is not null) Peer.OpusPacketReceived -= OnOpusPacket;
-            Peer.Dispose(); Decoder.Dispose(); Jitter.Reset(); Ingress.Reset();
+            Peer.Dispose(); Decoder.Dispose(); Jitter.Reset(); Ingress.Reset(); _retiredSources.Clear();
         }
     }
 
-    private sealed class RtpIngressRing
+    internal sealed class RtpIngressRing
     {
+        private readonly object _gate = new();
         private readonly int _capacity, _payloadCapacity;
         private readonly byte[] _payloads;
         private readonly ushort[] _sequences;
         private readonly uint[] _timestamps;
         private readonly int[] _lengths;
-        private long _read, _write;
+        private long _read, _write, _dropped;
         public RtpIngressRing(int capacity, int payloadCapacity) { _capacity = capacity; _payloadCapacity = payloadCapacity; _payloads = new byte[checked(capacity * payloadCapacity)]; _sequences = new ushort[capacity]; _timestamps = new uint[capacity]; _lengths = new int[capacity]; }
-        public bool TryWrite(ushort sequence, uint timestamp, ArraySegment<byte> payload)
+        public long DroppedPackets => Interlocked.Read(ref _dropped);
+        public bool TryWrite(ushort sequence, uint timestamp, ArraySegment<byte> payload, out bool dropped)
         {
+            dropped = false;
             if (payload.Array is null || payload.Count <= 0 || payload.Count > _payloadCapacity) return false;
-            long write = Volatile.Read(ref _write), read = Volatile.Read(ref _read);
-            if (write - read >= _capacity) return false;
-            int slot = (int)(write % _capacity);
-            payload.AsSpan().CopyTo(_payloads.AsSpan(slot * _payloadCapacity, payload.Count));
-            _sequences[slot] = sequence; _timestamps[slot] = timestamp; _lengths[slot] = payload.Count;
-            Volatile.Write(ref _write, write + 1); return true;
+            lock (_gate)
+            {
+                if (_write - _read >= _capacity)
+                {
+                    _read++;
+                    dropped = true;
+                    Interlocked.Increment(ref _dropped);
+                }
+                int slot = (int)(_write % _capacity);
+                payload.AsSpan().CopyTo(_payloads.AsSpan(slot * _payloadCapacity, payload.Count));
+                _sequences[slot] = sequence; _timestamps[slot] = timestamp; _lengths[slot] = payload.Count;
+                _write++;
+                return true;
+            }
         }
         public bool TryRead(Span<byte> payload, out ushort sequence, out uint timestamp, out int length)
         {
-            long read = Volatile.Read(ref _read);
-            if (read == Volatile.Read(ref _write)) { sequence = 0; timestamp = 0; length = 0; return false; }
-            int slot = (int)(read % _capacity);
-            sequence = _sequences[slot]; timestamp = _timestamps[slot]; length = _lengths[slot];
-            _payloads.AsSpan(slot * _payloadCapacity, length).CopyTo(payload);
-            Volatile.Write(ref _read, read + 1); return true;
+            lock (_gate)
+            {
+                if (_read == _write) { sequence = 0; timestamp = 0; length = 0; return false; }
+                int slot = (int)(_read % _capacity);
+                sequence = _sequences[slot]; timestamp = _timestamps[slot]; length = _lengths[slot];
+                _payloads.AsSpan(slot * _payloadCapacity, length).CopyTo(payload);
+                _read++;
+                return true;
+            }
         }
-        public void Reset() => Volatile.Write(ref _read, Volatile.Read(ref _write));
+        public void Reset()
+        {
+            lock (_gate) _read = _write;
+        }
     }
 
     private sealed class PlaybackRing
@@ -837,11 +1032,16 @@ public sealed class ManagedVoiceEngine : IDisposable
         public void Write(ReadOnlySpan<float> samples)
         {
             long write = Volatile.Read(ref _write), read = Volatile.Read(ref _read);
-            int available = _samples.Length - (int)Math.Clamp(write - read, 0, _samples.Length);
-            int count = Math.Min(samples.Length, available);
-            for (int i = 0; i < count; i++) _samples[(int)((write + i) % _samples.Length)] = samples[i];
+            int sourceOffset = Math.Max(0, samples.Length - _samples.Length);
+            int count = samples.Length - sourceOffset;
+            int depth = (int)Math.Clamp(write - read, 0, _samples.Length);
+            int overflow = Math.Max(0, depth + count - _samples.Length);
+            int evicted = (overflow + 1) & ~1;
+            read += evicted;
+            for (int i = 0; i < count; i++) _samples[(int)((write + i) % _samples.Length)] = samples[sourceOffset + i];
+            Volatile.Write(ref _read, read);
             Volatile.Write(ref _write, write + count);
-            if (count != samples.Length) Interlocked.Add(ref _dropped, samples.Length - count);
+            if (sourceOffset != 0 || evicted != 0) Interlocked.Add(ref _dropped, sourceOffset + evicted);
             UpdateHighWater((int)Math.Clamp(write + count - read, 0, _samples.Length));
         }
         public bool Read(Span<float> destination)

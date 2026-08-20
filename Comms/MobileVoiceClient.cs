@@ -19,8 +19,6 @@ internal sealed class MobileVoiceClient : IDisposable
     private static int _startFailures;
     private static long _startNotBeforeMs;
 
-    private static readonly object RetainedEngineGate = new();
-    private static readonly List<ManagedVoiceEngine> RetainedEngines = new();
     private readonly object _lifecycleLock = new();
     private readonly object _micLock = new();
     private readonly object _controlLock = new();
@@ -29,6 +27,9 @@ internal sealed class MobileVoiceClient : IDisposable
     private ManagedVoiceEngine? _engine;
     private int _activeEngineCalls;
     private int _disposed;
+    private ManagedVoiceEngine? _retiredEngine;
+    private int _retiredEngineDisposalCount;
+    private int _retiredEngineDisposalQueued;
     private int _micActive;
     private int _micFill;
     private int _lastDiagnosticsEnabled = -1;
@@ -182,13 +183,22 @@ internal sealed class MobileVoiceClient : IDisposable
                     failedEngine.Dispose();
                     return FailStart("managed engine start failed");
                 }
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    var rejectedEngine = engine;
+                    engine = null;
+                    Unsubscribe(rejectedEngine);
+                    rejectedEngine.Dispose();
+                    return FailStart("client disposed during managed engine start");
+                }
 
                 Interlocked.Exchange(ref _engine, engine);
                 engine = null;
             }
 
             CompleteStart(success: true);
-            VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient managed-starlight engine started");
+            try { VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient managed-starlight engine started"); }
+            catch { }
             return true;
         }
         catch (Exception ex)
@@ -411,10 +421,11 @@ internal sealed class MobileVoiceClient : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         ManagedVoiceEngine? engine;
         lock (_lifecycleLock)
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             Volatile.Write(ref _micActive, 0);
             if (Monitor.TryEnter(_micLock))
             {
@@ -432,16 +443,73 @@ internal sealed class MobileVoiceClient : IDisposable
         var activeCalls = Volatile.Read(ref _activeEngineCalls);
         if (activeCalls != 0)
         {
-            lock (RetainedEngineGate)
-                RetainedEngines.Add(engine);
+            Interlocked.Exchange(ref _retiredEngine, engine);
+            QueueRetiredEngineDisposalIfReady();
             VoiceDiagnostics.Log("voice.mobile.shutdown",
-                $"state=abandoned-engine reason=dispose timeoutMs={ShutdownTimeoutMs} activeCalls={activeCalls}");
+                $"state=deferred-engine-dispose reason=dispose timeoutMs={ShutdownTimeoutMs} activeCalls={activeCalls}");
             return;
         }
 
-        Unsubscribe(engine);
-        engine.Dispose();
-        VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient managed-starlight engine disposed");
+        DisposeEngine(engine);
+    }
+
+    private void QueueRetiredEngineDisposalIfReady()
+    {
+        if (Volatile.Read(ref _activeEngineCalls) != 0 ||
+            Volatile.Read(ref _retiredEngine) == null ||
+            Interlocked.CompareExchange(ref _retiredEngineDisposalQueued, 1, 0) != 0)
+            return;
+
+        ThreadPool.QueueUserWorkItem(static state =>
+        {
+            var client = (MobileVoiceClient)state!;
+            try { client.DisposeRetiredEngine(); }
+            catch (Exception ex)
+            {
+                VoiceDiagnostics.Log("voice.mobile.shutdown",
+                    $"state=deferred-engine-dispose-failed error=\"{ex.Message.Replace('"', '\'')}\"");
+            }
+        }, this);
+    }
+
+    private void DisposeRetiredEngine()
+    {
+        var engine = Interlocked.Exchange(ref _retiredEngine, null);
+        if (engine != null)
+            DisposeEngine(engine);
+    }
+
+    private void DisposeEngine(ManagedVoiceEngine engine)
+    {
+        try
+        {
+            Unsubscribe(engine);
+        }
+        finally
+        {
+            try { engine.Dispose(); }
+            finally { Interlocked.Increment(ref _retiredEngineDisposalCount); }
+        }
+        try { VoiceDiagnostics.DebugInfo("[VC] MobileVoiceClient managed-starlight engine disposed"); }
+        catch { }
+    }
+
+    internal int EngineDisposalCountForTest
+        => Volatile.Read(ref _retiredEngineDisposalCount);
+
+    internal bool HoldEngineCallForTest(ManualResetEventSlim acquired, ManualResetEventSlim release)
+    {
+        if (!TryAcquireEngine(out var engine)) return false;
+        try
+        {
+            acquired.Set();
+            release.Wait();
+            return true;
+        }
+        finally
+        {
+            ReleaseEngine();
+        }
     }
 
     private bool TryAcquireEngine(out ManagedVoiceEngine engine)
@@ -466,11 +534,15 @@ internal sealed class MobileVoiceClient : IDisposable
                 engine = current;
                 return true;
             }
-            Interlocked.Decrement(ref _activeEngineCalls);
+            ReleaseEngine();
         }
     }
 
-    private void ReleaseEngine() => Interlocked.Decrement(ref _activeEngineCalls);
+    private void ReleaseEngine()
+    {
+        if (Interlocked.Decrement(ref _activeEngineCalls) == 0)
+            QueueRetiredEngineDisposalIfReady();
+    }
 
     private void Subscribe(ManagedVoiceEngine engine)
     {

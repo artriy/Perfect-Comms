@@ -92,8 +92,9 @@ Both commands create exactly `artifacts/PerfectCommsStarlight.dll`. The managed
 media stack and its pinned managed dependencies are merged into that assembly
 at build time. The DLL also embeds the Perfect Comms license, Starlight
 third-party notices, and the complete SIPSorcery license. Validation rejects
-native payloads, unmanaged imports, executable extraction, unexpected sibling
-DLLs or archives, and any output other than the single managed assembly. Copy
+native payloads, unmanaged imports outside Starlight's exact capture ABI,
+executable extraction, unexpected sibling DLLs or archives, and any output
+other than the single managed assembly. Copy
 or upload only `PerfectCommsStarlight.dll` for Starlight beta or approved
 local-mod testing. It is not an APK and contains no native Android payload.
 

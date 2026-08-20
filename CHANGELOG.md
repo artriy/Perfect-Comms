@@ -15,11 +15,14 @@ Perfect Comms v4.1.10 supports the new Among Us v18 meeting player identifiers w
 
 ### Managed Starlight Android Build
 
-- **Android voice now runs through a security-compatible managed backend.**
-  > <sub>The Starlight build uses managed SIPSorcery WebRTC and Concentus Opus around Unity capture and playback, with no pc-mobile library, native DSP engine, or undeclared native interop. Validation rejects native binaries and verifies the managed dependency closure merged into the final assembly.</sub>
+- **Android voice now uses Starlight's approved capture surface and a managed media backend.**
+  > <sub>The Starlight build records through the host `libstarlight.so` bridge, resamples supported fallback rates to 48 kHz, plays through Unity, and runs SIPSorcery WebRTC plus Concentus Opus in managed code. It ships no Android native payload, desktop DSP engine, or undeclared native dependency.</sub>
 
-- **Starlight and desktop now build against their own game and runtime contracts.**
-  > <sub>The Android plugin is a dedicated `net10.0` project compiled against `AmongUs.GameLibs.Android` with `ANDROID` and `STARLIGHT`, while the existing `net6.0` desktop plugin keeps its native pc-capture and Pion media path unchanged. A managed-to-Pion interop probe covers signaling, ICE, connection, and audible Opus media.</sub>
+- **Starlight and desktop build against separate game and runtime contracts.**
+  > <sub>The Android plugin is a dedicated `net10.0` project compiled against `AmongUs.GameLibs.Android` with `ANDROID` and `STARLIGHT`, while the existing `net6.0` desktop plugin keeps its native pc-capture and Pion media path unchanged. Exact assembly, import, resource, and dependency validation now matches the Starlight 1.6.3 host closure.</sub>
+
+- **Cross-play verification covers both signaling and codec directions.**
+  > <sub>The managed-to-Pion probe runs each offer role, sustained RTP audio in both directions, managed Concentus to desktop libopus decoding, desktop libopus to managed decoding, classic FEC, DRED-bearing packet compatibility, teardown, and peer reuse. Managed recovery also preserves fresh audio across SSRC changes, ICE restarts, queue pressure, and long packet loss.</sub>
 
 - **Testers receive one verified managed DLL.**
   > <sub>`artifacts/PerfectCommsStarlight.dll` is the complete Starlight tester artifact. Its managed media dependencies are merged into the assembly, and the Perfect Comms license, managed dependency notices, and complete SIPSorcery terms are embedded in the DLL. No companion DLL or ZIP is required.</sub>

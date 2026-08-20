@@ -158,6 +158,11 @@ This testing path does not imply public Starlight availability or approval.
 There is no Perfect Comms APK or native Android payload. No APK, manifest, or
 native-library staging is involved.
 
+Capture uses Starlight's built-in recording bridge and Unity playback. The DLL
+does not ship either native component. Starlight 1.6.3 exposes only the Android
+platform-default recording route, so the Starlight build does not present a
+device selector that the host cannot honor.
+
 The Starlight build interoperates with desktop `PerfectComms.dll` players in
 the same voice lobby. The desktop build and its native media stack are
 unchanged.

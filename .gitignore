@@ -65,6 +65,7 @@ artifacts/
 packaging/.nuget-smoke/
 native/pc-pion/.cache/
 native/pion-sys/target/
+Starlight/OpusInteropProbe/target/
 native/vendor/**/target/
 native/vendor/**/Cargo.lock
 # The patched Cubeb crates and libcubeb's nested Rust backends are validated

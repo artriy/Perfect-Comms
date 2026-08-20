@@ -14,8 +14,17 @@ $staging = Join-Path $stagingRoot "package"
 $inputs = Join-Path $staging "inputs"
 $references = Join-Path $staging "ReferencePath.json"
 $output = Join-Path $artifactDirectory "PerfectCommsStarlight.dll"
-$legacyDirectory = Join-Path $artifactDirectory "PerfectComms-Starlight"
-$legacyZip = Join-Path $artifactDirectory "PerfectComms-Starlight.zip"
+$ownedOutputNames = @(
+    "PerfectCommsStarlight.dll",
+    "PerfectCommsStarlight.old.dll",
+    "PerfectCommsStarlight.pdb",
+    "PerfectCommsStarlight.deps.json",
+    "PerfectCommsStarlight.runtimeconfig.json",
+    "PerfectCommsStarlight.xml",
+    "PerfectCommsStarlight.zip",
+    "PerfectComms-Starlight",
+    "PerfectComms-Starlight.zip"
+)
 $env:NUGET_PACKAGES = Join-Path $stagingRoot "nuget-packages"
 $projectLicense = Join-Path $root "LICENSE"
 $managedNotices = Join-Path $root "Starlight\THIRD_PARTY_NOTICES.md"
@@ -60,7 +69,10 @@ function Get-TargetPath {
 }
 
 New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
-Remove-Item $stagingRoot, $legacyDirectory, $legacyZip, $output -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $artifactDirectory -Force -ErrorAction SilentlyContinue |
+    Where-Object { $ownedOutputNames -contains $_.Name } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 $packageSucceeded = $false
 
 try {
@@ -162,13 +174,12 @@ if (-not (Test-Path $output -PathType Leaf) -or (Get-Item $output).Length -eq 0)
     throw "Starlight output is missing or empty: $output"
 }
 
-$forbiddenOutputs = @(
-    Get-ChildItem $artifactDirectory -Recurse -File -Filter "*Starlight*.zip" -ErrorAction SilentlyContinue
-    Get-ChildItem $artifactDirectory -Recurse -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("companions", "PerfectComms-Starlight") }
+$starlightOutputs = @(
+    Get-ChildItem $artifactDirectory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $ownedOutputNames -contains $_.Name }
 )
-if ($forbiddenOutputs.Count -ne 0) {
-    throw "Forbidden Starlight ZIP or companion output remains: $($forbiddenOutputs.FullName -join ', ')"
+if ($starlightOutputs.Count -ne 1 -or $starlightOutputs[0].FullName -ne $output) {
+    throw "Starlight distributable set must contain only $output; found: $($starlightOutputs.FullName -join ', ')"
 }
 
 Write-Host "starlight.package assembly=$output"

@@ -1,0 +1,13 @@
+[package]
+name = "starlight-opus-probe"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+publish = false
+
+[dependencies]
+opusic-c = { version = "=1.6.1", default-features = false, features = ["bundled", "dred"] }
+
+[profile.release]
+opt-level = 2
+codegen-units = 1

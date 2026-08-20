@@ -29,6 +29,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$root/Starlight/InteropProbe/PerfectComms.Starlight.InteropProbe.csproj"
 pion="$root/Libs/pion/libpc-pion.linux-x64.so"
 merged="$root/artifacts/PerfectCommsStarlight.dll"
+codec_manifest="$root/Starlight/OpusInteropProbe/Cargo.toml"
+codec_probe="$root/Starlight/OpusInteropProbe/target/release/starlight-opus-probe"
 if [[ ! -f "$pion" ]]; then
   printf '%s\n' 'starlight-pion-interop.failed code=pion-missing' >&2
   exit 1
@@ -37,5 +39,10 @@ if [[ ! -f "$merged" ]]; then
   printf '%s\n' 'starlight-pion-interop.failed code=merged-artifact-missing' >&2
   exit 1
 fi
+cargo build --manifest-path "$codec_manifest" --locked --release --bin starlight-opus-probe
+if [[ ! -f "$codec_probe" ]]; then
+  printf '%s\n' 'starlight-pion-interop.failed code=codec-probe-missing' >&2
+  exit 1
+fi
 
-exec dotnet run --project "$project" --configuration Release --verbosity quiet "-p:MergedStarlightAssemblyPath=$merged" -- --pion "$pion" --timeout "$timeout"
+exec dotnet run --project "$project" --configuration Release --verbosity quiet "-p:MergedStarlightAssemblyPath=$merged" -- --pion "$pion" --codec-probe "$codec_probe" --timeout "$timeout"

@@ -125,8 +125,6 @@ public sealed class RtpJitterBuffer
         }
         if (_count == _capacity)
         {
-            if (!_started)
-                return false;
             int oldestSlot = FindLowestSequenceSlot();
             if (extendedSequence <= _sequences[oldestSlot])
                 return false;
@@ -160,8 +158,7 @@ public sealed class RtpJitterBuffer
     {
         if (_count == 0)
         {
-            if (!_started)
-                _missingSinceMilliseconds = NoDeadline;
+            _missingSinceMilliseconds = NoDeadline;
             _backlogExceeded = false;
             return new RtpJitterDecision(
                 RtpJitterDecisionKind.Wait,
@@ -242,8 +239,21 @@ public sealed class RtpJitterBuffer
             Remove(packetSlot);
             _expectedSequence++;
             _nextTimestamp = unchecked(packetTimestamp + TimestampStep);
-            _missingSinceMilliseconds = nowMilliseconds;
+            _missingSinceMilliseconds = _count == 0 ? NoDeadline : nowMilliseconds;
             return new RtpJitterDecision(RtpJitterDecisionKind.Packet, sequence, packetTimestamp, length);
+        }
+
+        int lowestSlot = FindLowestSequenceSlot();
+        if (_sequences[lowestSlot] - _expectedSequence > MaximumRecoveryFrames)
+        {
+            _expectedSequence = _sequences[lowestSlot];
+            _nextTimestamp = _timestamps[lowestSlot];
+            _missingSinceMilliseconds = nowMilliseconds;
+            return new RtpJitterDecision(
+                RtpJitterDecisionKind.Discontinuity,
+                _expectedSequence,
+                _nextTimestamp,
+                0);
         }
 
         if (_missingSinceMilliseconds == NoDeadline)
@@ -392,6 +402,8 @@ public sealed class RtpJitterBuffer
         _occupied[slot] = false;
         _lengths[slot] = 0;
         _count--;
+        if (_count == 0)
+            _missingSinceMilliseconds = NoDeadline;
     }
 
     private void ClearState()

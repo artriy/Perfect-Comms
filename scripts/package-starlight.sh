@@ -17,11 +17,31 @@ staging="$staging_root/package"
 inputs="$staging/inputs"
 references="$staging/ReferencePath.json"
 output="$artifact_directory/PerfectCommsStarlight.dll"
-legacy_directory="$artifact_directory/PerfectComms-Starlight"
-legacy_zip="$artifact_directory/PerfectComms-Starlight.zip"
+owned_starlight_output_names=(
+    "PerfectCommsStarlight.dll"
+    "PerfectCommsStarlight.old.dll"
+    "PerfectCommsStarlight.pdb"
+    "PerfectCommsStarlight.deps.json"
+    "PerfectCommsStarlight.runtimeconfig.json"
+    "PerfectCommsStarlight.xml"
+    "PerfectCommsStarlight.zip"
+    "PerfectComms-Starlight"
+    "PerfectComms-Starlight.zip"
+)
 project_license="$root/LICENSE"
 managed_notices="$root/Starlight/THIRD_PARTY_NOTICES.md"
 sipsorcery_license="$root/Starlight/licenses/SIPSorcery-LICENSE.md"
+is_owned_starlight_output() {
+    local candidate="$1"
+    local owned
+    for owned in "${owned_starlight_output_names[@]}"; do
+        if [[ "$candidate" == "$owned" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 
 for required_notice in "$project_license" "$managed_notices" "$sipsorcery_license"; do
     if [[ ! -s "$required_notice" ]]; then
@@ -79,7 +99,13 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$artifact_directory"
-rm -rf "$staging_root" "$legacy_directory" "$legacy_zip" "$output"
+shopt -s nocasematch nullglob
+for candidate in "$artifact_directory"/*; do
+    if is_owned_starlight_output "${candidate##*/}"; then
+        rm -rf "$candidate"
+    fi
+done
+rm -rf "$staging_root"
 export NUGET_PACKAGES="$(path_for_dotnet "$staging_root/nuget-packages")"
 
 media_project_dotnet="$(path_for_dotnet "$media_project")"
@@ -129,12 +155,17 @@ if [[ ! -s "$output" ]]; then
     exit 1
 fi
 
-shopt -s nullglob globstar
-for forbidden in "$artifact_directory"/**/*Starlight*.zip "$artifact_directory"/**/companions "$legacy_directory"; do
-    if [[ -e "$forbidden" ]]; then
-        echo "Forbidden Starlight ZIP or companion output remains: $forbidden" >&2
-        exit 1
+starlight_outputs=()
+for candidate in "$artifact_directory"/*; do
+    if is_owned_starlight_output "${candidate##*/}"; then
+        starlight_outputs+=("$candidate")
     fi
 done
+if (( ${#starlight_outputs[@]} != 1 )) || [[ "${starlight_outputs[0]:-}" != "$output" ]]; then
+    printf 'Starlight distributable set must contain only %s; found:' "$output" >&2
+    printf ' %s' "${starlight_outputs[@]}" >&2
+    printf '\n' >&2
+    exit 1
+fi
 
 printf 'starlight.package assembly=%s\n' "$output"

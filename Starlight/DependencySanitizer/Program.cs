@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Reflection.PortableExecutable;
 using System.Text;
@@ -17,6 +18,13 @@ internal static class Program
     private const string MicrosoftExtensionsPublicKeyToken = "adb9793829ddae60";
     private const string UnsupportedMessage = "Native interop is unavailable in Starlight.";
     private static readonly Version PluginVersion = new(4, 1, 10, 0);
+    private const string TmdsLibCAssemblyName = "Tmds.LibC";
+    private const string LinuxHelperTypeName = "Makaretu.Dns.LinuxHelper";
+    private const string ReuseAddressMethodName = "ReuseAddresss";
+    private const string NativeLibraryTypeName = "System.Runtime.InteropServices.NativeLibrary";
+    private const string MarshalTypeName = "System.Runtime.InteropServices.Marshal";
+    private const string StarlightNativeLibraryName = "libstarlight.so";
+
 
     private static readonly IReadOnlyDictionary<string, string> RequiredNoticeResourceHashes =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -86,6 +94,87 @@ internal static class Program
             "Microsoft.Extensions.DependencyInjection.Abstractions",
             "Microsoft.Extensions.Logging.Abstractions"
         };
+    private static readonly IReadOnlySet<string> AllowedExternalAssemblyReferences =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "0Harmony|2.10.2.0|",
+            "Assembly-CSharp|0.0.0.0|",
+            "BepInEx.Core|6.0.0.0|",
+            "BepInEx.Unity.IL2CPP|6.0.0.0|",
+            "Hazel|1.0.0.0|",
+            "Il2CppInterop.Runtime|1.4.6.0|",
+            "Il2Cppmscorlib|4.0.0.0|",
+            "Microsoft.CSharp|10.0.0.0|b03f5f7f11d50a3a",
+            "Microsoft.Extensions.DependencyInjection.Abstractions|8.0.0.0|adb9793829ddae60",
+            "Microsoft.Extensions.Logging.Abstractions|8.0.0.0|adb9793829ddae60",
+            "Microsoft.Win32.Primitives|8.0.0.0|b03f5f7f11d50a3a",
+            "Microsoft.Win32.Registry|8.0.0.0|b03f5f7f11d50a3a",
+            "SemanticVersioning|2.0.2.0|a89bb7dc6f7a145c",
+            "System.Collections.Concurrent|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Collections.NonGeneric|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Collections.Specialized|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Collections|10.0.0.0|b03f5f7f11d50a3a",
+            "System.ComponentModel.Primitives|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Console|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Diagnostics.Debug|4.0.10.0|b03f5f7f11d50a3a",
+            "System.Diagnostics.Process|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Diagnostics.TraceSource|8.0.0.0|b03f5f7f11d50a3a",
+            "System.Globalization|4.0.10.0|b03f5f7f11d50a3a",
+            "System.IO.Compression|10.0.0.0|b77a5c561934e089",
+            "System.IO|4.0.10.0|b03f5f7f11d50a3a",
+            "System.Linq.Expressions|4.0.10.0|b03f5f7f11d50a3a",
+            "System.Linq|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Memory|10.0.0.0|cc7b13ffcd2ddd51",
+            "System.Net.Http|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.NameResolution|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.NetworkInformation|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.Primitives|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.Security|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.Sockets|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.WebSockets.Client|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Net.WebSockets|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Numerics.Vectors|8.0.0.0|b03f5f7f11d50a3a",
+            "System.Reflection.Emit.ILGeneration|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Reflection.Emit.Lightweight|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Reflection.Primitives|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Reflection.TypeExtensions|4.0.0.0|b03f5f7f11d50a3a",
+            "System.Reflection|4.0.10.0|b03f5f7f11d50a3a",
+            "System.Runtime.CompilerServices.Unsafe|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Runtime.Extensions|4.0.10.0|b03f5f7f11d50a3a",
+            "System.Runtime.Intrinsics|10.0.0.0|cc7b13ffcd2ddd51",
+            "System.Runtime.InteropServices|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Runtime.Numerics|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Runtime.Serialization.Formatters|8.1.0.0|b03f5f7f11d50a3a",
+            "System.Runtime.Serialization.Primitives|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Runtime|4.0.20.0|b03f5f7f11d50a3a",
+            "System.Runtime|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography.Algorithms|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography.Csp|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography.Encoding|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography.Primitives|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography.X509Certificates|6.0.0.0|b03f5f7f11d50a3a",
+            "System.Security.Cryptography|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Text.Encoding.Extensions|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Text.Json|10.0.0.0|cc7b13ffcd2ddd51",
+            "System.Text.RegularExpressions|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Threading.Tasks.Parallel|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Threading.ThreadPool|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Threading.Thread|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Threading|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Xml.ReaderWriter|10.0.0.0|b03f5f7f11d50a3a",
+            "System.Xml.XDocument|10.0.0.0|b03f5f7f11d50a3a",
+            "Unity.TextMeshPro|0.0.0.0|",
+            "UnityEngine.AnimationModule|0.0.0.0|",
+            "UnityEngine.AudioModule|0.0.0.0|",
+            "UnityEngine.CoreModule|0.0.0.0|",
+            "UnityEngine.ImageConversionModule|0.0.0.0|",
+            "UnityEngine.InputLegacyModule|0.0.0.0|",
+            "UnityEngine.Physics2DModule|0.0.0.0|",
+            "UnityEngine.UI|1.0.0.0|",
+            "UnityEngine.UIModule|0.0.0.0|",
+            "netstandard|2.0.0.0|cc7b13ffcd2ddd51"
+        };
+
 
     private static readonly IReadOnlyDictionary<string, string> StrippedPublicKeyTokens =
         new Dictionary<string, string>(StringComparer.Ordinal)
@@ -202,14 +291,22 @@ internal static class Program
             {
                 CreatePInvokeValidatorCase(
                     directory,
-                    "allowlisted",
+                    "approved-capture-imports",
                     true,
-                    ("starlight", "GetWidth", "get_width"),
-                    ("STARLIGHT.SO", "GetHeight", "get_height"),
-                    ("libstarlight", "ReadFloat", "starlight_voice_read_float"),
-                    ("libstarlight.so", "get_height", ""),
-                    ("user32.dll", "ShowMessage", "MessageBox"),
-                    ("winmm.dll", "AnyWinMmEntryPoint", "AnyWinMmEntryPoint")),
+                    ("libstarlight.so", "HasPermission", "starlight_voice_has_record_audio_permission"),
+                    ("libstarlight.so", "RequestPermission", "starlight_voice_request_record_audio_permission"),
+                    ("libstarlight.so", "StartCapture", "starlight_voice_start_capture"),
+                    ("libstarlight.so", "ReadFloat", "starlight_voice_read_float"),
+                    ("libstarlight.so", "StopCapture", "starlight_voice_stop_capture"),
+                    ("libstarlight.so", "IsCaptureRunning", "starlight_voice_is_capture_running"),
+                    ("libstarlight.so", "GetSampleRate", "starlight_voice_get_sample_rate"),
+                    ("libstarlight.so", "GetBufferFrames", "starlight_voice_get_buffer_frames"),
+                    ("libstarlight.so", "GetLastError", "starlight_voice_get_last_error")),
+                CreatePInvokeValidatorCase(
+                    directory,
+                    "library-alias",
+                    false,
+                    ("starlight", "ReadFloat", "starlight_voice_read_float")),
                 CreatePInvokeValidatorCase(
                     directory,
                     "pc-mobile",
@@ -220,6 +317,31 @@ internal static class Program
                     "libc",
                     false,
                     ("libc", "Link", "link")),
+                CreateMutatedCaptureAbiValidatorCase(
+                    directory,
+                    "capture-wrong-return-type",
+                    "starlight_voice_read_float",
+                    static method => method.ReturnType = method.Module.TypeSystem.Int64),
+                CreateMutatedCaptureAbiValidatorCase(
+                    directory,
+                    "boolean-without-i1",
+                    "starlight_voice_is_capture_running",
+                    static method => method.MethodReturnType.MarshalInfo = null),
+                CreateMutatedCaptureAbiValidatorCase(
+                    directory,
+                    "float-array-without-out",
+                    "starlight_voice_read_float",
+                    static method => method.Parameters[0].Attributes = ParameterAttributes.None),
+                CreateMutatedCaptureAbiValidatorCase(
+                    directory,
+                    "capture-wrong-calling-convention",
+                    "starlight_voice_get_sample_rate",
+                    static method => method.PInvokeInfo!.Attributes = PInvokeAttributes.CallConvStdCall),
+                CreateMutatedCaptureAbiValidatorCase(
+                    directory,
+                    "capture-missing-preserve-sig",
+                    "starlight_voice_get_buffer_frames",
+                    static method => method.ImplAttributes = MethodImplAttributes.IL),
                 CreatePInvokeValidatorCase(
                     directory,
                     "kernel32",
@@ -231,7 +353,9 @@ internal static class Program
                     false,
                     ("libstarlight.so", "Initialize", "starlight_voice_initialize")),
                 CreateNativeLibraryValidatorCase(directory, "native-library-call", OpCodes.Call),
-                CreateNativeLibraryValidatorCase(directory, "native-library-callvirt", OpCodes.Callvirt)
+                CreateNativeLibraryValidatorCase(directory, "native-library-callvirt", OpCodes.Callvirt),
+                CreateCalliValidatorCase(directory),
+                CreateMarshalDelegateValidatorCase(directory)
             };
 
             foreach (var validatorCase in cases)
@@ -243,6 +367,8 @@ internal static class Program
                         $"Starlight validator self-test failed: {validatorCase.Name}.");
                 }
             }
+            RunManagedClosureSelfTests();
+            RunResourceSelfTests();
 
             var unreadablePath = Path.Combine(directory, "unreadable.dll");
             File.WriteAllBytes(unreadablePath, [0x00, 0x01, 0x02, 0x03]);
@@ -251,7 +377,7 @@ internal static class Program
                 throw new InvalidOperationException("Starlight validator self-test failed: unreadable.");
             }
 
-            Console.WriteLine($"starlight.validator.self-test.ok cases={cases.Length + 1}");
+            Console.WriteLine("starlight.validator.self-test.ok");
         }
         finally
         {
@@ -279,16 +405,115 @@ internal static class Program
                 MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PInvokeImpl,
                 assembly.MainModule.TypeSystem.Int32)
             {
+                ImplAttributes = MethodImplAttributes.PreserveSig,
                 PInvokeInfo = new PInvokeInfo(
                     PInvokeAttributes.CallConvCdecl,
                     import.EntryPoint,
                     moduleReference)
             };
             nestedType.Methods.Add(method);
+            if (expected)
+            {
+                ApplyCaptureAbi(method, import.EntryPoint);
+            }
         }
 
         assembly.Write(path);
         return (name, path, expected);
+    }
+
+    private static (string Name, string Path, bool Expected) CreateMutatedCaptureAbiValidatorCase(
+        string directory,
+        string name,
+        string entryPoint,
+        Action<MethodDefinition> mutate)
+    {
+        var path = Path.Combine(directory, name + ".dll");
+        using var assembly = CreateValidatorFixture(name);
+        var nestedType = assembly.MainModule.Types.Single(static type => type.Name == "Fixture")
+            .NestedTypes.Single();
+        var moduleReference = new ModuleReference("libstarlight.so");
+        assembly.MainModule.ModuleReferences.Add(moduleReference);
+        MethodDefinition? target = null;
+        foreach (var (methodName, captureEntryPoint) in new[]
+                 {
+                     ("HasPermission", "starlight_voice_has_record_audio_permission"),
+                     ("RequestPermission", "starlight_voice_request_record_audio_permission"),
+                     ("StartCapture", "starlight_voice_start_capture"),
+                     ("ReadFloat", "starlight_voice_read_float"),
+                     ("StopCapture", "starlight_voice_stop_capture"),
+                     ("IsCaptureRunning", "starlight_voice_is_capture_running"),
+                     ("GetSampleRate", "starlight_voice_get_sample_rate"),
+                     ("GetBufferFrames", "starlight_voice_get_buffer_frames"),
+                     ("GetLastError", "starlight_voice_get_last_error")
+                 })
+        {
+            var method = new MethodDefinition(
+                methodName,
+                MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PInvokeImpl,
+                assembly.MainModule.TypeSystem.Int32)
+            {
+                ImplAttributes = MethodImplAttributes.PreserveSig,
+                PInvokeInfo = new PInvokeInfo(
+                    PInvokeAttributes.CallConvCdecl,
+                    captureEntryPoint,
+                    moduleReference)
+            };
+            nestedType.Methods.Add(method);
+            ApplyCaptureAbi(method, captureEntryPoint);
+            if (string.Equals(captureEntryPoint, entryPoint, StringComparison.Ordinal))
+            {
+                target = method;
+            }
+        }
+
+        mutate(target ?? throw new InvalidOperationException($"Unknown capture ABI mutation '{entryPoint}'."));
+        assembly.Write(path);
+        return (name, path, false);
+    }
+
+    private static void ApplyCaptureAbi(MethodDefinition method, string entryPoint)
+    {
+        switch (entryPoint)
+        {
+            case "starlight_voice_has_record_audio_permission":
+            case "starlight_voice_request_record_audio_permission":
+            case "starlight_voice_is_capture_running":
+                method.ReturnType = method.Module.TypeSystem.Boolean;
+                AddI1MarshalInfo(method);
+                break;
+            case "starlight_voice_start_capture":
+                method.ReturnType = method.Module.TypeSystem.Int32;
+                method.Parameters.Add(new ParameterDefinition(method.Module.TypeSystem.Int32));
+                method.Parameters.Add(new ParameterDefinition(method.Module.TypeSystem.Int32));
+                break;
+            case "starlight_voice_read_float":
+                method.ReturnType = method.Module.TypeSystem.Int32;
+                method.Parameters.Add(
+                    new ParameterDefinition(new ArrayType(method.Module.TypeSystem.Single))
+                    {
+                        Attributes = ParameterAttributes.Out
+                    });
+                method.Parameters.Add(new ParameterDefinition(method.Module.TypeSystem.Int32));
+                break;
+            case "starlight_voice_stop_capture":
+                method.ReturnType = method.Module.TypeSystem.Void;
+                break;
+            case "starlight_voice_get_sample_rate":
+            case "starlight_voice_get_buffer_frames":
+                method.ReturnType = method.Module.TypeSystem.Int32;
+                break;
+            case "starlight_voice_get_last_error":
+                method.ReturnType = method.Module.TypeSystem.IntPtr;
+                break;
+            default:
+                throw new InvalidOperationException($"Unknown capture ABI fixture '{entryPoint}'.");
+        }
+    }
+
+    private static void AddI1MarshalInfo(MethodDefinition method)
+    {
+        method.MethodReturnType.MarshalInfo = new MarshalInfo(NativeType.I1);
     }
 
     private static (string Name, string Path, bool Expected) CreateNativeLibraryValidatorCase(
@@ -325,6 +550,316 @@ internal static class Program
         processor.Emit(OpCodes.Ret);
         assembly.Write(path);
         return (name, path, false);
+    }
+
+    private static (string Name, string Path, bool Expected) CreateCalliValidatorCase(string directory)
+    {
+        const string name = "unmanaged-calli";
+        var path = Path.Combine(directory, name + ".dll");
+        using var assembly = CreateValidatorFixture(name);
+        var nestedType = assembly.MainModule.Types.Single(static type => type.Name == "Fixture")
+            .NestedTypes.Single();
+        var method = new MethodDefinition(
+            "InvokeFunctionPointer",
+            MethodAttributes.Public | MethodAttributes.Static,
+            assembly.MainModule.TypeSystem.Void);
+        nestedType.Methods.Add(method);
+        method.Body = new MethodBody(method);
+        var callSite = new CallSite(assembly.MainModule.TypeSystem.Void)
+        {
+            CallingConvention = MethodCallingConvention.C
+        };
+        var processor = method.Body.GetILProcessor();
+        processor.Emit(OpCodes.Ldc_I4_0);
+        processor.Emit(OpCodes.Conv_I);
+        processor.Emit(OpCodes.Calli, callSite);
+        processor.Emit(OpCodes.Ret);
+        assembly.Write(path);
+        return (name, path, false);
+    }
+
+    private static (string Name, string Path, bool Expected) CreateMarshalDelegateValidatorCase(
+        string directory)
+    {
+        const string name = "marshal-delegate-bridge";
+        var path = Path.Combine(directory, name + ".dll");
+        using var assembly = CreateValidatorFixture(name);
+        var nestedType = assembly.MainModule.Types.Single(static type => type.Name == "Fixture")
+            .NestedTypes.Single();
+        var method = new MethodDefinition(
+            "CreateDelegate",
+            MethodAttributes.Public | MethodAttributes.Static,
+            assembly.MainModule.TypeSystem.Void);
+        nestedType.Methods.Add(method);
+        method.Body = new MethodBody(method);
+        var marshalType = new TypeReference(
+            "System.Runtime.InteropServices",
+            "Marshal",
+            assembly.MainModule,
+            assembly.MainModule.TypeSystem.CoreLibrary);
+        var bridge = new MethodReference(
+            "GetDelegateForFunctionPointer",
+            assembly.MainModule.TypeSystem.Object,
+            marshalType);
+        bridge.Parameters.Add(new ParameterDefinition(assembly.MainModule.TypeSystem.IntPtr));
+        bridge.Parameters.Add(
+            new ParameterDefinition(
+                new TypeReference(
+                    "System",
+                    "Type",
+                    assembly.MainModule,
+                    assembly.MainModule.TypeSystem.CoreLibrary)));
+        var processor = method.Body.GetILProcessor();
+        processor.Emit(OpCodes.Ldc_I4_0);
+        processor.Emit(OpCodes.Conv_I);
+        processor.Emit(OpCodes.Ldnull);
+        processor.Emit(OpCodes.Call, bridge);
+        processor.Emit(OpCodes.Pop);
+        processor.Emit(OpCodes.Ret);
+        assembly.Write(path);
+        return (name, path, false);
+    }
+
+    private static void RunManagedClosureSelfTests()
+    {
+        using var fixture = CreateValidatorFixture("managed-closure");
+        fixture.MainModule.AssemblyReferences.Clear();
+
+        fixture.MainModule.AssemblyReferences.Add(
+            AssemblyReference(
+                RequiredHostReference,
+                new Version(8, 0, 0, 0),
+                MicrosoftExtensionsPublicKeyToken));
+        ValidateExternalAssemblyReferences(fixture.MainModule);
+
+        fixture.MainModule.AssemblyReferences.Clear();
+        fixture.MainModule.AssemblyReferences.Add(
+            AssemblyReference(
+                "System.Runtime",
+                new Version(10, 0, 0, 0),
+                "b03f5f7f11d50a3a"));
+        ValidateExternalAssemblyReferences(fixture.MainModule);
+
+        fixture.MainModule.AssemblyReferences.Clear();
+        fixture.MainModule.AssemblyReferences.Add(
+            new AssemblyNameReference("Bogus.External", new Version(1, 0, 0, 0)));
+        ExpectInvalidOperation(
+            "bogus-external-reference",
+            () => ValidateExternalAssemblyReferences(fixture.MainModule));
+
+        fixture.MainModule.AssemblyReferences.Clear();
+        fixture.MainModule.AssemblyReferences.Add(
+            new AssemblyNameReference(TmdsLibCAssemblyName, new Version(0, 2, 0, 0)));
+        ExpectInvalidOperation(
+            "tmds-reference",
+            () => ValidateNoTmdsMetadata(fixture.MainModule));
+
+        fixture.MainModule.AssemblyReferences.Clear();
+        fixture.MainModule.AssemblyReferences.Add(
+            AssemblyReference(
+                RequiredHostReference,
+                new Version(10, 0, 0, 0),
+                MicrosoftExtensionsPublicKeyToken));
+        ExpectInvalidOperation(
+            "host-version-mismatch",
+            () => ValidateExternalAssemblyReferences(fixture.MainModule));
+
+        fixture.MainModule.AssemblyReferences.Clear();
+        fixture.MainModule.AssemblyReferences.Add(
+            AssemblyReference(
+                RequiredHostReference,
+                new Version(8, 0, 0, 0),
+                "0000000000000000"));
+        ExpectInvalidOperation(
+            "host-token-mismatch",
+            () => ValidateExternalAssemblyReferences(fixture.MainModule));
+        foreach (var flag in new[] { AssemblyAttributes.Retargetable, AssemblyAttributes.WindowsRuntime })
+        {
+            fixture.MainModule.AssemblyReferences.Clear();
+            var flagged = AssemblyReference(
+                RequiredHostReference,
+                new Version(8, 0, 0, 0),
+                MicrosoftExtensionsPublicKeyToken);
+            flagged.Attributes = flag;
+            fixture.MainModule.AssemblyReferences.Add(flagged);
+            ExpectInvalidOperation(
+                $"host-reference-flags-{flag}",
+                () => ValidateExternalAssemblyReferences(fixture.MainModule));
+        }
+        RunTmdsRewriteSelfTest();
+    }
+
+    private static AssemblyNameReference AssemblyReference(
+        string name,
+        Version version,
+        string publicKeyToken)
+    {
+        return new AssemblyNameReference(name, version)
+        {
+            PublicKeyToken = Convert.FromHexString(publicKeyToken)
+        };
+    }
+
+    private static void RunTmdsRewriteSelfTest()
+    {
+        using var assembly = AssemblyDefinition.CreateAssembly(
+            new AssemblyNameDefinition("Makaretu.Dns.Multicast", new Version(0, 27, 0, 0)),
+            "Makaretu.Dns.Multicast",
+            ModuleKind.Dll);
+        var socketAssembly = new AssemblyNameReference("System.Net.Sockets", new Version(10, 0, 0, 0));
+        var tmdsAssembly = new AssemblyNameReference(TmdsLibCAssemblyName, new Version(0, 2, 0, 0));
+        assembly.MainModule.AssemblyReferences.Add(socketAssembly);
+        assembly.MainModule.AssemblyReferences.Add(tmdsAssembly);
+        var socketType = new TypeReference(
+            "System.Net.Sockets",
+            "Socket",
+            assembly.MainModule,
+            socketAssembly);
+        var linuxHelper = new TypeDefinition(
+            "Makaretu.Dns",
+            "LinuxHelper",
+            TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed,
+            assembly.MainModule.TypeSystem.Object);
+        assembly.MainModule.Types.Add(linuxHelper);
+        var method = new MethodDefinition(
+            ReuseAddressMethodName,
+            MethodAttributes.Public | MethodAttributes.Static,
+            assembly.MainModule.TypeSystem.Void);
+        method.Parameters.Add(new ParameterDefinition(socketType));
+        method.Body = new MethodBody(method);
+        linuxHelper.Methods.Add(method);
+
+        var libcType = new TypeReference("Tmds.Linux", "LibC", assembly.MainModule, tmdsAssembly);
+        var socklenType = new TypeReference("Tmds.Linux", "socklen_t", assembly.MainModule, tmdsAssembly);
+        var processor = method.Body.GetILProcessor();
+        foreach (var (declaringType, name) in new[]
+                 {
+                     (libcType, "get_SOL_SOCKET"),
+                     (libcType, "get_SO_REUSEADDR"),
+                     (socklenType, "op_Implicit"),
+                     (libcType, "setsockopt")
+                 })
+        {
+            processor.Emit(
+                OpCodes.Call,
+                new MethodReference(name, assembly.MainModule.TypeSystem.Int32, declaringType));
+            processor.Emit(OpCodes.Pop);
+        }
+        processor.Emit(OpCodes.Ret);
+
+        if (!RewriteUnusedLinuxSocketReuse(assembly) ||
+            assembly.MainModule.AssemblyReferences.Any(static reference =>
+                reference.Name == TmdsLibCAssemblyName) ||
+            !method.Body.Instructions.Any(static instruction =>
+                instruction.Operand is MethodReference reference &&
+                reference.Name == "SetSocketOption") ||
+            method.Body.Instructions.Any(static instruction =>
+                instruction.Operand is MethodReference reference &&
+                IsTmdsType(reference.DeclaringType)))
+        {
+            throw new InvalidOperationException(
+                "Starlight validator self-test failed: Tmds.LibC rewrite.");
+        }
+
+    }
+
+    private static void RunResourceSelfTests()
+    {
+        using var valid = CreateValidatorFixture("resource-valid");
+        valid.MainModule.Resources.Add(
+            new EmbeddedResource(
+                "neutral",
+                ManifestResourceAttributes.Private,
+                StrictUtf8.GetBytes("known managed resource")));
+        ValidateResources(valid.MainModule);
+        using var managedContainer = CreateValidatorFixture("resource-container-valid");
+        managedContainer.MainModule.Resources.Add(
+            new EmbeddedResource(
+                "PerfectComms.Strings.resources",
+                ManifestResourceAttributes.Private,
+                CreateManagedResourceContainer("message", "known managed resource")));
+        ValidateResources(managedContainer.MainModule);
+
+        foreach (var (entryName, value) in new[]
+                 {
+                     ("neutral", new byte[] { 0xca, 0xfe, 0xba, 0xbf }),
+                     ("payload.so", StrictUtf8.GetBytes("not native magic"))
+                 })
+        {
+            using var invalidContainer = CreateValidatorFixture($"resource-container-{entryName}");
+            invalidContainer.MainModule.Resources.Add(
+                new EmbeddedResource(
+                    entryName == "neutral" ? "neutral-container" : "PerfectComms.Payloads.resources",
+                    ManifestResourceAttributes.Private,
+                    CreateManagedResourceContainer(entryName, value)));
+            ExpectInvalidOperation(
+                $"managed-resource-native-{entryName}",
+                () => ValidateResources(invalidContainer.MainModule));
+        }
+
+        using var nativeStreamPayload = new MemoryStream(new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F' });
+        using var invalidStreamContainer = CreateValidatorFixture("resource-container-stream");
+        invalidStreamContainer.MainModule.Resources.Add(
+            new EmbeddedResource(
+                "PerfectComms.Streams.resources",
+                ManifestResourceAttributes.Private,
+                CreateManagedResourceContainer("neutral-stream", nativeStreamPayload)));
+        ExpectInvalidOperation(
+            "managed-resource-native-stream",
+            () => ValidateResources(invalidStreamContainer.MainModule));
+
+
+        var nativeMagic = new[]
+        {
+            new byte[] { (byte)'M', (byte)'Z' },
+            new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F' },
+            new byte[] { 0xca, 0xfe, 0xba, 0xbe },
+            new byte[] { 0xbe, 0xba, 0xfe, 0xca },
+            new byte[] { 0xca, 0xfe, 0xba, 0xbf },
+            new byte[] { 0xbf, 0xba, 0xfe, 0xca }
+        };
+        for (var index = 0; index < nativeMagic.Length; index++)
+        {
+            using var invalid = CreateValidatorFixture($"resource-native-{index}");
+            invalid.MainModule.Resources.Add(
+                new EmbeddedResource(
+                    $"neutral-{index}",
+                    ManifestResourceAttributes.Private,
+                    nativeMagic[index]));
+            ExpectInvalidOperation(
+                $"neutral-native-resource-{index}",
+                () => ValidateResources(invalid.MainModule));
+        }
+    }
+
+    private static byte[] CreateManagedResourceContainer(string name, object value)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new System.Resources.ResourceWriter(stream);
+        if (value is Stream valueStream)
+        {
+            writer.AddResource(name, valueStream);
+        }
+        else
+        {
+            writer.AddResource(name, value);
+        }
+        writer.Generate();
+        return stream.ToArray();
+    }
+
+    private static void ExpectInvalidOperation(string name, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Starlight validator self-test failed: {name}.");
     }
 
     private static AssemblyDefinition CreateValidatorFixture(string name)
@@ -438,17 +973,21 @@ internal static class Program
             StarlightAssemblyValidator.ValidateStrictPe(peStream, inputPath);
         }
 
+        using var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(Path.GetDirectoryName(inputPath)!);
         using var assemblyStream = new MemoryStream(inputBytes, false);
         using var assembly = AssemblyDefinition.ReadAssembly(assemblyStream, new ReaderParameters
         {
             InMemory = true,
-            ReadSymbols = false
+            ReadSymbols = false,
+            AssemblyResolver = resolver,
         });
 
         ValidateAssemblyIdentity(assembly.Name, allowMediaAssembly);
         ValidatePinnedThirdPartyInput(inputBytes, assembly.Name, allowMediaAssembly);
         ValidateResources(assembly.MainModule);
-        var changed = RewriteImports(assembly);
+        var changed = RewriteUnusedLinuxSocketReuse(assembly);
+        changed |= RewriteImports(assembly);
         changed |= StripStrongName(assembly);
         changed |= RewriteStrongAssemblyReferences(assembly.MainModule);
 
@@ -471,7 +1010,10 @@ internal static class Program
             File.Move(temporaryPath, outputPath, true);
         }
 
-        ValidateSanitizedAssembly(outputPath, allowMediaAssembly);
+        ValidateSanitizedAssembly(
+            outputPath,
+            allowMediaAssembly,
+            Path.GetDirectoryName(inputPath));
     }
 
     private static void ValidateAssemblyIdentity(AssemblyNameDefinition name, bool allowMediaAssembly)
@@ -516,6 +1058,85 @@ internal static class Program
                 $"Pinned input hash mismatch for '{name.Name}, Version={name.Version}': " +
                 $"expected {expectedHash}, found {actualHash}.");
         }
+    }
+
+    private static bool RewriteUnusedLinuxSocketReuse(AssemblyDefinition assembly)
+    {
+        if (!string.Equals(assembly.Name.Name, "Makaretu.Dns.Multicast", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var linuxHelper = AllTypes(assembly.MainModule)
+            .SingleOrDefault(static type => type.FullName == LinuxHelperTypeName);
+        var method = linuxHelper?.Methods.SingleOrDefault(static candidate =>
+            candidate.Name == ReuseAddressMethodName &&
+            candidate.IsStatic &&
+            candidate.ReturnType.FullName == "System.Void" &&
+            candidate.Parameters.Count == 1 &&
+            candidate.Parameters[0].ParameterType.FullName == "System.Net.Sockets.Socket");
+        if (method is null || !method.HasBody)
+        {
+            throw new InvalidOperationException(
+                $"{LinuxHelperTypeName}.{ReuseAddressMethodName}(Socket) was not found in the pinned multicast input.");
+        }
+
+        var tmdsCalls = method.Body.Instructions
+            .Select(static instruction => instruction.Operand)
+            .OfType<MethodReference>()
+            .Where(static reference => IsTmdsType(reference.DeclaringType))
+            .Select(static reference => reference.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!tmdsCalls.SetEquals(new[] { "get_SOL_SOCKET", "get_SO_REUSEADDR", "op_Implicit", "setsockopt" }))
+        {
+            throw new InvalidOperationException(
+                $"{LinuxHelperTypeName}.{ReuseAddressMethodName}(Socket) no longer has the pinned Tmds.LibC implementation.");
+        }
+
+        var socketType = method.Parameters[0].ParameterType;
+        var socketOptionLevel = new TypeReference(
+            "System.Net.Sockets",
+            "SocketOptionLevel",
+            assembly.MainModule,
+            socketType.Scope,
+            true);
+        var socketOptionName = new TypeReference(
+            "System.Net.Sockets",
+            "SocketOptionName",
+            assembly.MainModule,
+            socketType.Scope,
+            true);
+        var setSocketOption = new MethodReference(
+            "SetSocketOption",
+            assembly.MainModule.TypeSystem.Void,
+            socketType)
+        {
+            HasThis = true
+        };
+        setSocketOption.Parameters.Add(new ParameterDefinition(socketOptionLevel));
+        setSocketOption.Parameters.Add(new ParameterDefinition(socketOptionName));
+        setSocketOption.Parameters.Add(new ParameterDefinition(assembly.MainModule.TypeSystem.Boolean));
+
+        method.Body = new MethodBody(method);
+        var processor = method.Body.GetILProcessor();
+        processor.Emit(OpCodes.Ldarg_0);
+        processor.Emit(OpCodes.Ldc_I4, 65535);
+        processor.Emit(OpCodes.Ldc_I4_4);
+        processor.Emit(OpCodes.Ldc_I4_1);
+        processor.Emit(OpCodes.Callvirt, setSocketOption);
+        processor.Emit(OpCodes.Ret);
+
+        var tmdsReferences = assembly.MainModule.AssemblyReferences
+            .Where(static reference => reference.Name == TmdsLibCAssemblyName)
+            .ToArray();
+        if (tmdsReferences.Length != 1)
+        {
+            throw new InvalidOperationException(
+                $"Expected exactly one {TmdsLibCAssemblyName} reference in the pinned multicast input.");
+        }
+
+        assembly.MainModule.AssemblyReferences.Remove(tmdsReferences[0]);
+        return true;
     }
 
     private static bool RewriteImports(AssemblyDefinition assembly)
@@ -664,20 +1285,34 @@ internal static class Program
         return changed;
     }
 
-    private static void ValidateSanitizedAssembly(string path, bool allowMediaAssembly)
+    private static void ValidateSanitizedAssembly(
+        string path,
+        bool allowMediaAssembly,
+        string? referenceDirectory = null)
     {
         using (var peStream = File.OpenRead(path))
         {
             StarlightAssemblyValidator.ValidateStrictPe(peStream, path);
         }
 
+        using var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(Path.GetDirectoryName(path)!);
+        if (referenceDirectory is not null)
+        {
+            resolver.AddSearchDirectory(referenceDirectory);
+        }
         using var assembly = AssemblyDefinition.ReadAssembly(path, new ReaderParameters
         {
             InMemory = true,
-            ReadSymbols = false
+            ReadSymbols = false,
+            AssemblyResolver = resolver,
         });
         ValidateAssemblyIdentity(assembly.Name, allowMediaAssembly);
         ValidateResources(assembly.MainModule);
+        ValidateNoTmdsMetadata(assembly.MainModule);
+        ValidateNoFunctionPointerSignatures(
+            assembly.MainModule,
+            $"Dynamic native interop remains in {assembly.Name.Name}");
 
         if (StrippedPublicKeyTokens.ContainsKey(assembly.Name.Name) &&
             (assembly.Name.HasPublicKey || assembly.Name.PublicKeyToken.Length != 0 ||
@@ -721,22 +1356,120 @@ internal static class Program
 
             foreach (var instruction in method.Body.Instructions)
             {
-                if (instruction.Operand is MethodReference calledMethod &&
-                    string.Equals(
-                        calledMethod.DeclaringType.FullName,
-                        "System.Runtime.InteropServices.NativeLibrary",
-                        StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"NativeLibrary call remains in {assembly.Name.Name}: {method.FullName}.");
-                }
+                ValidateDynamicNativeInstruction(
+                    instruction,
+                    method,
+                    $"Dynamic native interop remains in {assembly.Name.Name}");
             }
+        }
+    }
+
+    private static void ValidateNoTmdsMetadata(ModuleDefinition module)
+    {
+        var assemblyReference = module.AssemblyReferences
+            .FirstOrDefault(static reference => reference.Name == TmdsLibCAssemblyName);
+        if (assemblyReference is not null)
+        {
+            throw new InvalidOperationException(
+                $"{TmdsLibCAssemblyName} assembly reference remains: {assemblyReference.FullName}.");
+        }
+
+        var typeReference = module.GetTypeReferences().FirstOrDefault(IsTmdsType);
+        if (typeReference is not null)
+        {
+            throw new InvalidOperationException(
+                $"{TmdsLibCAssemblyName} type reference remains: {typeReference.FullName}.");
+        }
+
+        var memberReference = module.GetMemberReferences()
+            .FirstOrDefault(static reference => IsTmdsType(reference.DeclaringType));
+        if (memberReference is not null)
+        {
+            throw new InvalidOperationException(
+                $"{TmdsLibCAssemblyName} member reference remains: {memberReference.FullName}.");
+        }
+    }
+
+    private static bool IsTmdsType(TypeReference type)
+    {
+        while (type is TypeSpecification specification)
+        {
+            type = specification.ElementType;
+        }
+
+        return type.Scope is AssemblyNameReference assemblyReference &&
+               string.Equals(assemblyReference.Name, TmdsLibCAssemblyName, StringComparison.Ordinal);
+    }
+
+    private static void ValidateNoFunctionPointerSignatures(ModuleDefinition module, string message)
+    {
+        foreach (var type in AllTypes(module))
+        {
+            if (type.Fields.Any(static field => ContainsFunctionPointer(field.FieldType)) ||
+                type.Properties.Any(static property =>
+                    ContainsFunctionPointer(property.PropertyType) ||
+                    property.Parameters.Any(static parameter => ContainsFunctionPointer(parameter.ParameterType))) ||
+                type.Events.Any(static @event => ContainsFunctionPointer(@event.EventType)) ||
+                type.Methods.Any(static method =>
+                    ContainsFunctionPointer(method.ReturnType) ||
+                    method.Parameters.Any(static parameter => ContainsFunctionPointer(parameter.ParameterType)) ||
+                    method.HasBody &&
+                    method.Body.Variables.Any(static variable => ContainsFunctionPointer(variable.VariableType))))
+            {
+                throw new InvalidOperationException($"{message} a function-pointer signature in {type.FullName}.");
+            }
+        }
+    }
+
+    private static bool ContainsFunctionPointer(TypeReference type)
+    {
+        if (type is FunctionPointerType)
+        {
+            return true;
+        }
+
+        if (type is GenericInstanceType generic &&
+            generic.GenericArguments.Any(ContainsFunctionPointer))
+        {
+            return true;
+        }
+
+        return type is TypeSpecification specification &&
+               ContainsFunctionPointer(specification.ElementType);
+    }
+
+    private static void ValidateDynamicNativeInstruction(
+        Instruction instruction,
+        MethodDefinition containingMethod,
+        string message)
+    {
+        if (instruction.OpCode == OpCodes.Calli)
+        {
+            throw new InvalidOperationException($"{message} via calli: {containingMethod.FullName}.");
+        }
+
+        if (instruction.Operand is not MethodReference calledMethod)
+        {
+            return;
+        }
+
+        if (string.Equals(calledMethod.DeclaringType.FullName, NativeLibraryTypeName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{message} via NativeLibrary: {containingMethod.FullName}.");
+        }
+
+        if (string.Equals(calledMethod.DeclaringType.FullName, MarshalTypeName, StringComparison.Ordinal) &&
+            calledMethod.Name is "GetDelegateForFunctionPointer" or "GetFunctionPointerForDelegate")
+        {
+            throw new InvalidOperationException(
+                $"{message} via Marshal delegate bridge: {containingMethod.FullName}.");
         }
     }
 
     private static void ValidateResources(ModuleDefinition module)
     {
-        Span<byte> magic = stackalloc byte[4];
+        Span<byte> magic = stackalloc byte[8];
 
         foreach (var resource in module.Resources)
         {
@@ -756,6 +1489,69 @@ internal static class Program
             {
                 throw new InvalidOperationException($"Embedded native payload is prohibited: {resource.Name}.");
             }
+            if (resource.Name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase) ||
+                IsManagedResourceMagic(magic[..count]))
+            {
+                stream.Position = 0;
+                ValidateManagedResourceContainer(stream, resource.Name);
+            }
+        }
+    }
+
+    private static bool IsManagedResourceMagic(ReadOnlySpan<byte> magic)
+    {
+        return magic.StartsWith(new byte[] { 0xce, 0xca, 0xef, 0xbe });
+    }
+
+    private static void ValidateManagedResourceContainer(Stream stream, string resourceName)
+    {
+        try
+        {
+            using var reader = new System.Resources.ResourceReader(stream);
+            var entries = reader.GetEnumerator();
+            while (entries.MoveNext())
+            {
+                var entryName = entries.Key as string ??
+                                throw new InvalidDataException("Resource entry name is not a string.");
+                reader.GetResourceData(entryName, out var typeName, out var serialized);
+                if (typeName is not "ResourceTypeCode.ByteArray" and not "ResourceTypeCode.Stream")
+                {
+                    continue;
+                }
+
+                if (serialized.Length < sizeof(int))
+                {
+                    throw new InvalidDataException($"Resource entry '{entryName}' has a truncated value.");
+                }
+
+                var length = BinaryPrimitives.ReadInt32LittleEndian(serialized);
+                if (length < 0 || length != serialized.Length - sizeof(int))
+                {
+                    throw new InvalidDataException($"Resource entry '{entryName}' has an invalid length.");
+                }
+
+                var value = serialized.AsSpan(sizeof(int), length);
+                if (HasNativeExtension(entryName) || IsNativeMagic(value[..Math.Min(value.Length, 8)]))
+                {
+                    throw new InvalidOperationException(
+                        $"Managed resource container embeds a native payload: {resourceName}/{entryName}.");
+                }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception error) when (
+            error is ArgumentException or
+            BadImageFormatException or
+            EndOfStreamException or
+            FormatException or
+            IOException)
+        {
+            throw new InvalidOperationException(
+                $"Managed resource container is invalid: {resourceName}.",
+                error);
         }
     }
 
@@ -775,29 +1571,20 @@ internal static class Program
 
     private static bool IsNativeMagic(ReadOnlySpan<byte> magic)
     {
-        if (magic.Length < 2)
-        {
-            return false;
-        }
-
-        if (magic[0] == (byte)'M' && magic[1] == (byte)'Z' ||
-            magic[0] == (byte)'P' && magic[1] == (byte)'K' ||
-            magic[0] == 0x1f && magic[1] == 0x8b)
-        {
-            return true;
-        }
-
-        if (magic.Length < 4)
-        {
-            return false;
-        }
-
-        return magic.SequenceEqual(new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F' }) ||
-               magic.SequenceEqual(new byte[] { 0xfe, 0xed, 0xfa, 0xce }) ||
-               magic.SequenceEqual(new byte[] { 0xfe, 0xed, 0xfa, 0xcf }) ||
-               magic.SequenceEqual(new byte[] { 0xce, 0xfa, 0xed, 0xfe }) ||
-               magic.SequenceEqual(new byte[] { 0xcf, 0xfa, 0xed, 0xfe }) ||
-               magic.SequenceEqual(new byte[] { 0xca, 0xfe, 0xba, 0xbe });
+        return magic.StartsWith(new byte[] { (byte)'M', (byte)'Z' }) ||
+               magic.StartsWith(new byte[] { (byte)'P', (byte)'K' }) ||
+               magic.StartsWith(new byte[] { 0x1f, 0x8b }) ||
+               magic.StartsWith(new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F' }) ||
+               magic.StartsWith(new byte[] { (byte)'!', (byte)'<', (byte)'a', (byte)'r', (byte)'c', (byte)'h', (byte)'>', (byte)'\n' }) ||
+               magic.StartsWith(new byte[] { (byte)'7', (byte)'z', 0xbc, 0xaf, 0x27, 0x1c }) ||
+               magic.StartsWith(new byte[] { 0xfe, 0xed, 0xfa, 0xce }) ||
+               magic.StartsWith(new byte[] { 0xfe, 0xed, 0xfa, 0xcf }) ||
+               magic.StartsWith(new byte[] { 0xce, 0xfa, 0xed, 0xfe }) ||
+               magic.StartsWith(new byte[] { 0xcf, 0xfa, 0xed, 0xfe }) ||
+               magic.StartsWith(new byte[] { 0xca, 0xfe, 0xba, 0xbe }) ||
+               magic.StartsWith(new byte[] { 0xbe, 0xba, 0xfe, 0xca }) ||
+               magic.StartsWith(new byte[] { 0xca, 0xfe, 0xba, 0xbf }) ||
+               magic.StartsWith(new byte[] { 0xbf, 0xba, 0xfe, 0xca });
     }
 
     private static IEnumerable<TypeDefinition> AllTypes(ModuleDefinition module)
@@ -1101,6 +1888,7 @@ internal static class Program
         {
             assembly.MainModule.Attributes &= ~ModuleAttributes.StrongNameSigned;
         }
+        RemoveUnusedModuleReferences(assembly.MainModule);
 
         File.Delete(outputPath);
         assembly.Write(outputPath, new WriterParameters
@@ -1108,6 +1896,22 @@ internal static class Program
             WriteSymbols = false,
             Timestamp = DeterministicTimestamp(deterministicHash)
         });
+    }
+
+    private static void RemoveUnusedModuleReferences(ModuleDefinition module)
+    {
+        var used = AllTypes(module)
+            .SelectMany(static type => type.Methods)
+            .Where(static method => method.PInvokeInfo is not null)
+            .Select(static method => method.PInvokeInfo!.Module)
+            .ToHashSet();
+        for (var index = module.ModuleReferences.Count - 1; index >= 0; index--)
+        {
+            if (!used.Contains(module.ModuleReferences[index]))
+            {
+                module.ModuleReferences.RemoveAt(index);
+            }
+        }
     }
 
     private static Guid DeterministicGuid(byte[] hash)
@@ -1293,20 +2097,101 @@ internal static class Program
 
     private static void ValidatePluginNativeInterop(ModuleDefinition module, string message)
     {
+        ValidateNoFunctionPointerSignatures(module, message);
+        var usedModuleReferences = new HashSet<ModuleReference>();
         foreach (var method in AllTypes(module).SelectMany(static type => type.Methods))
         {
-            if (method.IsPInvokeImpl || method.PInvokeInfo is not null)
+            var hasPInvokeAttribute = (method.Attributes & MethodAttributes.PInvokeImpl) != 0;
+            var hasPInvokeInfo = method.PInvokeInfo is not null;
+            if (hasPInvokeAttribute != hasPInvokeInfo)
             {
-                throw new InvalidOperationException($"{message} an unexpected P/Invoke: {method.FullName}.");
+                throw new InvalidOperationException($"{message} malformed P/Invoke metadata: {method.FullName}.");
             }
 
-            if (method.HasBody && method.Body.Instructions.Any(static instruction =>
-                    instruction.Operand is MethodReference calledMethod &&
-                    calledMethod.DeclaringType.FullName == "System.Runtime.InteropServices.NativeLibrary"))
+            if (method.PInvokeInfo is not null)
             {
-                throw new InvalidOperationException($"{message} a NativeLibrary call: {method.FullName}.");
+                if (!StarlightAssemblyValidator.IsApprovedCaptureImport(method))
+                {
+                    throw new InvalidOperationException(
+                        $"{message} an unexpected P/Invoke ABI: {method.FullName}.");
+                }
+
+                usedModuleReferences.Add(method.PInvokeInfo.Module);
+            }
+
+            if (!method.HasBody)
+            {
+                continue;
+            }
+
+            foreach (var instruction in method.Body.Instructions)
+            {
+                ValidateDynamicNativeInstruction(instruction, method, message);
             }
         }
+
+        if (!StarlightAssemblyValidator.HasExactApprovedCaptureImports(module))
+        {
+            throw new InvalidOperationException(
+                $"{message} a missing or duplicate approved capture import.");
+        }
+
+        foreach (var moduleReference in module.ModuleReferences)
+        {
+            if (!string.Equals(
+                    moduleReference.Name,
+                    StarlightNativeLibraryName,
+                    StringComparison.Ordinal) ||
+                !usedModuleReferences.Contains(moduleReference))
+            {
+                throw new InvalidOperationException(
+                    $"{message} an unexpected native module reference: {moduleReference.Name}.");
+            }
+        }
+    }
+
+    private static IReadOnlySet<string> ValidateExternalAssemblyReferences(ModuleDefinition module)
+    {
+        var mergedNames = PinnedThirdPartyInputHashes.Keys
+            .Select(static identity => identity.Name)
+            .Append(MediaAssemblyName)
+            .ToHashSet(StringComparer.Ordinal);
+        var hostReferences = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var reference in module.AssemblyReferences)
+        {
+            if (mergedNames.Contains(reference.Name))
+            {
+                throw new InvalidOperationException(
+                    $"Merged input assembly reference remains: {reference.FullName}.");
+            }
+
+            if (!string.IsNullOrEmpty(reference.Culture))
+            {
+                throw new InvalidOperationException(
+                    $"External assembly reference must have neutral culture: {reference.FullName}.");
+            }
+            if (reference.Attributes != 0)
+            {
+                throw new InvalidOperationException(
+                    $"External assembly reference has prohibited flags {reference.Attributes}: {reference.FullName}.");
+            }
+
+
+            var identity = $"{reference.Name}|{reference.Version}|{TokenText(reference.PublicKeyToken)}";
+            if (!AllowedExternalAssemblyReferences.Contains(identity))
+            {
+                throw new InvalidOperationException(
+                    $"External assembly reference is outside the Starlight 1.6.3 contract: {reference.FullName}.");
+            }
+
+            if (HostProvidedAssemblies.Contains(reference.Name))
+            {
+                hostReferences.Add(reference.Name);
+            }
+        }
+
+        return hostReferences;
     }
 
     private static void ValidateMergedAssembly(
@@ -1354,54 +2239,9 @@ internal static class Program
         ValidateNoticeResources(assembly.MainModule);
         ValidatePluginNativeInterop(assembly.MainModule, "The merged Starlight plugin contains");
         ValidateEmptyDependencyMetadata(assembly.MainModule);
+        ValidateNoTmdsMetadata(assembly.MainModule);
 
-        var mergedNames = PinnedThirdPartyInputHashes.Keys
-            .Select(static identity => identity.Name)
-            .Append(MediaAssemblyName)
-            .ToHashSet(StringComparer.Ordinal);
-        var hostReferences = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var reference in assembly.MainModule.AssemblyReferences)
-        {
-            if (mergedNames.Contains(reference.Name))
-            {
-                throw new InvalidOperationException(
-                    $"Merged input assembly reference remains: {reference.FullName}.");
-            }
-
-            if (reference.Name.StartsWith("ILRepack", StringComparison.Ordinal) ||
-                string.Equals(reference.Name, "Mono.Cecil", StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Build-time merger reference remains: {reference.FullName}.");
-            }
-
-            if (reference.Name.StartsWith("Microsoft.Extensions.", StringComparison.Ordinal) &&
-                !HostProvidedAssemblies.Contains(reference.Name))
-            {
-                throw new InvalidOperationException(
-                    $"Unexpected Microsoft.Extensions host reference remains: {reference.FullName}.");
-            }
-
-            if (HostProvidedAssemblies.Contains(reference.Name))
-            {
-                if (reference.Version != ManagedAssemblyVersions[reference.Name])
-                {
-                    throw new InvalidOperationException(
-                        $"Host reference {reference.Name} must remain at version {ManagedAssemblyVersions[reference.Name]}.");
-                }
-
-                if (!string.Equals(
-                        TokenText(reference.PublicKeyToken),
-                        MicrosoftExtensionsPublicKeyToken,
-                        StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"Host reference {reference.Name} has an unexpected public key token.");
-                }
-
-                hostReferences.Add(reference.Name);
-            }
-        }
+        var hostReferences = ValidateExternalAssemblyReferences(assembly.MainModule);
 
         if (!hostReferences.Contains(RequiredHostReference))
         {
@@ -1439,6 +2279,7 @@ internal static class Program
             {
                 throw new InvalidOperationException($"Required embedded notice is missing: {expected.Key}.");
             }
+
 
             using var stream = embedded.GetResourceStream();
             using var memory = new MemoryStream();

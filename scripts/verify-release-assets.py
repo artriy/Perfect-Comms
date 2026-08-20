@@ -8,6 +8,7 @@ import json
 import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -93,6 +94,22 @@ STARLIGHT_DIRECT_DEPENDENCIES = {
     "SIPSorcery": "10.0.16",
     "Tmds.LibC": "0.2.0",
 }
+STARLIGHT_OWNED_OUTPUTS = frozenset(
+    (
+        "PerfectCommsStarlight.dll",
+        "PerfectCommsStarlight.old.dll",
+        "PerfectCommsStarlight.pdb",
+        "PerfectCommsStarlight.deps.json",
+        "PerfectCommsStarlight.runtimeconfig.json",
+        "PerfectCommsStarlight.xml",
+        "PerfectCommsStarlight.zip",
+        "PerfectComms-Starlight",
+        "PerfectComms-Starlight.zip",
+    )
+)
+STARLIGHT_OWNED_OUTPUT_KEYS = frozenset(
+    name.casefold() for name in STARLIGHT_OWNED_OUTPUTS
+)
 
 
 def fail(message: str) -> None:
@@ -1538,6 +1555,51 @@ def run_self_tests() -> None:
         fail("Starlight native suffix self-test rejected a managed assembly name")
     if not has_native_resource_suffix("Embedded.Managed.Dependency.dll"):
         fail("Starlight resource suffix self-test missed an embedded DLL")
+    with tempfile.TemporaryDirectory(prefix="perfectcomms-starlight-resource-") as temporary:
+        temporary_root = Path(temporary)
+        for index, magic in enumerate(
+            (
+                bytes.fromhex("cafebabe"),
+                bytes.fromhex("bebafeca"),
+                bytes.fromhex("cafebabf"),
+                bytes.fromhex("bfbafeca"),
+            )
+        ):
+            resource = temporary_root / f"neutral-{index}"
+            resource.write_bytes(magic + b"payload")
+            if not has_native_resource_magic(resource):
+                fail(f"Starlight native resource magic self-test missed {magic.hex()}")
+        managed_resource = temporary_root / "neutral-managed"
+        managed_resource.write_bytes(b"known managed resource")
+        if has_native_resource_magic(managed_resource):
+            fail("Starlight native resource magic self-test rejected managed data")
+
+    with tempfile.TemporaryDirectory(prefix="perfectcomms-starlight-assets-") as temporary:
+        temporary_root = Path(temporary)
+        canonical = temporary_root / "PerfectCommsStarlight.dll"
+        canonical.write_bytes(b"managed")
+        nested = temporary_root / "unrelated"
+        nested.mkdir()
+        (nested / "PerfectCommsStarlight.pdb").write_bytes(b"unrelated")
+        (temporary_root / "PerfectCommsStarlight-notes.txt").write_bytes(b"unrelated")
+        assert_exact_starlight_distributable_set(canonical)
+        for stale_name in (
+            "perfectcommsstarlight.pdb",
+            "PerfectCommsStarlight.deps.json",
+            "PerfectCommsStarlight.runtimeconfig.json",
+            "PerfectCommsStarlight.xml",
+            "PerfectCommsStarlight.zip",
+            "PERFECTCOMMSSTARLIGHT.OLD.DLL",
+        ):
+            (temporary_root / stale_name).write_bytes(b"stale")
+        try:
+            assert_exact_starlight_distributable_set(canonical)
+        except ValueError as error:
+            if "must contain only PerfectCommsStarlight.dll" not in str(error):
+                fail(f"starlight-stale-siblings returned unexpected error: {error}")
+        else:
+            fail("starlight-stale-siblings unexpectedly passed")
+
 
     print("release.asset.selftest.ok check=windows-pe-import-parser-and-self-contained-runtime")
     print("release.asset.selftest.ok check=pion-shared-library-contract")
@@ -1943,6 +2005,8 @@ def has_native_resource_magic(path: Path) -> bool:
         b"7z\xbc\xaf\x27\x1c",
     )
     return magic.startswith(native_prefixes) or magic[:4] in {
+        bytes.fromhex("cefaedfe"),
+        bytes.fromhex("feedface"),
         bytes.fromhex("cffaedfe"),
         bytes.fromhex("feedfacf"),
         bytes.fromhex("cafebabe"),
@@ -2158,12 +2222,30 @@ def assert_managed_pe_bytes(data: bytes, label: str) -> None:
     if data[metadata_offset : metadata_offset + 4] != b"BSJB":
         fail(f"{label}: PE file has no valid CLI metadata")
 
+def starlight_distributable_paths(directory: Path) -> list[Path]:
+    return sorted(
+        candidate
+        for candidate in directory.iterdir()
+        if candidate.name.casefold() in STARLIGHT_OWNED_OUTPUT_KEYS
+    )
+
+
+def assert_exact_starlight_distributable_set(path: Path) -> None:
+    outputs = starlight_distributable_paths(path.parent)
+    if len(outputs) != 1 or outputs[0].resolve() != path.resolve():
+        rendered = ", ".join(str(output) for output in outputs)
+        fail(
+            f"{path.parent}: Starlight distributable set must contain only "
+            f"PerfectCommsStarlight.dll; found: {rendered}"
+        )
+
 
 def verify_starlight_dll(path: Path) -> None:
     if path.name != "PerfectCommsStarlight.dll":
         fail(f"{path}: Starlight DLL must be named PerfectCommsStarlight.dll")
     if not path.is_file() or path.stat().st_size == 0:
         fail(f"missing or empty Starlight DLL: {path}")
+    assert_exact_starlight_distributable_set(path)
     assert_managed_pe_bytes(path.read_bytes(), str(path))
     print(f"release.asset.ok target=starlight format=single-managed-dll path={path}")
 

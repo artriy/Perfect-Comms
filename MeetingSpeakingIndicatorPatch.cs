@@ -18,6 +18,9 @@ public static class MeetingSpeakingIndicatorPatch
     // SyncOverlayTransforms skips the redundant per-frame localPosition/localScale rewrites. Cleared on
     // reparent (per id) and on meeting teardown (ClearDestroyedMeetingState) so a rebuilt glow re-stamps.
     private static readonly HashSet<byte> _glowTransformInit = new();
+    private static readonly HashSet<byte> _fallbackCardGlows = new();
+    private static readonly HashSet<byte> _backgroundCardGlows = new();
+    private static readonly Dictionary<byte, Material?> _fallbackCardGlowMaterials = new();
     // Vanilla HighlightedFX state captured before tinting, so the vote-card selection outline is restored intact.
     private static readonly Dictionary<byte, BuiltInHighlightSnapshot> _highlightSnapshots = new();
     private static Sprite? _cardGlowSprite;
@@ -263,35 +266,77 @@ public static class MeetingSpeakingIndicatorPatch
         SpriteRenderer? glow,
         byte playerId)
     {
-        if (glow != null)
+        if (glow == null)
+            return;
+
+        var background = state.Background;
+        bool hasBackground = background != null;
+        bool hasSprite = hasBackground && background!.sprite != null;
+        var mode = ResolveBackgroundMode(playerId, hasBackground, hasSprite);
+        if (mode.UseBackground)
         {
-            if (state.Background != null)
+            try
             {
-                // Fix 4-HUD-a(ii/iii): the local transform is static once parented, so write it only on
-                // (re)parent instead of every frame. Parenting itself stays unconditional so a freshly
-                // created glow never flashes unparented at the overlay-root origin on its first frame.
-                if (glow.transform.parent != state.Background.transform)
+                if (mode.SwitchingFromFallback)
                 {
-                    glow.transform.SetParent(state.Background.transform, false);
+                    glow.sprite = background!.sprite;
+                    glow.sortingLayerID = background.sortingLayerID;
+                    glow.sortingOrder = VCSorting.Glow;
+                    glow.maskInteraction = SpriteMaskInteraction.None;
+                    glow.sharedMaterial = background.sharedMaterial;
+                    var sortingGroup = glow.GetComponent<SortingGroup>();
+                    if (sortingGroup != null)
+                        sortingGroup.enabled = false;
+                    glow.gameObject.layer = background.gameObject.layer;
+                }
+
+                if (glow.transform.parent != background!.transform)
+                {
+                    glow.transform.SetParent(background.transform, false);
                     _glowTransformInit.Remove(playerId);
                 }
-                if (_glowTransformInit.Add(playerId))
+                if (TrackTransformInitialization(playerId))
                 {
                     glow.transform.localPosition = new Vector3(0f, 0f, -0.05f);
                     glow.transform.localScale = new Vector3(1.10f, 1.28f, 1f);
                 }
+                return;
             }
-            else
+            catch
             {
-                var root = ResolveMeetingOverlayRoot(meetingHud);
-                if (glow.transform.parent != root)
-                    glow.transform.SetParent(root, false);
-                glow.transform.localPosition = ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
-                glow.transform.localScale = CardGlowScale;
-                ApplySortingGroup(glow.gameObject, VCSorting.Glow);
-                VCOverlayCamera.EnsureOnTop(glow.gameObject);
-                glow.transform.SetAsLastSibling();
+                if (mode.SwitchingFromFallback)
+                    SetFallbackMode(playerId, true);
+                throw;
             }
+        }
+
+        try
+        {
+            if (mode.SwitchingToFallback)
+            {
+                glow.sprite = GetCardGlowSprite();
+                if (_fallbackCardGlowMaterials.TryGetValue(playerId, out var fallbackMaterial))
+                    glow.sharedMaterial = fallbackMaterial;
+                glow.sortingLayerID = SortingLayer.NameToID(VCSorting.Layer);
+                glow.sortingOrder = VCSorting.Glow;
+                glow.maskInteraction = SpriteMaskInteraction.None;
+                glow.gameObject.layer = VCOverlayCamera.OverlayLayer;
+            }
+
+            var root = ResolveMeetingOverlayRoot(meetingHud);
+            if (glow.transform.parent != root)
+                glow.transform.SetParent(root, false);
+            glow.transform.localPosition = ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
+            glow.transform.localScale = CardGlowScale;
+            ApplySortingGroup(glow.gameObject, VCSorting.Glow);
+            VCOverlayCamera.EnsureOnTop(glow.gameObject);
+            glow.transform.SetAsLastSibling();
+        }
+        catch
+        {
+            if (mode.SwitchingToFallback)
+                SetFallbackMode(playerId, false);
+            throw;
         }
     }
 
@@ -300,6 +345,7 @@ public static class MeetingSpeakingIndicatorPatch
         var group = go.GetComponent<SortingGroup>() ?? go.AddComponent<SortingGroup>();
         group.sortingLayerName = VCSorting.Layer;
         group.sortingOrder = order;
+        group.enabled = true;
     }
 
     private static Transform ResolveMeetingOverlayRoot(MeetingHud meetingHud)
@@ -608,22 +654,29 @@ public static class MeetingSpeakingIndicatorPatch
         {
             var go = new GameObject("VC_CardSpeakingGlow");
             var background = state.Background;
-            bool hasBackground = background != null && background.sprite != null;
+            bool hasBackground = background != null;
+            bool hasSprite = hasBackground && background!.sprite != null;
+            bool useBackground = UsesBackgroundMode(hasBackground, hasSprite);
             var root = ResolveMeetingOverlayRoot(meetingHud);
-            go.transform.SetParent(hasBackground ? background!.transform : root, false);
-            go.transform.localPosition = hasBackground ? new Vector3(0f, 0f, -0.05f) : ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
-            go.transform.localScale = hasBackground ? new Vector3(1.10f, 1.28f, 1f) : CardGlowScale;
+            go.transform.SetParent(useBackground ? background!.transform : root, false);
+            go.transform.localPosition = useBackground ? new Vector3(0f, 0f, -0.05f) : ToOverlayLocal(root, GetCardWorldPosition(state), -101f);
+            go.transform.localScale = useBackground ? new Vector3(1.10f, 1.28f, 1f) : CardGlowScale;
 
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = hasBackground ? background!.sprite : GetCardGlowSprite();
-            sr.sortingLayerID = hasBackground ? background!.sortingLayerID : SortingLayer.NameToID(VCSorting.Layer);
+            var fallbackMaterial = sr.sharedMaterial;
+            sr.sprite = useBackground ? background!.sprite : GetCardGlowSprite();
+            sr.sortingLayerID = useBackground ? background!.sortingLayerID : SortingLayer.NameToID(VCSorting.Layer);
             sr.sortingOrder = VCSorting.Glow;
             sr.maskInteraction = SpriteMaskInteraction.None;
+            if (useBackground)
+                sr.sharedMaterial = background!.sharedMaterial;
             sr.enabled = false;
 
             _cardGlows[playerId] = sr;
+            _fallbackCardGlowMaterials[playerId] = fallbackMaterial;
+            SetFallbackMode(playerId, !useBackground);
             if (ShouldDebugLogHud())
-                LogHud("hud.meeting.create", $"type=cardGlow player={playerId} hasBackground={hasBackground} parent={ParentName(go.transform)} localPos={DescribeVector(go.transform.localPosition)} scale={DescribeVector(go.transform.localScale)} renderer={DescribeSpriteRenderer(sr)}");
+                LogHud("hud.meeting.create", $"type=cardGlow player={playerId} hasBackground={useBackground} parent={ParentName(go.transform)} localPos={DescribeVector(go.transform.localPosition)} scale={DescribeVector(go.transform.localScale)} renderer={DescribeSpriteRenderer(sr)}");
             return sr;
         }
         catch (Exception ex)
@@ -634,22 +687,101 @@ public static class MeetingSpeakingIndicatorPatch
         }
     }
 
+    internal static BackgroundModeDecision ResolveBackgroundMode(byte playerId, bool hasBackground, bool hasSprite)
+    {
+        bool useBackground = UsesBackgroundMode(hasBackground, hasSprite);
+        bool switchingFromFallback = useBackground && _fallbackCardGlows.Contains(playerId);
+        bool switchingToFallback = !useBackground && _backgroundCardGlows.Contains(playerId);
+        SetFallbackMode(playerId, !useBackground);
+        return new BackgroundModeDecision(useBackground, switchingFromFallback, switchingToFallback);
+    }
+
+    internal static bool UsesBackgroundMode(bool hasBackground, bool hasSprite)
+        => hasBackground && hasSprite;
+
+    private static void SetFallbackMode(byte playerId, bool fallback)
+    {
+        if (fallback)
+        {
+            _fallbackCardGlows.Add(playerId);
+            _backgroundCardGlows.Remove(playerId);
+        }
+        else
+        {
+            _fallbackCardGlows.Remove(playerId);
+            _backgroundCardGlows.Add(playerId);
+        }
+    }
+
+    internal static int ManagedStateEntryCount
+        => _cardGlows.Count
+         + _speakingLevels.Count
+         + _visualStates.Count
+         + _highlightSnapshots.Count
+         + _glowTransformInit.Count
+         + _fallbackCardGlows.Count
+         + _backgroundCardGlows.Count
+         + _fallbackCardGlowMaterials.Count
+         + _playerLookup.Count;
+
+    internal static bool TrackTransformInitialization(byte playerId)
+        => _glowTransformInit.Add(playerId);
+
+    private static void RestoreMeetingVisuals()
+    {
+        foreach (var glow in _cardGlows.Values)
+        {
+            try
+            {
+                if (glow != null)
+                    glow.enabled = false;
+            }
+            catch
+            {
+            }
+        }
+        ClearAllBuiltInHighlights();
+    }
+
     [HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.OnDestroy))]
     private static class DestroyPatch
     {
-        // Finalizer (not postfix) so state clears even if vanilla OnDestroy throws, avoiding leaks into the next meeting.
         [HarmonyFinalizer]
-        private static void Finalizer() => ClearDestroyedMeetingState();
+        private static Exception? Finalizer(Exception? __exception)
+            => FinalizeDestroyedMeetingState(__exception);
     }
 
-    internal static void ClearDestroyedMeetingState()
+    internal static Exception? FinalizeDestroyedMeetingState(Exception? exception, Action? restoreVisuals = null)
     {
-        ClearAllBuiltInHighlights(); // best-effort restore of any live vote-card highlights
-        _cardGlows.Clear();
-        _speakingLevels.Clear();
-        _visualStates.Clear();
-        _highlightSnapshots.Clear();
-        _glowTransformInit.Clear();
+        ClearDestroyedMeetingState(restoreVisuals);
+        return exception;
+    }
+
+    internal static void ClearDestroyedMeetingState(Action? restoreVisuals = null)
+    {
+        try
+        {
+            if (restoreVisuals == null)
+                RestoreMeetingVisuals();
+            else
+                restoreVisuals();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            _cardGlows.Clear();
+            _speakingLevels.Clear();
+            _visualStates.Clear();
+            _highlightSnapshots.Clear();
+            _glowTransformInit.Clear();
+            _fallbackCardGlows.Clear();
+            _backgroundCardGlows.Clear();
+            _fallbackCardGlowMaterials.Clear();
+            _playerLookup.Clear();
+            _lookupFrame = -1;
+        }
     }
 
     private static Sprite GetCardGlowSprite()
@@ -663,15 +795,15 @@ public static class MeetingSpeakingIndicatorPatch
         var tex = new Texture2D(Width, Height, TextureFormat.RGBA32, false);
         var pixels = new Color[Width * Height];
         for (int y = 0; y < Height; y++)
-        for (int x = 0; x < Width; x++)
-        {
-            float edge = Mathf.Min(Mathf.Min(x, Width - 1 - x), Mathf.Min(y, Height - 1 - y));
-            float edgeGlow = Mathf.Pow(1f - Mathf.Clamp01(edge / Feather), 1.15f);
-            float fill = 0.24f;
-            float a = Mathf.Clamp01(fill + edgeGlow * 0.62f);
-            // SetPixels is row-major bottom-to-top: index == x + y * Width.
-            pixels[x + y * Width] = new Color(1f, 1f, 1f, a);
-        }
+            for (int x = 0; x < Width; x++)
+            {
+                float edge = Mathf.Min(Mathf.Min(x, Width - 1 - x), Mathf.Min(y, Height - 1 - y));
+                float edgeGlow = Mathf.Pow(1f - Mathf.Clamp01(edge / Feather), 1.15f);
+                float fill = 0.24f;
+                float a = Mathf.Clamp01(fill + edgeGlow * 0.62f);
+                // SetPixels is row-major bottom-to-top: index == x + y * Width.
+                pixels[x + y * Width] = new Color(1f, 1f, 1f, a);
+            }
 
         tex.SetPixels(pixels);
         tex.Apply();
@@ -735,6 +867,20 @@ public static class MeetingSpeakingIndicatorPatch
         }
 
         return fallback;
+    }
+
+    internal readonly struct BackgroundModeDecision
+    {
+        public BackgroundModeDecision(bool useBackground, bool switchingFromFallback, bool switchingToFallback)
+        {
+            UseBackground = useBackground;
+            SwitchingFromFallback = switchingFromFallback;
+            SwitchingToFallback = switchingToFallback;
+        }
+
+        public bool UseBackground { get; }
+        public bool SwitchingFromFallback { get; }
+        public bool SwitchingToFallback { get; }
     }
 
     private sealed class SmoothVisualState

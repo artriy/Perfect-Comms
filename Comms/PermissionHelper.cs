@@ -6,6 +6,29 @@ using BepInEx.Unity.IL2CPP.Utils.Collections;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+internal enum MicrophonePermissionCompletionAction
+{
+    Ignore,
+    StartCapture,
+    RestoreMuted,
+}
+
+internal static class MicrophonePermissionDecisions
+{
+    internal static MicrophonePermissionCompletionAction DecideCompletion(
+        bool granted,
+        bool roomAvailable,
+        bool roomIsCurrent,
+        bool roomIsMuted)
+    {
+        if (!roomAvailable || !roomIsCurrent || roomIsMuted)
+            return MicrophonePermissionCompletionAction.Ignore;
+        return granted
+            ? MicrophonePermissionCompletionAction.StartCapture
+            : MicrophonePermissionCompletionAction.RestoreMuted;
+    }
+}
+
 /// <summary>
 /// Android microphone permission helper.
 ///
@@ -74,8 +97,17 @@ internal class PermissionHelper : MonoBehaviour
         var device = _pendingDevice;
         _pendingRoom = null;
         _pendingDevice = "";
-        if (granted && room != null && ReferenceEquals(VoiceChatRoom.Current, room))
-            room.StartMicAfterPermission(device);
+
+        var action = MicrophonePermissionDecisions.DecideCompletion(
+            granted,
+            room != null,
+            room != null && ReferenceEquals(VoiceChatRoom.Current, room),
+            room?.Mute ?? true);
+        if (action == MicrophonePermissionCompletionAction.StartCapture)
+            room!.StartMicAfterPermission(device);
+        else if (action == MicrophonePermissionCompletionAction.RestoreMuted)
+            room!.RestoreMutedAfterPermissionDenied();
     }
+
 }
 #endif

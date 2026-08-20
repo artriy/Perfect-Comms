@@ -140,6 +140,15 @@ internal class VCManager : MonoBehaviour
         VoiceChatPluginMain.ShutdownVoiceRuntime("application-quit");
     }
 
+    void OnApplicationPause(bool paused)
+    {
+        if (paused)
+        {
+            try { VoiceChatPatches.ReleaseHeldTransmitInputs(); } catch { }
+        }
+        try { VoiceChatRoom.Current?.SetApplicationPaused(paused); } catch { }
+    }
+
     void OnApplicationFocus(bool hasFocus)
     {
         if (hasFocus) return;

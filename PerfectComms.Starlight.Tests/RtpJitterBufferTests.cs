@@ -39,22 +39,32 @@ public sealed class RtpJitterBufferTests
     }
 
     [Fact]
-    public void DuplicateLateAndCapacityOverflowPacketsAreRejected()
+    public void PrePrimeOverflowRetainsTheNewestBoundedTail()
     {
-        var jitter = new RtpJitterBuffer(capacity: 2, primePackets: 1);
+        var jitter = new RtpJitterBuffer(capacity: 2, primePackets: 2);
         var output = new byte[ManagedOpusEncoder.MaxPacketBytes];
-        byte[] payload = [7, 8, 9];
 
-        Assert.True(jitter.Push(10, 1_000, payload, 0));
-        Assert.False(jitter.Push(10, 1_000, payload, 1));
-        Assert.True(jitter.Push(11, 1_960, payload, 2));
-        Assert.False(jitter.Push(12, 2_920, payload, 3));
+        Assert.True(jitter.Push(10, 1_000, [10], 0));
+        Assert.False(jitter.Push(10, 1_000, [10], 1));
+        Assert.True(jitter.Push(11, 1_960, [11], 2));
+        Assert.True(jitter.Push(12, 2_920, [12], 3));
         Assert.Equal(2, jitter.Count);
 
-        Assert.Equal(RtpJitterDecisionKind.Packet, jitter.GetDecision(3, output).Kind);
-        Assert.False(jitter.Push(10, 1_000, payload, 4));
-        Assert.True(jitter.Push(12, 2_920, payload, 4));
+        RtpJitterDecision discontinuity = jitter.GetDecision(3, output);
+        Assert.Equal(RtpJitterDecisionKind.Discontinuity, discontinuity.Kind);
+        Assert.Equal(11L, discontinuity.ExtendedSequence);
         Assert.Equal(2, jitter.Count);
+
+        RtpJitterDecision firstRetained = jitter.GetDecision(3, output);
+        Assert.Equal(RtpJitterDecisionKind.Packet, firstRetained.Kind);
+        Assert.Equal(11L, firstRetained.ExtendedSequence);
+        Assert.Equal((byte)11, output[0]);
+        Assert.False(jitter.Push(10, 1_000, [10], 4));
+
+        RtpJitterDecision secondRetained = jitter.GetDecision(3, output);
+        Assert.Equal(RtpJitterDecisionKind.Packet, secondRetained.Kind);
+        Assert.Equal(12L, secondRetained.ExtendedSequence);
+        Assert.Equal((byte)12, output[0]);
     }
 
     [Fact]
@@ -78,7 +88,7 @@ public sealed class RtpJitterBufferTests
     }
 
     [Fact]
-    public void MissingPacketUsesFollowingPacketForFecThenFallsBackToPlc()
+    public void IdleQueueStartsAFreshMissingDeadlineBeforeFecAndPlc()
     {
         var jitter = new RtpJitterBuffer(
             primePackets: 1,
@@ -96,7 +106,9 @@ public sealed class RtpJitterBufferTests
         Assert.Equal(1_460u, emptyQueueWait.Timestamp);
         Assert.True(jitter.Push(7, 2_420, following, 19));
 
-        RtpJitterDecision fec = jitter.GetDecision(20, output);
+        Assert.Equal(RtpJitterDecisionKind.Wait, jitter.GetDecision(20, output).Kind);
+        Assert.Equal(RtpJitterDecisionKind.Wait, jitter.GetDecision(39, output).Kind);
+        RtpJitterDecision fec = jitter.GetDecision(40, output);
         Assert.Equal(RtpJitterDecisionKind.Fec, fec.Kind);
         Assert.Equal(6L, fec.ExtendedSequence);
         Assert.Equal(1_460u, fec.Timestamp);
@@ -104,15 +116,16 @@ public sealed class RtpJitterBufferTests
         Assert.Equal(following, output.AsSpan(0, fec.PayloadLength).ToArray());
         Assert.Equal(1, jitter.Count);
 
-        RtpJitterDecision followingPacket = jitter.GetDecision(20, output);
+        RtpJitterDecision followingPacket = jitter.GetDecision(40, output);
         Assert.Equal(RtpJitterDecisionKind.Packet, followingPacket.Kind);
         Assert.Equal(7L, followingPacket.ExtendedSequence);
         Assert.Equal(2_420u, followingPacket.Timestamp);
         Assert.Equal(0, jitter.Count);
-        Assert.True(jitter.Push(10, 5_300, following, 39));
+        Assert.True(jitter.Push(10, 5_300, following, 59));
 
-        Assert.Equal(RtpJitterDecisionKind.Wait, jitter.GetDecision(39, output).Kind);
-        RtpJitterDecision plc = jitter.GetDecision(40, output);
+        Assert.Equal(RtpJitterDecisionKind.Wait, jitter.GetDecision(59, output).Kind);
+        Assert.Equal(RtpJitterDecisionKind.Wait, jitter.GetDecision(78, output).Kind);
+        RtpJitterDecision plc = jitter.GetDecision(79, output);
         Assert.Equal(RtpJitterDecisionKind.Plc, plc.Kind);
         Assert.Equal(8L, plc.ExtendedSequence);
         Assert.Equal(3_380u, plc.Timestamp);
@@ -218,6 +231,33 @@ public sealed class RtpJitterBufferTests
         Assert.Equal(RtpJitterDecisionKind.Packet, packet.Kind);
         Assert.Equal(21L, packet.ExtendedSequence);
         Assert.Equal(laterTimestamp, packet.Timestamp);
+    }
+
+    [Fact]
+    public void LongSequenceLossFastForwardsWithoutDeletingRetainedPackets()
+    {
+        var jitter = new RtpJitterBuffer(
+            capacity: 16,
+            primePackets: 1,
+            primeDeadlineMilliseconds: 0,
+            missingDeadlineMilliseconds: 20);
+        var output = new byte[ManagedOpusEncoder.MaxPacketBytes];
+
+        Assert.True(jitter.Push(1, 1_000, [1], 0));
+        Assert.Equal(RtpJitterDecisionKind.Packet, jitter.GetDecision(0, output).Kind);
+        Assert.True(jitter.Push(9, 8_680, [9], 1));
+        Assert.True(jitter.Push(10, 9_640, [10], 2));
+
+        RtpJitterDecision discontinuity = jitter.GetDecision(2, output);
+        Assert.Equal(RtpJitterDecisionKind.Discontinuity, discontinuity.Kind);
+        Assert.Equal(9L, discontinuity.ExtendedSequence);
+        Assert.Equal(2, jitter.Count);
+
+        RtpJitterDecision retained = jitter.GetDecision(2, output);
+        Assert.Equal(RtpJitterDecisionKind.Packet, retained.Kind);
+        Assert.Equal(9L, retained.ExtendedSequence);
+        Assert.Equal((byte)9, output[0]);
+        Assert.Equal(1, jitter.Count);
     }
 
     [Fact]

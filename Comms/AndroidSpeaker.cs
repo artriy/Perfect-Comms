@@ -22,8 +22,8 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     // A streaming PCM callback cannot ask for more samples than the complete clip. Allocate that
     // upper bound before AudioClip.Create so the realtime callback never resizes or allocates.
     internal const int MaximumCallbackSamples = ClipFrames * Channels;
-    private readonly AudioSource _source;
-    private readonly AudioClip _clip;
+    private AudioSource? _source;
+    private AudioClip? _clip;
     private readonly MobileVoiceClient _voice;
     private readonly AndroidMicrophoneMonitor? _microphoneMonitor;
     private int _readCallbacks;
@@ -37,7 +37,15 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     private long _nextRecoveryMs;
     private volatile bool _disposed;
 
-    public bool IsPlaying => _source != null && _source.isPlaying;
+    public bool IsPlaying
+    {
+        get
+        {
+            var source = _source;
+            return !_disposed && source != null && source.isPlaying;
+        }
+    }
+    internal bool IsValid => !_disposed && _source != null && _clip != null;
     public int ReadCallbacks => Volatile.Read(ref _readCallbacks);
 
     public AndroidEnginePcmSpeaker(
@@ -49,24 +57,47 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
 
         var host = VoiceChatPluginMain.ResidentObject
             ?? throw new InvalidOperationException("[VC] ResidentObject is null");
+        AudioSource? source = null;
+        AudioClip? clip = null;
+        try
+        {
+            source = host.AddComponent<AudioSource>();
+            source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
+            source.spatialBlend = 0f;
+            source.volume = 1f;
 
-        _source = host.AddComponent<AudioSource>();
-        _source.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
-        _source.spatialBlend = 0f;
-        _source.volume = 1f;
+            clip = AudioClip.Create(
+                "VCManagedStarlight",
+                ClipFrames,
+                Channels,
+                SampleRate,
+                true,
+                (AudioClip.PCMReaderCallback)Read);
+            if (clip == null)
+                throw new InvalidOperationException("[VC] AudioClip.Create returned null");
 
-        _clip = AudioClip.Create(
-            "VCManagedStarlight",
-            ClipFrames,
-            Channels,
-            SampleRate,
-            true,
-            (AudioClip.PCMReaderCallback)Read);
+            source.clip = clip;
+            source.loop = true;
+            source.Play();
+            if (!source.isPlaying)
+                throw new InvalidOperationException("[VC] AudioSource.Play did not start playback");
 
-        _source.clip = _clip;
-        _source.loop = true;
-        _source.Play();
-        _lastReadMs = Environment.TickCount64;
+            _source = source;
+            _clip = clip;
+            _lastReadMs = Environment.TickCount64;
+        }
+        catch
+        {
+            if (source != null)
+            {
+                try { source.Stop(); } catch { }
+                try { source.clip = null; } catch { }
+                try { UnityEngine.Object.Destroy(source); } catch { }
+            }
+            if (clip != null)
+                try { UnityEngine.Object.Destroy(clip); } catch { }
+            throw;
+        }
 
         VoiceDiagnostics.DebugInfo($"[VC] Android managed-starlight speaker initialised ({SampleRate} Hz, {Channels} ch).");
     }
@@ -115,7 +146,8 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     /// </summary>
     public bool Tick()
     {
-        if (_disposed || _source == null) return false;
+        var source = _source;
+        if (_disposed || source == null || _clip == null) return false;
 
         var now = Environment.TickCount64;
         if (now < _nextHealthCheckMs) return IsPlaying;
@@ -142,7 +174,7 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
         catch { focused = true; }
 
         bool playing;
-        try { playing = _source.isPlaying; }
+        try { playing = source.isPlaying; }
         catch { playing = false; }
 
         // Do not fight Android while it deliberately owns audio focus. A focused Tick after resume
@@ -159,15 +191,19 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
 
     private bool RestartPlayback(long now, string reason)
     {
+        var source = _source;
+        var clip = _clip;
+        if (_disposed || source == null || clip == null) return false;
+
         var attempt = Math.Min(Interlocked.Increment(ref _recoveryAttempt), 30);
         try
         {
-            _source.Stop();
-            _source.clip = null;
-            _source.clip = _clip;
-            _source.loop = true;
-            _source.Play();
-            if (_source.isPlaying)
+            source.Stop();
+            source.clip = null;
+            source.clip = clip;
+            source.loop = true;
+            source.Play();
+            if (source.isPlaying)
             {
                 // Allow the audio thread a full stall window to deliver its first callback. The
                 // callback resets the retry state; if it never arrives, subsequent stop/play
@@ -198,9 +234,18 @@ internal sealed class AndroidEnginePcmSpeaker : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        try { _source.Stop(); } catch { }
-        try { if (_source != null) UnityEngine.Object.Destroy(_source); } catch { }
-        try { if (_clip != null) UnityEngine.Object.Destroy(_clip); } catch { }
+        var source = _source;
+        var clip = _clip;
+        _source = null;
+        _clip = null;
+        if (source != null)
+        {
+            try { source.Stop(); } catch { }
+            try { source.clip = null; } catch { }
+            try { UnityEngine.Object.Destroy(source); } catch { }
+        }
+        if (clip != null)
+            try { UnityEngine.Object.Destroy(clip); } catch { }
         VoiceDiagnostics.DebugInfo("[VC] Android managed-starlight speaker disposed.");
     }
 }

@@ -11,6 +11,40 @@ using Object = UnityEngine.Object;
 
 namespace VoiceChatPlugin.VoiceChat;
 
+internal readonly struct VoiceHudRect
+{
+    internal VoiceHudRect(float x, float y, float width, float height)
+    {
+        X = x;
+        Y = y;
+        Width = width;
+        Height = height;
+    }
+
+    internal float X { get; }
+    internal float Y { get; }
+    internal float Width { get; }
+    internal float Height { get; }
+    internal float XMin => X;
+    internal float XMax => X + Width;
+    internal float YMin => Y;
+    internal float YMax => Y + Height;
+    internal float CenterX => X + Width * 0.5f;
+    internal float CenterY => Y + Height * 0.5f;
+}
+
+internal readonly struct VoiceHudPoint
+{
+    internal VoiceHudPoint(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    internal float X { get; }
+    internal float Y { get; }
+}
+
 public static partial class VoiceChatHudState
 {
     internal enum SharedMicTooltipOwner
@@ -20,10 +54,10 @@ public static partial class VoiceChatHudState
         Radio,
     }
 
-    private static PassiveButton?  _micButton;
-    private static GameObject?     _micButtonObj;
-    private static PassiveButton?  _spkButton;
-    private static GameObject?     _spkButtonObj;
+    private static PassiveButton? _micButton;
+    private static GameObject? _micButtonObj;
+    private static PassiveButton? _spkButton;
+    private static GameObject? _spkButtonObj;
     // Cached child SpriteRenderers so the per-frame refresh/sort paths avoid Transform.Find + GetComponent
     // and GetComponentsInChildren (managed array alloc + IL2CPP interop) every frame. Captured when the
     // (one-time) buttons are created; re-acquired automatically if a cache entry is null.
@@ -32,8 +66,8 @@ public static partial class VoiceChatHudState
     private static SpriteRenderer[]? _micButtonSrs;
     private static SpriteRenderer[]? _spkButtonSrs;
     private const float ButtonScale = 0.42f;
-    private const int   ButtonSortOrder = 32760;
-    private const int   TooltipSortOrder = 32767;
+    private const int ButtonSortOrder = 32760;
+    private const int TooltipSortOrder = 32767;
     private const float TooltipHalfWidth = 1.35f;
     private const float TooltipHalfHeight = 1.25f;
     private const float TooltipButtonGap = 0.35f;
@@ -43,8 +77,8 @@ public static partial class VoiceChatHudState
     private static float _btnY = 0.10f;
     private static VoiceControlsLayout _controlsLayout = VoiceControlsLayout.Vertical;
     private static bool _voiceControlsHudEnabled = true;
-    private static GameObject?  _micTooltip;
-    private static GameObject?  _spkTooltip;
+    private static GameObject? _micTooltip;
+    private static GameObject? _spkTooltip;
     private static TextMeshPro? _micTooltipTmp;
     private static TextMeshPro? _spkTooltipTmp;
     private static SharedMicTooltipOwner _sharedMicTooltipOwner;
@@ -54,21 +88,21 @@ public static partial class VoiceChatHudState
     // child set once (mirrors the _micButtonSrs pattern) and only re-stamp sorting per frame. Both the
     // Renderer set and the TextMeshPro set must be cached/stamped — the TMP's sortingLayerID is stamped
     // on a separate path from the Renderer's sortingLayerName, so dropping either regresses sorting.
-    private static Renderer[]?    _micTooltipRenderers;
-    private static Renderer[]?    _spkTooltipRenderers;
+    private static Renderer[]? _micTooltipRenderers;
+    private static Renderer[]? _spkTooltipRenderers;
     private static TextMeshPro[]? _micTooltipTmps;
     private static TextMeshPro[]? _spkTooltipTmps;
-    private static GameObject?    _toastObj;
-    private static TextMeshPro?   _toastTmp;
-    private static Renderer[]?    _toastRenderers;
+    private static GameObject? _toastObj;
+    private static TextMeshPro? _toastTmp;
+    private static Renderer[]? _toastRenderers;
     private static TextMeshPro[]? _toastTmps;
     private static string _toastMessage = "";
     private static float _toastExpiry;
     private const float ToastDurationSeconds = 4f;
     private const float ToastViewportY = 0.84f;
-    private static GameObject?    _compactStatusObj;
-    private static TextMeshPro?   _compactStatusTmp;
-    private static Renderer[]?    _compactStatusRenderers;
+    private static GameObject? _compactStatusObj;
+    private static TextMeshPro? _compactStatusTmp;
+    private static Renderer[]? _compactStatusRenderers;
     private static TextMeshPro[]? _compactStatusTmps;
     private static string _compactStatusMessage = "";
     private static float _compactStatusExpiry;
@@ -124,7 +158,7 @@ public static partial class VoiceChatHudState
         ApplyAudioPolicy(VoiceChatRoom.Current?.CurrentSnapshot);
     }
 
-    public static bool IsMuted        => IsManualMuteActive();
+    public static bool IsMuted => IsManualMuteActive();
     public static bool IsTeamRadio => IsInTeamRadioMode();
     public static bool IsImpostorRadio => IsTeamRadio;
     public static bool IsSpeakerMuted => _speakerMuted;
@@ -298,7 +332,10 @@ public static partial class VoiceChatHudState
         var cam = MainCamera();
         if (cam == null)
             return;
-        var worldPt = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, ButtonViewportDepth));
+        VoiceHudRect safe = NormalizedSafeViewportRect(cam);
+        VoiceHudPoint buttonAnchor = SafeViewportAnchor(safe, _btnX, _btnY);
+        var worldPt = cam.ViewportToWorldPoint(
+            new Vector3(buttonAnchor.X, buttonAnchor.Y, ButtonViewportDepth));
 
         float scale = _overlayScale * ButtonScale;
         float spacing = scale * 0.8f;
@@ -472,9 +509,11 @@ public static partial class VoiceChatHudState
             || float.IsInfinity(minY) || float.IsInfinity(maxY))
             return Vector3.zero;
 
-        Rect safe = NormalizedSafeViewportRect();
-        float shiftX = CalculateViewportShift(minX, maxX, safe.xMin, safe.xMax);
-        float shiftY = CalculateViewportShift(minY, maxY, safe.yMin, safe.yMax);
+        VoiceHudRect safe = NormalizedSafeViewportRect(cam);
+        VoiceHudPoint shift = CalculateViewportRectShift(
+            new VoiceHudRect(minX, minY, maxX - minX, maxY - minY), safe);
+        float shiftX = shift.X;
+        float shiftY = shift.Y;
         if (Mathf.Approximately(shiftX, 0f) && Mathf.Approximately(shiftY, 0f))
             return Vector3.zero;
 
@@ -499,19 +538,78 @@ public static partial class VoiceChatHudState
         return 0f;
     }
 
-    internal static Rect NormalizedSafeViewportRect()
+    internal static VoiceHudRect NormalizedSafeViewportRect(Camera cam)
     {
-        float screenWidth = Mathf.Max(1f, Screen.width);
-        float screenHeight = Mathf.Max(1f, Screen.height);
-        Rect safe = Screen.safeArea;
-        if (safe.width < 1f || safe.height < 1f)
-            safe = new Rect(0f, 0f, screenWidth, screenHeight);
-        return new Rect(
-            safe.xMin / screenWidth,
-            safe.yMin / screenHeight,
-            safe.width / screenWidth,
-            safe.height / screenHeight);
+        Rect safeArea = Screen.safeArea;
+        Rect cameraPixelRect = cam.pixelRect;
+        return CameraRelativeSafeViewportRect(
+            new VoiceHudRect(safeArea.x, safeArea.y, safeArea.width, safeArea.height),
+            new VoiceHudRect(
+                cameraPixelRect.x,
+                cameraPixelRect.y,
+                cameraPixelRect.width,
+                cameraPixelRect.height));
     }
+
+    internal static VoiceHudRect CameraRelativeSafeViewportRect(
+        VoiceHudRect safeArea,
+        VoiceHudRect cameraPixelRect)
+    {
+        if (!HasPositiveFiniteSize(cameraPixelRect))
+            return new VoiceHudRect(0f, 0f, 1f, 1f);
+        if (!HasPositiveFiniteSize(safeArea))
+            return new VoiceHudRect(0f, 0f, 1f, 1f);
+
+        float xMin = MathF.Max(safeArea.XMin, cameraPixelRect.XMin);
+        float xMax = MathF.Min(safeArea.XMax, cameraPixelRect.XMax);
+        float yMin = MathF.Max(safeArea.YMin, cameraPixelRect.YMin);
+        float yMax = MathF.Min(safeArea.YMax, cameraPixelRect.YMax);
+        if (xMax <= xMin || yMax <= yMin)
+            return new VoiceHudRect(0f, 0f, 1f, 1f);
+
+        return new VoiceHudRect(
+            (xMin - cameraPixelRect.XMin) / cameraPixelRect.Width,
+            (yMin - cameraPixelRect.YMin) / cameraPixelRect.Height,
+            (xMax - xMin) / cameraPixelRect.Width,
+            (yMax - yMin) / cameraPixelRect.Height);
+    }
+
+    internal static VoiceHudPoint SafeViewportAnchor(
+        VoiceHudRect safeViewport,
+        float normalizedX,
+        float normalizedY)
+        => new(
+            safeViewport.XMin + safeViewport.Width * normalizedX,
+            safeViewport.YMin + safeViewport.Height * normalizedY);
+
+    internal static VoiceHudPoint CalculateViewportRectShift(
+        VoiceHudRect contentBounds,
+        VoiceHudRect safeViewport,
+        float paddingX = 0f,
+        float paddingY = 0f)
+        => new(
+            CalculateViewportShift(
+                contentBounds.XMin,
+                contentBounds.XMax,
+                safeViewport.XMin + paddingX,
+                safeViewport.XMax - paddingX),
+            CalculateViewportShift(
+                contentBounds.YMin,
+                contentBounds.YMax,
+                safeViewport.YMin + paddingY,
+                safeViewport.YMax - paddingY));
+
+    private static bool HasPositiveFiniteSize(VoiceHudRect rect)
+        => rect.Width > 0f
+           && rect.Height > 0f
+           && !float.IsNaN(rect.X)
+           && !float.IsInfinity(rect.X)
+           && !float.IsNaN(rect.Y)
+           && !float.IsInfinity(rect.Y)
+           && !float.IsNaN(rect.Width)
+           && !float.IsInfinity(rect.Width)
+           && !float.IsNaN(rect.Height)
+           && !float.IsInfinity(rect.Height);
     // P1.2: pre-warm the one-time HUD init off the game-entry frame. The first UpdateHud() otherwise lands the
     // ~24 MB / ~177 ms first-init (embedded-PNG sprite decode + HUD button Instantiate + tooltip GameObject
     // creation) on the worst transition frame, next to the engine scene-load freeze and the peer-join wave. This
@@ -997,8 +1095,8 @@ public static partial class VoiceChatHudState
     private static void ApplyAudioPolicyCore(VoiceGameStateSnapshot? snapshot)
     {
         var settings = VoiceSettings.Instance;
-        bool radioTransmit   = IsInTeamRadioMode();
-        bool pushToTalkMode  = settings?.MicMode.Value == VoiceMicMode.PushToTalk;
+        bool radioTransmit = IsInTeamRadioMode();
+        bool pushToTalkMode = settings?.MicMode.Value == VoiceMicMode.PushToTalk;
         if (pushToTalkMode && _micMuted) _micMuted = false;
         bool pushToTalkMuted = pushToTalkMode && !_pushToTalkHeld && !radioTransmit;
         var resolvedPhase = VoiceSceneState.ResolvePhase();
@@ -1186,7 +1284,7 @@ public static partial class VoiceChatHudState
             return;
         }
 
-        bool prev     = _teamRadioHeld;
+        bool prev = _teamRadioHeld;
         _teamRadioHeld = held;
         if (prev != _teamRadioHeld)
         {
@@ -1485,8 +1583,13 @@ public static partial class VoiceChatHudState
         if (_toastObj == null) return;
         var cam = MainCamera();
         if (cam == null) return;
-        var world = cam.ViewportToWorldPoint(new Vector3(0.5f, ToastViewportY, ButtonViewportDepth));
+
+        VoiceHudRect safe = NormalizedSafeViewportRect(cam);
+        VoiceHudPoint anchor = SafeViewportAnchor(safe, 0.5f, ToastViewportY);
+        var world = cam.ViewportToWorldPoint(
+            new Vector3(anchor.X, anchor.Y, ButtonViewportDepth));
         _toastObj.transform.position = new Vector3(world.x, world.y, world.z - 1f);
+        ShiftTextIntoSafeViewport(cam, _toastObj, _toastTmp, safe, 0f, 0f);
     }
 
     private static GameObject CreateToastObject(Transform root, out TextMeshPro tmp)
@@ -1613,7 +1716,10 @@ public static partial class VoiceChatHudState
         float maxX = float.NegativeInfinity;
         float minY = float.PositiveInfinity;
         float maxY = float.NegativeInfinity;
-        var fallback = cam.ViewportToWorldPoint(new Vector3(_btnX, _btnY, ButtonViewportDepth));
+        VoiceHudRect safe = NormalizedSafeViewportRect(cam);
+        VoiceHudPoint fallbackAnchor = SafeViewportAnchor(safe, _btnX, _btnY);
+        var fallback = cam.ViewportToWorldPoint(
+            new Vector3(fallbackAnchor.X, fallbackAnchor.Y, ButtonViewportDepth));
         IncludeProposedButtonViewportBounds(
             cam,
             _micButtonObj,
@@ -1659,9 +1765,8 @@ public static partial class VoiceChatHudState
             statusMaxY = center.y + CompactStatusFallbackHalfHeightViewport;
         }
 
-        Rect safe = NormalizedSafeViewportRect();
         float alignX = (minX + maxX - statusMinX - statusMaxX) * 0.5f;
-        bool placeAbove = (minY + maxY) * 0.5f <= safe.center.y;
+        bool placeAbove = (minY + maxY) * 0.5f <= safe.CenterY;
         float alignY = placeAbove
             ? maxY + CompactStatusViewportGap - statusMinY
             : minY - CompactStatusViewportGap - statusMaxY;
@@ -1670,12 +1775,19 @@ public static partial class VoiceChatHudState
         float shiftedMaxX = statusMaxX + alignX;
         float shiftedMinY = statusMinY + alignY;
         float shiftedMaxY = statusMaxY + alignY;
-        float paddingX = Mathf.Min(CompactStatusViewportPadding, safe.width * 0.25f);
-        float paddingY = Mathf.Min(CompactStatusViewportPadding, safe.height * 0.25f);
-        float clampX = CalculateViewportShift(
-            shiftedMinX, shiftedMaxX, safe.xMin + paddingX, safe.xMax - paddingX);
-        float clampY = CalculateViewportShift(
-            shiftedMinY, shiftedMaxY, safe.yMin + paddingY, safe.yMax - paddingY);
+        float paddingX = Mathf.Min(CompactStatusViewportPadding, safe.Width * 0.25f);
+        float paddingY = Mathf.Min(CompactStatusViewportPadding, safe.Height * 0.25f);
+        VoiceHudPoint clamp = CalculateViewportRectShift(
+            new VoiceHudRect(
+                shiftedMinX,
+                shiftedMinY,
+                shiftedMaxX - shiftedMinX,
+                shiftedMaxY - shiftedMinY),
+            safe,
+            paddingX,
+            paddingY);
+        float clampX = clamp.X;
+        float clampY = clamp.Y;
 
         var origin = cam.ViewportToWorldPoint(new Vector3(0f, 0f, ButtonViewportDepth));
         var shifted = cam.ViewportToWorldPoint(
@@ -1691,18 +1803,28 @@ public static partial class VoiceChatHudState
         out float maxX,
         out float minY,
         out float maxY)
+        => TryGetTextViewportBounds(
+            cam, _compactStatusTmp, out minX, out maxX, out minY, out maxY);
+
+    private static bool TryGetTextViewportBounds(
+        Camera cam,
+        TextMeshPro? text,
+        out float minX,
+        out float maxX,
+        out float minY,
+        out float maxY)
     {
         minX = float.PositiveInfinity;
         maxX = float.NegativeInfinity;
         minY = float.PositiveInfinity;
         maxY = float.NegativeInfinity;
-        if (_compactStatusTmp == null) return false;
+        if (text == null) return false;
 
-        _compactStatusTmp.ForceMeshUpdate(ignoreActiveState: true, forceTextReparsing: true);
-        var bounds = _compactStatusTmp.textBounds;
+        text.ForceMeshUpdate(ignoreActiveState: true, forceTextReparsing: true);
+        var bounds = text.textBounds;
         if (bounds.size.x <= 0f || bounds.size.y <= 0f) return false;
 
-        var transform = _compactStatusTmp.transform;
+        var transform = text.transform;
         IncludeViewportPoint(
             cam.WorldToViewportPoint(transform.TransformPoint(
                 new Vector3(bounds.min.x, bounds.min.y, bounds.center.z))),
@@ -1721,6 +1843,34 @@ public static partial class VoiceChatHudState
             ref minX, ref maxX, ref minY, ref maxY);
         return !float.IsInfinity(minX) && !float.IsInfinity(maxX)
             && !float.IsInfinity(minY) && !float.IsInfinity(maxY);
+    }
+
+    private static void ShiftTextIntoSafeViewport(
+        Camera cam,
+        GameObject root,
+        TextMeshPro? text,
+        VoiceHudRect safe,
+        float paddingX,
+        float paddingY)
+    {
+        if (!TryGetTextViewportBounds(
+                cam, text, out float minX, out float maxX, out float minY, out float maxY))
+            return;
+
+        VoiceHudPoint shift = CalculateViewportRectShift(
+            new VoiceHudRect(minX, minY, maxX - minX, maxY - minY),
+            safe,
+            paddingX,
+            paddingY);
+        if (Mathf.Approximately(shift.X, 0f) && Mathf.Approximately(shift.Y, 0f))
+            return;
+
+        float depth = cam.WorldToViewportPoint(root.transform.position).z;
+        var origin = cam.ViewportToWorldPoint(new Vector3(0f, 0f, depth));
+        var shifted = cam.ViewportToWorldPoint(new Vector3(shift.X, shift.Y, depth));
+        var delta = shifted - origin;
+        delta.z = 0f;
+        root.transform.position += delta;
     }
 
     private static GameObject CreateTooltipObject(Transform root, out TextMeshPro tmp)
@@ -1773,7 +1923,7 @@ public static partial class VoiceChatHudState
                 pushToTalkMode,
                 radioVisible);
 #else
-        string muteKey  = VoiceChatKeybinds.ToggleMute.Label;
+        string muteKey = VoiceChatKeybinds.ToggleMute.Label;
         string radioKey = VoiceChatKeybinds.TeamRadio.Label;
         string cycleKey = VoiceChatKeybinds.CycleTeamRadioChannel.Label;
         _micTooltipTmp.text =
@@ -1786,7 +1936,7 @@ public static partial class VoiceChatHudState
                 : $"Mute: {muteKey}  |  Team Radio: {radioKey} (hold)  |  Cycle: {cycleKey}");
 #endif
 
-        PositionNear(_micTooltip, _micButtonObj);
+        PositionNear(_micTooltip, _micTooltipTmp, _micButtonObj);
         KeepTooltipOnTop(_micTooltip, ref _micTooltipRenderers, ref _micTooltipTmps);
         _micTooltip.SetActive(true);
     }
@@ -1813,7 +1963,7 @@ public static partial class VoiceChatHudState
             "Mutes playback and pauses microphone transmission.";
 #endif
 
-        PositionNear(_spkTooltip, _spkButtonObj);
+        PositionNear(_spkTooltip, _spkTooltipTmp, _spkButtonObj);
         KeepTooltipOnTop(_spkTooltip, ref _spkTooltipRenderers, ref _spkTooltipTmps);
         _spkTooltip.SetActive(true);
     }
@@ -1825,7 +1975,7 @@ public static partial class VoiceChatHudState
         _sharedMicTooltipOwner = SharedMicTooltipOwner.None;
     }
 
-    private static void PositionNear(GameObject tooltip, GameObject btn)
+    private static void PositionNear(GameObject tooltip, TextMeshPro text, GameObject btn)
     {
         var p = btn.transform.position;
         var cam = MainCamera();
@@ -1835,32 +1985,22 @@ public static partial class VoiceChatHudState
             return;
         }
 
+        VoiceHudRect safe = NormalizedSafeViewportRect(cam);
         var viewport = cam.WorldToViewportPoint(p);
-        float side = viewport.x < 0.5f ? 1f : -1f;
+        float side = viewport.x < safe.CenterX ? 1f : -1f;
         float x = p.x + side * (TooltipHalfWidth + TooltipButtonGap);
         float y = p.y;
 
-        if (viewport.y < 0.35f)
+        if (viewport.y < safe.YMin + safe.Height * 0.35f)
             y = p.y + TooltipHalfHeight + TooltipButtonGap;
-        else if (viewport.y > 0.65f)
+        else if (viewport.y > safe.YMin + safe.Height * 0.65f)
             y = p.y - TooltipHalfHeight - TooltipButtonGap;
 
-        float z = viewport.z;
-        var min = cam.ViewportToWorldPoint(new Vector3(TooltipViewportPadding, TooltipViewportPadding, z));
-        var max = cam.ViewportToWorldPoint(new Vector3(1f - TooltipViewportPadding, 1f - TooltipViewportPadding, z));
-        float minX = Mathf.Min(min.x, max.x) + TooltipHalfWidth;
-        float maxX = Mathf.Max(min.x, max.x) - TooltipHalfWidth;
-        float minY = Mathf.Min(min.y, max.y) + TooltipHalfHeight;
-        float maxY = Mathf.Max(min.y, max.y) - TooltipHalfHeight;
-
-        tooltip.transform.position = new Vector3(
-            ClampTooltipAxis(x, minX, maxX),
-            ClampTooltipAxis(y, minY, maxY),
-            p.z - 1f);
+        tooltip.transform.position = new Vector3(x, y, p.z - 1f);
+        float paddingX = Mathf.Min(TooltipViewportPadding, safe.Width * 0.25f);
+        float paddingY = Mathf.Min(TooltipViewportPadding, safe.Height * 0.25f);
+        ShiftTextIntoSafeViewport(cam, tooltip, text, safe, paddingX, paddingY);
     }
-
-    private static float ClampTooltipAxis(float value, float min, float max)
-        => min <= max ? Mathf.Clamp(value, min, max) : (min + max) * 0.5f;
 
     private static void KeepTooltipOnTop(
         GameObject? tooltip,
@@ -1872,7 +2012,7 @@ public static partial class VoiceChatHudState
         VCOverlayCamera.EnsureOnTop(tooltip);
         // The tooltip hierarchy is static, so cache the child component arrays once instead of
         // re-allocating them every frame. (Nulled in DestroyTooltips so a re-created tooltip re-caches.)
-        cachedTmps      ??= tooltip.GetComponentsInChildren<TextMeshPro>(true);
+        cachedTmps ??= tooltip.GetComponentsInChildren<TextMeshPro>(true);
         cachedRenderers ??= tooltip.GetComponentsInChildren<Renderer>(true);
         int layerId = SortingLayer.NameToID(VCSorting.Layer);
         foreach (var tmp in cachedTmps)
@@ -2094,7 +2234,7 @@ public static partial class VoiceChatHudState
         {
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, highQuality)
             {
-                wrapMode   = TextureWrapMode.Clamp,
+                wrapMode = TextureWrapMode.Clamp,
                 filterMode = FilterMode.Bilinear,
                 anisoLevel = highQuality ? 16 : 1,
                 mipMapBias = highQuality ? -1.15f : 0f,
@@ -2103,7 +2243,7 @@ public static partial class VoiceChatHudState
             using var ms = new MemoryStream();
             stream.CopyTo(ms);
             tex.LoadImage(ms.ToArray(), false);
-            tex.wrapMode   = TextureWrapMode.Clamp;
+            tex.wrapMode = TextureWrapMode.Clamp;
             tex.filterMode = FilterMode.Bilinear;
             tex.anisoLevel = highQuality ? 16 : 1;
             tex.mipMapBias = highQuality ? -1.15f : 0f;
@@ -2123,9 +2263,9 @@ public static partial class VoiceChatHudState
 
     private static class Sprites
     {
-        public static Sprite MicOn  => LoadControlSprite("VoiceChatPlugin.Resources.MicOn.png");
+        public static Sprite MicOn => LoadControlSprite("VoiceChatPlugin.Resources.MicOn.png");
         public static Sprite MicOff => LoadControlSprite("VoiceChatPlugin.Resources.MicOff.png");
-        public static Sprite SpkOn  => LoadControlSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
+        public static Sprite SpkOn => LoadControlSprite("VoiceChatPlugin.Resources.SpeakerOn.png");
         public static Sprite SpkOff => LoadControlSprite("VoiceChatPlugin.Resources.SpeakerOff.png");
     }
 }

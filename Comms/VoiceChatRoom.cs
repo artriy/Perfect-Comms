@@ -48,13 +48,13 @@ public class VoiceChatRoom
     public static VoiceChatRoom? Current => Volatile.Read(ref _current);
 
     // ── Virtual components ─────────────────────────────────────────────────────
-    private readonly List<IVoiceComponent> _virtualMics     = new();
+    private readonly List<IVoiceComponent> _virtualMics = new();
     private readonly List<IVoiceComponent> _virtualSpeakers = new();
     private readonly List<SpeakerCache> _speakerCacheBuffer = new();
-    public void AddVirtualMicrophone(IVoiceComponent c)    => _virtualMics.Add(c);
-    public void AddVirtualSpeaker(IVoiceComponent c)       => _virtualSpeakers.Add(c);
+    public void AddVirtualMicrophone(IVoiceComponent c) => _virtualMics.Add(c);
+    public void AddVirtualSpeaker(IVoiceComponent c) => _virtualSpeakers.Add(c);
     public void RemoveVirtualMicrophone(IVoiceComponent c) => _virtualMics.Remove(c);
-    public void RemoveVirtualSpeaker(IVoiceComponent c)    => _virtualSpeakers.Remove(c);
+    public void RemoveVirtualSpeaker(IVoiceComponent c) => _virtualSpeakers.Remove(c);
 
     // ── Microphone ─────────────────────────────────────────────────────────────
     public bool UsingMicrophone => _voiceBackend?.UsingMicrophone == true;
@@ -99,9 +99,9 @@ public class VoiceChatRoom
     // Capture is fail-closed from construction through the first authoritative policy tick. The
     // backend observes this value before opening a microphone, so StartMuted/PTT/deafen state can
     // never race an early OnGameJoined transport bootstrap.
-    public bool Mute  { get; private set; } = true;
+    public bool Mute { get; private set; } = true;
     private bool _keepCaptureWarm;
-    public int  SampleRate => AudioHelpers.ClockRate;
+    public int SampleRate => AudioHelpers.ClockRate;
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
     private bool _voiceRoutingPolicyReady;
     private VoiceConnectionProgress _voiceConnectionProgress = VoiceConnectionProgress.Starting;
@@ -116,21 +116,21 @@ public class VoiceChatRoom
     public bool UsingSpeaker => _voiceBackend?.UsingSpeaker == true;
 
     // ── Misc ───────────────────────────────────────────────────────────────────
-    private bool  _commsSabActive;
+    private bool _commsSabActive;
     private float _commsSabCheckTimer;
     private string _lastCommsSabotageSource = "";
-    private byte   _lastId   = byte.MaxValue;
+    private byte _lastId = byte.MaxValue;
     private string _lastName = null!;
-    private float  _lastCompatibilityRefreshTime = -999f;
-    private float  _snapshotRefreshTimer;
+    private float _lastCompatibilityRefreshTime = -999f;
+    private float _snapshotRefreshTimer;
     private int _snapshotGameId;
     private bool _retainingTransitionSnapshot;
     private readonly Dictionary<int, float> _missingSnapshotClientSince = new();
     private readonly HashSet<int> _authenticatedSnapshotClientIds = new();
     private float _authRosterUnavailableSince = -1f;
     private float _completeRemoteRosterWaitStart = -1f;
-    private float  _bootstrapUntilTime = -999f;
-    private float  _bootstrapRefreshTimer;
+    private float _bootstrapUntilTime = -999f;
+    private float _bootstrapRefreshTimer;
     private float _missingPeerRecoveryReadyTime = -999f;
     private float _lastMissingPeerRecoveryTime = -999f;
     // Storm guard (P0): a permanently-unmappable remote keeps mappedPeers < remotePlayers forever. Track how
@@ -342,6 +342,9 @@ public class VoiceChatRoom
 
     public void RebuildCaptureSupervisor() => _perfectCommsVoice?.RebuildCaptureSupervisor();
 
+    internal void SetApplicationPaused(bool paused)
+        => _perfectCommsVoice?.SetApplicationPaused(paused);
+
     internal void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
 #if !WINDOWS
@@ -435,6 +438,17 @@ public class VoiceChatRoom
         StartMicNow(deviceName);
         _voiceBackend?.SetMicrophonePolicy(false, keepCaptureWarm: false);
     }
+
+    internal void RestoreMutedAfterPermissionDenied()
+    {
+        if (Volatile.Read(ref _closed) != 0 ||
+            !ReferenceEquals(Current, this) ||
+            Mute)
+            return;
+        Mute = true;
+        _keepCaptureWarm = false;
+        _voiceBackend?.SetMicrophonePolicy(true, keepCaptureWarm: false);
+    }
 #endif
 
     // ======================================================================
@@ -465,8 +479,8 @@ public class VoiceChatRoom
 #if WINDOWS
         VoiceChatLocalSettings.MaybeRefreshActiveRoomDeviceLists();
 #endif
-        updateStep = "transport";        TryUpdateLocalProfile();
-        TryRunBootstrapRefresh();        TickVoiceBackend(CurrentSnapshot);
+        updateStep = "transport"; TryUpdateLocalProfile();
+        TryRunBootstrapRefresh(); TickVoiceBackend(CurrentSnapshot);
         MaybeLogNetworkStats();
 
         updateStep = "snapshot";
@@ -660,7 +674,7 @@ public class VoiceChatRoom
         // One-time-per-map occlusion warm-up so the first in-range speaker doesn't pay the physics-broadphase
         // build + door-cache scan (~70-100ms) mid-round. No-op after the first call for a given map.
         if (listenerPos.HasValue) VoiceAudioOcclusion.WarmUp(listenerPos.Value);
-        TrackTransitionPhase(snapshot);        bool localInVent = snapshot != null &&
+        TrackTransitionPhase(snapshot); bool localInVent = snapshot != null &&
                             snapshot.TryGetLocalPlayer(out var localSnapshot) &&
                             localSnapshot.InVent;
 
@@ -2034,7 +2048,7 @@ public class VoiceChatRoom
                     preserveHeldTransmitInputs: false));
     }
 
-    private void TryUpdateLocalProfile()  => UpdateLocalProfile(false);
+    private void TryUpdateLocalProfile() => UpdateLocalProfile(false);
     internal void ForceUpdateLocalProfile() => UpdateLocalProfile(true);
 
     private void UpdateLocalProfile(bool always)
@@ -2043,7 +2057,7 @@ public class VoiceChatRoom
         if (!lp) return;
         if (!always && lp.PlayerId == _lastId && lp.name == _lastName) return;
 
-        _lastId   = lp.PlayerId;
+        _lastId = lp.PlayerId;
         _lastName = lp.name;
 
         try
@@ -2191,7 +2205,7 @@ public class VoiceChatRoom
         if (!slow) _tracePerfEventsRemaining--;
 
         VoiceDiagnostics.Log(slow ? "transition.perf.slowUpdate" : "transition.perf.update",
-            $"elapsedMs={elapsedMs:0.000} completedStep={completedStep} phase={snapshot?.Phase.ToString() ?? "none"} " +            $"micLevel={LocalMicLevel:0.000} speaking={LocalMicSpeaking} mute={Mute}");
+            $"elapsedMs={elapsedMs:0.000} completedStep={completedStep} phase={snapshot?.Phase.ToString() ?? "none"} " + $"micLevel={LocalMicLevel:0.000} speaking={LocalMicSpeaking} mute={Mute}");
     }
 
     private void TraceOperationCost(string category, string message, double elapsedMs)

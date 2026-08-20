@@ -137,6 +137,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private MobileVoiceClient? _mobileVoice;
     private AndroidEnginePcmSpeaker? _mobileSpeaker;
     private readonly AndroidMicrophoneMonitor _androidMicrophoneMonitor = new();
+    private readonly object _mobileLifecycleGate = new();
+    private volatile bool _applicationPaused;
     private long _mobileVoiceStartRetryAtMs;
     private int _mobileVoiceStartFailures;
     private int _mobileVoiceGeneration;
@@ -146,7 +148,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS
     private enum CaptureSlot { Sidecar, Bass, Unity }
     private CaptureSlot[] _captureSlots = Array.Empty<CaptureSlot>();
-    private CaptureSlot _activeCaptureSlot = CaptureSlot.Bass;
+    private CaptureSlot _activeCaptureSlot = CaptureSlot.Sidecar;
     private CaptureSupervisor? _captureSupervisor;
     private int _supervisorActiveIndex;
     private SidecarVoiceLease? _voice;
@@ -210,8 +212,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private float _vadThreshold = 0.004f;
     private volatile float _localLevel;
     private volatile bool _localSpeaking;
-#if WINDOWS
+#if WINDOWS || ANDROID
     private volatile bool _microphoneRequested;
+#endif
+#if WINDOWS
     private volatile bool _sidecarCaptureAwaitingFirstLevel;
     private ulong _sidecarCaptureStreamGeneration;
     private long _sidecarCaptureSourceGeneration;
@@ -313,8 +317,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         lock (_voiceSync) voice = _voice;
         voice?.SetIceServers(servers);
 #elif ANDROID
-        _iceServers = servers;
-        _mobileVoice?.SetIceServers(servers);
+        lock (_mobileLifecycleGate)
+        {
+            if (!_disposed)
+                _mobileVoice?.SetIceServers(servers);
+        }
 #endif
     }
 
@@ -940,6 +947,38 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         return false;
     }
 
+    public void SetApplicationPaused(bool paused)
+    {
+#if ANDROID
+        if (_disposed) return;
+        _applicationPaused = paused;
+        if (paused)
+        {
+            StopAndroidMicrophone("application-paused");
+            return;
+        }
+
+        bool permitted;
+        try { permitted = Application.HasUserAuthorization(UserAuthorization.Microphone); }
+        catch { permitted = false; }
+        if (ShouldResumeAndroidMicrophone(
+                _disposed,
+                _applicationPaused,
+                permitted,
+                _microphoneRequested,
+                Mute))
+            StartAndroidMicrophone("application-resumed");
+#endif
+    }
+
+    internal static bool ShouldResumeAndroidMicrophone(
+        bool disposed,
+        bool paused,
+        bool permitted,
+        bool requested,
+        bool muted)
+        => !disposed && !paused && permitted && requested && !muted;
+
     public void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
 #if !WINDOWS
@@ -1387,6 +1426,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _lastMicDeviceName, normalizedName, forceRestart);
         _lastMicDeviceName = normalizedName;
         _micVolume = NormalizeMicGain(volume);
+#if ANDROID
+        _microphoneRequested = true;
+#endif
 #endif
 #if WINDOWS
         if (restartSidecar)
@@ -3275,6 +3317,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID
     private void EnsureMobileVoice()
     {
+        if (_disposed) return;
+        lock (_mobileLifecycleGate)
+        {
+            if (_disposed) return;
         var nowMs = Environment.TickCount64;
         var existing = _mobileVoice;
         if (existing?.IsRunning == true)
@@ -3362,6 +3408,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             }
             return;
         }
+        if (_disposed)
+        {
+            mv.Dispose();
+            return;
+        }
         _mobileVoiceStartRetryAtMs = 0;
         _mobileVoiceStartFailures = 0;
         if (_iceServers != null && _iceServers.Count > 0) mv.SetIceServers(_iceServers);
@@ -3372,12 +3423,13 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         mv.SetDsp(false, false, false, false, false);
         // A fresh engine is fail-closed. Explicit Stop when muted/not ready also resets any
         // encoder history before peers can be authorized; an already-running source gets Start.
-        mv.SetMicActive(!Mute && _microphoneReady);
+        mv.SetMicActive(!_applicationPaused && !Mute && _microphoneReady);
         _gameStateSendGate.Reset();
         _mobileVoice = mv;
         EnsureMobileSpeaker(mv, nowMs, force: true);
         VoiceDiagnostics.Log("voice.mobile", $"state=started backend=managed-starlight generation={callbackGeneration} dsp=platform-passthrough");
     }
+        }
 
     private bool IsCurrentMobileVoice(MobileVoiceClient voice, int generation)
         => !_disposed
@@ -3387,6 +3439,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
     private void InvalidateMobileVoice(MobileVoiceClient voice, string reason)
     {
+        lock (_mobileLifecycleGate)
+        {
         Interlocked.Increment(ref _mobileVoiceGeneration);
         try { _mobileSpeaker?.Dispose(); } catch { }
         _mobileSpeaker = null;
@@ -3412,25 +3466,48 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         try { voice.ResetMicInput(); } catch { }
         try { voice.Dispose(); } catch { }
         VoiceDiagnostics.Log("voice.mobile", $"state=invalidated reason={reason}");
+        }
     }
 
     private void EnsureMobileSpeaker(MobileVoiceClient voice, long nowMs, bool force)
     {
-        if (_mobileSpeaker != null || !ReferenceEquals(_mobileVoice, voice) || !voice.IsRunning)
-            return;
+        lock (_mobileLifecycleGate)
+        {
+            if (_disposed || !ReferenceEquals(_mobileVoice, voice) || !voice.IsRunning)
+                return;
+            if (_mobileSpeaker != null)
+            {
+                if (_mobileSpeaker.IsValid)
+                    return;
+                try { _mobileSpeaker.Dispose(); } catch { }
+                _mobileSpeaker = null;
+                _speakerReady = false;
+            }
         if (!force && nowMs < _mobileSpeakerRetryAtMs)
             return;
 
+        AndroidEnginePcmSpeaker? speaker = null;
         try
         {
-            _mobileSpeaker = new AndroidEnginePcmSpeaker(voice, _androidMicrophoneMonitor);
-            _speakerReady = _mobileSpeaker.IsPlaying;
+            speaker = new AndroidEnginePcmSpeaker(voice, _androidMicrophoneMonitor);
+            if (_disposed)
+            {
+                speaker.Dispose();
+                speaker = null;
+                return;
+            }
+            if (!speaker.IsPlaying)
+                throw new InvalidOperationException("managed Starlight speaker did not start playback");
+            _mobileSpeaker = speaker;
+            speaker = null;
+            _speakerReady = true;
             _mobileSpeakerRetryAttempts = 0;
             _mobileSpeakerRetryAtMs = 0;
-            Interlocked.Exchange(ref _voiceUnavailableRetrying, _speakerReady ? 0 : 1);
+            Interlocked.Exchange(ref _voiceUnavailableRetrying, 0);
         }
         catch (Exception ex)
         {
+            try { speaker?.Dispose(); } catch { }
             _mobileSpeaker = null;
             _speakerReady = false;
             _mobileSpeakerRetryAttempts = Math.Min(_mobileSpeakerRetryAttempts + 1, 30);
@@ -3442,6 +3519,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             VoiceDiagnostics.Log("voice.speaker",
                 $"ready=false backend=managed-starlight retryAfterMs={retryMs} error=\"{ex.Message}\"");
         }
+    }
     }
 
     private void OnMobilePeerState(int clientId, int generation, string state)
@@ -3475,6 +3553,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void OnSyntheticMicTick()
     {
         if (_disposed || Mute || !_captureOptions.SyntheticMicToneEnabled) return;
+#if ANDROID
+        if (_applicationPaused) return;
+#endif
         try
         {
             var frame = new float[AudioHelpers.FrameSize];
@@ -3524,6 +3605,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if ANDROID || WINDOWS
     private void StartAndroidMicrophone(string reason)
     {
+        if (_disposed) return;
+#if ANDROID
+        if (_applicationPaused) return;
+#endif
         try
         {
             StopAndroidMicrophone($"restart:{reason}");
@@ -3623,6 +3708,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private void OnAndroidMicrophoneData(float[] buffer, int length)
     {
         if (_disposed || buffer.Length == 0) return;
+#if ANDROID
+        if (_applicationPaused) return;
+#endif
         Interlocked.Increment(ref _micCallbacks);
         int samples = Math.Min(Math.Max(length, 0), buffer.Length);
         Interlocked.Add(ref _micBytes, samples * sizeof(float));
@@ -3718,7 +3806,11 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
                 lock (_captureFrameSync)
                 {
+#if ANDROID
+                    if (epoch != _captureEpoch || Mute || _applicationPaused) continue;
+#else
                     if (epoch != _captureEpoch || Mute) continue;
+#endif
                     try
                     {
 #if ANDROID
@@ -3823,16 +3915,20 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         }
 #else
 #if ANDROID
-        EnsureMobileVoice();
-        try { _mobileSpeaker?.Dispose(); } catch { }
-        _mobileSpeaker = null;
-        _speakerReady = false;
-        _mobileSpeakerRetryAttempts = 0;
-        _mobileSpeakerRetryAtMs = 0;
-        var mobileVoice = _mobileVoice;
-        if (mobileVoice != null)
-            EnsureMobileSpeaker(mobileVoice, Environment.TickCount64, force: true);
-        VoiceDiagnostics.Log("voice.speaker", $"ready={_speakerReady} device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=managed-starlight");
+        lock (_mobileLifecycleGate)
+        {
+            if (_disposed) return;
+            EnsureMobileVoice();
+            try { _mobileSpeaker?.Dispose(); } catch { }
+            _mobileSpeaker = null;
+            _speakerReady = false;
+            _mobileSpeakerRetryAttempts = 0;
+            _mobileSpeakerRetryAtMs = 0;
+            var mobileVoice = _mobileVoice;
+            if (mobileVoice != null)
+                EnsureMobileSpeaker(mobileVoice, Environment.TickCount64, force: true);
+            VoiceDiagnostics.Log("voice.speaker", $"ready={_speakerReady} device={VoiceDiagnostics.DescribeDevice(deviceName)} backend=managed-starlight");
+        }
 #else
         _speakerReady = false;
 #endif
@@ -4109,18 +4205,34 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 // Close the native PCM gate during every Unity restart/lease wait. Re-open it only
                 // after the source has actually recovered so stale encoder history and queued PCM
                 // cannot leak across a capture discontinuity.
-                try { _mobileVoice?.SetMicActive(isReady && !Mute); } catch { }
+                try { _mobileVoice?.SetMicActive(!_applicationPaused && isReady && !Mute); } catch { }
                 VoiceDiagnostics.Log(
                     "voice.mic",
                     $"ready={isReady.ToString().ToLowerInvariant()} reason=unity-capture-transition leaseUnavailable={androidMicrophone.LeaseUnavailable.ToString().ToLowerInvariant()} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)}");
             }
         }
 
-        var mobileSpeaker = _mobileSpeaker;
-        if (mobileSpeaker != null)
+        lock (_mobileLifecycleGate)
         {
-            _speakerReady = mobileSpeaker.Tick();
-            Interlocked.Exchange(ref _voiceUnavailableRetrying, _speakerReady ? 0 : 1);
+            var mobileSpeaker = _mobileSpeaker;
+            if (mobileSpeaker != null && !mobileSpeaker.IsValid)
+            {
+                try { mobileSpeaker.Dispose(); } catch { }
+                _mobileSpeaker = null;
+                _speakerReady = false;
+                mobileSpeaker = null;
+            }
+            if (mobileSpeaker != null)
+            {
+                _speakerReady = mobileSpeaker.Tick();
+                Interlocked.Exchange(ref _voiceUnavailableRetrying, _speakerReady ? 0 : 1);
+            }
+            else
+            {
+                var mobileVoice = _mobileVoice;
+                if (mobileVoice?.IsRunning == true)
+                    EnsureMobileSpeaker(mobileVoice, Environment.TickCount64, force: false);
+            }
         }
 #elif WINDOWS
         _androidMicrophone?.Tick();
@@ -4409,11 +4521,15 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         BestEffortDispose("sidecar-session-stop", () => StopVoiceSession(
             "dispose", waitForStop: true, cleanupInBackground: true));
 #elif ANDROID
-        BestEffortDispose("android-microphone-stop", () => StopAndroidMicrophone("dispose"));
-        BestEffortDispose("mobile-speaker-dispose", () => _mobileSpeaker?.Dispose());
-        _mobileSpeaker = null;
-        BestEffortDispose("mobile-engine-dispose", () => _mobileVoice?.Dispose());
-        _mobileVoice = null;
+        lock (_mobileLifecycleGate)
+        {
+            _applicationPaused = true;
+            BestEffortDispose("android-microphone-stop", () => StopAndroidMicrophone("dispose"));
+            BestEffortDispose("mobile-speaker-dispose", () => _mobileSpeaker?.Dispose());
+            _mobileSpeaker = null;
+            BestEffortDispose("mobile-engine-dispose", () => _mobileVoice?.Dispose());
+            _mobileVoice = null;
+        }
 #endif
         BestEffortDispose("preprocessor-dispose", () =>
         {

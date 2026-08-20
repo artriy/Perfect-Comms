@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using PerfectComms.Starlight.Media;
+using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
 namespace PerfectComms.Starlight.Tests;
@@ -71,6 +72,89 @@ public sealed class ManagedVoiceEngineTests
     }
 
     [Fact]
+    public async Task MobileClientReapsATimedOutEngineExactlyOnceAfterItsActiveCallReturns()
+    {
+        var client = new MobileVoiceClient();
+        using var acquired = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        Task? activeCall = null;
+        try
+        {
+            Assert.True(client.Start());
+            activeCall = Task.Run(
+                () => Assert.True(client.HoldEngineCallForTest(acquired, release)),
+                TestContext.Current.CancellationToken);
+            Assert.True(acquired.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+
+            await Task.Run(client.Dispose, TestContext.Current.CancellationToken).WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+            Assert.False(activeCall.IsCompleted);
+            Assert.Equal(0, client.EngineDisposalCountForTest);
+
+            release.Set();
+            await activeCall.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+            Assert.True(SpinWait.SpinUntil(
+                () => client.EngineDisposalCountForTest == 1,
+                TimeSpan.FromSeconds(5)));
+
+            client.Dispose();
+            Assert.Equal(1, client.EngineDisposalCountForTest);
+        }
+        finally
+        {
+            release.Set();
+            if (activeCall != null)
+            {
+                try
+                {
+                    await activeCall.WaitAsync(
+                        TimeSpan.FromSeconds(2),
+                        TestContext.Current.CancellationToken);
+                }
+                catch { }
+            }
+            client.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData(true, false, true, true, false)]
+    [InlineData(false, true, true, true, false)]
+    [InlineData(false, false, false, true, false)]
+    [InlineData(false, false, true, false, false)]
+    [InlineData(false, false, true, true, true)]
+    public void AndroidMicrophoneDoesNotResumeWhenAnyLifecycleGateRejects(
+        bool disposed,
+        bool paused,
+        bool permitted,
+        bool requested,
+        bool muted)
+    {
+        Assert.False(PerfectCommsVoiceBackend.ShouldResumeAndroidMicrophone(
+            disposed,
+            paused,
+            permitted,
+            requested,
+            muted));
+    }
+
+    [Fact]
+    public void AndroidMicrophoneResumesOnlyForALivePermittedRequestedUnmutedRoom()
+    {
+        Assert.True(PerfectCommsVoiceBackend.ShouldResumeAndroidMicrophone(
+            disposed: false,
+            paused: false,
+            permitted: true,
+            requested: true,
+            muted: false));
+    }
+
+    [Fact]
     public void DeafeningDiscardsAlreadyQueuedPlayback()
     {
         using var engine = new ManagedVoiceEngine();
@@ -86,6 +170,190 @@ public sealed class ManagedVoiceEngineTests
         var playback = new float[ManagedOpusEncoder.FrameSamples * 2];
         engine.ReadPlayback(playback, playback.Length);
         Assert.All(playback, sample => Assert.Equal(0f, sample));
+    }
+
+    [Fact]
+    public void RtpIngressOverflowRetainsNewestPacketsAndCountsDrops()
+    {
+        var ingress = new ManagedVoiceEngine.RtpIngressRing(4, 8);
+
+        for (ushort sequence = 1; sequence <= 7; sequence++)
+        {
+            byte[] payload = [(byte)sequence];
+            Assert.True(ingress.TryWrite(
+                sequence,
+                (uint)sequence * (uint)ManagedOpusEncoder.FrameSamples,
+                new ArraySegment<byte>(payload),
+                out bool dropped));
+            Assert.Equal(sequence > 4, dropped);
+        }
+
+        Assert.Equal(3L, ingress.DroppedPackets);
+        var output = new byte[8];
+        for (ushort sequence = 4; sequence <= 7; sequence++)
+        {
+            Assert.True(ingress.TryRead(output, out ushort actual, out uint timestamp, out int length));
+            Assert.Equal(sequence, actual);
+            Assert.Equal((uint)sequence * (uint)ManagedOpusEncoder.FrameSamples, timestamp);
+            Assert.Equal(1, length);
+            Assert.Equal((byte)sequence, output[0]);
+        }
+        Assert.False(ingress.TryRead(output, out _, out _, out _));
+    }
+
+    [Fact]
+    public void PlaybackOverflowRetainsStereoAlignedNewestTailAndCountsDrops()
+    {
+        using var engine = new ManagedVoiceEngine();
+        int stereoFrameSamples = ManagedOpusEncoder.FrameSamples * 2;
+        var queued = new float[stereoFrameSamples * 17];
+        for (int frame = 0; frame < 17; frame++)
+        {
+            for (int sample = 0; sample < ManagedOpusEncoder.FrameSamples; sample++)
+            {
+                queued[frame * stereoFrameSamples + sample * 2] = frame + 1;
+                queued[frame * stereoFrameSamples + sample * 2 + 1] = -(frame + 1);
+            }
+        }
+
+        engine.QueuePlaybackForTest(queued);
+
+        Assert.Equal(stereoFrameSamples * 16, engine.PlaybackDepthSamples);
+        Assert.Equal((long)stereoFrameSamples, engine.PlaybackDroppedSamples);
+        var playback = new float[stereoFrameSamples];
+        for (int frame = 14; frame <= 17; frame++)
+        {
+            engine.ReadPlayback(playback, playback.Length);
+            for (int sample = 0; sample < ManagedOpusEncoder.FrameSamples; sample++)
+            {
+                Assert.Equal((float)frame, playback[sample * 2]);
+                Assert.Equal((float)-frame, playback[sample * 2 + 1]);
+            }
+        }
+        Assert.Equal((long)stereoFrameSamples * 12, engine.PlaybackSkippedSamples);
+    }
+
+    [Fact]
+    public async Task PlaybackReadCompletesWhileMixerWorkIsPaused()
+    {
+        using var engine = new ManagedVoiceEngine();
+        using var mixerEntered = new ManualResetEventSlim();
+        using var releaseMixer = new ManualResetEventSlim();
+        engine.BeforeMixerWorkForTest = () =>
+        {
+            mixerEntered.Set();
+            releaseMixer.Wait(TestContext.Current.CancellationToken);
+        };
+        Task pump = Task.Run(
+            engine.PumpPlaybackFrameForTest,
+            TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.True(mixerEntered.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+            var playback = new float[ManagedOpusEncoder.FrameSamples * 2];
+            await Task.Run(
+                () => engine.ReadPlayback(playback, playback.Length),
+                TestContext.Current.CancellationToken).WaitAsync(
+                    TimeSpan.FromSeconds(2),
+                    TestContext.Current.CancellationToken);
+            Assert.All(playback, sample => Assert.Equal(0f, sample));
+        }
+        finally
+        {
+            releaseMixer.Set();
+            await pump.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task DeafeningDuringPublicationPauseRejectsThePreDeafenMix()
+    {
+        using var engine = new ManagedVoiceEngine();
+        using var mixCompleted = new ManualResetEventSlim();
+        using var releasePublication = new ManualResetEventSlim();
+        engine.ConfigureGameState(false, 1f, []);
+        engine.BeforePlaybackWriteForTest = () =>
+        {
+            mixCompleted.Set();
+            releasePublication.Wait(TestContext.Current.CancellationToken);
+        };
+        Task pump = Task.Run(
+            engine.PumpPlaybackFrameForTest,
+            TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.True(mixCompleted.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+            engine.ConfigureGameState(true, 1f, []);
+            Assert.Equal(0, engine.PlaybackDepthSamples);
+        }
+        finally
+        {
+            releasePublication.Set();
+            await pump.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, engine.PlaybackDepthSamples);
+    }
+
+    [Fact]
+    public void DiscontinuityPacketRendersInTheSamePlaybackPump()
+    {
+        using var engine = new ManagedVoiceEngine();
+        using var encoder = new ManagedOpusEncoder();
+        engine.AddPeerForTest("peer");
+        engine.ConfigureGameState(
+            false,
+            1f,
+            [new ManagedPeerRoute("peer", 1f, 0f, 0, false)]);
+        var samples = new float[ManagedOpusEncoder.FrameSamples];
+        FillSignal(samples, 0, 440f, 0.2f);
+        var encoded = new byte[ManagedOpusEncoder.MaxPacketBytes];
+        int encodedLength = encoder.Encode(samples, encoded, out _, out _);
+        byte[] packet = encoded.AsSpan(0, encodedLength).ToArray();
+
+        for (ushort sequence = 1; sequence <= 3; sequence++)
+        {
+            Assert.True(engine.IngestOpusForTest(
+                "peer",
+                1,
+                1,
+                sequence,
+                (uint)(sequence - 1) * (uint)ManagedOpusEncoder.FrameSamples,
+                packet));
+            if (sequence == 3)
+            {
+                engine.PumpPlaybackFrameForTest();
+                engine.PumpPlaybackFrameForTest();
+                engine.PumpPlaybackFrameForTest();
+            }
+        }
+
+        engine.ConfigureGameState(true, 1f, []);
+        engine.ConfigureGameState(
+            false,
+            1f,
+            [new ManagedPeerRoute("peer", 1f, 0f, 0, false)]);
+        uint discontinuousTimestamp = 9u * (uint)ManagedOpusEncoder.FrameSamples;
+        Assert.True(engine.IngestOpusForTest("peer", 1, 1, 4, discontinuousTimestamp, packet));
+
+        engine.PumpPlaybackFrameForTest();
+
+        int stereoFrameSamples = ManagedOpusEncoder.FrameSamples * 2;
+        Assert.Equal(stereoFrameSamples, engine.PlaybackDepthSamples);
+        engine.QueuePlaybackForTest(new float[stereoFrameSamples * 3]);
+        var playback = new float[stereoFrameSamples];
+        engine.ReadPlayback(playback, playback.Length);
+        Assert.True(Energy(playback) > 0.001d);
     }
 
     [Fact]
@@ -284,6 +552,267 @@ public sealed class ManagedVoiceEngineTests
             TestContext.Current.CancellationToken);
         await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Equal(1, Volatile.Read(ref failures));
+    }
+
+    [Fact]
+    public void SsrcReplacementAcceptsTheNewSourceAndRejectsTheRetiredSource()
+    {
+        using var engine = new ManagedVoiceEngine();
+        byte[] opus = [1, 2, 3];
+
+        Assert.True(engine.Start());
+        Assert.True(engine.AddPeer("source-peer", false, 1));
+        Assert.True(engine.IngestOpusForTest("source-peer", 1, 0x10203040, 30_000, 960, opus));
+        Assert.True(engine.IngestOpusForTest("source-peer", 1, 0x50607080, 1_000, 960, opus));
+        Assert.False(engine.IngestOpusForTest("source-peer", 1, 0x10203040, 30_001, 1_920, opus));
+    }
+
+    [Fact]
+    public async Task SsrcReplacementDefersDecoderResetUntilTheNextPlaybackPump()
+    {
+        using var engine = new ManagedVoiceEngine();
+        using var encoder = new ManagedOpusEncoder();
+        using var mixerEntered = new ManualResetEventSlim();
+        using var releaseMixer = new ManualResetEventSlim();
+        engine.AddPeerForTest("epoch-peer");
+        engine.ConfigureGameState(
+            false,
+            1f,
+            [new ManagedPeerRoute("epoch-peer", 1f, 0f, 0, false)]);
+        var samples = new float[ManagedOpusEncoder.FrameSamples];
+        FillSignal(samples, 0, 440f, 0.2f);
+        var encoded = new byte[ManagedOpusEncoder.MaxPacketBytes];
+        int encodedLength = encoder.Encode(samples, encoded, out _, out _);
+        byte[] packet = encoded.AsSpan(0, encodedLength).ToArray();
+        for (ushort sequence = 30_000; sequence < 30_003; sequence++)
+        {
+            Assert.True(engine.IngestOpusForTest(
+                "epoch-peer",
+                1,
+                0x10203040,
+                sequence,
+                (uint)(sequence - 30_000) * (uint)ManagedOpusEncoder.FrameSamples,
+                packet));
+        }
+        engine.BeforeMixerWorkForTest = () =>
+        {
+            mixerEntered.Set();
+            releaseMixer.Wait(TestContext.Current.CancellationToken);
+        };
+        Task oldPump = Task.Run(
+            engine.PumpPlaybackFrameForTest,
+            TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.True(mixerEntered.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+            float oldPeak = engine.PeerDecodedPeakForTest("epoch-peer");
+            Assert.True(oldPeak > 0f);
+            for (ushort sequence = 1_000; sequence < 1_003; sequence++)
+            {
+                Assert.True(engine.IngestOpusForTest(
+                    "epoch-peer",
+                    1,
+                    0x50607080,
+                    sequence,
+                    (uint)(sequence - 1_000) * (uint)ManagedOpusEncoder.FrameSamples,
+                    packet));
+            }
+            Assert.Equal(oldPeak, engine.PeerDecodedPeakForTest("epoch-peer"));
+            Assert.Equal(0, engine.PeerSourceEpochForTest("epoch-peer"));
+        }
+        finally
+        {
+            engine.BeforeMixerWorkForTest = null;
+            releaseMixer.Set();
+            await oldPump.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+        }
+
+        engine.PumpPlaybackFrameForTest();
+        Assert.Equal(1, engine.PeerSourceEpochForTest("epoch-peer"));
+        Assert.True(engine.PeerDecodedPeakForTest("epoch-peer") > 0f);
+    }
+
+    [Fact]
+    public async Task RestartAndRemoteOfferPreserveFifoCandidateOrdering()
+    {
+        using var offerer = new ManagedWebRtcPeer("offerer", 1, []);
+        var offerReady = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var candidateReady = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        offerer.LocalSdp += (type, sdp) =>
+        {
+            if (type == "offer")
+                offerReady.TrySetResult(sdp);
+        };
+        offerer.LocalCandidate += candidate => candidateReady.TrySetResult(candidate);
+        Assert.True(offerer.Start(createOffer: true));
+        string offer = await offerReady.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        string candidate = await candidateReady.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        using var peer = new ManagedWebRtcPeer("restart-peer", 1, []);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            peer.SetRemoteDescriptionReadyForTest();
+            peer.SetLocalSignalsPublishedForTest();
+            await peer.HoldNegotiationForTest(release.Task).WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(peer.RestartIce(createOffer: false));
+            Assert.Equal(2, peer.LocalSignalStateForTest);
+            Assert.True(peer.SetRemoteSdp("offer", offer));
+            Assert.True(peer.RemoteDescriptionPendingForTest);
+            Assert.True(peer.AddIceCandidate(candidate));
+            Assert.Equal(1, peer.PendingRemoteCandidateCountForTest);
+
+            release.TrySetResult();
+            await peer.WaitForNegotiationForTest().WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+            Assert.False(peer.RemoteDescriptionPendingForTest);
+            Assert.True(peer.RemoteDescriptionReadyForTest);
+            Assert.Equal(0, peer.PendingRemoteCandidateCountForTest);
+            Assert.Equal(1, peer.AppliedRemoteCandidateCountForTest);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task SendFailureRecoversOnlyAfterRestartAndReconnect()
+    {
+        using var peer = new ManagedWebRtcPeer("send-peer", 1, []);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            await peer.HoldNegotiationForTest(release.Task).WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+            int attempts = 0;
+            int failures = 0;
+            peer.StateChanged += state =>
+            {
+                if (state == "failed")
+                    Interlocked.Increment(ref failures);
+            };
+            peer.SendAudioForTest = (_, _) =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                    throw new InvalidOperationException("send failed");
+            };
+            peer.SetConnectedForTest();
+            byte[] packet = [1, 2, 3];
+
+            Assert.False(peer.SendEncodedOpus(packet, packet.Length));
+            Assert.False(peer.IsConnected);
+            Assert.False(peer.SendEncodedOpus(packet, packet.Length));
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            Assert.Equal(1, Volatile.Read(ref failures));
+
+            Assert.True(peer.RestartIce(createOffer: false));
+            peer.SetConnectedForTest();
+            Assert.True(peer.SendEncodedOpus(packet, packet.Length));
+            Assert.Equal(2, Volatile.Read(ref attempts));
+            Assert.Equal(1, Volatile.Read(ref failures));
+        }
+        finally
+        {
+            peer.Dispose();
+            release.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task DisposeDiscardsTelemetryQueuedBehindAnActiveCallback()
+    {
+        var engine = new ManagedVoiceEngine();
+        using var callbackEntered = new ManualResetEventSlim();
+        using var releaseCallback = new ManualResetEventSlim();
+        int callbacks = 0;
+        engine.LocalLevel += (_, _) =>
+        {
+            Interlocked.Increment(ref callbacks);
+            callbackEntered.Set();
+            releaseCallback.Wait(TestContext.Current.CancellationToken);
+        };
+
+        try
+        {
+            Assert.True(engine.Start());
+            Assert.True(engine.EnqueueLocalLevelForTest());
+            Assert.True(callbackEntered.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+            Assert.True(engine.EnqueueLocalLevelForTest());
+
+            await Task.Run(engine.Dispose, TestContext.Current.CancellationToken).WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(1, Volatile.Read(ref callbacks));
+            releaseCallback.Set();
+            Assert.True(SpinWait.SpinUntil(
+                () => engine.PendingEventCount == 0,
+                TimeSpan.FromSeconds(2)));
+            Assert.Equal(1, Volatile.Read(ref callbacks));
+        }
+        finally
+        {
+            releaseCallback.Set();
+            engine.Dispose();
+        }
+    }
+
+    [Fact]
+    public void DisposeFromCallbackPreventsTheNextQueuedCallback()
+    {
+        var engine = new ManagedVoiceEngine();
+        using var callbackEntered = new ManualResetEventSlim();
+        using var allowDispose = new ManualResetEventSlim();
+        using var disposeReturned = new ManualResetEventSlim();
+        int callbacks = 0;
+        engine.LocalLevel += (_, _) =>
+        {
+            if (Interlocked.Increment(ref callbacks) != 1)
+                return;
+            callbackEntered.Set();
+            allowDispose.Wait(TestContext.Current.CancellationToken);
+            engine.Dispose();
+            disposeReturned.Set();
+        };
+
+        try
+        {
+            Assert.True(engine.Start());
+            Assert.True(engine.EnqueueLocalLevelForTest());
+            Assert.True(callbackEntered.Wait(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+            Assert.True(engine.EnqueueLocalLevelForTest());
+            allowDispose.Set();
+            Assert.True(disposeReturned.Wait(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken));
+            Assert.True(SpinWait.SpinUntil(
+                () => engine.PendingEventCount == 0,
+                TimeSpan.FromSeconds(2)));
+            Assert.Equal(1, Volatile.Read(ref callbacks));
+        }
+        finally
+        {
+            allowDispose.Set();
+            engine.Dispose();
+        }
     }
 
     private static void FillSignal(float[] samples, int sampleOffset, float frequency, float amplitude)

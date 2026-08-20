@@ -413,7 +413,7 @@ public static partial class VoiceChatHudState
             $"Channel: {channel}\n" +
             "Tap: change channel  |  Hold: transmit";
 
-        PositionNear(_micTooltip, _radioTouchButtonObj);
+        PositionNear(_micTooltip, _micTooltipTmp, _radioTouchButtonObj);
         KeepTooltipOnTop(_micTooltip, ref _micTooltipRenderers, ref _micTooltipTmps);
         _micTooltip.SetActive(true);
     }
