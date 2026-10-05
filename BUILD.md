@@ -88,7 +88,7 @@ APM libraries.
 Desktop helpers require sidecar protocol 17 and Pion ABI 3 for private-only audio
 recipient selection. Rebuild every platform's helper and Pion companion together;
 older binaries must not be packaged. Public fanout and ICE behavior are unchanged.
-Voice clients use game protocol 6 for the impostor settings and phase-scoped radio
+Voice clients use game protocol 7 for the impostor settings and phase-scoped radio
 state; the mobile interop contract remains ABI 5.
 
 RustSec audits every native lockfile during CI. The desktop codec is the bundled
@@ -101,6 +101,10 @@ Android is not part of the native gate. Starlight owns Android capture through
 its approved interop surface, while the net10.0 managed media project owns
 Opus, mixing, and peer transport. The Starlight distribution has no Android
 Pion, NDK-built library, or other native payload.
+
+The Starlight/Pion probe drives capture and playback on fixed 20 ms ticks.
+Encoding and correlation work do not add drift to the simulated audio clock;
+the probe still requires 16 consecutive correlated playback frames.
 
 Pion release builds require Go 1.26.2 exactly. Build and optionally stage one
 target with:

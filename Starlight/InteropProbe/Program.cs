@@ -922,6 +922,7 @@ internal sealed class InteropSession
     {
         var frame = new float[ManagedOpusEncoder.FrameSamples];
         long sampleOffset = 0;
+        using var cadence = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
         try
         {
             for (int frameIndex = 0; frameIndex < MaximumMediaFrames && !_playbackCorrelated.Task.IsCompleted; frameIndex++)
@@ -933,7 +934,7 @@ internal sealed class InteropSession
                 }
                 sampleOffset += frame.Length;
                 _managed.PushMic(frame, frame.Length, 0);
-                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+                await cadence.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false);
             }
             if (!_playbackCorrelated.Task.IsCompleted)
                 Fail("playback-unsustained");
@@ -952,6 +953,7 @@ internal sealed class InteropSession
         var playback = new float[ManagedOpusEncoder.FrameSamples * 2];
         var mono = new float[ManagedOpusEncoder.FrameSamples];
         int correlatedFrames = 0;
+        using var cadence = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
         try
         {
             while (!cancellationToken.IsCancellationRequested && !_playbackCorrelated.Task.IsCompleted)
@@ -984,7 +986,7 @@ internal sealed class InteropSession
                     _playbackCorrelated.TrySetResult(true);
                     return;
                 }
-                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+                await cadence.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
