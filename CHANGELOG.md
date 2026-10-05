@@ -2,6 +2,9 @@
 
 ## Perfect Comms v4.1.11
 
+> [!IMPORTANT]
+> **Among Us compatibility:** Perfect Comms v4.1.11 requires Among Us v19 or newer. Earlier Among Us versions are not supported.
+
 Perfect Comms v4.1.11 supports Among Us v19 across all supported platforms, adds Push To Talk and Team Radio support while performing tasks, and introduces new host options for impostor chat across death and during meetings.
 
 <p align="center">
