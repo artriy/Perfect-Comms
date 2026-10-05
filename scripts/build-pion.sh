@@ -17,14 +17,14 @@ linker_flags="-s -w -buildid="
 if [[ "${2:-}" == "--stage" ]]; then
   stage=1
 elif [[ -n "${2:-}" ]]; then
-  echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
+  echo "usage: build-pion.sh <win-x64|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
   exit 2
 fi
 
 case "$target" in
-  win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal) ;;
+  win-x64|linux-x64|mac-x64|mac-arm64|mac-universal) ;;
   *)
-    echo "usage: build-pion.sh <win-x64|win-x86|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
+    echo "usage: build-pion.sh <win-x64|linux-x64|mac-x64|mac-arm64|mac-universal> [--stage]" >&2
     exit 2
     ;;
 esac
@@ -56,12 +56,6 @@ case "$target" in
     export CC="${CC:-x86_64-w64-mingw32-gcc}"
     output="$artifact_root/pc-pion.x64.dll"
     stage_path="$root/Libs/pion/pc-pion.x64.dll"
-    ;;
-  win-x86)
-    export GOOS=windows GOARCH=386 CGO_ENABLED=1
-    export CC="${CC:-i686-w64-mingw32-gcc}"
-    output="$artifact_root/pc-pion.x86.dll"
-    stage_path="$root/Libs/pion/pc-pion.x86.dll"
     ;;
   linux-x64)
     export GOOS=linux GOARCH=amd64 CGO_ENABLED=1

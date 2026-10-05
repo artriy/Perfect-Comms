@@ -86,12 +86,29 @@ internal static class VoiceProximityCalculator
             : targetRadioActive
                 ? VoiceRadioState.BuiltIn(targetRadioChannel)
                 : VoiceRadioState.None;
+        bool meetingImpostorRadio = targetRadioActive && targetRadioChannel == VoiceTeamRadioChannel.Impostors &&
+            VoiceImpostorPolicy.MeetingRadioEnabled(s, phase);
 
         if (s.OnlyGhostsCanTalk && !localDead)
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk);
 
         if (VoiceRoleMuteState.IsMeetingVoiceBlocked(target, phase))
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetMeetingBlockReason(target, phase));
+        if (targetDead && !localDead && localPlayer?.IsSpectator != true && !meetingImpostorRadio)
+            return VoiceProximityResult.Muted(VoiceProximityReason.TargetDeadMuted);
+        if (meetingImpostorRadio || s.TeamRadio && s.TeamRadioInMeetings && targetRadioActive &&
+            targetRadioChannel != VoiceTeamRadioChannel.External)
+        {
+            bool canHear = meetingImpostorRadio
+                ? localPlayer.HasValue && VoiceImpostorPolicy.CanHearMeetingRadio(s, phase, localPlayer.Value, target)
+                : CanHearTeamRadio(localPlayer, target, s, targetRadioChannel, phase);
+            if (!canHear)
+                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted);
+            if (TryGetModPairRoute(localPlayer, target, 1f, out var radioPairRoute, localPlayer?.Position))
+                return radioPairRoute;
+            return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
+                true, VoiceProximityReason.TeamRadio, 1f);
+        }
 
         if (s.TeamRadio
             && s.TeamRadioInMeetings
@@ -102,23 +119,9 @@ internal static class VoiceProximityCalculator
         if (TryGetModPairRoute(localPlayer, target, 1f, out var pairRoute, meetingListenerPosition))
             return pairRoute;
 
-        // Third-party mod channel (PerfectComms.Api Primitive 2): local & target sharing a channel
-        // hear each other with the channel's audio shape, before built-in team radio. The channel
-        // owns its membership (it may deliberately include dead players, e.g. a Medium seance), so
-        // this is NOT gated on target/local life state.
         if (TryGetModChannelRoute(localPlayer, target, 1f, out var meetingModChannel, meetingListenerPosition))
             return meetingModChannel;
 
-        if (s.TeamRadio && s.TeamRadioInMeetings && targetRadioActive && !targetDead)
-        {
-            if (CanHearTeamRadio(localPlayer, target, s, targetRadioChannel))
-                return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
-                    true, VoiceProximityReason.TeamRadio, 1f);
-
-            // Living non-teammates hard-muted; dead listeners fall through so ghosts still hear them.
-            if (!localDead)
-                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted);
-        }
 
         if (localDead)
         {
@@ -226,10 +229,21 @@ internal static class VoiceProximityCalculator
         var target = targetPlayer.Value;
         if (IsUnavailableTarget(target))
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable, previousWallCoefficient);
+        var s = VoiceRoomSettingsState.Current;
+        if (VoiceImpostorPolicy.SpecialChatEnabled(s, VoiceGamePhase.Tasks))
+        {
+            if (!localPlayer.HasValue || !VoiceImpostorPolicy.CanListen(localPlayer.Value) ||
+                !VoiceImpostorPolicy.CanTransmit(s, target))
+                return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
+            if (target.External.Muted)
+                return VoiceProximityResult.Muted(VoiceProximityReason.RoleMuted, previousWallCoefficient);
+            if (TryGetModPairRoute(localPlayer, target, previousWallCoefficient, out var impostorPairRoute, listenerPos))
+                return impostorPairRoute;
+            return new(1f, 0f, 0f, 0f, VoiceAudioFilterMode.None,
+                true, VoiceProximityReason.ImpostorChat, previousWallCoefficient);
+        }
         if (!listenerPos.HasValue)
             return VoiceProximityResult.Muted(VoiceProximityReason.NoListener, previousWallCoefficient);
-
-        var s = VoiceRoomSettingsState.Current;
         var targetPos = target.Position;
         var localListenerPos = listenerPos.Value;
         Vector2 cameraPosition = default;
@@ -261,6 +275,21 @@ internal static class VoiceProximityCalculator
             return VoiceProximityResult.Muted(VoiceRoleMuteState.GetTaskBlockReason(target), previousWallCoefficient);
 
         bool taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
+        if (s.TeamRadio && taskRadioAllowed && targetRadioActive &&
+            targetRadioChannel != VoiceTeamRadioChannel.External)
+        {
+            if (!CanHearTeamRadio(localPlayer, target, s, targetRadioChannel, VoiceGamePhase.Tasks))
+                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, previousWallCoefficient);
+            if (TryGetModPairRoute(localPlayer, target, previousWallCoefficient,
+                    out var radioPairRoute, localListenerPos))
+                return radioPairRoute;
+            if (s.OnlyGhostsCanTalk && !localDead && !localBypassesTaskVoiceGates)
+                return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
+            if (commsSabActive && s.CommsSabDisables && !localDead && !localBypassesTaskVoiceGates)
+                return VoiceProximityResult.Muted(VoiceProximityReason.CommsSabotage, previousWallCoefficient);
+            return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
+                true, VoiceProximityReason.TeamRadio, previousWallCoefficient);
+        }
         if (s.TeamRadio
             && taskRadioAllowed
             && TryGetManagedRadioRoute(
@@ -292,19 +321,6 @@ internal static class VoiceProximityCalculator
         if (TryGetModChannelRoute(localPlayer, target, previousWallCoefficient, out var taskModChannel, localListenerPos))
             return taskModChannel;
 
-        // Task-phase team radio is gated by the "Usable in Tasks" sub-toggle ONLY when the meeting/lobby radio
-        // option is on; when that parent is off the sub-toggle does nothing and radio stays task-usable.
-        taskRadioAllowed = !s.TeamRadioInMeetings || s.TeamRadioInTasks;
-        if (s.TeamRadio && taskRadioAllowed && targetRadioActive && !targetDead)
-        {
-            if (CanHearTeamRadio(localPlayer, target, s, targetRadioChannel))
-                return new(0f, 0f, 1f, 0f, VoiceAudioFilterMode.Radio,
-                    true, VoiceProximityReason.TeamRadio, previousWallCoefficient);
-
-            // Living non-teammates hard-muted; dead listeners fall through to proximity below.
-            if (!localDead)
-                return VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, previousWallCoefficient);
-        }
 
         if (localDead)
         {
@@ -563,7 +579,10 @@ internal static class VoiceProximityCalculator
         if (targetRadioState.Channel != VoiceTeamRadioChannel.External || !targetRadioState.IsActive)
             return false;
         if (target.IsDead)
-            return false;
+        {
+            result = VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, wallCoefficient);
+            return true;
+        }
 
         // A claimed external transmit key is valid only while the speaker's current resolved
         // memberships contain it. This prevents a stale or forged radio RPC from opening a route.
@@ -573,10 +592,11 @@ internal static class VoiceProximityCalculator
             return true;
         }
 
-        // Preserve the existing Team Radio ghost policy: dead listeners fall through to their
-        // normal all-hearing route instead of being constrained to living private channels.
         if (localPlayer?.IsDead == true)
-            return false;
+        {
+            result = VoiceProximityResult.Muted(VoiceProximityReason.TeamRadioMuted, wallCoefficient);
+            return true;
+        }
 
         if (localPlayer.HasValue
             && HasManagedRadioMembership(localPlayer.Value, targetRadioState.ManagedKey))
@@ -606,11 +626,38 @@ internal static class VoiceProximityCalculator
         return false;
     }
 
+    internal static bool CanReceiveRadioState(
+        VoiceRoomSettingsSnapshot settings, VoiceGamePhase phase,
+        VoicePlayerSnapshot speaker, VoicePlayerSnapshot listener, VoiceRadioState radio)
+    {
+        if (!radio.IsActive || speaker.Disconnected || speaker.IsDummy ||
+            listener.Disconnected || listener.IsDummy || speaker.External.Muted ||
+            VoiceImpostorPolicy.SpecialChatEnabled(settings, phase))
+            return false;
+        if (radio.Channel == VoiceTeamRadioChannel.Impostors && VoiceImpostorPolicy.MeetingRadioEnabled(settings, phase))
+            return VoiceImpostorPolicy.CanHearMeetingRadio(settings, phase, listener, speaker);
+        if (!settings.TeamRadio ||
+            !(VoiceSceneState.IsMeetingVoicePhase(phase) ? settings.TeamRadioInMeetings :
+                VoiceSceneState.IsTaskVoicePhase(phase) && (!settings.TeamRadioInMeetings || settings.TeamRadioInTasks)))
+            return false;
+        if (phase == VoiceGamePhase.Tasks && settings.OnlyMeetingOrLobby &&
+            (settings.OnlyMeetingOrLobbyAffectsGhosts || !speaker.IsDead || !listener.IsDead))
+            return false;
+        if (settings.OnlyGhostsCanTalk && !speaker.IsDead)
+            return false;
+        if (radio.Channel == VoiceTeamRadioChannel.External)
+            return !speaker.IsDead && !listener.IsDead && !IsUnavailableTarget(listener) &&
+                HasManagedRadioMembership(speaker, radio.ManagedKey) &&
+                HasManagedRadioMembership(listener, radio.ManagedKey);
+        return CanHearTeamRadio(listener, speaker, settings, radio.Channel, phase);
+    }
+
     private static bool CanHearTeamRadio(
         VoicePlayerSnapshot? localPlayer,
         VoicePlayerSnapshot target,
         VoiceRoomSettingsSnapshot settings,
-        VoiceTeamRadioChannel targetRadioChannel)
+        VoiceTeamRadioChannel targetRadioChannel,
+        VoiceGamePhase phase)
     {
         if (!localPlayer.HasValue)
             return false;
@@ -619,13 +666,15 @@ internal static class VoiceProximityCalculator
         return VoiceTeamRadioChannels.Normalize(targetRadioChannel) switch
         {
             VoiceTeamRadioChannel.Impostors or VoiceTeamRadioChannel.All =>
-                settings.TeamRadioImpostors && local.IsImpostor && target.IsImpostor,
+                VoiceImpostorPolicy.CanHearRadio(settings, phase, local, target),
             _ => false,
         };
     }
 
+    // Haunting hides a ghost's object without removing the voice participant.
     internal static bool IsUnavailableTarget(VoicePlayerSnapshot target)
-        => target.Disconnected || target.IsDummy || !target.IsVisible;
+        => target.Disconnected || target.IsDummy ||
+            (!target.IsVisible && !target.IsDead);
 
 
     internal static VoiceProximityResult ApplyExternalAudioEffects(

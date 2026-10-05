@@ -24,7 +24,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     bool TeamRadioInTasks,
     bool GhostsHearEachOtherUnlimited,
     bool GracePeriodEnabled,
-    float GracePeriodSeconds)
+    float GracePeriodSeconds,
+    bool MeetingOnlyImpostorChat,
+    bool ImpostorsTalkAcrossDeath,
+    bool ImpostorsTalkAcrossDeathInMeetings)
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
@@ -55,7 +58,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         TeamRadioInTasks: true,
         GhostsHearEachOtherUnlimited: false,
         GracePeriodEnabled: false,
-        GracePeriodSeconds: 5f);
+        GracePeriodSeconds: 5f,
+        MeetingOnlyImpostorChat: false,
+        ImpostorsTalkAcrossDeath: false,
+        ImpostorsTalkAcrossDeathInMeetings: true);
 
     public static VoiceRoomSettingsSnapshot FromGameOptions()
     {
@@ -82,7 +88,10 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             TeamRadioInTasks: options.TeamRadioInTasks.Value,
             GhostsHearEachOtherUnlimited: options.GhostsHearEachOtherUnlimited.Value,
             GracePeriodEnabled: options.GracePeriodEnabled.Value,
-            GracePeriodSeconds: options.GracePeriodSeconds.Value).Clamp();
+            GracePeriodSeconds: options.GracePeriodSeconds.Value,
+            MeetingOnlyImpostorChat: options.MeetingOnlyImpostorChat.Value,
+            ImpostorsTalkAcrossDeath: options.ImpostorsTalkAcrossDeath.Value,
+            ImpostorsTalkAcrossDeathInMeetings: options.ImpostorsTalkAcrossDeathInMeetings.Value).Clamp();
     }
 
     public VoiceRoomSettingsSnapshot Clamp()

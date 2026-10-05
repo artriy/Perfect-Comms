@@ -503,6 +503,30 @@ impl RtcEngine {
         )
     }
 
+    pub fn set_private_radio(&self, active: bool, receivers: &[String], epoch: u64) -> bool {
+        let _control = self.control_gate.lock();
+        let receivers_json = serde_json::to_vec(receivers).expect("receiver strings serialize");
+        let backend = self.backend.as_deref();
+        advance_encoder_epoch_if_ready(
+            backend.map(PionBackend::handle),
+            self.poll_healthy.load(Ordering::Acquire),
+            epoch,
+            |handle, epoch| {
+                backend
+                    .expect("a ready radio backend must be loaded")
+                    .api
+                    .set_private_radio(
+                        handle,
+                        active,
+                        &receivers_json,
+                        epoch,
+                        RTP_EGRESS_PRIVACY_DRAIN_TIMEOUT.as_millis() as u32,
+                    )
+                    == pion_sys::STATUS_OK
+            },
+        )
+    }
+
     pub fn recv(&self) -> Option<ReceivedPacket> {
         while let Some(packet) = self.receive_queue.pop() {
             let current = self

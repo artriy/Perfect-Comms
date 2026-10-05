@@ -51,7 +51,7 @@ public sealed class SidecarLauncherCacheTests
             macOs: false,
             linux: true,
             System.Runtime.InteropServices.Architecture.X64));
-        Assert.Equal("i686-pc-windows-msvc", SidecarLauncher.TargetTripleFor(
+        Assert.Throws<PlatformNotSupportedException>(() => SidecarLauncher.TargetTripleFor(
             wine: false,
             WineHostOs.Unknown,
             windows: true,

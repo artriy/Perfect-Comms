@@ -331,8 +331,8 @@ internal static class SignalPayload
 
 internal sealed class PeerSessionManager
 {
-    public const int ProtocolVersion = 5;
-    public const int MinCompatibleVersion = 3;
+    public const int ProtocolVersion = VoiceProtocol.ProtocolVersion;
+    public const int MinCompatibleVersion = VoiceProtocol.MinCompatibleVersion;
     private const int ScopedControlProtocolVersion = 4;
     private const int IceRestartProtocolVersion = 5;
     private const long HelloResendIntervalMs = 3000;

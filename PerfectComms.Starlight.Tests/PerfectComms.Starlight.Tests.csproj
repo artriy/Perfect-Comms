@@ -28,11 +28,11 @@
 
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
-      <HintPath>$(NuGetPackageRoot)amongus.gamelibs.android\$(AmongUsGameLibsVersion)\build\Assembly-CSharp.dll</HintPath>
+      <HintPath>$(NuGetPackageRoot)\amongus.gamelibs.android\$(AmongUsGameLibsVersion)\build\Assembly-CSharp.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(NuGetPackageRoot)amongus.gamelibs.android\$(AmongUsGameLibsVersion)\build\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(NuGetPackageRoot)\amongus.gamelibs.android\$(AmongUsGameLibsVersion)\build\UnityEngine.CoreModule.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>

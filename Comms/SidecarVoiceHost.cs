@@ -72,6 +72,7 @@ internal interface ISidecarVoiceClient : IDisposable
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
     void SetMicActive(bool active);
     void SetMicWarm();
+    bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers);
     void SelectMicDevice(string deviceId);
     bool SelectOutputDevice(string deviceId);
     bool ConfigureAudioRoute(
@@ -260,6 +261,11 @@ internal sealed class SidecarVoiceLease : IDisposable
         => _host.SubmitCritical(this, client => client.SetMicActive(active));
     public void SetMicWarm()
         => _host.SubmitCritical(this, client => client.SetMicWarm());
+    public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers)
+    {
+        var snapshot = active ? receivers.ToArray() : Array.Empty<string>();
+        return _host.ExecuteCritical(this, client => client.ConfigurePrivateRadio(active, snapshot));
+    }
     public void SelectMicDevice(string deviceId)
         => _host.Submit(this, client => client.SelectMicDevice(deviceId));
     public bool SelectOutputDevice(string deviceId)

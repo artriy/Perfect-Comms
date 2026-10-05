@@ -940,6 +940,7 @@ public sealed class SidecarVoiceHostTests
             Sequence.Add($"mic:{active.ToString().ToLowerInvariant()}");
         }
         public void SetMicWarm() { }
+        public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers) => true;
         public void SelectMicDevice(string deviceId) { }
         public bool SelectOutputDevice(string deviceId)
         {

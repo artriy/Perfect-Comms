@@ -18,6 +18,7 @@ internal enum VoiceProximityReason
     MeetingLiving,
     TeamRadio,
     TeamRadioMuted,
+    ImpostorChat,
     ImpostorHearsGhost,
     TargetDeadMuted,
     VentMuted,

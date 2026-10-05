@@ -15,7 +15,7 @@
 		<NuGetAuditMode>all</NuGetAuditMode>
 		<NuGetAuditLevel>low</NuGetAuditLevel>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
-		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.3.31</AmongUsGameLibsVersion>
+		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.9.29</AmongUsGameLibsVersion>
 	</PropertyGroup>
 
 	<PropertyGroup>
@@ -38,6 +38,7 @@
 	<ItemGroup>
 		<PackageReference Include="AmongUs.GameLibs.Steam" Version="$(AmongUsGameLibsVersion)" PrivateAssets="all" />
 		<PackageReference Include="BepInEx.Core" Version="6.0.0-be.735" PrivateAssets="all" />
+		<PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.735" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
 		<PackageReference Include="xunit.v3" Version="3.2.2" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
@@ -49,10 +50,10 @@
 
 	<ItemGroup>
 		<Reference Include="Assembly-CSharp">
-			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\Assembly-CSharp.dll</HintPath>
+			<HintPath>$(NuGetPackageRoot)\amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\Assembly-CSharp.dll</HintPath>
 		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
-			<HintPath>$(NuGetPackageRoot)amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\UnityEngine.CoreModule.dll</HintPath>
+			<HintPath>$(NuGetPackageRoot)\amongus.gamelibs.steam\$(AmongUsGameLibsVersion)\build\UnityEngine.CoreModule.dll</HintPath>
 		</Reference>
 	</ItemGroup>
 

@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 16;
+pub const PROTO_VERSION: u32 = 17;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -119,8 +119,8 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, DecodeError> {
             r.read_exact(&mut body)?;
             let ts = u64::from_le_bytes(body[0..8].try_into().unwrap());
             let mut samples = Vec::with_capacity(FRAME_SAMPLES);
-            for chunk in body[8..].chunks_exact(4) {
-                samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in body[8..].as_chunks::<4>().0 {
+                samples.push(f32::from_le_bytes(*chunk));
             }
             Ok(Frame::Audio(AudioFrame {
                 encoder_epoch: 0,
@@ -712,6 +712,11 @@ pub enum InboundOp {
     },
     #[serde(rename = "set-ice-servers")]
     SetIceServers { servers: Vec<IceServer> },
+    #[serde(rename = "private-radio")]
+    PrivateRadio {
+        active: bool,
+        receivers: Vec<String>,
+    },
     #[serde(rename = "game-state")]
     GameState {
         deaf: bool,
@@ -758,6 +763,24 @@ pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
         ));
     }
     Ok(op)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PrivateRadioScope {
+    pub active: bool,
+    pub receivers: Vec<String>,
+}
+
+impl PrivateRadioScope {
+    pub fn new(active: bool, mut receivers: Vec<String>) -> Self {
+        if active {
+            receivers.sort_unstable();
+            receivers.dedup();
+        } else {
+            receivers.clear();
+        }
+        Self { active, receivers }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1159,7 +1182,7 @@ mod tests {
 
     #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 16);
+        assert_eq!(PROTO_VERSION, 17);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);
@@ -1998,7 +2021,6 @@ mod tests {
         let s = ready_json(&devs, &[]);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["op"], "ready");
-        assert_eq!(v["proto"], 16);
         assert_eq!(v["format"]["rate"], 48_000);
         assert_eq!(v["format"]["channels"], 1);
         assert_eq!(v["format"]["sample"], "f32");

@@ -17,9 +17,6 @@ public sealed class EmbeddedNativeHelpersTests
                 "Lib.pc-capture.pc-capture-win-x64.exe",
                 Path.Combine(repositoryRoot, "Libs", "pc-capture", "pc-capture-win-x64.exe")),
             new HelperResource(
-                "Lib.pc-capture.pc-capture-win-x86.exe",
-                Path.Combine(repositoryRoot, "Libs", "pc-capture", "pc-capture-win-x86.exe")),
-            new HelperResource(
                 "Lib.pc-capture.pc-capture-linux-x64",
                 Path.Combine(repositoryRoot, "Libs", "pc-capture", "pc-capture-linux-x64")),
             new HelperResource(
@@ -37,7 +34,6 @@ public sealed class EmbeddedNativeHelpersTests
         foreach (string triple in new[]
                  {
                      "x86_64-pc-windows-msvc",
-                     "i686-pc-windows-msvc",
                      "x86_64-unknown-linux-gnu",
                      "x86_64-apple-darwin",
                      "aarch64-apple-darwin",
@@ -53,19 +49,6 @@ public sealed class EmbeddedNativeHelpersTests
         foreach (var helper in helpers)
             AssertEmbeddedFileParity(pluginAssembly, embeddedResources, helper);
 
-        // Windows release staging is a paired x64/x86 operation. Preserve the stronger existing
-        // guard against accidentally testing or packaging a half-updated pair.
-        var windowsHelpers = helpers.Take(2).ToArray();
-        if (windowsHelpers.Any(helper =>
-                File.Exists(helper.StagedPath) || embeddedResources.Contains(helper.ResourceName)))
-        {
-            Assert.All(windowsHelpers, helper =>
-            {
-                Assert.True(File.Exists(helper.StagedPath),
-                    $"Staged Windows helper pair is incomplete: {helper.StagedPath}");
-                Assert.Contains(helper.ResourceName, embeddedResources);
-            });
-        }
     }
 
     [Theory]
@@ -76,12 +59,10 @@ public sealed class EmbeddedNativeHelpersTests
         string expectedRootKind)
     {
         if (!OperatingSystem.IsWindows()) return;
-        if (RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.X86))
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
-        var triple = RuntimeInformation.ProcessArchitecture == Architecture.X64
-            ? "x86_64-pc-windows-msvc"
-            : "i686-pc-windows-msvc";
+        const string triple = "x86_64-pc-windows-msvc";
         var pluginAssembly = typeof(VoiceLobbyRegistryPublisher).Assembly;
         var helperResource = SidecarLauncher.ResourceName(triple);
         var resources = new[] { helperResource }

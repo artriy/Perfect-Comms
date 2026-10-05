@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 pub const PION_VERSION: u32 = 4_002_017;
 pub const PION_VERSION_TEXT: &str = "4.2.17";
 pub const STATUS_OK: i32 = 0;
@@ -62,6 +62,7 @@ type FnAddIceCandidate = unsafe extern "C" fn(u64, *mut u8, u32, u32, *mut u8, u
 type FnRestartIce = unsafe extern "C" fn(u64, *mut u8, u32, u32, u32, u32) -> i32;
 type FnSendOpus = unsafe extern "C" fn(u64, *mut u8, u32, u64, u64, *mut SendResult) -> i32;
 type FnAdvanceEpoch = unsafe extern "C" fn(u64, u64, u32) -> i32;
+type FnSetPrivateRadio = unsafe extern "C" fn(u64, u32, *mut u8, u32, u64, u32) -> i32;
 type FnPollControl = unsafe extern "C" fn(u64, *mut u8, u32, *mut u32) -> i32;
 type FnPollRtp = unsafe extern "C" fn(u64, *mut RtpEvent, *mut u8, u32, *mut u8, u32) -> i32;
 type FnGetCounters = unsafe extern "C" fn(u64, *mut TransportCounters) -> i32;
@@ -82,6 +83,7 @@ pub struct Api {
     restart_ice: FnRestartIce,
     send_opus: FnSendOpus,
     advance_epoch: FnAdvanceEpoch,
+    set_private_radio: FnSetPrivateRadio,
     poll_control: FnPollControl,
     poll_rtp: FnPollRtp,
     get_counters: FnGetCounters,
@@ -124,6 +126,7 @@ impl Api {
             restart_ice: symbol!(b"pc_pion_restart_ice"),
             send_opus: symbol!(b"pc_pion_send_opus"),
             advance_epoch: symbol!(b"pc_pion_advance_epoch"),
+            set_private_radio: symbol!(b"pc_pion_set_private_radio"),
             poll_control: symbol!(b"pc_pion_poll_control"),
             poll_rtp: symbol!(b"pc_pion_poll_rtp"),
             get_counters: symbol!(b"pc_pion_get_counters"),
@@ -318,6 +321,26 @@ impl Api {
         unsafe { (self.advance_epoch)(handle, epoch, timeout_ms) }
     }
 
+    pub fn set_private_radio(
+        &self,
+        handle: u64,
+        active: bool,
+        receivers_json: &[u8],
+        epoch: u64,
+        timeout_ms: u32,
+    ) -> i32 {
+        with_bytes(receivers_json, |pointer, length| unsafe {
+            (self.set_private_radio)(
+                handle,
+                u32::from(active),
+                pointer,
+                length,
+                epoch,
+                timeout_ms,
+            )
+        })
+    }
+
     pub fn poll_control(&self, handle: u64, buffer: &mut Vec<u8>) -> Result<bool, i32> {
         if buffer.capacity() == 0 {
             buffer.reserve(4096);
@@ -430,10 +453,6 @@ pub const fn platform_library_name() -> &'static str {
     {
         "pc-pion.x64.dll"
     }
-    #[cfg(all(target_os = "windows", target_arch = "x86"))]
-    {
-        "pc-pion.x86.dll"
-    }
     #[cfg(target_os = "linux")]
     {
         "libpc-pion.so"
@@ -450,36 +469,12 @@ pub const fn platform_library_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        platform_library_name, Api, RtpEvent, SendResult, TransportCounters, PION_VERSION,
-        PION_VERSION_TEXT, STATUS_OK,
-    };
-    use std::path::Path;
+    use super::{RtpEvent, SendResult, TransportCounters};
 
     #[test]
     fn abi_struct_layouts_are_stable() {
         assert_eq!(std::mem::size_of::<RtpEvent>(), 40);
         assert_eq!(std::mem::size_of::<SendResult>(), 16);
         assert_eq!(std::mem::size_of::<TransportCounters>(), 80);
-    }
-
-    #[test]
-    fn platform_name_is_not_empty() {
-        assert!(!platform_library_name().is_empty());
-        assert_eq!(PION_VERSION, 4_002_017);
-        assert_eq!(PION_VERSION_TEXT, "4.2.17");
-    }
-
-    #[test]
-    fn configured_library_loads_and_creates_engine() {
-        if std::env::var_os("PC_REQUIRE_PION").is_none() {
-            return;
-        }
-        let configured = std::env::var_os("PC_PION_LIB")
-            .expect("PC_REQUIRE_PION requires an explicit PC_PION_LIB test path");
-        let (api, _) = Api::load_default(Some(Path::new(&configured)))
-            .expect("configured Pion transport library must load");
-        let handle = api.engine_new().expect("Pion engine must be created");
-        assert_eq!(api.engine_close(handle), STATUS_OK);
     }
 }

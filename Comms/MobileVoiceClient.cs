@@ -347,6 +347,22 @@ internal sealed class MobileVoiceClient : IDisposable
         }
     }
 
+    public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers)
+    {
+        if (receivers == null) throw new ArgumentNullException(nameof(receivers));
+        lock (_micLock)
+        {
+            if (!TryAcquireEngine(out var engine)) return false;
+            try
+            {
+                bool configured = engine.ConfigurePrivateRadio(active, receivers, out bool changed);
+                if (changed) ResetMicAccumulation();
+                return configured;
+            }
+            finally { ReleaseEngine(); }
+        }
+    }
+
     public void PushMic(float[] mono, int count)
         => PushMicInternal(mono, count, skippedBeforeCurrent: 0, gapAware: false);
 

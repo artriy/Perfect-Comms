@@ -21,11 +21,15 @@ public sealed class VoiceProximityRulesTests : IDisposable
     }
 
     [Fact]
-    public void PublicLobbyProtocolRejectsTheRetiredTransport()
+    public void ClientsWithoutCrossDeathMeetingRadioAreRejected()
     {
-        Assert.Equal(5, VoiceProtocol.ProtocolVersion);
-        Assert.Equal(5, VoiceProtocol.MinCompatibleVersion);
-        Assert.True(VoiceProtocol.IsCompatible(5, 5));
+        Assert.True(VoiceProtocol.IsCompatible(7, 7));
+        Assert.True(VoiceProtocol.IsCompatible(8, 7));
+        Assert.True(VoiceProtocol.IsCompatible(7, 6));
+        Assert.False(VoiceProtocol.IsCompatible(6, 6));
+        Assert.False(VoiceProtocol.IsCompatible(6, 7));
+        Assert.False(VoiceProtocol.IsCompatible(8, 8));
+        Assert.False(VoiceProtocol.IsCompatible(5, 5));
         Assert.False(VoiceProtocol.IsCompatible(3, 3));
         Assert.False(VoiceProtocol.IsCompatible(4, 4));
     }
@@ -47,6 +51,44 @@ public sealed class VoiceProximityRulesTests : IDisposable
             AssertMutedUnavailable(VoiceProximityCalculator.CalculateMeeting(local, target, true));
             AssertMutedUnavailable(Task(local, target, targetRadioActive: true));
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HauntingGhostRemainsAudibleForGhostVoice(bool spectator)
+    {
+        var settings = BaseSettings() with { GhostsHearEachOtherUnlimited = true };
+        VoiceRoomSettingsState.ApplyRemote(settings);
+        var listener = Player(0, 0f, isLocal: true, isDead: true);
+        var hauntingGhost = Player(1, 100f, isDead: true, isVisible: false) with { IsSpectator = spectator };
+
+        Assert.True(Task(listener, hauntingGhost).Audible);
+        Assert.True(VoiceProximityCalculator.CalculateMeeting(listener, hauntingGhost, false).Audible);
+        Assert.False(Task(listener, hauntingGhost with { Disconnected = true }).Audible);
+    }
+
+    [Fact]
+    public void HauntingDoesNotGrantLivingOrImpostorOnlyVoiceAccess()
+    {
+        var settings = BaseSettings();
+        var crew = Player(0, 0f, isLocal: true);
+        var hauntingGhost = Player(1, 0f, isDead: true, isVisible: false);
+        Assert.False(Task(crew, hauntingGhost).Audible);
+        Assert.False(VoiceProximityCalculator.CalculateMeeting(crew, hauntingGhost, false).Audible);
+
+        settings = settings with
+        {
+            OnlyMeetingOrLobby = true, MeetingOnlyImpostorChat = true, ImpostorsTalkAcrossDeath = true,
+        };
+        VoiceRoomSettingsState.ApplyRemote(settings);
+        var impostor = Player(2, 0f, isImpostor: true);
+        Assert.False(Task(impostor, hauntingGhost).Audible);
+        Assert.True(Task(hauntingGhost, impostor).Audible);
+
+        var hauntingImpostor = hauntingGhost with { IsImpostor = true, IsImpostorTeam = true };
+        Assert.True(Task(impostor, hauntingImpostor).Audible);
+        Assert.False(VoiceProximityCalculator.CalculateMeeting(impostor, hauntingImpostor, false).Audible);
     }
 
     [Fact]
@@ -321,7 +363,8 @@ public sealed class VoiceProximityRulesTests : IDisposable
             ControlHearingMode: VoiceControlHearingMode.None,
             ControlledVictimPosition: default,
             ControlledVictimLightRadius: -1f,
-            External: ExternalVoiceState.None);
+            External: ExternalVoiceState.None,
+            IsImpostorTeam: isImpostor);
 
     private static Vector2 Vector(float x, float y)
     {

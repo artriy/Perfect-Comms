@@ -44,7 +44,7 @@ MACH_N_STAB = 0xE0
 MACH_N_TYPE = 0x0E
 MACH_N_EXT = 0x01
 MACH_N_UNDF = 0x00
-PION_ABI_EXPECTED = 2
+PION_ABI_EXPECTED = 3
 PION_VERSION_EXPECTED = "4.2.17"
 PION_CONTRACT_MARKER_PREFIX = b"PERFECTCOMMS_PC_PION_ABI="
 PION_CONTRACT_MARKER = (
@@ -68,6 +68,7 @@ PION_REQUIRED_FUNCTION_EXPORTS = frozenset(
         "pc_pion_add_ice_candidate",
         "pc_pion_restart_ice",
         "pc_pion_send_opus",
+        "pc_pion_set_private_radio",
         "pc_pion_advance_epoch",
         "pc_pion_poll_control",
         "pc_pion_poll_rtp",
@@ -1428,7 +1429,7 @@ def run_self_tests() -> None:
         else:
             fail(f"Additional PE runtime policy self-test accepted {runtime_name}")
 
-    for machine in (PE_AMD64, PE_I386):
+    for machine in (PE_AMD64,):
         assert_pion_pe_bytes(
             self_test_pion_pe(machine), f"pion-pe-valid-{machine:04x}", machine
         )
@@ -2253,9 +2254,7 @@ def verify_starlight_dll(path: Path) -> None:
 def verify_desktop(root: Path) -> None:
     pe_assets = (
         ("Libs/pc-capture/pc-capture-win-x64.exe", PE_AMD64),
-        ("Libs/pc-capture/pc-capture-win-x86.exe", PE_I386),
         ("Libs/dsp/webrtc-apm.x64.dll", PE_AMD64),
-        ("Libs/dsp/webrtc-apm.x86.dll", PE_I386),
     )
     elf_assets = (
         "Libs/pc-capture/pc-capture-linux-x64",
@@ -2277,7 +2276,6 @@ def verify_desktop(root: Path) -> None:
         print(f"release.asset.ok format=elf64 machine=x86_64 path={relative}")
     pion_pe_assets = (
         ("Libs/pion/pc-pion.x64.dll", PE_AMD64),
-        ("Libs/pion/pc-pion.x86.dll", PE_I386),
     )
     for relative, machine in pion_pe_assets:
         path = require_file(root, relative)
@@ -2349,8 +2347,8 @@ def main() -> int:
     parser.add_argument(
         "--expected-protocol",
         type=int,
-        default=16,
-        help="protocol expected from --helper-build-info (default: 16)",
+        default=17,
+        help="protocol expected from --helper-build-info (default: 17)",
     )
     args = parser.parse_args()
     root = args.root.resolve()

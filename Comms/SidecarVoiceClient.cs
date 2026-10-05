@@ -169,7 +169,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 16;
+    public const int Proto = 17;
     private const int HandshakeTimeoutMs = 10_000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -588,6 +588,12 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     {
         SendCommand("warm", SidecarProtocol.WarmFrame, "micWarm=true");
     }
+
+    public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers)
+        => SendCommand(
+            "private-radio",
+            () => SidecarProtocol.PrivateRadioFrame(active, receivers),
+            $"active={active} receivers={receivers.Count}");
 
     public void SelectMicDevice(string deviceId)
     {

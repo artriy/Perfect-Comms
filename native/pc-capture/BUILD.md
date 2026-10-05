@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 16.
+Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required ABI 3 companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 17.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -12,23 +12,22 @@ The desktop mod (`PerfectComms.dll`) embeds one helper binary and its matching P
 
 ## Targets
 
-The five Rust targets, verbatim:
+The four Rust targets, verbatim:
 
 - x86_64-pc-windows-msvc
-- i686-pc-windows-msvc
 - x86_64-apple-darwin
 - aarch64-apple-darwin
 - x86_64-unknown-linux-gnu
 
 The Pion build additionally names its desktop C-shared targets `win-x64`,
-`win-x86`, `linux-x64`, `mac-x64`, `mac-arm64`, and `mac-universal`.
+`linux-x64`, `mac-x64`, `mac-arm64`, and `mac-universal`.
 
 ## Local build
 
 - All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Cubeb requires CMake 3.19+ and a C/C++ compiler. Linux additionally needs `pkg-config`, `libpulse-dev`, and `libasound2-dev` so the shipped helper contains its PulseAudio primary backend and ALSA fallback.
-- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|win-x86|linux-x64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows targets need the matching MinGW C compiler and Linux needs GCC. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
+- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|linux-x64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows x64 needs the matching MinGW C compiler and Linux needs GCC. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
 - macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Rust and Pion Apple slices, `lipo`s each into a universal binary, seals `libpc-pion.dylib` into a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
-- Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-win-x86.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll`, `pc-pion.x86.dll`, and `libpc-pion.linux-x64.so`; the macOS dylib stays inside the signed app.
+- Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll` and `libpc-pion.linux-x64.so`; the macOS dylib stays inside the signed app.
 
 Cubeb is built from the pinned `cubeb-sys` vendored source as a static library
 inside every desktop helper. The build scripts clear
@@ -94,7 +93,7 @@ notarization branch and does not consume Apple signing secrets.
 
 The desktop managed build embeds each helper as `Lib.pc-capture.<file>` and each standalone Pion companion as `Lib.pc-pion.<file>`, with one `<EmbeddedResource>` per frozen output name. A normal developer build may omit native resources, but release validation requires the complete desktop platform set. At runtime the mod extracts the content-matched helper and Pion library into the per-target cache. On macOS the embedded resource is the zipped `.app`; its Pion dylib is already inside the signed bundle, so the mod preserves it while unzipping the app, setting executable permissions, and stripping quarantine.
 
-`scripts/package-release.sh` also stages the same four helper files as **side-files** in the BepInEx plugin folder (`BepInEx/plugins/pc-capture/`) so they ship alongside the DLL in the release zip. The Pion libraries are embedded in `PerfectComms.dll` (or sealed inside the macOS app) and extracted next to the selected helper at runtime. The embedded, content-matched copies are the runtime source of truth.
+Desktop releases publish only `PerfectComms.dll`. Helpers and Pion libraries are embedded in the DLL (or sealed inside the macOS app) and extracted into the content-matched runtime cache. No helper side-files or release ZIP are required.
 
 ## How it is launched
 
@@ -112,11 +111,11 @@ to the host audio stack directly: PulseAudio/ALSA on Linux and AudioUnit on
 macOS. It does not route the helper's audio through Wine's emulated WASAPI
 layer. Native Windows launches use Cubeb's WASAPI backend.
 
-Android remains a separate media surface. Unity owns microphone capture and
-`AudioSource` playback, while the net10.0 managed Starlight media project owns
+Android remains a separate media surface. Starlight owns microphone capture and
+Unity owns `AudioSource` playback, while the net10.0 managed Starlight media project owns
 Opus, mixing, and peer transport. `PerfectComms.Starlight.csproj` compiles with
-`ANDROID` and `STARLIGHT` against the locked `AmongUs.GameLibs.Android`
-package. Run `bash scripts/package-starlight.sh Release` or
+`ANDROID` and `STARLIGHT` against `AmongUs.GameLibs.Android` `2026.8.18` and the
+Starlight `1.6.3` host contract. Run `bash scripts/package-starlight.sh Release` or
 `pwsh scripts/package-starlight.ps1 -Configuration Release` to create
 `artifacts/PerfectCommsStarlight.dll`. The self-contained managed DLL includes
 the merged media dependency closure, the Perfect Comms license, the Starlight
@@ -132,12 +131,14 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 
 ## CI
 
-- `.github/workflows/native-helpers.yml`: builds the five desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64/x86, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64). It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
+- `.github/workflows/native-helpers.yml`: builds the four desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64). It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
 - `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, Starlight, and packaging gates, then publishes the self-contained desktop `PerfectComms.dll`. It also retains `PerfectCommsStarlight.dll` as the sole managed Starlight tester artifact for Starlight beta or staff-approved local-mod testing. The Starlight DLL contains its merged managed dependencies and embedded legal notices; no companion DLL is required. BepInEx remains an external desktop runtime selected by the player or modpack and is not included in release assets. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. Before launch, the mod also requires the helper's `--build-info` response to prove protocol 16, Cubeb 0.36.0, and the platform's exact backend inventory. Protocol 16 atomically commits desktop input, output, source, and capture mode, and serializes qualifying Windows WASAPI Bluetooth hands-free transitions. Protocol 15 separates warm microphone capture from transmission so Push To Talk can keep the hardware stream ready while its encoder and network gate remain closed. Protocol 14 generation-scopes every native peer mutation, coalesces obsolete RTC control work, acknowledges applied peer and SDP operations, and reports bounded scheduler health. Protocol 13 adds local microphone monitoring with optional delayed playback; protocol 12 adds coordinated automatic mixed-ICE restart after network changes; protocol 11 adds selectable high/very-high WebRTC noise suppression. Protocol 10 sends stable audio device IDs separately from presentation names. Protocol 9 added the speech-safe noise-gate threshold, diagnostics sampling controls, and deterministic runtime device updates.
+The helper announces `proto` in its `ready` payload. Before launch, the mod requires the helper's `--build-info` response to prove protocol 17, Cubeb 0.36.0, and the platform's exact backend inventory. The native transport requires Pion ABI 3. Game voice protocol 6 requires the current impostor settings and phase-scoped radio state.
+
+The `private-radio` control operation carries `active` and a `receivers` array of peer-ID strings. Public mode (`active: false`) keeps ordinary fanout. Private mode sends only to the named peers; an empty array sends nothing. Scope changes close capture and reset captured PCM, Opus FEC/DRED history, queued RTP, and retransmission caches through the existing privacy epoch before restoring transmission. This does not renegotiate or disconnect healthy peers.
 
 ## Media diagnostics
 

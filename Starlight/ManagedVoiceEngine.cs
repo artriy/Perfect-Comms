@@ -26,6 +26,7 @@ public sealed class ManagedVoiceEngine : IDisposable
     private readonly object _micGate = new();
     private readonly object _mixerGate = new();
     private readonly Dictionary<string, PeerContext> _peers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _privateRadioReceivers = new(StringComparer.Ordinal);
     private readonly ManagedVoiceMixer _mixer = new();
     private readonly PlaybackRing _playback = new(PlaybackCapacitySamples);
     private readonly ConcurrentQueue<EngineEvent> _events = new();
@@ -52,6 +53,7 @@ public sealed class ManagedVoiceEngine : IDisposable
     private bool _levelSpeaking;
     private int _levelFrameCount;
     private bool _deafened;
+    private bool _privateRadioActive;
     private long _playbackVersion;
     private int _running;
     private int _micActive;
@@ -114,6 +116,8 @@ public sealed class ManagedVoiceEngine : IDisposable
                     _encoder.Configure(_inputGain, _vadThreshold, _noiseGateThreshold);
                     _encoder.Reset();
                     ResetMicInputLocked();
+                    _privateRadioActive = false;
+                    _privateRadioReceivers.Clear();
                 }
                 lock (_playbackGate)
                 {
@@ -338,6 +342,38 @@ public sealed class ManagedVoiceEngine : IDisposable
 
     public void SetSynthetic(bool enabled) => Volatile.Write(ref _synthetic, enabled ? 1 : 0);
 
+    public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers)
+        => ConfigurePrivateRadio(active, receivers, out _);
+
+    public bool ConfigurePrivateRadio(bool active, IReadOnlyList<string> receivers, out bool changed)
+    {
+        ArgumentNullException.ThrowIfNull(receivers);
+        changed = false;
+        lock (_micGate)
+        {
+            if (!IsRunning) return false;
+            if (active)
+            {
+                for (int i = 0; i < receivers.Count; i++)
+                    if (string.IsNullOrEmpty(receivers[i]))
+                        throw new ArgumentException("Private radio receiver IDs must not be empty.", nameof(receivers));
+            }
+            if (_privateRadioActive == active &&
+                (!active || _privateRadioReceivers.SetEquals(receivers)))
+                return true;
+
+            ResetMicInputLocked();
+            _encoder!.Reset();
+            _privateRadioReceivers.Clear();
+            if (active)
+                for (int i = 0; i < receivers.Count; i++)
+                    _privateRadioReceivers.Add(receivers[i]);
+            _privateRadioActive = active;
+            changed = true;
+            return true;
+        }
+    }
+
     public void ConfigureGameState(bool deafened, float master, IReadOnlyList<ManagedPeerRoute> routes)
     {
         ArgumentNullException.ThrowIfNull(routes);
@@ -487,6 +523,8 @@ public sealed class ManagedVoiceEngine : IDisposable
                 _encoder?.Dispose();
                 _encoder = null;
                 ResetMicInputLocked();
+                _privateRadioActive = false;
+                _privateRadioReceivers.Clear();
             }
             lock (_playbackGate)
             {
@@ -547,8 +585,10 @@ public sealed class ManagedVoiceEngine : IDisposable
     {
         int count = 0;
         lock (_peerGate)
-            foreach (PeerContext context in _peers.Values)
-                if (context.Peer.IsConnected) _sendSnapshot[count++] = context.Peer;
+            foreach (KeyValuePair<string, PeerContext> peer in _peers)
+                if (peer.Value.Peer.IsConnected &&
+                    (!_privateRadioActive || _privateRadioReceivers.Contains(peer.Key)))
+                    _sendSnapshot[count++] = peer.Value.Peer;
         return count;
     }
 

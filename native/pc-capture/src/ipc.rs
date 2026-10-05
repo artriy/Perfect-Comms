@@ -421,8 +421,8 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
             r.read_exact(&mut body)?;
             let ts = u64::from_le_bytes(body[0..8].try_into().unwrap());
             let mut samples = Vec::with_capacity(proto::FRAME_SAMPLES);
-            for chunk in body[8..].chunks_exact(4) {
-                samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in body[8..].as_chunks::<4>().0 {
+                samples.push(f32::from_le_bytes(*chunk));
             }
             Ok(Frame::Audio(AudioFrame {
                 encoder_epoch: 0,
@@ -441,8 +441,8 @@ pub fn read_frame_checked<R: BufRead>(r: &mut R) -> Result<Frame, proto::DecodeE
             let mut body = vec![0u8; proto::AUDIO_OUT_BYTES];
             r.read_exact(&mut body)?;
             let mut samples = Vec::with_capacity(proto::AUDIO_OUT_SAMPLES);
-            for chunk in body.chunks_exact(4) {
-                samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in body.as_chunks::<4>().0 {
+                samples.push(f32::from_le_bytes(*chunk));
             }
             Ok(Frame::AudioOut(AudioOutFrame { samples }))
         }
@@ -2122,6 +2122,7 @@ struct EncoderPrivacyEpochState {
 #[derive(Default)]
 struct EncoderPrivacyEpoch {
     requested: Arc<AtomicU64>,
+    reset_dsp: AtomicBool,
     state: Mutex<EncoderPrivacyEpochState>,
     changed: Condvar,
 }
@@ -2143,6 +2144,11 @@ impl EncoderPrivacyEpoch {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    fn request_dsp_reset(&self) -> Result<u64, String> {
+        self.reset_dsp.store(true, Ordering::Release);
+        self.request()
     }
 
     fn requested(&self) -> u64 {
@@ -2299,6 +2305,30 @@ fn close_capture_privacy(
     }
     let epoch = encoder_privacy.request()?;
     encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)
+}
+
+fn apply_private_radio_scope(
+    capture_transmit_enabled: &AtomicBool,
+    encoder_privacy: &EncoderPrivacyEpoch,
+    ring_consumer: &CaptureFrameConsumer,
+    apply: impl FnOnce(u64) -> bool,
+) -> Result<(), String> {
+    let was_transmitting = capture_transmit_enabled.load(Ordering::Acquire);
+    let previous_epoch = encoder_privacy.requested();
+    close_capture_privacy(capture_transmit_enabled, encoder_privacy, ring_consumer)?;
+    if encoder_privacy.requested() == previous_epoch {
+        let epoch = encoder_privacy.request()?;
+        encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)?;
+    }
+    if !apply(encoder_privacy.requested()) {
+        return Err("private radio RTP privacy fence failed".to_string());
+    }
+    // Reject callbacks begun while the audience transition was still in flight.
+    let epoch = encoder_privacy.request_dsp_reset()?;
+    encoder_privacy.wait_applied(epoch, ENCODER_PRIVACY_EPOCH_TIMEOUT)?;
+    ring_consumer.discard_all();
+    capture_transmit_enabled.store(was_transmitting, Ordering::Release);
+    Ok(())
 }
 
 fn apply_capture_mode(
@@ -2568,6 +2598,7 @@ fn run_authenticated_session(
     let (ring_producer, ring_consumer) = capture_frame_ring(RING_CAPACITY);
     let encoder_privacy = Arc::new(EncoderPrivacyEpoch::default());
     let capture_transmit_enabled = Arc::new(AtomicBool::new(false));
+    let mut private_radio_scope = proto::PrivateRadioScope::default();
     let stop = Arc::new(AtomicBool::new(false));
     let mut producer = CaptureProducer::new(
         cfg.synthetic,
@@ -2720,6 +2751,17 @@ fn run_authenticated_session(
             let requested_epoch = writer_privacy.requested();
             if requested_epoch > active_encoder_epoch {
                 writer_ring.discard_all();
+                if writer_privacy.reset_dsp.swap(false, Ordering::AcqRel) {
+                    let dsp_reset = writer_dsp
+                        .lock()
+                        .map_err(|_| "DSP privacy lock poisoned".to_string())
+                        .and_then(|mut dsp| dsp.reset_capture_history());
+                    if let Err(error) = dsp_reset {
+                        writer_privacy.fail();
+                        eprintln!("pc-capture: DSP privacy reset failed: {error}");
+                        return;
+                    }
+                }
                 if let Err(error) = encoder.reset_encoder() {
                     writer_counters.opus_errors.fetch_add(1, Ordering::Relaxed);
                     writer_privacy.fail();
@@ -3361,6 +3403,25 @@ fn run_authenticated_session(
                     Err(_) => continue,
                 };
                 match op {
+                    InboundOp::PrivateRadio { active, receivers } => {
+                        let scope = proto::PrivateRadioScope::new(active, receivers);
+                        if scope != private_radio_scope {
+                            if let Err(error) = apply_private_radio_scope(
+                                &capture_transmit_enabled,
+                                &encoder_privacy,
+                                &ring_consumer,
+                                |epoch| {
+                                    rtc.set_private_radio(scope.active, &scope.receivers, epoch)
+                                },
+                            ) {
+                                eprintln!(
+                                    "pc-capture: critical media failure: private radio boundary: {error}"
+                                );
+                                break 'control;
+                            }
+                            private_radio_scope = scope;
+                        }
+                    }
                     InboundOp::SelectDevice { id } => {
                         hfp_route_cache.clear();
                         if let Err(error) = producer.select_device(id) {
@@ -4375,6 +4436,76 @@ mod tests {
     }
 
     #[test]
+    fn private_radio_scope_fences_queued_pcm_and_codec_before_restoring_capture() {
+        for (was_transmitting, scope_succeeds) in [(true, true), (false, true), (true, false)] {
+            let (producer, consumer) = capture_frame_ring(4);
+            let transmitting = AtomicBool::new(was_transmitting);
+            let privacy = Arc::new(EncoderPrivacyEpoch::default());
+            let stop = Arc::new(AtomicBool::new(false));
+            let writer_privacy = privacy.clone();
+            let writer_stop = stop.clone();
+            let writer = std::thread::spawn(move || {
+                let mut encoder = OpusCodec::new().unwrap();
+                for _ in 0..12 {
+                    encoder.encode(&[0.4; proto::FRAME_SAMPLES]);
+                }
+                let mut applied = 0;
+                while !writer_stop.load(Ordering::Acquire) {
+                    let requested = writer_privacy.requested();
+                    if requested > applied {
+                        encoder.reset_encoder().unwrap();
+                        applied = requested;
+                        writer_privacy.publish_applied(applied);
+                    }
+                    std::thread::yield_now();
+                }
+                encoder.encode(&[0.0; proto::FRAME_SAMPLES])
+            });
+            assert!(producer.push(
+                CaptureFrameMetadata::default(),
+                &[0.4; proto::FRAME_SAMPLES],
+            ));
+            let transition_epoch = std::cell::Cell::new(0);
+            let result = apply_private_radio_scope(&transmitting, &privacy, &consumer, |epoch| {
+                assert!(!transmitting.load(Ordering::Acquire));
+                assert!(privacy.is_settled());
+                assert_eq!(consumer.discard_all(), 0);
+                transition_epoch.set(epoch);
+                assert!(producer.push(
+                    CaptureFrameMetadata {
+                        encoder_epoch: epoch,
+                        ..Default::default()
+                    },
+                    &[0.5; proto::FRAME_SAMPLES],
+                ));
+                scope_succeeds
+            });
+            stop.store(true, Ordering::Release);
+            let public_packet = writer.join().unwrap();
+            assert_eq!(
+                public_packet,
+                OpusCodec::new()
+                    .unwrap()
+                    .encode(&[0.0; proto::FRAME_SAMPLES]),
+                "old private speech remained in codec history"
+            );
+            if scope_succeeds {
+                result.unwrap();
+                assert_eq!(consumer.discard_all(), 0);
+                assert!(!capture_frame_authorized(
+                    transition_epoch.get(),
+                    privacy.requested(),
+                    privacy.requested()
+                ));
+                assert_eq!(transmitting.load(Ordering::Acquire), was_transmitting);
+            } else {
+                assert!(result.is_err());
+                assert!(!transmitting.load(Ordering::Acquire));
+            }
+        }
+    }
+
+    #[test]
     fn privacy_boundary_discards_pre_boundary_capture_frames() {
         let (producer, consumer) = capture_frame_ring(2);
         let privacy = EncoderPrivacyEpoch::default();
@@ -5221,13 +5352,19 @@ mod tests {
 
     #[test]
     fn validate_hello_accepts_matching_token_and_proto() {
-        let op = parse_inbound(r#"{"op":"hello","proto":16,"token":"good"}"#).unwrap();
+        let op = InboundOp::Hello {
+            proto: PROTO_VERSION,
+            token: "good".into(),
+        };
         assert!(matches!(validate_hello(&op, "good"), HelloResult::Accept));
     }
 
     #[test]
     fn validate_hello_rejects_bad_token() {
-        let op = parse_inbound(r#"{"op":"hello","proto":16,"token":"bad"}"#).unwrap();
+        let op = InboundOp::Hello {
+            proto: PROTO_VERSION,
+            token: "bad".into(),
+        };
         assert!(matches!(
             validate_hello(&op, "good"),
             HelloResult::RejectToken
@@ -5501,7 +5638,8 @@ mod tests {
             .unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":16,"token":"listen-only"}"#,
+                &serde_json::json!({"op":"hello","proto":PROTO_VERSION,"token":"listen-only"})
+                    .to_string(),
             ))
             .unwrap();
         let mut reader = BufReader::new(client.try_clone().unwrap());
@@ -5557,7 +5695,8 @@ mod tests {
 
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":16,"token":"tok123"}"#,
+                &serde_json::json!({"op":"hello","proto":PROTO_VERSION,"token":"tok123"})
+                    .to_string(),
             ))
             .unwrap();
 
@@ -5566,7 +5705,6 @@ mod tests {
             Frame::Control(s) => {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(v["op"], "ready");
-                assert_eq!(v["proto"], 16);
                 assert_eq!(v["format"]["rate"], 48_000);
                 assert_eq!(v["devices"][0]["id"], "synthetic-tone");
             }
@@ -5684,7 +5822,8 @@ mod tests {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":16,"token":"wrong"}"#,
+                &serde_json::json!({"op":"hello","proto":PROTO_VERSION,"token":"wrong"})
+                    .to_string(),
             ))
             .unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
@@ -5758,7 +5897,8 @@ mod tests {
         let mut unauthorized = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         unauthorized
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":16,"token":"wrong"}"#,
+                &serde_json::json!({"op":"hello","proto":PROTO_VERSION,"token":"wrong"})
+                    .to_string(),
             ))
             .unwrap();
         let mut unauthorized_reader = BufReader::new(unauthorized.try_clone().unwrap());
@@ -5777,7 +5917,8 @@ mod tests {
         let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         first
             .write_all(&encode_control(
-                r#"{"op":"hello","proto":16,"token":"servetok"}"#,
+                &serde_json::json!({"op":"hello","proto":PROTO_VERSION,"token":"servetok"})
+                    .to_string(),
             ))
             .unwrap();
         let mut r1 = BufReader::new(first.try_clone().unwrap());

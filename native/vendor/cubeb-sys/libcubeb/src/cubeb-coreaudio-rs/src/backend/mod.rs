@@ -33,7 +33,10 @@ use self::device_property::*;
 use self::mixer::*;
 use self::resampler::*;
 use self::utils::*;
-use backend::ringbuf::RingBuffer;
+use backend::ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapCons, HeapProd, HeapRb,
+};
 #[cfg(feature = "audio-dump")]
 use cubeb_backend::ffi::cubeb_audio_dump_stream_t;
 use cubeb_backend::{
@@ -3247,23 +3250,23 @@ struct InputCallbackData {
     num_buf: u32,
 }
 struct InputCallbackLogger {
-    prod: ringbuf::Producer<InputCallbackData>,
-    cons: ringbuf::Consumer<InputCallbackData>,
+    prod: HeapProd<InputCallbackData>,
+    cons: HeapCons<InputCallbackData>,
 }
 
 impl InputCallbackLogger {
     fn new() -> Self {
-        let ring = RingBuffer::<InputCallbackData>::new(16);
+        let ring = HeapRb::<InputCallbackData>::new(16);
         let (prod, cons) = ring.split();
         Self { prod, cons }
     }
 
     fn push(&mut self, data: InputCallbackData) {
-        self.prod.push(data);
+        let _ = self.prod.try_push(data);
     }
 
     fn pop(&mut self) -> Option<InputCallbackData> {
-        self.cons.pop()
+        self.cons.try_pop()
     }
 
     fn is_empty(&self) -> bool {
@@ -3276,8 +3279,8 @@ impl fmt::Debug for InputCallbackLogger {
         write!(
             f,
             "InputCallbackLogger  {{ prod: {}, cons: {} }}",
-            self.prod.len(),
-            self.cons.len()
+            self.prod.occupied_len(),
+            self.cons.occupied_len()
         )
     }
 }

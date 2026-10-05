@@ -113,6 +113,40 @@ public sealed class AndroidTouchInputDecisionTests
     }
 
     [Theory]
+    [InlineData((int)VoiceGamePhase.Meeting, true, false, false, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, true, true, false, true)]
+    [InlineData((int)VoiceGamePhase.Meeting, true, true, true, false)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, false, false, false)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, true, false, false)]
+    [InlineData((int)VoiceGamePhase.Exile, true, false, false, false)]
+    [InlineData((int)VoiceGamePhase.Exile, true, true, false, false)]
+    [InlineData((int)VoiceGamePhase.Tasks, true, false, false, false)]
+    public void AcrossDeathMeetingRadioUsesTheSamePermissionsForVisibilityAndHold(
+        int phaseValue, bool actualImpostor, bool dead, bool spectator, bool expected)
+    {
+        var phase = (VoiceGamePhase)phaseValue;
+        var settings = VoiceRoomSettingsSnapshot.Defaults with
+        {
+            TeamRadio = false,
+            TeamRadioImpostors = false,
+            TeamRadioInMeetings = false,
+            MeetingOnlyImpostorChat = false,
+            ImpostorsTalkAcrossDeath = true,
+            ImpostorsTalkAcrossDeathInMeetings = true,
+        };
+        bool eligible = VoiceRoleMuteState.CanUseTeamRadioChannel(
+            settings, phase, actualImpostor, dead, spectator, VoiceTeamRadioChannel.Impostors);
+        bool blocked = VoiceChatHudState.TeamRadioBlockedByMeetingPolicy(
+            settings, phase, VoiceTeamRadioChannel.Impostors, actualImpostor, dead, spectator);
+        bool routingSupported = VoiceChatHudState.AndroidTeamRadioPhaseSupportsPrivateRouting(phase);
+
+        Assert.Equal(expected, VoiceChatHudState.AndroidShouldShowTeamRadioButton(
+            eligible, routingSupported, blocked));
+        Assert.Equal(expected, VoiceChatHudState.AndroidTeamRadioInputAvailable(
+            eligible, routingSupported, false, false, false, blocked));
+    }
+
+    [Theory]
     [InlineData((int)VoiceTeamRadioChannel.Impostors, "I", "Team Radio: Impostors")]
     [InlineData((int)VoiceTeamRadioChannel.All, "A", "Team Radio: All Teams")]
     [InlineData((int)VoiceTeamRadioChannel.None, "R", "Team Radio unavailable")]

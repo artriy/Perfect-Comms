@@ -265,7 +265,8 @@ public static class HostSettingsPanel
                 g.GracePeriodEnabled, g.GracePeriodSeconds,
                 g.HearInVent, g.VentPrivateChat, g.ImpostorHearGhosts, g.CommsSabDisables,
                 g.OnlyGhostsCanTalk, g.GhostsHearEachOtherUnlimited, g.OnlyMeetingOrLobby,
-                g.OnlyMeetingOrLobbyAffectsGhosts
+                g.MeetingOnlyImpostorChat, g.OnlyMeetingOrLobbyAffectsGhosts,
+                g.ImpostorsTalkAcrossDeath, g.ImpostorsTalkAcrossDeathInMeetings
             },
             3 => new List<OptionHolder>
             {

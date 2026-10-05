@@ -46,6 +46,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly List<byte> _meetingSpatialRosterScratch = new(32);
     private readonly Dictionary<byte, float> _meetingSpatialPanByPlayerId = new(32);
     private readonly GameStateSendGate _gameStateSendGate = new();
+    private bool _privateRadioActive;
+    private volatile bool _privateRadioScopePending;
+    private object? _privateRadioScopeVoice;
+    private readonly List<int> _privateRadioReceivers = new(32);
+    private readonly List<int> _privateRadioReceiverScratch = new(32);
+    private readonly List<string> _privateRadioReceiverKeys = new(32);
     private readonly List<string> _staleSnapshotRoutePeerIds = new();
     private readonly Dictionary<int, DateTime> _duplicateRouteLogUtcByClient = new();
     private static readonly TimeSpan DuplicateRouteLogInterval = TimeSpan.FromSeconds(2);
@@ -798,7 +804,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     }
     private volatile bool _mute;
     private volatile bool _keepCaptureWarm;
-    public bool Mute => _mute;
+    public bool Mute => _mute || _privateRadioScopePending;
     public float LocalLevel => _localLevel;
     public bool LocalSpeaking => _localSpeaking;
     public int PeerCount
@@ -979,11 +985,113 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         bool muted)
         => !disposed && !paused && permitted && requested && !muted;
 
+    internal void ConfigurePrivateRadio(
+        VoiceGameStateSnapshot? snapshot, bool hostPolicyReady, VoiceRadioState radio, VoiceGamePhase phase)
+    {
+        var active = CollectPrivateRadioReceivers(
+            snapshot, VoiceRoomSettingsState.Current, phase,
+            hostPolicyReady, radio, _privateRadioActive, _privateRadioReceiverScratch);
+#if WINDOWS
+        object? currentVoice = _voice;
+#elif ANDROID
+        object? currentVoice = _mobileVoice;
+#else
+        object? currentVoice = null;
+#endif
+        var changed = active != _privateRadioActive ||
+            _privateRadioReceiverScratch.Count != _privateRadioReceivers.Count;
+        for (int i = 0; !changed && i < _privateRadioReceivers.Count; i++)
+            changed = _privateRadioReceiverScratch[i] != _privateRadioReceivers[i];
+        if (!changed && !_privateRadioScopePending &&
+            (!active || ReferenceEquals(currentVoice, _privateRadioScopeVoice)))
+            return;
+
+        var needsFence = changed || !_privateRadioScopePending;
+        var keepCaptureWarm = _keepCaptureWarm || !_mute && _microphoneRequested;
+        _privateRadioScopePending = true;
+        SetMicrophonePolicy(true, keepCaptureWarm);
+        lock (_captureFrameSync)
+        {
+            if (needsFence)
+            {
+                _captureEpoch++;
+                _captureFrameSamples = 0;
+                _micPreprocessor.Reset(preserveAutoGain: true);
+#if WINDOWS || ANDROID
+                lock (_unityEncodeSync)
+                {
+                    _unityCaptureFill = 0;
+                    while (_unityEncodeQueue.Count > 0)
+                    {
+                        var queued = _unityEncodeQueue.Dequeue();
+                        ArrayPool<float>.Shared.Return(queued.buffer, clearArray: false);
+                    }
+                }
+#endif
+            }
+            if (changed)
+            {
+                _privateRadioActive = active;
+                _privateRadioReceivers.Clear();
+                _privateRadioReceivers.AddRange(_privateRadioReceiverScratch);
+                _privateRadioReceiverKeys.Clear();
+                foreach (var clientId in _privateRadioReceivers)
+                    _privateRadioReceiverKeys.Add(clientId.ToString(CultureInfo.InvariantCulture));
+            }
+#if WINDOWS
+            var voice = _voice;
+            if (!_voiceReady || voice == null || voice.Health != CaptureHealth.Healthy ||
+                !voice.ConfigurePrivateRadio(active, _privateRadioReceiverKeys))
+                return;
+#elif ANDROID
+            var voice = _mobileVoice;
+            if (voice == null || !voice.ConfigurePrivateRadio(active, _privateRadioReceiverKeys))
+                return;
+#else
+            return;
+#endif
+#if WINDOWS || ANDROID
+            _privateRadioScopeVoice = voice;
+            _privateRadioScopePending = false;
+#endif
+        }
+    }
+
+    internal static bool CollectPrivateRadioReceivers(
+        VoiceGameStateSnapshot? snapshot, VoiceRoomSettingsSnapshot settings, VoiceGamePhase phase,
+        bool hostPolicyReady, VoiceRadioState radio, bool wasPrivate, List<int> receivers)
+    {
+        receivers.Clear();
+        if (VoiceSceneState.IsLobbyVoicePhase(phase))
+            return false;
+        var specialChat = VoiceImpostorPolicy.SpecialChatEnabled(settings, phase);
+        var trusted = hostPolicyReady && snapshot != null && snapshot.Phase == phase &&
+            snapshot.LiveLocalPlayerResolved && snapshot.PlayerEnumerationCompleted &&
+            !snapshot.RoutingRosterRetained;
+        var active = radio.IsActive || specialChat || !trusted && wasPrivate;
+        if (!active || !trusted || !snapshot!.TryGetLocalPlayer(out var speaker) ||
+            speaker.External.Muted || VoiceRoleMuteState.IsMeetingVoiceBlocked(speaker, phase))
+            return active;
+        foreach (var listener in snapshot.Players)
+        {
+            if (listener.IsLocal || listener.ClientId == snapshot.LocalClientId || listener.ClientId < 0)
+                continue;
+            var allowed = specialChat
+                ? VoiceImpostorPolicy.CanTransmit(settings, speaker) && VoiceImpostorPolicy.CanListen(listener)
+                : VoiceProximityCalculator.CanReceiveRadioState(settings, phase, speaker, listener, radio);
+            if (allowed)
+                receivers.Add(listener.ClientId);
+        }
+        receivers.Sort();
+        return active;
+    }
+
     public void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
 #if !WINDOWS
         keepCaptureWarm = false;
 #endif
+        mute |= _privateRadioScopePending;
 #if WINDOWS
         SidecarVoiceLease? sidecarVoice;
         long sidecarSessionGeneration;
@@ -1763,6 +1871,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             ResetSpeakerFallbackRetryLocked();
             BeginSidecarCaptureSourceGenerationLocked(awaitingFirstLevel: false);
             _voice = voice;
+            if (_privateRadioActive)
+                _privateRadioScopePending = true;
             _voiceStartTask = Task.Run(() => RunVoiceStart(voice, sessionGeneration, reason));
         }
     }
@@ -3421,8 +3531,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         mv.SetSynthetic(false);
         // Android intentionally ships without the desktop WebRTC APM side library.
         mv.SetDsp(false, false, false, false, false);
-        // A fresh engine is fail-closed. Explicit Stop when muted/not ready also resets any
-        // encoder history before peers can be authorized; an already-running source gets Start.
+        _privateRadioScopePending = !mv.ConfigurePrivateRadio(_privateRadioActive, _privateRadioReceiverKeys);
+        if (!_privateRadioScopePending)
+            _privateRadioScopeVoice = mv;
         mv.SetMicActive(!_applicationPaused && !Mute && _microphoneReady);
         _gameStateSendGate.Reset();
         _mobileVoice = mv;
@@ -3735,7 +3846,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         var epoch = Volatile.Read(ref _captureEpoch);
         lock (_unityEncodeSync)
         {
-            if (_disposed) return;
+            if (_disposed || epoch != Volatile.Read(ref _captureEpoch)) return;
             var offset = 0;
             while (offset < samples)
             {
@@ -4243,6 +4354,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #if WINDOWS || ANDROID
         PumpRpcSignaling(snapshot);
 #endif
+        if (snapshot != null && snapshot.Phase != VoiceSceneState.ResolvePhase())
+            snapshot = null;
 
         if (snapshot == null)
         {
@@ -4387,6 +4500,23 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #endif
 
         MaybeLogStats(snapshot, "ok");
+    }
+
+    internal void ResetRadioState()
+    {
+        lock (_peerSync)
+            _radioStateByPlayerId.Clear();
+        SnapshotPeersInto(_updatePeerScratch);
+        foreach (var peer in _updatePeerScratch)
+        {
+            peer.ApplyRadioState(VoiceRadioState.None);
+            peer.MuteAll();
+        }
+        _gameStateSendGate.Reset();
+#if WINDOWS || ANDROID
+        SendNativeGameStateIfDue(true, 0f, Array.Empty<SidecarProtocol.GameStatePeerInput>());
+        _gameStateSendGate.Reset();
+#endif
     }
 
     private void BuildMeetingSpatialPanMap(

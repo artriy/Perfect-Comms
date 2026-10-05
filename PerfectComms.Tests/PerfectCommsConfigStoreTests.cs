@@ -1,5 +1,6 @@
 using BepInEx;
 using BepInEx.Configuration;
+using System.Reflection;
 using VoiceChatPlugin.VoiceChat;
 using Xunit;
 
@@ -164,6 +165,73 @@ public sealed class PerfectCommsConfigStoreTests
         }
         finally
         {
+            store?.Dispose();
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void MeetingRadioPreferenceDefaultsOnAndPersistsOffWhileParentIsHidden()
+    {
+        string root = NewTemporaryDirectory();
+        PerfectCommsConfigStore? store = null;
+        var constructor = typeof(VoiceChatGameOptions).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(ConfigFile) },
+            modifiers: null)!;
+        var instanceField = typeof(VoiceChatGameOptions).GetField(
+            "_instance", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var previousInstance = instanceField.GetValue(null);
+        try
+        {
+            string instancePath = Path.Combine(root, "instance", "com.edgetel.perfectcomms.cfg");
+            Directory.CreateDirectory(Path.GetDirectoryName(instancePath)!);
+            File.WriteAllText(instancePath, "[Host.VoiceChat]\nImpostorsTalkAcrossDeath = true\n");
+            var instanceConfig = new ConfigFile(instancePath, saveOnInit: false, Metadata);
+            string persistent = Path.Combine(root, "persistent");
+            store = Open(instanceConfig, persistent);
+            var options = (VoiceChatGameOptions)constructor.Invoke(new object[] { store.Config });
+            instanceField.SetValue(null, options);
+            store.CompleteInitialization();
+
+            Assert.True(options.ImpostorsTalkAcrossDeath.Value);
+            Assert.True(options.ImpostorsTalkAcrossDeathInMeetings.IsVisible);
+            Assert.True(options.ImpostorsTalkAcrossDeathInMeetings.Value);
+            options.ImpostorsTalkAcrossDeathInMeetings.Value = false;
+            options.ImpostorsTalkAcrossDeath.Value = false;
+            Assert.False(options.ImpostorsTalkAcrossDeathInMeetings.IsVisible);
+            Assert.False(options.ImpostorsTalkAcrossDeathInMeetings.Value);
+            var snapshot = VoiceRoomSettingsSnapshot.FromGameOptions();
+            Assert.False(snapshot.ImpostorsTalkAcrossDeath);
+            Assert.False(snapshot.ImpostorsTalkAcrossDeathInMeetings);
+            var payload = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+                snapshot, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+            Assert.True(VoiceRoomSettingsRpc.TryDecodeSnapshotPayload(
+                VoiceRoomSettingsRpc.SnapshotKind, payload, out var decoded, out _, out var reason), reason);
+            Assert.False(decoded.ImpostorsTalkAcrossDeathInMeetings);
+
+            store.Dispose();
+            store = Open(instanceConfig, persistent);
+            options = (VoiceChatGameOptions)constructor.Invoke(new object[] { store.Config });
+            instanceField.SetValue(null, options);
+            store.CompleteInitialization();
+            Assert.False(options.ImpostorsTalkAcrossDeath.Value);
+            Assert.False(options.ImpostorsTalkAcrossDeathInMeetings.IsVisible);
+            Assert.False(options.ImpostorsTalkAcrossDeathInMeetings.Value);
+
+            options.ImpostorsTalkAcrossDeath.Value = true;
+            Assert.True(options.ImpostorsTalkAcrossDeathInMeetings.IsVisible);
+            Assert.False(options.ImpostorsTalkAcrossDeathInMeetings.Value);
+            Assert.False(VoiceRoomSettingsSnapshot.FromGameOptions().ImpostorsTalkAcrossDeathInMeetings);
+            var saved = PerfectCommsConfigStore.ParseValues(
+                File.ReadAllText(PerfectCommsConfigPath.Resolve(persistent)));
+            Assert.True(bool.Parse(saved[new PerfectCommsConfigKey("Host.VoiceChat", "ImpostorsTalkAcrossDeath")]));
+            Assert.False(bool.Parse(saved[new PerfectCommsConfigKey("Host.VoiceChat", "ImpostorsTalkAcrossDeathInMeetings")]));
+        }
+        finally
+        {
+            instanceField.SetValue(null, previousInstance);
             store?.Dispose();
             DeleteTemporaryDirectory(root);
         }

@@ -47,11 +47,6 @@ jobs:
             cc: x86_64-w64-mingw32-gcc
             artifact: pion-win-x64
             file: pc-pion.x64.dll
-          - target: win-x86
-            package: gcc-mingw-w64-i686
-            cc: i686-w64-mingw32-gcc
-            artifact: pion-win-x86
-            file: pc-pion.x86.dll
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -86,7 +81,7 @@ jobs:
         with:
           go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
-      - name: Test locked Pion module and license inventory
+      - name: Test locked Pion transport and license inventory
         run: |
           (cd native/pc-pion && go test -buildvcs=false -mod=readonly ./...)
           python3 scripts/verify-pion-license-inventory.py
@@ -111,13 +106,6 @@ jobs:
             dest: pc-capture-win-x64.exe
             artifact: helper-win-x64
             runner: windows-latest
-          - target: i686-pc-windows-msvc
-            dest: pc-capture-win-x86.exe
-            artifact: helper-win-x86
-            # VS 2026's MSVC 14.51 crashes internally while compiling Opus 1.6.1
-            # DRED SIMD for Win32. Keep the supported VS 2022 compiler for this
-            # target so DRED and SIMD remain enabled.
-            runner: windows-2022
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -131,7 +119,7 @@ jobs:
       - name: Verify helper has no private MSVC runtime dependency
         run: python scripts/verify-release-assets.py --pe-no-private-runtime Libs/pc-capture/${{ matrix.dest }}
       - name: Verify linked Cubeb backend inventory
-        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 16
+        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 17
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -157,7 +145,7 @@ jobs:
       - name: Verify static Cubeb and Linux audio runtime contract
         run: python3 scripts/verify-release-assets.py --elf-cubeb-runtime Libs/pc-capture/pc-capture-linux-x64
       - name: Verify linked Cubeb backend inventory
-        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 16
+        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 17
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-linux-x64
@@ -200,12 +188,6 @@ jobs:
             apm_artifact: apm-win-x64
             pion_artifact: pion-win-x64
             pion_file: pc-pion.x64.dll
-          - artifact: helper-win-x86
-            os: windows-latest
-            bin: pc-capture-win-x86.exe
-            apm_artifact: apm-win-x86
-            pion_artifact: pion-win-x86
-            pion_file: pc-pion.x86.dll
           - artifact: helper-linux-x64
             os: ubuntu-latest
             bin: pc-capture-linux-x64
@@ -266,9 +248,7 @@ jobs:
   # ---- webrtc-audio-processing DSP shared library (apm-sys gate) ----
   # Build the vendored C++ APM as a SHARED lib that exports the webrtc_apm_* C
   # ABI, then prove apm-sys (libloading) can load it and process a frame.
-  # The two Windows DLLs are cross-built on Linux with the mingw toolchains the
-  # crossfiles reference, then loaded on a real Windows runner. i686 (32-bit
-  # Windows) is the go/no-go gate.
+  # The Windows x64 DLL is cross-built on Linux, then loaded on a Windows runner.
   apm-build-linux:
     runs-on: ubuntu-latest
     container: rust:1-bullseye
@@ -281,11 +261,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config ninja-build python3 python3-pip \
-            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
             gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
           # webrtc/abseil need std::thread -> force the POSIX mingw runtime
-          update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-posix || true
-          update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-posix || true
           update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix || true
           update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix || true
           pip3 install meson || pip3 install --break-system-packages meson
@@ -295,11 +272,9 @@ jobs:
         run: |
           APM_LIB="$PWD/artifacts/apm/libwebrtc-apm.so" \
             cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
-            -- --ignored loads_and_processes_a_frame
+            -- --ignored
       - name: Build win-x64 (.dll, x86_64-w64-mingw32)
         run: bash scripts/build-apm.sh win-x64
-      - name: Build win-x86 (.dll, i686-w64-mingw32) [GATE]
-        run: bash scripts/build-apm.sh win-x86
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apm-linux-x64
@@ -309,11 +284,6 @@ jobs:
         with:
           name: apm-win-x64
           path: artifacts/apm/webrtc-apm.x64.dll
-          if-no-files-found: error
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: apm-win-x86
-          path: artifacts/apm/webrtc-apm.x86.dll
           if-no-files-found: error
 
   apm-smoke-win-x64:
@@ -335,30 +305,7 @@ jobs:
         run: |
           APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x64.dll" \
             cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
-            -- --ignored loads_and_processes_a_frame
-
-  apm-smoke-win-x86:
-    needs: apm-build-linux
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-          targets: i686-pc-windows-msvc
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: apm-win-x86
-          path: dl
-      - name: Verify no unbundled compiler runtime
-        run: python scripts/verify-release-assets.py --pe-no-private-runtime dl/webrtc-apm.x86.dll
-      - name: Smoke win-x86 (32-bit process loads 32-bit DLL) [GATE]
-        shell: bash
-        run: |
-          APM_LIB="$(cd dl && pwd -W)/webrtc-apm.x86.dll" \
-            cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
-            --target i686-pc-windows-msvc \
-            -- --ignored loads_and_processes_a_frame
+            -- --ignored
 
   apm-mac:
     name: apm-mac-${{ matrix.arch }}
@@ -395,7 +342,7 @@ jobs:
         run: |
           APM_LIB="$PWD/artifacts/apm/${{ matrix.file }}" \
             cargo test --locked --manifest-path native/apm-sys/Cargo.toml --release \
-            -- --ignored loads_and_processes_a_frame
+            -- --ignored
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}

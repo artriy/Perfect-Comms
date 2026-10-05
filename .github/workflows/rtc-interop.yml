@@ -56,6 +56,11 @@ jobs:
       - name: Windows cgo compiler
         if: runner.os == 'Windows'
         run: choco install mingw -y --no-progress
+      - name: Native UDP restart and TCP RTP coverage
+        shell: bash
+        run: |
+          (cd native/pc-pion && go test -buildvcs=false -mod=readonly -count=1 \
+            -run '^TestPion(LoopbackRTPOrderingEOCAndICERestart|DirectICETCPCarriesRTP|CloseIsNotHeldByTCPPeerWithoutSTUN)$' ./...)
       - name: Build and require Pion transport
         shell: bash
         run: |

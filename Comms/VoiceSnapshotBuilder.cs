@@ -125,7 +125,8 @@ internal static class VoiceSnapshotBuilder
                 ControlledVictimLightRadius: playerIsLocal
                     ? localControlledVictimLight
                     : -1f,
-                External: external));
+                External: external,
+                IsImpostorTeam: data?.Role?.IsImpostor == true));
         }
         }
         catch

@@ -76,6 +76,8 @@ internal static class Program
         }
 
         await CodecInterop.RunAsync(options.CodecProbePath, options.Timeout).ConfigureAwait(false);
+        if (NativePion.AbiVersion() != 3 || NativePion.PionVersion() != 4_002_017)
+            throw new ProbeFailureException("native-contract");
 
         ulong nativeHandle = NativePion.EngineNew();
         if (nativeHandle == 0)
@@ -392,6 +394,7 @@ internal sealed class InteropSession
     private long _nativeReceivedPackets;
     private long _echoedPackets;
     private ulong _mediaSequence;
+    private ulong _mediaEpoch;
 
     public InteropSession(
         ulong nativeHandle,
@@ -405,6 +408,7 @@ internal sealed class InteropSession
         _deadline = deadline;
         _managedOfferer = managedOfferer;
         _generation = generation;
+        _mediaEpoch = checked((ulong)generation * 8);
         _peerId = "pion";
         _peer = Encoding.UTF8.GetBytes(_peerId);
     }
@@ -440,6 +444,7 @@ internal sealed class InteropSession
         await AwaitSignalAsync(Task.WhenAll(_managedConnected.Task, _pionConnected.Task)).ConfigureAwait(false);
 
         _managed.SetMicActive(true);
+        await ProbePrivateMediaAsync().ConfigureAwait(false);
         _playbackTask = ReadPlaybackAsync(_deadline.Token);
         _mediaTask = PushMicrophoneAsync(_deadline.Token);
         await AwaitSignalAsync(_playbackCorrelated.Task).ConfigureAwait(false);
@@ -454,6 +459,82 @@ internal sealed class InteropSession
         {
             throw new ProbeFailureException("media-sustained");
         }
+    }
+
+    private async Task ProbePrivateMediaAsync()
+    {
+        using var encoder = new ManagedOpusEncoder();
+        encoder.Configure(1f, 0f, 0f);
+        var frame = new float[ManagedOpusEncoder.FrameSamples];
+        var packet = new byte[ManagedOpusEncoder.MaxPacketBytes];
+        for (int i = 0; i < frame.Length; i++)
+            frame[i] = (float)(0.2d * Math.Sin(Math.Tau * 440d * i / ManagedOpusEncoder.SampleRate));
+        int length = encoder.Encode(frame, packet, out _, out _);
+
+        foreach (string[] receivers in new[] { Array.Empty<string>(), new[] { _peerId }, new[] { "excluded" } })
+        {
+            bool included = receivers.Length != 0 && receivers[0] == _peerId;
+            SetNativePrivateRadio(true, receivers);
+            long received = _managed.ReceivedPackets;
+            int status = NativePion.SendOpus(
+                _nativeHandle, packet, checked((uint)length), _mediaEpoch, ++_mediaSequence,
+                out NativePion.SendResult sent);
+            if (status != NativePion.Ok || sent.Attempted != (included ? 1u : 0u) ||
+                sent.Enqueued != (included ? 1u : 0u) || sent.QueueFull != 0 || sent.StaleEpoch != 0)
+                throw new ProbeFailureException("native-private-send");
+            if (included)
+                await AwaitPacketCountAsync(() => _managed.ReceivedPackets, received + 1).ConfigureAwait(false);
+            else
+            {
+                await Task.Delay(200, _deadline.Token).ConfigureAwait(false);
+                if (_managed.ReceivedPackets != received)
+                    throw new ProbeFailureException("native-private-leak");
+            }
+        }
+        SetNativePrivateRadio(false, []);
+
+        foreach (string[] receivers in new[] { Array.Empty<string>(), new[] { _peerId }, new[] { "excluded" } })
+        {
+            bool included = receivers.Length != 0 && receivers[0] == _peerId;
+            if (!_managed.ConfigurePrivateRadio(true, receivers))
+                throw new ProbeFailureException("managed-private-configure");
+            long received = Interlocked.Read(ref _nativeReceivedPackets);
+            long echoed = _managed.ReceivedPackets;
+            _managed.PushMic(frame, frame.Length, 0);
+            if (included)
+            {
+                await AwaitPacketCountAsync(() => Interlocked.Read(ref _nativeReceivedPackets), received + 1)
+                    .ConfigureAwait(false);
+                await AwaitPacketCountAsync(() => _managed.ReceivedPackets, echoed + 1).ConfigureAwait(false);
+            }
+            else
+            {
+                await Task.Delay(200, _deadline.Token).ConfigureAwait(false);
+                if (Interlocked.Read(ref _nativeReceivedPackets) != received)
+                    throw new ProbeFailureException("managed-private-leak");
+            }
+        }
+        if (!_managed.ConfigurePrivateRadio(false, []))
+            throw new ProbeFailureException("managed-public-configure");
+    }
+
+    private void SetNativePrivateRadio(bool active, string[] receivers)
+    {
+        byte[] json = JsonSerializer.SerializeToUtf8Bytes(receivers);
+        ulong epoch = _mediaEpoch + 1;
+        int status = NativePion.SetPrivateRadio(
+            _nativeHandle, active ? 1u : 0u, json, checked((uint)json.Length), epoch, 2_000);
+        if (status != NativePion.Ok)
+            throw new ProbeFailureException("native-private-configure");
+        Volatile.Write(ref _mediaEpoch, epoch);
+    }
+
+    private async Task AwaitPacketCountAsync(Func<long> count, long expected)
+    {
+        while (count() < expected && !_failure.Task.IsCompleted)
+            await Task.Delay(10, _deadline.Token).ConfigureAwait(false);
+        if (_failure.Task.IsCompleted)
+            throw new ProbeFailureException(await _failure.Task.ConfigureAwait(false));
     }
 
     public async Task CloseAsync()
@@ -823,7 +904,7 @@ internal sealed class InteropSession
                 _nativeHandle,
                 payloadBuffer,
                 rtpEvent.PayloadLength,
-                0,
+                Volatile.Read(ref _mediaEpoch),
                 sequence,
                 out NativePion.SendResult sendResult);
             if (sendStatus != NativePion.Ok || sendResult.Attempted == 0 || sendResult.Enqueued == 0 ||
@@ -1082,6 +1163,12 @@ internal static class NativePion
         }
     }
 
+    [DllImport(LibraryName, EntryPoint = "pc_pion_abi_version", CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint AbiVersion();
+
+    [DllImport(LibraryName, EntryPoint = "pc_pion_version", CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint PionVersion();
+
     [DllImport(LibraryName, EntryPoint = "pc_pion_engine_new", CallingConvention = CallingConvention.Cdecl)]
     public static extern ulong EngineNew();
 
@@ -1129,6 +1216,15 @@ internal static class NativePion
         ulong epoch,
         ulong mediaSequence,
         out SendResult result);
+
+    [DllImport(LibraryName, EntryPoint = "pc_pion_set_private_radio", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SetPrivateRadio(
+        ulong handle,
+        uint active,
+        byte[] receiversJson,
+        uint length,
+        ulong epoch,
+        uint timeoutMilliseconds);
 
     [DllImport(LibraryName, EntryPoint = "pc_pion_poll_control", CallingConvention = CallingConvention.Cdecl)]
     public static extern int PollControl(ulong handle, byte[] buffer, uint capacity, out uint required);

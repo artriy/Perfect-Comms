@@ -36,9 +36,14 @@ The directory handles public-lobby discovery only. It does not carry voice audio
 | **Only Ghosts can Talk/Hear** | Off | Restricts task-phase voice to dead players. |
 | **Ghosts Hear Each Other Anywhere** | Off | Removes proximity distance between dead players. |
 | **Meetings/Lobby Only** | Off | Disables living-player voice during tasks. |
+| **Meeting Only - Impostor Chat** | Off | Beneath Meetings/Lobby Only when enabled. Living actual impostors can speak globally during tasks; all ghosts and spectators listen, but living crew and mod-added impostor voice privileges do not gain access. |
 | **Ghosts Also Meeting/Lobby Only** | Off | Applies Meetings/Lobby Only to dead players too. |
+| **Impostors Talk Across Death** | Off | Lets dead actual impostors reply in task-only impostor chat and impostor Team Radio. Crew ghosts and spectators remain listen-only on these channels. |
+| **Impostors Talk Across Death in Meetings** | On | Beneath Impostors Talk Across Death when enabled. Living and dead actual impostors can hold their radio control during Meeting to speak privately. Living actual impostors, all ghosts and spectators listen; crew ghosts and spectators cannot transmit, and living crew receive neither private audio nor radio state. |
 
 Conditional rows appear only when their parent rule is enabled.
+
+The meeting exception requires both across-death options, independently of ordinary Team Radio settings. It does not apply in Exile or tasks. Releasing radio restores normal speech and death separation; mute and meeting-floor rules remain authoritative. Hiding the meeting child does not reset its saved value.
 
 ## Team Radio tab
 

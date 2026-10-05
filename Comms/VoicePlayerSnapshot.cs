@@ -28,4 +28,5 @@ internal readonly record struct VoicePlayerSnapshot(
     Vector2 ControlledVictimPosition,
     float ControlledVictimLightRadius,
     // Registered mod voice state, resolved once per player in the snapshot builder.
-    ExternalVoiceState External = default);
+    ExternalVoiceState External = default,
+    bool IsImpostorTeam = false);

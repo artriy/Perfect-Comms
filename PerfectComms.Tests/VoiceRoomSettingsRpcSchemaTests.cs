@@ -34,6 +34,9 @@ public sealed class VoiceRoomSettingsRpcSchemaTests
             GhostsHearEachOtherUnlimited = !defaults.GhostsHearEachOtherUnlimited,
             GracePeriodEnabled = !defaults.GracePeriodEnabled,
             GracePeriodSeconds = 11.5f,
+            MeetingOnlyImpostorChat = !defaults.MeetingOnlyImpostorChat,
+            ImpostorsTalkAcrossDeath = !defaults.ImpostorsTalkAcrossDeath,
+            ImpostorsTalkAcrossDeathInMeetings = !defaults.ImpostorsTalkAcrossDeathInMeetings,
         };
         var options = new[]
         {
@@ -53,6 +56,62 @@ public sealed class VoiceRoomSettingsRpcSchemaTests
         Assert.Equal(options, decodedOptions);
         Assert.Equal(VoiceRoomSettingsRpc.SnapshotSchema, payload[0]);
         Assert.Equal(payload.Length - 3, BinaryPrimitives.ReadUInt16LittleEndian(payload.AsSpan(1)));
+        Assert.Equal(4, payload[0]);
+        Assert.Equal(3 + 39 + 4 + options.Length * 9, payload.Length);
+        Assert.Equal(source.ImpostorsTalkAcrossDeath ? 1 : 0, payload[3 + 16 + 17]);
+        Assert.Equal(source.ImpostorsTalkAcrossDeathInMeetings ? 1 : 0, payload[3 + 16 + 18]);
+        Assert.Equal(source.GracePeriodSeconds,
+            BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(payload.AsSpan(3 + 16 + 19))));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void HiddenMeetingPreferenceSurvivesClampAndWire(bool parentEnabled, bool meetingEnabled)
+    {
+        var source = VoiceRoomSettingsSnapshot.Defaults with
+        {
+            ImpostorsTalkAcrossDeath = parentEnabled,
+            ImpostorsTalkAcrossDeathInMeetings = meetingEnabled,
+        };
+        var payload = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            source, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+
+        Assert.True(VoiceRoomSettingsRpc.TryDecodeSnapshotPayload(
+            VoiceRoomSettingsRpc.SnapshotKind, payload, out var decoded, out _, out var reason), reason);
+        Assert.Equal(parentEnabled, decoded.ImpostorsTalkAcrossDeath);
+        Assert.Equal(meetingEnabled, decoded.ImpostorsTalkAcrossDeathInMeetings);
+        Assert.Equal(meetingEnabled,
+            (decoded with { ImpostorsTalkAcrossDeath = !parentEnabled }).Clamp().ImpostorsTalkAcrossDeathInMeetings);
+    }
+
+    [Fact]
+    public void SchemaThreeWithoutMeetingPreferenceIsRejected()
+    {
+        var current = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+        const int meetingPreferenceOffset = 3 + 16 + 18;
+        var old = new byte[current.Length - 1];
+        current.AsSpan(0, meetingPreferenceOffset).CopyTo(old);
+        current.AsSpan(meetingPreferenceOffset + 1).CopyTo(old.AsSpan(meetingPreferenceOffset));
+        old[0] = 3;
+        BinaryPrimitives.WriteUInt16LittleEndian(old.AsSpan(1), checked((ushort)(old.Length - 3)));
+
+        AssertRejected(old, "unsupported-schema");
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(255)]
+    public void MalformedMeetingPreferenceBooleanFailsClosed(byte invalidValue)
+    {
+        var payload = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+        payload[3 + 16 + 18] = invalidValue;
+
+        AssertRejected(payload, "invalid-boolean");
     }
 
     [Fact]

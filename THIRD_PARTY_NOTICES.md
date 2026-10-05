@@ -32,8 +32,7 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
 
 ## webrtc-audio-processing (AEC3 + noise suppression + high-pass filter)
 
-- Release files: `Libs/dsp/webrtc-apm.x64.dll`, `Libs/dsp/webrtc-apm.x86.dll`,
-  `Libs/dsp/libwebrtc-apm.so`, and the signed
+- Release files: `Libs/dsp/webrtc-apm.x64.dll`, `Libs/dsp/libwebrtc-apm.so`, and the signed
   `PerfectCommsAudio.app/Contents/MacOS/libwebrtc-apm.dylib` inside `pc-capture-mac.zip`
 - Upstream: WebRTC AudioProcessingModule (Google), via the PulseAudio standalone fork
   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing (v2.1, WebRTC M131). Windows
@@ -47,8 +46,7 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
 
 ## Pion WebRTC v4.2.17 (peer-to-peer transport)
 
-- Release files: `Libs/pion/pc-pion.x64.dll`, `Libs/pion/pc-pion.x86.dll`,
-  `Libs/pion/libpc-pion.linux-x64.so`, and the signed
+- Release files: `Libs/pion/pc-pion.x64.dll`, `Libs/pion/libpc-pion.linux-x64.so`, and the signed
   `PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib` inside `pc-capture-mac.zip`.
 - Upstream: https://github.com/pion/webrtc, pinned to v4.2.17 together with the exact module graph
   in `native/pc-pion/go.mod` and `native/pc-pion/go.sum`.

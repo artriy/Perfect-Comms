@@ -6,9 +6,49 @@ packaging scripts are the only supported way to create release artifacts;
 desktop packaging validates its native assets, while Starlight packaging
 validates a managed-only dependency set.
 
+## Portable local development tools
+
+The local `dev-tools/` bundle contains the downloaded archives, extracted
+Windows toolchains, Rust homes, Python build packages, and restored NuGet
+package cache. Copy the entire project folder, including `dev-tools/` and
+`Libs/`, to transfer it. The bundle is ignored by Git and excluded from default
+MSBuild items; pushing or cloning the repository does not transfer it.
+
+On a Windows x64 destination, install the .NET 10 SDK, Visual Studio 2022
+with Desktop development with C++ and a Windows SDK (Community or Build
+Tools), Git for Windows, and Python 3.14. Then double-click
+`dev-tools/Start-Dev.cmd`, or dot-source `dev-tools/Enter-Dev.ps1` in a PowerShell
+session that permits local scripts. Activation uses paths relative to the
+bundle for `PATH`, `CARGO_HOME`, `RUSTUP_HOME`, `NUGET_PACKAGES`, and `PYTHONPATH`.
+The NuGet package path includes a trailing separator so the test projects'
+explicit game-library references resolve after moving the bundle.
+
+Run the locked restores below after moving; existing `obj/` files may refer
+to the old machine's paths. The bundled GCC 16.2.0 specs directly locate the
+shipped default manifest, avoiding its optional-lookup bug with spaces in
+installation paths. Rust proxies are regular executables so folder copies do
+not require symbolic-link privileges. The bundle also includes GitHub CLI,
+NASM 3.02, `cargo-audit` 0.22.2, and `cargo-about` 0.9.1. The x64 MinGW toolchain
+includes the architecture-prefixed resource compiler and strip executable names
+used by the APM crossfile. Existing x86 tools in a local bundle are not used.
+
+Account authorization does not travel with the bundle. In the activated shell,
+run `gh auth login --hostname github.com` for GitHub access. For Cloudflare
+deployment, change to `cloudflare/perfect-comms-lobbies` and run
+`npx wrangler login`. Install the locked Worker tools with `npm ci`.
+Local development and deployment dry runs do not require these account logins.
+
+This setup uses native Windows tools, not WSL. Windows x64 helpers, Pion,
+and APM can be built locally; Linux and macOS builds use the existing GitHub
+Actions runners. Starlight produces a managed DLL and does not require an
+Android SDK or NDK.
+
+
 ## Managed gate
 
-Use the .NET 9 SDK to build and test the net6.0 desktop plugin target:
+Use the .NET 10 SDK to build and test the net6.0 desktop plugin target against
+`AmongUs.GameLibs.Steam` 2026.9.29. The current Steam game and Windows native
+payloads are x64 only; Windows x86 is not supported.
 
 ```powershell
 dotnet restore PerfectComms.Tests/PerfectComms.Tests.csproj --locked-mode
@@ -17,8 +57,9 @@ dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore
 ```
 
 The Android target is `PerfectComms.Starlight.csproj`, a net10.0 Starlight
-plugin compiled with `ANDROID` and `STARLIGHT` against the locked
-`AmongUs.GameLibs.Android` package. The Starlight build restores the media,
+plugin compiled with `ANDROID` and `STARLIGHT` against
+`AmongUs.GameLibs.Android` `2026.8.18` and the Starlight `1.6.3` host contract.
+The Starlight build restores the media,
 plugin, and merge-tool dependency graphs with `--locked-mode`; committed lock
 files make a dependency change fail the restore instead of silently changing
 the build.
@@ -36,9 +77,15 @@ runs the real Pion WebRTC v4.2.17 offer/answer/trickle-ICE/DTLS/SRTP/Opus
 loopback on Windows and Linux, then forces two Linux helpers through the
 deployed Cloudflare TURN service and requires relayed Opus audio telemetry in
 both directions. The full helper workflow builds and smoke-tests Windows
-x64/x86, Linux x64, the final APM-containing/signature-verified universal macOS
+x64, Linux x64, the final APM-containing/signature-verified universal macOS
 app, the matching desktop Pion C-shared transport libraries, and desktop WebRTC
 APM libraries.
+
+Desktop helpers require sidecar protocol 17 and Pion ABI 3 for private-only audio
+recipient selection. Rebuild every platform's helper and Pion companion together;
+older binaries must not be packaged. Public fanout and ICE behavior are unchanged.
+Voice clients use game protocol 6 for the impostor settings and phase-scoped radio
+state; the mobile interop contract remains ABI 5.
 
 RustSec audits every native lockfile during CI. The desktop codec is the bundled
 libopus 1.6.1 source from the pinned `opusic-sys` binding, compiled with DRED on
@@ -55,7 +102,7 @@ Pion release builds require Go 1.26.2 exactly. Build and optionally stage one
 target with:
 
 ```bash
-bash scripts/build-pion.sh <win-x64|win-x86|linux-x64> --stage
+bash scripts/build-pion.sh <win-x64|linux-x64> --stage
 ```
 
 Build both macOS architecture slices before `mac-universal`; the normal
@@ -73,8 +120,8 @@ bash scripts/package-release.sh Release
 
 For a local desktop package, stage every artifact generated by the helper
 workflow under `Libs/pc-capture`, `Libs/dsp`, and `Libs/pion`, then run
-`scripts/package-release.ps1`. Desktop packaging requires all four helpers,
-the desktop APM libraries, and the Windows x64/x86 and Linux x64 Pion
+`scripts/package-release.ps1`. Desktop packaging requires all three helpers,
+the desktop APM libraries, and the Windows x64 and Linux x64 Pion
 libraries; the universal macOS Pion dylib is already sealed inside the signed
 helper app. Missing or empty files are a hard error.
 

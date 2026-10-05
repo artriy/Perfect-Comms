@@ -311,9 +311,7 @@ internal static class SidecarLauncher
             RuntimeInformation.IsOSPlatform(OSPlatform.Windows),
             RuntimeInformation.IsOSPlatform(OSPlatform.OSX),
             RuntimeInformation.IsOSPlatform(OSPlatform.Linux),
-            // The helper must match the game process, not the physical CPU. This keeps 32-bit
-            // Among Us correct on x64 Windows and lets the x64 build run under Windows-on-ARM
-            // emulation instead of incorrectly requesting a nonexistent ARM64 helper.
+            // Match the game process so Windows-on-ARM x64 emulation uses the x64 helper.
             RuntimeInformation.ProcessArchitecture);
 
     internal static string TargetTripleFor(
@@ -335,7 +333,6 @@ internal static class SidecarLauncher
         if (windows)
             return processArchitecture switch
             {
-                Architecture.X86 => "i686-pc-windows-msvc",
                 Architecture.X64 => "x86_64-pc-windows-msvc",
                 _ => throw new PlatformNotSupportedException(
                     $"pc-capture: unsupported Windows process architecture {processArchitecture}"),
@@ -412,7 +409,6 @@ internal static class SidecarLauncher
         => triple switch
         {
             "x86_64-pc-windows-msvc" => "Lib.pc-capture.pc-capture-win-x64.exe",
-            "i686-pc-windows-msvc" => "Lib.pc-capture.pc-capture-win-x86.exe",
             "x86_64-unknown-linux-gnu" => "Lib.pc-capture.pc-capture-linux-x64",
             "x86_64-apple-darwin" => "Lib.pc-capture.pc-capture-mac.zip",
             "aarch64-apple-darwin" => "Lib.pc-capture.pc-capture-mac.zip",
@@ -691,7 +687,6 @@ internal static class SidecarLauncher
         => triple switch
         {
             "x86_64-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x64.dll", "webrtc-apm.x64.dll") },
-            "i686-pc-windows-msvc" => new[] { ("Lib.dsp.webrtc-apm.x86.dll", "webrtc-apm.x86.dll") },
             "x86_64-unknown-linux-gnu" => new[] { ("Lib.dsp.libwebrtc-apm.so", "libwebrtc-apm.so") },
             _ => Array.Empty<(string, string)>(),
         };
@@ -700,7 +695,6 @@ internal static class SidecarLauncher
         => triple switch
         {
             "x86_64-pc-windows-msvc" => new[] { ("Lib.pc-pion.pc-pion.x64.dll", "pc-pion.x64.dll") },
-            "i686-pc-windows-msvc" => new[] { ("Lib.pc-pion.pc-pion.x86.dll", "pc-pion.x86.dll") },
             "x86_64-unknown-linux-gnu" => new[] { ("Lib.pc-pion.libpc-pion.linux-x64.so", "libpc-pion.so") },
             _ => Array.Empty<(string, string)>(),
         };

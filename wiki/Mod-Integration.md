@@ -6,7 +6,7 @@ Perfect Comms API 1.2 exposes the supported `PerfectComms.Api` surface for role 
 
 ## Safe setup
 
-Add the build-only package version matching the minimum Perfect Comms release your integration supports. API 1.2 starts with Perfect Comms 4.1.7 and its corrected API package revision 4.1.7.1:
+Use the build-only package version matching the minimum Perfect Comms release your integration supports. API 1.2 starts with Perfect Comms 4.1.7 and its corrected API package revision 4.1.7.1:
 
 ```xml
 <ItemGroup>

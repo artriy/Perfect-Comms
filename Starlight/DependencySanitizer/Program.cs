@@ -17,7 +17,7 @@ internal static class Program
     private const string RequiredHostReference = "Microsoft.Extensions.Logging.Abstractions";
     private const string MicrosoftExtensionsPublicKeyToken = "adb9793829ddae60";
     private const string UnsupportedMessage = "Native interop is unavailable in Starlight.";
-    private static readonly Version PluginVersion = new(4, 1, 10, 0);
+    private static readonly Version PluginVersion = new(4, 1, 11, 0);
     private const string TmdsLibCAssemblyName = "Tmds.LibC";
     private const string LinuxHelperTypeName = "Makaretu.Dns.LinuxHelper";
     private const string ReuseAddressMethodName = "ReuseAddresss";

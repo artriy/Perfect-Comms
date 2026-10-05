@@ -13,14 +13,14 @@ internal static class VoiceRoomSettingsRpc
     internal const byte LegacySnapshotKind = 1;
     private const byte RequestKind = 2;
     internal const byte SnapshotKind = 3;
-    internal const byte SnapshotSchema = 2;
+    internal const byte SnapshotSchema = 4;
     private const int MaxSyncedModOptions = 256;
 
-    // Schema 1 is a self-contained, exact binary layout. The old kind-1 envelope had no
+    // Each schema is a self-contained, exact binary layout. The old kind-1 envelope had no
     // schema marker and was extended in-place repeatedly; its remaining-byte heuristics can
     // misread later fields at earlier offsets, so it must never enter the current decoder.
     private const int SnapshotHeaderBytes = 3; // schema:byte + bodyLength:ushort
-    private const int FixedSettingsBytes = 36;
+    private const int FixedSettingsBytes = 39;
     private const int ModOptionBytes = 9; // keyHash:int + isEnum:byte + value:int
     private const int MaxBackendServerUrlBytes = 512;
     internal const int MaxSnapshotPayloadBytes = SnapshotHeaderBytes + FixedSettingsBytes + 2
@@ -183,6 +183,9 @@ internal static class VoiceRoomSettingsRpc
         WriteBoolean(payload, ref offset, settings.TeamRadioInTasks);
         WriteBoolean(payload, ref offset, settings.GhostsHearEachOtherUnlimited);
         WriteBoolean(payload, ref offset, settings.GracePeriodEnabled);
+        WriteBoolean(payload, ref offset, settings.MeetingOnlyImpostorChat);
+        WriteBoolean(payload, ref offset, settings.ImpostorsTalkAcrossDeath);
+        WriteBoolean(payload, ref offset, settings.ImpostorsTalkAcrossDeathInMeetings);
         WriteSingle(payload, ref offset, settings.GracePeriodSeconds);
 
         if (offset != SnapshotHeaderBytes + FixedSettingsBytes)
@@ -276,7 +279,10 @@ internal static class VoiceRoomSettingsRpc
             || !TryReadBoolean(payload, ref offset, out bool teamRadioInMeetings)
             || !TryReadBoolean(payload, ref offset, out bool teamRadioInTasks)
             || !TryReadBoolean(payload, ref offset, out bool ghostsHearEachOtherUnlimited)
-            || !TryReadBoolean(payload, ref offset, out bool gracePeriodEnabled))
+            || !TryReadBoolean(payload, ref offset, out bool gracePeriodEnabled)
+            || !TryReadBoolean(payload, ref offset, out bool meetingOnlyImpostorChat)
+            || !TryReadBoolean(payload, ref offset, out bool impostorsTalkAcrossDeath)
+            || !TryReadBoolean(payload, ref offset, out bool impostorsTalkAcrossDeathInMeetings))
         {
             reason = "invalid-boolean";
             return false;
@@ -362,7 +368,10 @@ internal static class VoiceRoomSettingsRpc
             teamRadioInTasks,
             ghostsHearEachOtherUnlimited,
             gracePeriodEnabled,
-            gracePeriodSeconds).Clamp();
+            gracePeriodSeconds,
+            meetingOnlyImpostorChat,
+            impostorsTalkAcrossDeath,
+            impostorsTalkAcrossDeathInMeetings).Clamp();
         modOptions = parsedOptions;
         return true;
     }

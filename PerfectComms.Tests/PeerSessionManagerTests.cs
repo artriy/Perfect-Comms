@@ -81,8 +81,6 @@ public sealed class PeerSessionManagerTests
 
     private const long TestRemoteSessionId = 0x1234;
     private static byte[] CompatHello() => SignalPayload.Hello(PeerSessionManager.ProtocolVersion, PeerSessionManager.MinCompatibleVersion, TestRemoteSessionId);
-    private static byte[] V4CompatHello() => SignalPayload.Hello(4, 3, TestRemoteSessionId);
-    private static byte[] LegacyCompatHello() => SignalPayload.Hello(3, 3);
     private static byte[] ScopedControl(long negotiationId) => SignalPayload.Control(TestRemoteSessionId, negotiationId);
     private static byte[] ScopedSdp(long negotiationId, string sdpType, string sdp)
         => SignalPayload.Sdp(TestRemoteSessionId, negotiationId, sdpType, sdp);
@@ -196,7 +194,7 @@ public sealed class PeerSessionManagerTests
     }
 
     [Fact]
-    public void V4DiscoveryKeepsV3HelloCompatibilityThenUpgradesToScopedHello()
+    public void CurrentDiscoveryUsesUnscopedHelloThenUpgradesToScopedHello()
     {
         var transport = new MockTransport();
         var sender = new MockSender();
@@ -230,45 +228,44 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Single(transport.Added);
     }
 
-    [Fact]
-    public void V3ReplyKeepsLegacyHelloAndControlCompatibility()
-    {
-        var sender = new MockSender();
-        var manager = new PeerSessionManager(3, new MockTransport(), sender);
 
-        manager.OnPlayerJoined(7, 1000);
-        manager.OnSignal(7, SignalMsgType.Hello, LegacyCompatHello(), 1100);
-
-        var hellos = sender.Sent.Where(message => message.Type == SignalMsgType.Hello).ToArray();
-        Xunit.Assert.Equal(2, hellos.Length);
-        Xunit.Assert.All(hellos, message => Xunit.Assert.Equal(8, message.Payload.Length));
-    }
-
-    [Fact]
-    public void IncompatibleHelloDoesNotPair()
+    [Theory]
+    [InlineData(3, 3)]
+    [InlineData(4, 3)]
+    [InlineData(5, 5)]
+    [InlineData(6, 6)]
+    [InlineData(6, 7)]
+    [InlineData(99, 99)]
+    public void IncompatibleHelloDoesNotPair(int protocol, int minimum)
     {
         var transport = new MockTransport();
         var sender = new MockSender();
         var manager = new PeerSessionManager(3, transport, sender);
 
-        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(99, 99));
+        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(protocol, minimum));
 
         Xunit.Assert.Empty(transport.Added);
         Xunit.Assert.Empty(sender.Sent);
         Xunit.Assert.False(manager.TryGetPeerState(7, out _));
     }
 
-    [Fact]
-    public void IncompatibleRosterPeerStopsHelloRetriesUntilCompatibleHelloArrives()
+    [Theory]
+    [InlineData(6, 6)]
+    [InlineData(99, 99)]
+    public void IncompatibleRosterPeerStopsHelloRetriesUntilCompatibleHelloArrives(int protocol, int minimum)
     {
         var transport = new MockTransport();
         var sender = new MockSender();
         var manager = new PeerSessionManager(3, transport, sender);
 
         manager.OnPlayerJoined(7, 1000);
-        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(99, 99), 1100);
+        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(protocol, minimum), 1100);
         manager.Tick(100_000);
 
+        Xunit.Assert.Equal(1, HelloCount(sender));
+        Xunit.Assert.Empty(transport.Added);
+        Xunit.Assert.True(manager.IsPeerIncompatible(7));
+        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(6, 6, TestRemoteSessionId), 100_050);
         Xunit.Assert.Equal(1, HelloCount(sender));
         Xunit.Assert.Empty(transport.Added);
         Xunit.Assert.True(manager.IsPeerIncompatible(7));
@@ -1530,17 +1527,13 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
     }
 
-    [Theory]
-    [InlineData(4)]
-    [InlineData(5)]
-    public void RecoveryContinuesPastSixtySecondCapAndEstablishesWhenResponsesResume(
-        int remoteProtocolVersion)
+    [Fact]
+    public void RecoveryContinuesPastSixtySecondCapAndEstablishesWhenResponsesResume()
     {
         var transport = new MockTransport();
         var sender = new MockSender();
         var manager = new PeerSessionManager(3, transport, sender);
-        var hello = remoteProtocolVersion == 4 ? V4CompatHello() : CompatHello();
-        manager.OnSignal(7, SignalMsgType.Hello, hello, 1000);
+        manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
 
         long EmitCurrentOffer(long nowMs)
         {
@@ -1676,25 +1669,6 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
     }
 
-    [Fact]
-    public void NetworkChangeRecreatesPeersThatPreDateIceRestartProtocol()
-    {
-        var transport = new MockTransport();
-        var manager = new PeerSessionManager(3, transport, new MockSender());
-
-        manager.OnSignal(7, SignalMsgType.Hello, V4CompatHello(), 1000);
-        manager.OnPeerConnected(7, transport.LatestGeneration(7));
-        transport.Added.Clear();
-        transport.AddedRelayOnly.Clear();
-        transport.Removed.Clear();
-
-        Xunit.Assert.Equal(1, manager.RestartIceAfterNetworkChange(5000));
-
-        Xunit.Assert.Empty(transport.IceRestarts);
-        Xunit.Assert.Equal(new[] { 7 }, transport.Removed);
-        Xunit.Assert.Equal(new[] { 7 }, transport.Added);
-        Xunit.Assert.Equal(new[] { false }, transport.AddedRelayOnly);
-    }
 
     [Fact]
     public void FailedNativeIceRestartFallsBackToPeerRecreation()
@@ -2175,23 +2149,6 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
     }
 
-    [Fact]
-    public void LegacyProtocolPeerKeepsLegacyEmptyControlFrames()
-    {
-        var transport = new MockTransport();
-        var sender = new MockSender();
-        var manager = new PeerSessionManager(3, transport, sender);
-        manager.OnSignal(7, SignalMsgType.Hello, LegacyCompatHello(), 1000);
-        var generation = transport.LatestGeneration(7);
-        manager.OnPeerConnected(7, generation);
-        var addsBefore = transport.Added.Count;
-
-        manager.OnSignal(7, SignalMsgType.Restart, Array.Empty<byte>(), 5000);
-
-        Xunit.Assert.Equal(addsBefore + 1, transport.Added.Count);
-        manager.OnSignal(7, SignalMsgType.Bye, Array.Empty<byte>(), 9000);
-        Xunit.Assert.False(manager.TryGetPeerState(7, out _));
-    }
 
     [Fact]
     public void DelayedHelloFromRetiredRemoteSessionCannotRollBackReplacement()
@@ -2333,8 +2290,10 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(PeerState.Offering, StateOf(manager, 7));
     }
 
-    [Fact]
-    public void IncompatiblePeerIsQuiescedUntilACompatibleHelloArrives()
+    [Theory]
+    [InlineData(6, 6)]
+    [InlineData(99, 99)]
+    public void IncompatiblePeerIsQuiescedUntilACompatibleHelloArrives(int protocol, int minimum)
     {
         var transport = new MockTransport();
         var sender = new MockSender();
@@ -2342,7 +2301,7 @@ public sealed class PeerSessionManagerTests
         manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 1000);
         manager.OnPeerConnected(7, transport.LatestGeneration(7));
 
-        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(99, 99, 0x9999), 2000);
+        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(protocol, minimum, 0x9999), 2000);
         var addsAfterQuiesce = transport.Added.Count;
         var removesAfterQuiesce = transport.Removed.Count;
         var signalsAfterQuiesce = sender.Sent.Count;
@@ -2356,9 +2315,15 @@ public sealed class PeerSessionManagerTests
         Xunit.Assert.Equal(addsAfterQuiesce, transport.Added.Count);
         Xunit.Assert.Equal(removesAfterQuiesce, transport.Removed.Count);
         Xunit.Assert.Equal(signalsAfterQuiesce, sender.Sent.Count);
+        Xunit.Assert.True(manager.IsPeerIncompatible(7));
+        manager.OnSignal(7, SignalMsgType.Hello, SignalPayload.Hello(6, 6, 0xAAAA), 20250);
+        Xunit.Assert.Equal(addsAfterQuiesce, transport.Added.Count);
+        Xunit.Assert.Equal(removesAfterQuiesce, transport.Removed.Count);
+        Xunit.Assert.Equal(signalsAfterQuiesce, sender.Sent.Count);
+        Xunit.Assert.True(manager.IsPeerIncompatible(7));
 
-        // The incompatible replacement advanced the remote session to 0x9999 and retired the
-        // previously compatible session, so a delayed Hello from that predecessor cannot revive it.
+        // Incompatible replacements retire the previous compatible session.
+        // A delayed Hello from that predecessor cannot revive it.
         manager.OnSignal(7, SignalMsgType.Hello, CompatHello(), 20500);
         Xunit.Assert.Equal(addsAfterQuiesce, transport.Added.Count);
         Xunit.Assert.Equal(removesAfterQuiesce, transport.Removed.Count);

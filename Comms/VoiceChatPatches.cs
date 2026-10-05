@@ -58,7 +58,6 @@ public static class VoiceChatPatches
                     Application.isFocused,
                     VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
                     VoiceUiKit.AnyPanelOpen,
-                    Minigame.Instance != null,
                     IsFriendsListOpen()))
             {
                 ReleaseHeldTransmitInputs();
@@ -251,10 +250,8 @@ public static class VoiceChatPatches
         bool applicationFocused,
         bool rebindCapturing,
         bool modalOpen,
-        bool minigameOpen,
         bool friendsListOpen)
-        => !applicationFocused || rebindCapturing || modalOpen ||
-           minigameOpen || friendsListOpen;
+        => !applicationFocused || rebindCapturing || modalOpen || friendsListOpen;
 
     internal static bool ShouldBlockBindingForChat(
         bool chatOpen,
@@ -270,7 +267,6 @@ public static class VoiceChatPatches
                    Application.isFocused,
                    VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
                    VoiceUiKit.AnyPanelOpen,
-                   Minigame.Instance != null,
                    IsFriendsListOpen()) ||
                ShouldBlockBindingForChat(
                    IsChatOpen(), allowAllWhileChatOpen,
@@ -312,7 +308,6 @@ public static class VoiceChatPatches
             Application.isFocused,
             VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
             modalOpen: false,
-            Minigame.Instance != null,
             IsFriendsListOpen());
 
         foreach (var binding in VoiceChatKeybinds.AllBindings)

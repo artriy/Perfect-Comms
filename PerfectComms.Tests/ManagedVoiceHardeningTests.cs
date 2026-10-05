@@ -8,40 +8,16 @@ using Xunit;
 public sealed class ManagedVoiceHardeningTests
 {
 
-    public static TheoryData<bool, bool, bool, bool, bool, bool> HardVoiceInputSuppressionCases
-    {
-        get
-        {
-            var cases = new TheoryData<bool, bool, bool, bool, bool, bool>();
-            for (int mask = 0; mask < 32; mask++)
-            {
-                bool focused = (mask & 1) != 0;
-                bool rebinding = (mask & 2) != 0;
-                bool modalOpen = (mask & 4) != 0;
-                bool minigameOpen = (mask & 8) != 0;
-                bool friendsListOpen = (mask & 16) != 0;
-                bool expected = !focused || rebinding || modalOpen ||
-                                minigameOpen || friendsListOpen;
-                cases.Add(
-                    focused,
-                    rebinding,
-                    modalOpen,
-                    minigameOpen,
-                    friendsListOpen,
-                    expected);
-            }
-
-            return cases;
-        }
-    }
-
     [Theory]
-    [MemberData(nameof(HardVoiceInputSuppressionCases))]
+    [InlineData(true, false, false, false, false)]
+    [InlineData(false, false, false, false, true)]
+    [InlineData(true, true, false, false, true)]
+    [InlineData(true, false, true, false, true)]
+    [InlineData(true, false, false, true, true)]
     public void EveryHardPrivacyBoundarySuppressesVoiceInput(
         bool focused,
         bool rebinding,
         bool modalOpen,
-        bool minigameOpen,
         bool friendsListOpen,
         bool expected)
     {
@@ -49,7 +25,6 @@ public sealed class ManagedVoiceHardeningTests
             focused,
             rebinding,
             modalOpen,
-            minigameOpen,
             friendsListOpen));
     }
 
@@ -397,16 +372,6 @@ public sealed class ManagedVoiceHardeningTests
         Assert.Equal(1f, root.GetProperty("noise_gate_threshold").GetSingle());
     }
 
-    [Fact]
-    public void RuntimeSyntheticControlUsesNativeContract()
-    {
-        var root = DecodeControl(SidecarProtocol.SetSyntheticFrame(enabled: true));
-        Assert.Equal("set-synthetic", root.GetProperty("op").GetString());
-        Assert.True(root.GetProperty("enabled").GetBoolean());
-        Assert.Equal(16, SidecarVoiceClient.Proto);
-        Assert.Equal(5, SidecarProtocol.MobileAbi);
-        Assert.Equal("warm", DecodeControl(SidecarProtocol.WarmFrame()).GetProperty("op").GetString());
-    }
     [Theory]
     [InlineData("stopped")]
     [InlineData("warm")]

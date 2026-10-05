@@ -95,18 +95,14 @@ Write-Host "release.package.protocol network=$networkProtocol sidecar=$managedSi
 
 @(
     "Libs\pc-capture\pc-capture-win-x64.exe",
-    "Libs\pc-capture\pc-capture-win-x86.exe",
     "Libs\pc-capture\pc-capture-linux-x64",
     "Libs\pc-capture\pc-capture-mac.zip",
     "Libs\dsp\webrtc-apm.x64.dll",
-    "Libs\dsp\webrtc-apm.x86.dll",
     "Libs\dsp\libwebrtc-apm.so",
     "Libs\pion\pc-pion.x64.dll",
-    "Libs\pion\pc-pion.x86.dll",
     "Libs\pion\libpc-pion.linux-x64.so"
 ) | ForEach-Object { Assert-ReleaseAsset $_ }
 Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x64.exe" $managedSidecarProtocol
-Assert-HelperProtocol "Libs\pc-capture\pc-capture-win-x86.exe" $managedSidecarProtocol
 Assert-NativeAssetLayouts $Configuration
 
 if ($Version) {

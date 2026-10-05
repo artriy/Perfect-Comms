@@ -64,6 +64,7 @@ def metadata(root: Path, manifest: Path) -> dict:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if completed.returncode != 0:
         fail(

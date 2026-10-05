@@ -75,9 +75,7 @@ public class VoiceChatRoom
     private float _hostPolicyWaitStartTime = -1f;
     private bool _hostPolicyFallbackLogged;
     private float _lastLocalVoiceRefreshRequestTime = -999f;
-    private readonly RadioStateSyncTracker _radioStateSync = new(
-        TimeSpan.FromMilliseconds(250),
-        TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
+    private readonly Dictionary<int, RadioStateSyncTracker> _radioStateSyncByClient = new();
     // Set by missing-peer recovery to make EnsureVoiceBackend fully rebuild the active media session.
     private bool _forceBackendRebuild;
     private string? _activeRoomCode;
@@ -345,11 +343,38 @@ public class VoiceChatRoom
     internal void SetApplicationPaused(bool paused)
         => _perfectCommsVoice?.SetApplicationPaused(paused);
 
+    internal void ResetRadioStateForTransition()
+    {
+        ResetRadioStateSync();
+        try
+        {
+            _perfectCommsVoice?.ResetRadioState();
+        }
+        catch (Exception ex)
+        {
+            RecoverAfterMeetingVoiceFailure(ex);
+        }
+    }
+
+    internal void RecoverAfterMeetingVoiceFailure(Exception exception)
+    {
+        RunCleanupStep("meeting-radio-reset", ResetRadioStateSync);
+        RunCleanupStep("meeting-voice-fail-closed", FailClosedAfterUpdateFailure);
+        RunCleanupStep("meeting-voice-recovery", () => RequestBoundedUpdateFailureRecovery(1));
+        try
+        {
+            VoiceDiagnostics.DebugError(
+                $"[VC] Meeting voice transition failed closed: {exception.GetType().Name}: {exception.Message}");
+        }
+        catch { }
+    }
+
     internal void SetMicrophonePolicy(bool mute, bool keepCaptureWarm)
     {
 #if !WINDOWS
         keepCaptureWarm = false;
 #endif
+        UpdatePrivateRadioScope();
         bool wasMuted = Mute;
         Mute = mute;
         _keepCaptureWarm = keepCaptureWarm;
@@ -667,9 +692,11 @@ public class VoiceChatRoom
         }
 
         var snapshot = CurrentSnapshot;
+        UpdatePrivateRadioScope();
         // Audio policy is room-owned and must follow the effective snapshot phase even when the HUD
         // update returned early (or did not run in a transition frame).
         VoiceChatHudState.ApplyAudioPolicy(snapshot);
+        _voiceBackend?.SetMicrophonePolicy(Mute, _keepCaptureWarm);
         Vector2? listenerPos = snapshot?.LocalPosition;
         // One-time-per-map occlusion warm-up so the first in-range speaker doesn't pay the physics-broadphase
         // build + door-cache scan (~70-100ms) mid-round. No-op after the first call for a given map.
@@ -729,7 +756,10 @@ public class VoiceChatRoom
         // A partially-applied transition can leave the active mixer holding the previous route
         // generation. Mute capture and explicitly publish a null game state so stale routes cannot
         // remain audible while the managed update loop recovers.
-        SetMute(true);
+        Mute = true;
+        _keepCaptureWarm = false;
+        try { _voiceBackend?.SetMicrophonePolicy(true, keepCaptureWarm: false); }
+        catch { }
         try
         {
             _voiceBackend?.Update(
@@ -1229,6 +1259,7 @@ public class VoiceChatRoom
         {
             VoiceDiagnostics.DebugError($"[VC] HUD prewarm failed during transport bootstrap: {ex.Message}");
         }
+        UpdatePrivateRadioScope();
         backend.SetMicrophonePolicy(Mute, _keepCaptureWarm);
         backend.SetMasterVolume(VoiceChatHudState.GetEffectiveMasterVolume(settings?.MasterVolume.Value ?? 1f));
         backend.SetNoiseGate(
@@ -1863,10 +1894,30 @@ public class VoiceChatRoom
                 $"{sender.ToDiagnosticFields()} target={targetClientId}");
     }
 
-    internal static void ApplyRemoteRadioState(byte playerId, VoiceRadioState state)
+    internal static void ApplyRemoteRadioState(byte playerId, VoiceRadioState state, VoiceGamePhase phase)
     {
-        Current?._voiceBackend?.ApplyRemoteRadioState(playerId, state.Normalize());
+        var room = Current;
+        if (room == null) return;
+        state = state.Normalize();
+        if (state.IsActive)
+        {
+            var snapshot = room.CurrentSnapshot;
+            var settings = VoiceRoomSettingsState.Current;
+            if (!room.IsHostPolicyReady() || snapshot == null || snapshot.Phase != phase ||
+                phase != VoiceSceneState.ResolvePhase() || !snapshot.LiveLocalPlayerResolved ||
+                !snapshot.PlayerEnumerationCompleted || snapshot.RoutingRosterRetained ||
+                !snapshot.TryGetLocalPlayer(out var listener) || !snapshot.TryGetPlayer(playerId, out var speaker) ||
+                VoiceRoleMuteState.IsMeetingVoiceBlocked(speaker, phase) ||
+                !VoiceProximityCalculator.CanReceiveRadioState(settings, phase, speaker, listener, state))
+                return;
+        }
+        room._voiceBackend?.ApplyRemoteRadioState(playerId, state);
     }
+
+    private void UpdatePrivateRadioScope()
+        => _perfectCommsVoice?.ConfigurePrivateRadio(
+            CurrentSnapshot, IsHostPolicyReady(), VoiceChatHudState.ActiveTeamRadioState(),
+            VoiceSceneState.ResolvePhase());
 
     private void SendRadioState(byte playerId, VoiceRadioState state)
     {
@@ -1875,13 +1926,31 @@ public class VoiceChatRoom
 
     private void SyncRadioStateRpc(byte playerId, VoiceRadioState state)
     {
-        if (playerId == byte.MaxValue) return;
-
+        var snapshot = CurrentSnapshot;
+        if (snapshot == null || playerId == byte.MaxValue || !snapshot.TryGetLocalPlayer(out var speaker)) return;
+        var settings = VoiceRoomSettingsState.Current;
         var now = DateTime.UtcNow;
-        if (!_radioStateSync.ShouldAttempt(playerId, state, now)) return;
-
-        var sent = VoiceRadioStateRpc.TrySend(playerId, state);
-        _radioStateSync.RecordAttempt(playerId, state, now, sent);
+        foreach (var listener in snapshot.Players)
+        {
+            if (listener.IsLocal || listener.ClientId < 0 || listener.Disconnected || listener.IsDummy) continue;
+            bool authorized = IsHostPolicyReady() && snapshot.Phase == VoiceSceneState.ResolvePhase() &&
+                snapshot.LiveLocalPlayerResolved && snapshot.PlayerEnumerationCompleted &&
+                !snapshot.RoutingRosterRetained &&
+                !VoiceRoleMuteState.IsMeetingVoiceBlocked(speaker, snapshot.Phase) &&
+                VoiceProximityCalculator.CanReceiveRadioState(settings, snapshot.Phase, speaker, listener, state);
+            var advertised = authorized ? state.Normalize() : VoiceRadioState.None;
+            if (!_radioStateSyncByClient.TryGetValue(listener.ClientId, out var tracker))
+            {
+                if (!advertised.IsActive) continue;
+                tracker = new RadioStateSyncTracker(TimeSpan.FromMilliseconds(250),
+                    TimeSpan.FromSeconds(RadioStateRpcHeartbeatSeconds));
+                _radioStateSyncByClient[listener.ClientId] = tracker;
+            }
+            if (!advertised.IsActive && !tracker.LastState.IsActive) continue;
+            if (!tracker.ShouldAttempt(playerId, advertised, now)) continue;
+            var sent = VoiceRadioStateRpc.TrySend(playerId, advertised, listener.ClientId, snapshot.Phase);
+            tracker.RecordAttempt(playerId, advertised, now, sent);
+        }
     }
 
     private void DisposeVoiceBackend()
@@ -2007,7 +2076,7 @@ public class VoiceChatRoom
 
     private void ResetRadioStateSync()
     {
-        _radioStateSync.Reset();
+        _radioStateSyncByClient.Clear();
     }
 
     public void Close()
@@ -2145,6 +2214,8 @@ public class VoiceChatRoom
                 _haveRoutingPhase,
                 _lastRoutingPhase,
                 routingPhase);
+            if (_haveRoutingPhase && _lastRoutingPhase != routingPhase)
+                ResetRadioStateForTransition();
             _haveRoutingPhase = true;
             _lastRoutingPhase = routingPhase;
             if (resetSight)

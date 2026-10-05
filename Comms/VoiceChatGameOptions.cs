@@ -27,6 +27,9 @@ public class VoiceChatGameOptions
     public ToggleHolder GhostsHearEachOtherUnlimited { get; }
     public ToggleHolder OnlyMeetingOrLobby { get; }
     public ToggleHolder OnlyMeetingOrLobbyAffectsGhosts { get; }
+    public ToggleHolder MeetingOnlyImpostorChat { get; }
+    public ToggleHolder ImpostorsTalkAcrossDeath { get; }
+    public ToggleHolder ImpostorsTalkAcrossDeathInMeetings { get; }
     public ToggleHolder GracePeriodEnabled { get; }
     public NumberHolder GracePeriodSeconds { get; }
 
@@ -86,6 +89,18 @@ public class VoiceChatGameOptions
         {
             Visible = MeetingLobbySubOptionsVisible
         };
+        MeetingOnlyImpostorChat = new ToggleHolder(cfg, Section, "MeetingOnlyImpostorChat", "Meeting Only - Impostor Chat", false,
+            "During tasks, living actual impostors can speak globally. All ghosts and spectators can listen; dead impostors can speak only with Impostors Talk Across Death. Living crew and other role voice privileges do not gain access. Normal meeting rules apply unless Impostors Talk Across Death in Meetings enables radio-held chat.")
+        {
+            Visible = MeetingLobbySubOptionsVisible
+        };
+        ImpostorsTalkAcrossDeath = new ToggleHolder(cfg, Section, "ImpostorsTalkAcrossDeath", "Impostors Talk Across Death", false,
+            "Lets dead impostors talk back to living impostors in task-phase impostor chat and impostor team radio. Crew ghosts and spectators remain listen-only. The In Meetings child option also allows radio-held private chat during meetings.");
+        ImpostorsTalkAcrossDeathInMeetings = new ToggleHolder(cfg, Section, "ImpostorsTalkAcrossDeathInMeetings", "Impostors Talk Across Death in Meetings", true,
+            "While Impostors Talk Across Death is on, living and dead actual impostors can hold the radio key to speak privately during meetings, not exile. Living actual impostors, all ghosts and spectators listen; living crew are excluded. Crew ghosts and spectators cannot transmit. Works independently of Team Radio and Meeting Only - Impostor Chat; other mute and meeting-floor rules still apply.")
+        {
+            Visible = ImpostorsTalkAcrossDeathSubOptionsVisible
+        };
         GracePeriodEnabled = new ToggleHolder(cfg, Section, "GracePeriodEnabled", "Meeting Floor Grace Period", false,
             "Gives the player who called the meeting an exclusive voice floor for a short time when the meeting begins.");
         GracePeriodSeconds = new NumberHolder(cfg, Section, "GracePeriodSeconds", "Grace Period Seconds", 5f, 0f, 15f, 1f, "0",
@@ -105,6 +120,8 @@ public class VoiceChatGameOptions
         Instance.TeamRadio.Value && Instance.TeamRadioInMeetings.Value;
 
     private static bool MeetingLobbySubOptionsVisible() => Instance.OnlyMeetingOrLobby.Value;
+
+    private static bool ImpostorsTalkAcrossDeathSubOptionsVisible() => Instance.ImpostorsTalkAcrossDeath.Value;
 
     private static bool GracePeriodSubOptionVisible() => Instance.GracePeriodEnabled.Value;
 }

@@ -8,14 +8,12 @@ internal static class VoiceRadioStateRpc
 {
     private const byte RpcId = 205;
 
-    public static bool TrySend(byte playerId, VoiceTeamRadioChannel channel)
-        => TrySend(playerId, VoiceRadioState.BuiltIn(channel));
 
-    public static bool TrySend(byte playerId, VoiceRadioState state)
+    public static bool TrySend(byte playerId, VoiceRadioState state, int targetClientId, VoiceGamePhase phase)
     {
         try
         {
-            var writer = StartWriter();
+            var writer = StartWriter(targetClientId);
             if (writer == null)
             {
                 VoiceDiagnostics.Log("radio.rpc.send_deferred", $"player={playerId} reason=writer-unavailable");
@@ -28,6 +26,7 @@ internal static class VoiceRadioStateRpc
             writer.Write((byte)state.Channel);
             if (state.Channel == VoiceTeamRadioChannel.External)
                 writer.Write(state.ManagedKey);
+            writer.Write((byte)phase);
             FinishWriter(writer);
             return true;
         }
@@ -43,14 +42,14 @@ internal static class VoiceRadioStateRpc
     private static string Safe(string? value)
         => (value ?? string.Empty).Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
 
-    private static MessageWriter? StartWriter()
+    private static MessageWriter? StartWriter(int targetClientId)
     {
-        if (AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return null;
+        if (targetClientId < 0 || AmongUsClient.Instance == null || PlayerControl.LocalPlayer == null) return null;
         return AmongUsClient.Instance.StartRpcImmediately(
             PlayerControl.LocalPlayer.NetId,
             RpcId,
             SendOption.Reliable,
-            -1);
+            targetClientId);
     }
 
     private static void FinishWriter(MessageWriter writer)
@@ -75,6 +74,8 @@ internal static class VoiceRadioStateRpc
                 var state = channel == VoiceTeamRadioChannel.External && reader.BytesRemaining > 0
                     ? VoiceRadioState.Managed(reader.ReadString())
                     : VoiceRadioState.BuiltIn(channel);
+                if (reader.BytesRemaining != 1) return;
+                var phase = (VoiceGamePhase)reader.ReadByte();
 
                 // Claimed id must match dispatched PlayerControl; PlayerId is netId-derived, not auth, so spoofable on a relay.
                 if (__instance == null || __instance.PlayerId != playerId)
@@ -84,7 +85,7 @@ internal static class VoiceRadioStateRpc
                     return;
                 }
 
-                VoiceChatRoom.ApplyRemoteRadioState(playerId, state);
+                VoiceChatRoom.ApplyRemoteRadioState(playerId, state, phase);
             }
             catch (Exception ex)
             {

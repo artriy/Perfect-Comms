@@ -45,13 +45,6 @@ jobs:
         run: bash scripts/package-api.sh Release
       - name: Run managed tests
         run: dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --no-restore --nologo
-      - name: Test meeting compatibility against Among Us v18 bindings
-        run: >-
-          dotnet test PerfectComms.Tests/PerfectComms.Tests.csproj -c Release --nologo
-          --filter FullyQualifiedName~PlayerVoteAreaPlayerIdTests
-          -p:AmongUsGameLibsVersion=2026.8.18
-          -p:NuGetLockFilePath=obj/compat-v18/packages.lock.json
-          -p:RestoreLockedMode=false
 
   starlight:
     name: Starlight managed build, tests, and single-DLL validation
@@ -189,7 +182,7 @@ jobs:
           cargo test --locked --manifest-path native/vendor/cubeb/Cargo.toml --lib
       - name: Pion formatting, vet, tests, and license inventory
         run: |
-          unformatted="$(find native/pc-pion -type f -name '*.go' -exec gofmt -l {} +)"
+          unformatted="$(gofmt -l native/pc-pion/*.go)"
           test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
           (cd native/pc-pion && go vet -mod=readonly ./...)
           (cd native/pc-pion && go test -buildvcs=false -mod=readonly ./...)

@@ -62,6 +62,9 @@ cloudflare/**/package-lock.json
 cloudflare/**/*.log
 TouMira/
 artifacts/
+# Local portable toolchains and downloaded installers travel with folder copies,
+# not with source-control commits.
+dev-tools/
 packaging/.nuget-smoke/
 native/pc-pion/.cache/
 native/pion-sys/target/
@@ -77,3 +80,4 @@ PerfectComms.sln
 .superpowers/
 .claude/
 .serena/
+.orca/

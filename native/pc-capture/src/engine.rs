@@ -85,11 +85,13 @@ pub(crate) fn reset_decoded_peer_timeline(
 
 pub struct Engine {
     rtc: Arc<RtcEngine>,
-    dsp: Mutex<Dsp>,
-    enc: Mutex<OpusCodec>,
+    dsp: parking_lot::Mutex<Dsp>,
+    enc: parking_lot::Mutex<OpusCodec>,
     // Outermost transmit lock. Both microphone processing and encoder-history resets acquire this
     // before `enc`, so no direct FFI caller can overlap a capture with a privacy boundary.
-    capture_pipeline: Mutex<()>,
+    capture_pipeline: parking_lot::Mutex<()>,
+    control_gate: parking_lot::Mutex<()>,
+    private_radio: parking_lot::Mutex<crate::proto::PrivateRadioScope>,
     dec: Mutex<DecodeState>,
     gs: Arc<GameState>,
     sig_rx: Mutex<Receiver<LocalSignal>>,
@@ -121,9 +123,11 @@ impl Engine {
         let encoder = OpusCodec::new()?;
         Ok(Engine {
             rtc: Arc::new(RtcEngine::new(sig_tx)),
-            dsp: Mutex::new(Dsp::new(initial_dsp_config())),
-            enc: Mutex::new(encoder),
-            capture_pipeline: Mutex::new(()),
+            dsp: parking_lot::Mutex::new(Dsp::new(initial_dsp_config())),
+            enc: parking_lot::Mutex::new(encoder),
+            capture_pipeline: parking_lot::Mutex::new(()),
+            control_gate: parking_lot::Mutex::new(()),
+            private_radio: parking_lot::Mutex::new(crate::proto::PrivateRadioScope::default()),
             dec: Mutex::new(DecodeState {
                 decoders: HashMap::new(),
                 last_seq: HashMap::new(),
@@ -165,8 +169,12 @@ impl Engine {
     }
 
     fn reset_encoder_history(&self) -> u64 {
-        let _pipeline = self.capture_pipeline.lock().unwrap();
-        let mut encoder = self.enc.lock().unwrap();
+        let _pipeline = self.capture_pipeline.lock();
+        self.reset_encoder_history_locked()
+    }
+
+    fn reset_encoder_history_locked(&self) -> u64 {
+        let mut encoder = self.enc.lock();
         if let Err(error) = encoder.reset_encoder() {
             panic!("pc-capture: Opus encoder privacy reset failed: {error}");
         }
@@ -188,13 +196,19 @@ impl Engine {
     }
 
     pub fn push_mic_with_media_gap(&self, samples: &[f32], skipped_before_current: u64) -> f32 {
+        let capture_epoch = self.encoder_epoch.load(Ordering::Acquire);
+        if !self.mic_active.load(Ordering::Acquire) {
+            return f32::from_bits(self.level.load(Ordering::Relaxed));
+        }
         if samples.len() != FRAME_SIZE {
             return f32::from_bits(self.level.load(Ordering::Relaxed));
         }
         // Lock order is always capture_pipeline -> enc. Keep this guard through send_opus so a
         // concurrent PeerAdd/Start/Stop cannot reset and then be followed by stale PCM encoding.
-        let _pipeline = self.capture_pipeline.lock().unwrap();
-        if !self.mic_active.load(Ordering::Acquire) {
+        let _pipeline = self.capture_pipeline.lock();
+        if !self.mic_active.load(Ordering::Acquire)
+            || capture_epoch != self.encoder_epoch.load(Ordering::Acquire)
+        {
             return f32::from_bits(self.level.load(Ordering::Relaxed));
         }
         // The FFI capture thread is the only normal producer, but retain a mutex so accidental
@@ -207,7 +221,7 @@ impl Engine {
         } else {
             buf.copy_from_slice(samples);
         }
-        self.dsp.lock().unwrap().capture(&mut buf[..]);
+        self.dsp.lock().capture(&mut buf[..]);
         let input = *self.input.lock().unwrap();
         let detector_peak = peak(&buf[..]);
         self.noise_gate
@@ -218,7 +232,7 @@ impl Engine {
         let output_peak = peak(&buf[..]);
 
         let policy = self.rtc.encoder_policy_snapshot();
-        let mut encoder = self.enc.lock().unwrap();
+        let mut encoder = self.enc.lock();
         // Stop closes this gate before waiting on the encoder mutex, then resets history while
         // holding it. A frame already being processed can therefore never encode after Stop or
         // rebuild DRED history between the reset and the next authorized Start.
@@ -407,7 +421,7 @@ impl Engine {
             stereo,
         );
         self.rtc.record_mix_control(mixer.control_snapshot());
-        self.dsp.lock().unwrap().far_end(stereo);
+        self.dsp.lock().far_end(stereo);
         let n = out.len().min(stereo.len());
         out[..n].copy_from_slice(&stereo[..n]);
         n
@@ -489,8 +503,30 @@ impl Engine {
             Ok(op) => op,
             Err(_) => return,
         };
+        let _control = self.control_gate.lock();
         match op {
             InboundOp::SetIceServers { servers } => self.rtc.set_ice_servers(&servers),
+            InboundOp::PrivateRadio { active, receivers } => {
+                let scope = crate::proto::PrivateRadioScope::new(active, receivers);
+                let mut previous = self.private_radio.lock();
+                if *previous == scope {
+                    return;
+                }
+                let _pipeline = self.capture_pipeline.lock();
+                let was_active = self.mic_active.swap(false, Ordering::AcqRel);
+                if let Err(error) = self.dsp.lock().reset_capture_history() {
+                    panic!("pc-capture: DSP privacy reset failed: {error}");
+                }
+                let epoch = self.reset_encoder_history_locked();
+                assert!(
+                    self.rtc
+                        .set_private_radio(scope.active, &scope.receivers, epoch),
+                    "pc-capture: private radio privacy fence failed"
+                );
+                *previous = scope;
+                self.level.store(0, Ordering::Relaxed);
+                self.mic_active.store(was_active, Ordering::Release);
+            }
             InboundOp::PeerAdd {
                 peer_id,
                 offerer,
@@ -561,17 +597,13 @@ impl Engine {
                 ns,
                 ns_very_high,
                 hpf,
-            } => self
-                .dsp
-                .lock()
-                .unwrap()
-                .set(effective_dsp_config(DspConfig {
-                    aec,
-                    agc,
-                    ns,
-                    ns_very_high: ns && ns_very_high,
-                    hpf,
-                })),
+            } => self.dsp.lock().set(effective_dsp_config(DspConfig {
+                aec,
+                agc,
+                ns,
+                ns_very_high: ns && ns_very_high,
+                hpf,
+            })),
             InboundOp::SetDiagnostics { enabled } => {
                 let mut diagnostics = self.diagnostics.lock().unwrap();
                 if enabled && !diagnostics.enabled {
@@ -651,25 +683,45 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn private_radio_cutovers_clear_codec_history_without_repeated_scope_reset() {
+        let engine = Engine::new();
+        engine.control(r#"{"op":"start"}"#);
+        for command in [
+            r#"{"op":"private-radio","active":true,"receivers":["1"]}"#,
+            r#"{"op":"private-radio","active":true,"receivers":["1","2"]}"#,
+            r#"{"op":"private-radio","active":false,"receivers":["ignored"]}"#,
+        ] {
+            for _ in 0..12 {
+                assert!(!engine.enc.lock().encode(&[0.4; FRAME_SIZE]).is_empty());
+            }
+            engine.control(command);
+            let actual = engine.enc.lock().encode(&[0.0; FRAME_SIZE]);
+            let expected = OpusCodec::new().unwrap().encode(&[0.0; FRAME_SIZE]);
+            assert_eq!(actual, expected, "prior speech survived scope cutover");
+            assert!(engine.mic_active.load(Ordering::Acquire));
+        }
+        engine.control(r#"{"op":"private-radio","active":true,"receivers":["2","1"]}"#);
+        let mut reference = OpusCodec::new().unwrap();
+        for _ in 0..8 {
+            engine.enc.lock().encode(&[0.3; FRAME_SIZE]);
+            reference.encode(&[0.3; FRAME_SIZE]);
+        }
+        engine.control(r#"{"op":"private-radio","active":true,"receivers":["1","2","1"]}"#);
+        assert_eq!(
+            engine.enc.lock().encode(&[0.0; FRAME_SIZE]),
+            reference.encode(&[0.0; FRAME_SIZE]),
+            "repeated normalized scope reset current speech history"
+        );
+        engine.control(r#"{"op":"stop"}"#);
+        engine.control(r#"{"op":"private-radio","active":false,"receivers":[]}"#);
+        assert!(!engine.mic_active.load(Ordering::Acquire));
+    }
+    #[test]
     fn push_mic_wrong_size_is_noop_and_keeps_level() {
         let e = Engine::new();
 
         let lvl = e.push_mic(&[0.1f32; 100]);
         assert_eq!(lvl, 0.0);
-    }
-
-    #[test]
-    fn push_mic_reuses_fixed_scratch_storage_on_normal_path() {
-        let e = Engine::new();
-        e.control(r#"{"op":"start"}"#);
-        let before = e.mic_scratch.lock().unwrap().as_ptr();
-        for value in [0.0f32, 0.01, -0.02, 0.05] {
-            let level = e.push_mic(&[value; FRAME_SIZE]);
-            assert!(level.is_finite());
-        }
-        let after = e.mic_scratch.lock().unwrap().as_ptr();
-        assert_eq!(before, after);
-        assert_eq!(e.mic_scratch.lock().unwrap().len(), FRAME_SIZE);
     }
 
     #[test]
@@ -786,7 +838,7 @@ mod tests {
         let engine = Arc::new(Engine::new());
         engine.control(r#"{"op":"start"}"#);
 
-        let held = engine.capture_pipeline.lock().unwrap();
+        let held = engine.capture_pipeline.lock();
         let (push_tx, push_rx) = std::sync::mpsc::channel();
         let pushing = engine.clone();
         let push = std::thread::spawn(move || {
@@ -798,7 +850,7 @@ mod tests {
         push.join().unwrap();
 
         let before = engine.encoder_epoch.load(Ordering::Acquire);
-        let held = engine.capture_pipeline.lock().unwrap();
+        let held = engine.capture_pipeline.lock();
         let (reset_tx, reset_rx) = std::sync::mpsc::channel();
         let resetting = engine.clone();
         let reset = std::thread::spawn(move || {

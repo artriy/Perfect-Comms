@@ -238,11 +238,11 @@ public static void RegisterVoicePairRule(
     Func<VoicePairContext, VoicePairResult> rule);
 ```
 
-The listener is always local. Pair `Mute` wins immediately. Pair `Muffle` is retained and applies to whichever route is otherwise selected. The first valid `Route` wins, but later rules are still inspected for restrictive mute/muffle results.
+Pair callbacks use the local listener and remote speaker. Pair `Mute` wins immediately. Pair `Muffle` is retained and applies to whichever route is otherwise selected. The first valid `Route` wins, but later rules are still inspected for restrictive mute/muffle results.
 
 `Radio` is flat. `Proximity` and `Ghost` use normal host distance/falloff and pan. Omitted `SpeakerOrigin` and `ListenerOrigin` use the resolved speaker and listener positions. Volume is clamped to `0..1`. Invalid shape, non-finite volume/origins, null, and exceptions are neutral.
 
-An explicit pair route replaces ordinary routing for that pair. Speaker/global mutes and Tasks `OnlyMeetingOrLobby` remain authoritative. In Tasks, the pair route runs before `OnlyGhostsCanTalk` and Comms-sabotage blocking to support Medium-style exceptions; in Meeting/Exile those host restrictions run first. Channels stay below those restrictions.
+An explicit pair route replaces ordinary routing for that pair. Speaker/global mutes, capture restrictions, and Tasks `OnlyMeetingOrLobby` remain authoritative. In Tasks, the pair route runs before receive-side `OnlyGhostsCanTalk` and Comms-sabotage blocking to support Medium-style exceptions. Pair and channel routes cannot bypass normal Meeting/Exile death separation. The host's built-in impostor meeting radio is the exception only in Meeting when both across-death options are enabled, never in Exile. Actual impostors transmit; living actual impostors, all ghosts and spectators listen. Private audience authorization runs before pair routing, so crew ghosts and spectators cannot transmit and living crew or mod-added voice privileges do not gain access. Eligible listeners retain pair mutes, route shape and gain.
 
 See **[Channels](Mod-Integration-Channels#listener-speaker-pair-rules)**.
 

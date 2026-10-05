@@ -63,6 +63,15 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 | Team Radio channels | Meeting spatial audio, plus noise suppression and echo cancellation on desktop |
 | Role-based mutes (with supported mods) | Per-player volume and HUD layout |
 
+### Impostor voice rules
+
+- **Meeting Only - Impostor Chat**, beneath **Only During Meeting Or Lobby**, lets living actual impostors speak globally during tasks. All ghosts and spectators can listen; living crew and mod-added Vampire/Lover voice privileges do not gain access. Meeting radio uses its separate option below.
+- **Impostors Talk Across Death** lets dead actual impostors speak back to living impostors in that task chat and through the independent impostor Team Radio. With it off, dead impostors can still listen. Crew ghosts and spectators remain listen-only on these channels; normal ghost chat remains available.
+- **Impostors Talk Across Death in Meetings** appears directly beneath that parent when enabled and defaults on. Living and dead actual impostors can hold their existing Team Radio control (default `V` on desktop, radio button on Starlight) during meetings to speak privately. Living actual impostors, all ghosts and spectators listen without holding radio; living crew receive neither the private audio nor its radio state. Crew ghosts and spectators cannot transmit on this channel. It works with every ordinary Team Radio option off, requires both across-death toggles, and does not apply in Exile or tasks. Releasing radio restores normal speech and death separation. Hiding the child does not reset its saved choice; mute and meeting-floor rules still apply.
+- **Meeting Caller Grace Period** gives the living caller the speaking floor until the configured countdown expires. Other living players cannot transmit or be heard during that period.
+
+Every participant needs this rebuilt voice-protocol-7 client, even though the release version remains `4.1.11`. Older voice clients are rejected.
+
 <br>
 
 ## Controls
@@ -95,7 +104,7 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 > - **Open Mic** is the default: your voice sends automatically when you speak.
 >   Tap `Right Alt` to mute or unmute your microphone.
 > - **Push To Talk:** select it in **Voice Settings > Audio**, then hold `C`
->   whenever you want to speak.
+>   whenever you want to speak, including while performing task minigames.
 > - **Deafen:** tap `Right Ctrl` to stop hearing voice and pause your microphone
 >   until you undeafen.
 > - **Team Radio:** when your role and the host settings allow a private channel,
@@ -138,9 +147,7 @@ The Starlight tester build uses in-game touch controls instead of desktop keybin
 > Use this path if your mod does not provide BepInEx, or if you are not using another mod.
 >
 > 1. Download **BepInEx 6 Unity IL2CPP** from the [official BepInEx build page](https://builds.bepinex.dev/projects/bepinex_be).
-> 2. Choose the build for your platform:
->    - **Steam or itch.io:** `Unity.IL2CPP-win-x86`
->    - **Epic Games Store or Microsoft Store:** `Unity.IL2CPP-win-x64`
+> 2. For the x64 Windows game on Windows, Linux/Proton, or macOS/Wine, including Steam Among Us `2026.9.29`, choose `Unity.IL2CPP-win-x64`. Windows x86 is not supported.
 > 3. Extract BepInEx into the folder containing `Among Us.exe`.
 > 4. Launch the game once to complete BepInEx setup, then close it.
 > 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
@@ -178,7 +185,7 @@ Making a roles mod? You can add your own voice behaviours to Perfect Comms **wit
                   PrivateAssets="all" />
 ```
 
-`4.1.7.1` is the reference-only API package revision and is versioned independently from the player-facing mod. It supports Perfect Comms 4.1.7 and later runtimes that retain this API contract. Players still install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
+`4.1.7.1` is the reference-only API package revision and is versioned independently from the player-facing mod. It supports Perfect Comms 4.1.7 and later runtimes that retain this API contract. Players install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
 
 ```csharp
 [BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]

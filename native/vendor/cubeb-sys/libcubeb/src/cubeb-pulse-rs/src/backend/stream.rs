@@ -11,7 +11,10 @@ use cubeb_backend::{
 };
 use pulse::{self, ChannelMapExt, SampleSpecExt, StreamLatency, USecExt};
 use pulse_ffi::*;
-use ringbuf::RingBuffer;
+use ringbuf::{
+    traits::{Consumer, Producer, Split},
+    HeapCons, HeapProd, HeapRb,
+};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_long, c_void};
 use std::slice;
@@ -126,13 +129,13 @@ impl Drop for Device {
 }
 
 enum RingBufferConsumer {
-    IntegerRingBufferConsumer(ringbuf::Consumer<i16>),
-    FloatRingBufferConsumer(ringbuf::Consumer<f32>),
+    IntegerRingBufferConsumer(HeapCons<i16>),
+    FloatRingBufferConsumer(HeapCons<f32>),
 }
 
 enum RingBufferProducer {
-    IntegerRingBufferProducer(ringbuf::Producer<i16>),
-    FloatRingBufferProducer(ringbuf::Producer<f32>),
+    IntegerRingBufferProducer(HeapProd<i16>),
+    FloatRingBufferProducer(HeapProd<f32>),
 }
 
 enum LinearInputBuffer {
@@ -151,7 +154,7 @@ impl BufferManager {
     // either the input or output sample-spec here.
     fn new(input_buffer_size: usize, sample_spec: &pulse::SampleSpec) -> BufferManager {
         if sample_spec.format == PA_SAMPLE_S16BE || sample_spec.format == PA_SAMPLE_S16LE {
-            let ring = RingBuffer::<i16>::new(input_buffer_size);
+            let ring = HeapRb::<i16>::new(input_buffer_size);
             let (prod, cons) = ring.split();
             BufferManager {
                 producer: IntegerRingBufferProducer(prod),
@@ -161,7 +164,7 @@ impl BufferManager {
                 )),
             }
         } else {
-            let ring = RingBuffer::<f32>::new(input_buffer_size);
+            let ring = HeapRb::<f32>::new(input_buffer_size);
             let (prod, cons) = ring.split();
             BufferManager {
                 producer: FloatRingBufferProducer(prod),
@@ -1257,6 +1260,46 @@ mod test {
     use super::layout_to_channel_map;
     use cubeb_backend::ChannelLayout;
     use pulse_ffi::*;
+
+    #[test]
+    fn sample_buffer_integer_wraparound_and_silence() {
+        let spec = pulse::SampleSpec {
+            format: PA_SAMPLE_S16LE,
+            rate: 48000,
+            channels: 1,
+        };
+        let mut buffer = super::BufferManager::new(4, &spec);
+        let input = [1i16, 2, 3, 4, 5];
+        buffer.push_input_data(input.as_ptr().cast(), input.len());
+        let mut output = [99i16; 2];
+        buffer.pull_input_data(output.as_mut_ptr().cast(), output.len());
+        assert_eq!(output, [1, 2]);
+        let input = [6i16, 7];
+        buffer.push_input_data(input.as_ptr().cast(), input.len());
+        let mut output = [99i16; 5];
+        buffer.pull_input_data(output.as_mut_ptr().cast(), output.len());
+        assert_eq!(output, [3, 4, 6, 7, 0]);
+    }
+
+    #[test]
+    fn sample_buffer_float_wraparound_and_silence() {
+        let spec = pulse::SampleSpec {
+            format: PA_SAMPLE_FLOAT32LE,
+            rate: 48000,
+            channels: 1,
+        };
+        let mut buffer = super::BufferManager::new(4, &spec);
+        let input = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        buffer.push_input_data(input.as_ptr().cast(), input.len());
+        let mut output = [99.0f32; 2];
+        buffer.pull_input_data(output.as_mut_ptr().cast(), output.len());
+        assert_eq!(output, [1.0, 2.0]);
+        let input = [6.0f32, 7.0];
+        buffer.push_input_data(input.as_ptr().cast(), input.len());
+        let mut output = [99.0f32; 5];
+        buffer.pull_input_data(output.as_mut_ptr().cast(), output.len());
+        assert_eq!(output, [3.0, 4.0, 6.0, 7.0, 0.0]);
+    }
 
     macro_rules! channel_tests {
         {$($name: ident, $layout: ident => [ $($channels: ident),* ]),+} => {

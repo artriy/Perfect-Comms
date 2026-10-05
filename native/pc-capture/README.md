@@ -14,7 +14,12 @@ libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and th
 Pion WebRTC v4.2.17 peer transport with proximity mixing, so mic, peer audio,
 and playback all live in this helper. The Rust media core loads Pion through
 the companion C-shared library built from `native/pc-pion`; transport startup
-fails closed if the matching library is missing. Protocol version 16.
+fails closed if the matching library is missing. Protocol version 17, Pion ABI 3.
+
+Private radio audio is sent only to selected peer IDs. An empty private audience
+sends no audio; public speech retains the existing fanout. Scope changes discard
+captured PCM and Opus/RTP history before a wider audience can receive speech.
+Peer connections and ICE behavior are unchanged.
 
 DRED history is bounded to the receiver's 100 ms concealment window. The packet-loss
 expectation controls whether libopus can afford to emit DRED (healthy-route settings naturally
@@ -83,20 +88,19 @@ cargo check --all-targets          # fast gate the CI matrix reuses per target
 
 `cargo build` produces the Rust helper only. From the repository root, use
 `scripts/build-pion.sh` with Go 1.26.2 to produce its required Pion companion,
-for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64/x86,
+for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64,
 Linux x64, and macOS x64/arm64/universal targets are supported.
 
 ## CI build targets
 
 - x86_64-pc-windows-msvc
-- i686-pc-windows-msvc
 - x86_64-apple-darwin
 - aarch64-apple-darwin
 - x86_64-unknown-linux-gnu
 
 The crate is target-agnostic Rust with no host-only constructs, so each target
 above is built by its own CI runner (native compile per OS). Each target builds
-where its native toolchain and system audio libraries live: Windows targets on
+where its native toolchain and system audio libraries live: Windows x64 on
 a Windows runner (Cubeb/WASAPI with WinMM fallback), the Linux target on a Linux runner
 (Cubeb/PulseAudio with ALSA fallback), and the macOS targets on a macOS runner
 (Cubeb/AudioUnit + Apple toolchain). Cubeb is C/C++ and Rust internally, so
@@ -130,10 +134,9 @@ argument-bearing audio child directly. This avoids CrossOver opening an
 interactive Terminal and dropping `/bin/sh -c` arguments while preserving the
 existing authenticated cancellation and exit receipts.
 
-Per-target desktop helper binaries ship as side-files in the BepInEx plugin
-folder and as embedded resources. On Windows and Linux, the mod extracts the
-embedded, content-matched Pion library beside the helper; macOS uses the copy
-already inside the signed app.
+Per-target desktop helper binaries ship embedded in the plugin DLL. On Windows
+and Linux, the mod extracts the embedded, content-matched Pion library beside
+the helper; macOS uses the copy already inside the signed app.
 
 Cubeb itself is compiled from the version pinned by `Cargo.lock` and statically
 linked into each desktop helper. There is no `cubeb.dll`, `libcubeb.so`, or
@@ -145,7 +148,7 @@ PE, ELF, and Mach-O checks reject external Cubeb
 or speexdsp libraries, covering stale local Cargo/CMake caches as well as clean
 CI builds.
 
-`pc-capture --build-info` reports protocol 16, Cubeb 0.36.0, the immutable
+`pc-capture --build-info` reports protocol 17, Cubeb 0.36.0, the immutable
 Perfect Comms audio-contract marker, and the exact backends compiled into that
 binary. Packaging executes this probe, and the managed launcher requires the
 same contract before every uncached native launch, including host-native

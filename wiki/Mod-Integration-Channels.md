@@ -156,7 +156,7 @@ PerfectCommsApi.RegisterVoicePairRule(Mod, ctx =>
 });
 ```
 
-`VoicePairContext` contains the local `Listener`, target `Speaker`, exact phase, effective dead flags for both, and the three scoped host-option accessors.
+`VoicePairContext` contains the local `Listener` and remote `Speaker`, exact phase, effective dead flags for both, and the three scoped host-option accessors.
 
 | Pair result | Effect |
 | :--- | :--- |
@@ -167,7 +167,7 @@ PerfectCommsApi.RegisterVoicePairRule(Mod, ctx =>
 
 The first valid Route is retained, but later rules are still checked for a restrictive Mute or Muffle. `Radio` is flat. `Proximity` and `Ghost` use normal host falloff/pan. Omitted origins fall back to resolved player positions; volume is clamped. Invalid/non-finite results and exceptions are neutral.
 
-Pair routes are considered early enough in Lobby, Tasks, Meeting, and Exile routing to implement private role paths instead of ordinary routing. Speaker/global mutes and the Tasks-only `OnlyMeetingOrLobby` policy remain authoritative. During Tasks, an explicit pair route runs before `OnlyGhostsCanTalk` and Comms-sabotage blocking so Medium-style role exceptions are possible. During Meeting/Exile, those host restrictions run before the pair route. Channels run below those host restrictions in every phase.
+Pair routes can implement private role paths during Lobby, Tasks, Meeting, and Exile receive routing. Speaker/global mutes, capture restrictions, and the Tasks-only `OnlyMeetingOrLobby` policy remain authoritative. During Tasks, an explicit pair route runs before receive-side `OnlyGhostsCanTalk` and Comms-sabotage blocking so Medium-style role exceptions are possible. Pair and channel routes cannot bypass normal Meeting/Exile death separation. The host's built-in impostor meeting radio is the exception only in Meeting when both across-death options are enabled. Actual impostors transmit; living actual impostors, all ghosts and spectators listen. Private audience authorization runs before pair routing, so crew ghosts and spectators cannot transmit and living crew or mod-added voice privileges do not gain access. Eligible listeners retain pair mutes, route shape and gain.
 
 EndGame is a fresh global results-screen call after player objects disappear. Transition-retained per-player channel/pair/mute/muffle state is not reapplied there.
 

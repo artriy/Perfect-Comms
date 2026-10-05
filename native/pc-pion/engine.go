@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	pionABIVersion         = 2
+	pionABIVersion         = 3
 	outboundQueueCapacity  = 4
 	outboundFreshnessLimit = 120 * time.Millisecond
 	iceEOCSettleDelay      = 3 * time.Second
@@ -109,24 +109,28 @@ func (c *transportCounters) recordQueueDepth(depth uint64) {
 }
 
 type engine struct {
-	mu           sync.RWMutex
-	peerOps      sync.Mutex
-	peers        map[string]*peer
-	retired      map[*peer]struct{}
-	iceServers   []webrtc.ICEServer
-	api          *webrtc.API
-	estimators   chan *feedbackAwareEstimator
-	epochGates   chan *epochGate
-	udpMux       ice.UDPMux
-	muxClosing   *atomic.Bool
-	control      controlQueue
-	rtp          *rtpQueue
-	privacyFloor atomic.Uint64
-	privacyMu    sync.RWMutex
-	tcpMux       ice.TCPMux
-	closed       atomic.Bool
-	instance     atomic.Uint64
-	counters     transportCounters
+	mu             sync.RWMutex
+	peerOps        sync.Mutex
+	peers          map[string]*peer
+	retired        map[*peer]struct{}
+	iceServers     []webrtc.ICEServer
+	api            *webrtc.API
+	estimators     chan *feedbackAwareEstimator
+	epochGates     chan *epochGate
+	udpMux         ice.UDPMux
+	muxClosing     *atomic.Bool
+	control        controlQueue
+	rtp            *rtpQueue
+	privacyFloor   atomic.Uint64
+	privacyMu      sync.RWMutex
+	privateRadio   bool
+	radioReceivers map[string]struct{}
+	radioEpoch     uint64
+	mediaEpoch     atomic.Uint64
+	tcpMux         ice.TCPMux
+	closed         atomic.Bool
+	instance       atomic.Uint64
+	counters       transportCounters
 }
 
 func newEngine() (*engine, error) {
@@ -555,6 +559,50 @@ func (e *engine) peer(id string) *peer {
 	return p
 }
 
+func (e *engine) setPrivateRadio(active bool, receivers []string, epoch uint64, timeout time.Duration) bool {
+	e.peerOps.Lock()
+	defer e.peerOps.Unlock()
+	scope := make(map[string]struct{}, len(receivers))
+	if active {
+		for _, id := range receivers {
+			scope[id] = struct{}{}
+		}
+	}
+	e.privacyMu.Lock()
+	same := e.privateRadio == active && len(e.radioReceivers) == len(scope)
+	if same {
+		for id := range scope {
+			if _, found := e.radioReceivers[id]; !found {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		e.privacyMu.Unlock()
+		return !e.closed.Load()
+	}
+	if epoch <= e.radioEpoch || epoch <= e.mediaEpoch.Load() || epoch < e.privacyFloor.Load() || e.closed.Load() {
+		e.privateRadio = true
+		e.radioReceivers = nil
+		e.privacyMu.Unlock()
+		return false
+	}
+	// No packets are admitted while originals and cached NACKs drain.
+	e.privateRadio = true
+	e.radioReceivers = nil
+	e.radioEpoch = epoch
+	e.privacyMu.Unlock()
+	if !e.advanceEpoch(epoch, timeout) {
+		return false
+	}
+	e.privacyMu.Lock()
+	e.privateRadio = active
+	e.radioReceivers = scope
+	e.privacyMu.Unlock()
+	return true
+}
+
 func (e *engine) sendOpus(payload []byte, epoch, mediaSequence uint64) sendResult {
 	result := sendResult{}
 	if e.closed.Load() {
@@ -565,6 +613,11 @@ func (e *engine) sendOpus(payload []byte, epoch, mediaSequence uint64) sendResul
 	e.mu.RLock()
 	peers := make([]*peer, 0, len(e.peers))
 	for _, p := range e.peers {
+		if e.privateRadio {
+			if _, allowed := e.radioReceivers[p.id]; !allowed {
+				continue
+			}
+		}
 		peers = append(peers, p)
 	}
 	e.mu.RUnlock()
@@ -576,6 +629,12 @@ func (e *engine) sendOpus(payload []byte, epoch, mediaSequence uint64) sendResul
 		}
 		e.counters.rtpTXStaleEpochDropped.Add(uint64(result.stale))
 		return result
+	}
+	for {
+		current := e.mediaEpoch.Load()
+		if epoch <= current || e.mediaEpoch.CompareAndSwap(current, epoch) {
+			break
+		}
 	}
 	for _, p := range peers {
 		if epoch < p.minEpoch.Load() || !p.active.Load() {

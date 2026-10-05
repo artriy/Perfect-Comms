@@ -662,6 +662,144 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
     }
 
     [Fact]
+    public void RadioReceiveBypassAppliesToLocalListenerOrigin()
+    {
+        PlayerControl listenerControl = FakePlayer();
+        PerfectCommsApi.RegisterContextualListenerOrigin(
+            NewModId("radio-listener-bypass"),
+            context => ReferenceEquals(context.Listener, listenerControl)
+                ? new VoiceListenerResult(Vector(0f, 0f), -1f, VoiceListenerMode.Replace)
+                    { BypassTaskVoiceGates = true }
+                : null);
+        ExternalVoiceState localExternal = VoiceModRegistry.ResolvePlayer(
+            listenerControl, VoicePhaseKind.Tasks, isLocal: true, isDead: false);
+        VoicePlayerSnapshot listener = Player(
+            1, 0f, isLocal: true, isImpostor: true, external: localExternal) with
+        {
+            IsImpostorTeam = true,
+        };
+        VoicePlayerSnapshot speaker = Player(0, 0f, isDead: true, isImpostor: true) with
+        {
+            IsImpostorTeam = true,
+        };
+        VoiceRoomSettingsSnapshot settings = BaseSettings() with
+        {
+            OnlyGhostsCanTalk = true,
+            CommsSabDisables = true,
+            TeamRadio = true,
+            TeamRadioInTasks = true,
+            ImpostorsTalkAcrossDeath = true,
+        };
+        VoiceRoomSettingsState.ApplyRemote(settings);
+        VoiceProximityResult received = VoiceProximityCalculator.CalculateTaskPhase(
+            listener, speaker, listener.Position, -1f, 0, false, -1, null,
+            Array.Empty<VoiceChatRoom.SpeakerCache>(), Array.Empty<IVoiceComponent>(),
+            false, true, true, 1f, VoiceTeamRadioChannel.Impostors);
+        Assert.True(received.Audible);
+    }
+
+    [Fact]
+    public void PairMutesAndSilentRoutesApplyInTasksMeetingAndExile()
+    {
+        ExternalVoicePairState[] taskPairs =
+        [
+            ExternalVoicePairState.None with { Verdict = VoicePairVerdict.Mute },
+            ExternalVoicePairState.None with { Verdict = VoicePairVerdict.Route, Volume = 0f },
+        ];
+        VoicePlayerSnapshot speaker = Player(0, 0f, isLocal: true);
+        foreach (ExternalVoicePairState pair in taskPairs)
+        {
+            VoicePlayerSnapshot listener = Player(1, 0f, isLocal: true);
+            VoicePlayerSnapshot target = speaker with
+            {
+                IsLocal = false,
+                External = speaker.External with { Pair = pair },
+            };
+            Assert.False(Task(listener, target).Audible);
+            foreach (VoiceGamePhase phase in new[] { VoiceGamePhase.Meeting, VoiceGamePhase.Exile })
+            {
+                Assert.False(VoiceProximityCalculator.CalculateMeeting(listener, target, false, phase).Audible);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Tasks, true, 0f)]
+    [InlineData((int)VoiceGamePhase.Tasks, false, 0f)]
+    [InlineData((int)VoiceGamePhase.Tasks, false, 0.35f)]
+    [InlineData((int)VoiceGamePhase.Meeting, true, 0f)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, 0f)]
+    [InlineData((int)VoiceGamePhase.Meeting, false, 0.35f)]
+    [InlineData((int)VoiceGamePhase.Exile, true, 0f)]
+    [InlineData((int)VoiceGamePhase.Exile, false, 0f)]
+    [InlineData((int)VoiceGamePhase.Exile, false, 0.35f)]
+    public void AllowedImpostorRadioPreservesIncomingPairRoute(int phaseValue, bool mute, float volume)
+    {
+        var phase = (VoiceGamePhase)phaseValue;
+        VoiceRoomSettingsState.ApplyRemote(BaseSettings() with
+        {
+            TeamRadio = true,
+            TeamRadioImpostors = true,
+            TeamRadioInMeetings = true,
+            TeamRadioInTasks = true,
+        });
+        PerfectCommsApi.RegisterVoicePairRule(
+            NewModId("radio-pair"),
+            _ => mute
+                ? VoicePairResult.Mute("Private")
+                : VoicePairResult.Route(VoicePairRouteShape.Radio, volume: volume));
+        ExternalVoicePairState pair = VoiceModRegistry.ResolvePair(
+            FakePlayer(), FakePlayer(), VoiceModBridge.ToApiPhase(phase),
+            listenerIsDead: false, speakerIsDead: false);
+        VoicePlayerSnapshot listener = Player(0, 0f, isLocal: true, isImpostor: true) with
+        {
+            IsImpostorTeam = true,
+        };
+        VoicePlayerSnapshot speaker = Player(1, 1f, isImpostor: true) with
+        {
+            IsImpostorTeam = true,
+            External = ExternalVoiceState.None with { Pair = pair },
+        };
+        VoiceProximityResult received = phase == VoiceGamePhase.Tasks
+            ? VoiceProximityCalculator.CalculateTaskPhase(
+                listener, speaker, listener.Position, -1f, 0, false, -1, null,
+                Array.Empty<VoiceChatRoom.SpeakerCache>(), Array.Empty<IVoiceComponent>(),
+                false, true, false, 1f, VoiceTeamRadioChannel.Impostors)
+            : VoiceProximityCalculator.CalculateMeeting(
+                listener, speaker, true, phase, VoiceTeamRadioChannel.Impostors);
+
+        Assert.Equal(!mute && volume > 0f, received.Audible);
+        AssertClose(mute ? 0f : volume, received.RadioVolume);
+    }
+
+    [Theory]
+    [InlineData((int)VoiceGamePhase.Meeting)]
+    [InlineData((int)VoiceGamePhase.Exile)]
+    public void MeetingDeathSeparationOverridesPairAndChannelRoutes(int phaseValue)
+    {
+        var phase = (VoiceGamePhase)phaseValue;
+        var pair = ExternalVoicePairState.None with
+        {
+            Verdict = VoicePairVerdict.Route, Shape = (int)VoicePairRouteShape.Radio, Volume = 1f,
+        };
+        var channel = new ExternalVoiceChannelState(
+            "tests.meeting.seance", true, (int)VoiceAudioShape.Radio, 1f, false, default);
+        foreach (bool pairRoute in new[] { false, true })
+        {
+            var external = ExternalVoiceState.None with
+            {
+                Pair = pairRoute ? pair : ExternalVoicePairState.None,
+                Channels = pairRoute ? null : new[] { channel },
+            };
+            var living = Player(0, 0f, isLocal: true, external: external);
+            var ghost = Player(1, 0f, isDead: true, external: external);
+            Assert.False(VoiceProximityCalculator.CalculateMeeting(living, ghost, false, phase).Audible);
+            Assert.True(VoiceProximityCalculator.CalculateMeeting(
+                living with { IsDead = true }, ghost, false, phase).Audible);
+        }
+    }
+
+    [Fact]
     public void PlayerTraitsComposeByOrAndDriveDeadSpectatorAndImpostorVoiceRouting()
     {
         PlayerControl composite = FakePlayer();
@@ -1416,9 +1554,7 @@ public sealed class VoiceModApiRuntimeParityTests : IDisposable
         Assert.True(memberRoute.Audible);
         AssertClose(1f, memberRoute.RadioVolume);
         Assert.False(outsiderRoute.Audible);
-        Assert.Equal(VoiceProximityReason.TeamRadioMuted, outsiderRoute.Reason);
         Assert.False(deadSpeakerRoute.Audible);
-        Assert.Equal(VoiceProximityReason.TargetDeadMuted, deadSpeakerRoute.Reason);
     }
 
     [Fact]

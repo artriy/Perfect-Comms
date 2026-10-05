@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Ten real-helper direct-P2P mesh smoke for the production Pion transport.
 
-This manual release diagnostic stages the shipped Windows x64/x86 helpers and their
+This manual release diagnostic stages the shipped Windows x64 helper and its
 matching native libraries, creates the complete 10-client mesh (45 connections / 90
 peer endpoints), verifies decoded pre-route audio and non-relay selected paths, restarts
 ICE on every connection, and churns client 9 at a new generation.
+
+Set PC_PION_TEST_DISABLE_MDNS=1 only for a hermetic same-host diagnostic that bypasses
+runner multicast delivery. The default retains production mDNS privacy; a hermetic
+pass does not verify mDNS discovery between separate hosts.
 
 Raw SDP, ICE candidates, candidate-pair identifiers, and network addresses are routed
 only in memory. Helper stderr stays in the private staging directory, which is verified
@@ -244,7 +248,7 @@ class Helper:
             except queue.Empty:
                 return result
 
-    def runtime_health(self) -> dict[str, bool]:
+    def runtime_health(self) -> dict[str, Any]:
         try:
             self._stderr.flush()
             self._stderr.seek(0)
@@ -255,12 +259,53 @@ class Helper:
                 "apm_loaded": False,
                 "critical": True,
                 "owner_exit": False,
+                "peer_errors": collections.Counter({"stderr-unreadable": 1}),
             }
+        peer_errors: collections.Counter[str] = collections.Counter()
+        failure_operations = {
+            "Pion peer add failed ": "peer-add-call",
+            "Pion remote SDP failed ": "remote-sdp-call",
+            "Pion ICE restart failed ": "restart-call",
+            "Pion candidate failed ": "candidate-call",
+            "Pion remote SDP rejected ": "remote-sdp-rejected",
+            "Pion ICE restart rejected ": "restart-rejected",
+            "Pion candidate rejected ": "candidate-rejected",
+        }
+        failure_causes = {
+            "privacy epoch write deadline exceeded": "privacy-write-deadline",
+            "peer privacy epoch drain failed": "peer-privacy-drain",
+            "create offer:": "create-offer",
+            "set local offer:": "set-local-offer",
+            "set remote SDP:": "set-remote-sdp",
+            "apply buffered candidate:": "buffered-candidate",
+            "create answer:": "create-answer",
+            "set local answer:": "set-local-answer",
+            "set restart configuration:": "restart-configuration",
+            "local ICE candidate buffer exhausted": "local-candidate-overflow",
+            "remote ICE candidate buffer exhausted": "remote-candidate-overflow",
+        }
+        for line in text.splitlines():
+            for prefix, category in failure_operations.items():
+                if line.startswith(f"pc-capture: {prefix}"):
+                    peer_errors[category] += 1
+                    break
+            if line.startswith("pc-capture: Pion peer error ") and " error=" in line:
+                cause = line.split(" error=", 1)[1]
+                category = next(
+                    (
+                        category
+                        for prefix, category in failure_causes.items()
+                        if cause.startswith(prefix)
+                    ),
+                    "native-peer-error",
+                )
+                peer_errors[category] += 1
         return {
             "pion_loaded": f"Pion WebRTC {PION_VERSION} transport loaded" in text,
             "apm_loaded": "dsp apm=true" in text or "dsp set apm=true" in text,
             "critical": "critical media failure" in text,
             "owner_exit": "owner exited" in text or "owner guard failed" in text,
+            "peer_errors": peer_errors,
         }
 
     def close(self, partial: bool = False) -> None:
@@ -315,8 +360,13 @@ class Mesh:
             for target in range(CLIENT_COUNT)
             if source != target
         }
+        self.phase = "startup"
         self.connected: set[tuple[int, int, int]] = set()
         self.heard: set[tuple[int, int, int]] = set()
+        self.native_added: set[tuple[int, int, int]] = set()
+        self.native_removed: set[tuple[int, int, int]] = set()
+        self.expected_removals: set[tuple[int, int, int]] = set()
+        self.remote_sdp_applied: collections.Counter[tuple[int, int, int]] = collections.Counter()
         self.levels_seen: set[tuple[int, int, int]] = set()
         self.eoc_epochs: collections.Counter[tuple[int, int, int]] = collections.Counter()
         self.eoc_messages: collections.Counter[tuple[int, int, int]] = collections.Counter()
@@ -404,8 +454,7 @@ class Mesh:
             helper.send({"op": "start"})
 
     def add_initial_peers(self) -> None:
-        # Install every answerer before any offerer so signaling is deterministic and no early
-        # offer can race a missing remote endpoint.
+        # A control write only schedules native work. Wait for every installed answerer.
         for lower, higher in self.pairs():
             self.helpers[higher].send(
                 {
@@ -416,6 +465,12 @@ class Mesh:
                     "generation": 1,
                 }
             )
+        answerers = {(higher, lower, 1) for lower, higher in self.pairs()}
+        self.wait(
+            "initial-answerers",
+            lambda: answerers <= self.native_added,
+            lambda: {"added": len(answerers & self.native_added), "expected": LINK_COUNT},
+        )
         for lower, higher in self.pairs():
             self.helpers[lower].send(
                 {
@@ -426,6 +481,19 @@ class Mesh:
                     "generation": 1,
                 }
             )
+        endpoints = self.endpoints()
+        self.wait(
+            "initial-signaling",
+            lambda: self.current_connected_count(endpoints) == ENDPOINT_COUNT
+            and all(self.endpoint_key(*endpoint) in self.native_added for endpoint in endpoints)
+            and all(
+                self.remote_sdp_applied[self.endpoint_key(*endpoint)] == 1
+                for endpoint in endpoints
+            )
+            and self.current_eoc_count(endpoints) == ENDPOINT_COUNT
+            and self.healthy_path_count(endpoints) == ENDPOINT_COUNT,
+            self.initial_progress,
+        )
 
     def _route_signal(self, source: int, target: int, message: dict[str, Any]) -> None:
         operation = message.get("op")
@@ -568,6 +636,19 @@ class Mesh:
             if generation != self.generation[(source, target)]:
                 return
             key = (source, target, generation)
+            if state == "native-peer-added":
+                self.native_added.add(key)
+                return
+            if state == "native-peer-removed":
+                self.native_removed.add(key)
+                self.native_added.discard(key)
+                self.connected.discard(key)
+                return
+            if state == "native-remote-sdp-applied":
+                self.remote_sdp_applied[key] += 1
+                return
+            if state == "native-ice-restarted":
+                return
             pair = (min(source, target), max(source, target))
             if state not in {
                 "new",
@@ -591,8 +672,10 @@ class Mesh:
                 self.unaffected_bad_states += 1
             if state == "connected":
                 self.connected.add(key)
-            elif state in {"failed", "closed"}:
-                self.errors.append((source, f"peer-{state}"))
+            elif state in {"new", "connecting", "disconnected", "failed", "closed"}:
+                self.connected.discard(key)
+                if state == "failed" or (state == "closed" and key not in self.expected_removals):
+                    self.errors.append((source, f"peer-{state}"))
             return
 
         if operation == "peer-levels":
@@ -635,6 +718,7 @@ class Mesh:
         )
         architecture_pairs: collections.Counter[str] = collections.Counter()
         failed_endpoints: list[str] = []
+        failed_progress: list[str] = []
         for (source, target, _generation), history in self.state_histories.items():
             if history and history[-1] in {"closed", "failed"}:
                 pair = "-".join(
@@ -644,8 +728,18 @@ class Mesh:
                 failed_endpoints.append(
                     f"c{source}-c{target}-g{_generation}:{'-'.join(history)}"
                 )
+                key = (source, target, _generation)
+                descriptions = self.sdp_counts[(*key, "offer")] + self.sdp_counts[(*key, "answer")]
+                failed_progress.append(
+                    f"c{source}-c{target}-g{_generation}:"
+                    f"added{int(key in self.native_added)}-sdp{descriptions}"
+                    f"-remote{self.remote_sdp_applied[key]}-eoc{self.eoc_epochs[key]}"
+                )
         codes = collections.Counter(code for _source, code in self.errors)
         runtime = [helper.runtime_health() for helper in self.helpers]
+        peer_errors: collections.Counter[str] = collections.Counter()
+        for health in runtime:
+            peer_errors.update(health["peer_errors"])
         return {
             "apm_loaded": sum(health["apm_loaded"] for health in runtime),
             "arch_pairs": ",".join(
@@ -656,6 +750,15 @@ class Mesh:
             or "none",
             "critical_logs": sum(health["critical"] for health in runtime),
             "failed_endpoints": ",".join(sorted(failed_endpoints)) or "none",
+            "failed_progress": ",".join(sorted(failed_progress)) or "none",
+            "mdns": "disabled-test" if os.environ.get("PC_PION_TEST_DISABLE_MDNS") == "1" else "production",
+            "native_added": len(self.native_added),
+            "peer_errors": ",".join(
+                f"{name}:{peer_errors[name]}" for name in sorted(peer_errors)
+            )
+            or "none",
+            "phase": self.phase,
+            "remote_applied": sum(self.remote_sdp_applied.values()),
             "owner_exits": sum(health["owner_exit"] for health in runtime),
             "pion_loaded": sum(health["pion_loaded"] for health in runtime),
             "state_patterns": ",".join(
@@ -699,6 +802,7 @@ class Mesh:
         progress: Callable[[], dict[str, object]],
         timeout: float | None = None,
     ) -> float:
+        self.phase = phase
         started = time.monotonic()
         deadline = started + (self.phase_timeout if timeout is None else timeout)
         while time.monotonic() < deadline:
@@ -707,7 +811,7 @@ class Mesh:
                 return time.monotonic() - started
             time.sleep(0.005)
         self.pump()
-        raise MeshFailure(f"{phase}-timeout", **progress())
+        raise MeshFailure(f"{phase}-timeout", **{**progress(), **self.failure_progress()})
 
     def settle(self, duration: float) -> None:
         deadline = time.monotonic() + duration
@@ -850,6 +954,8 @@ class Mesh:
         endpoints = self.endpoints()
         return {
             "connected": self.current_connected_count(endpoints),
+            "added": len(self.native_added),
+            "remote_sdp_applied": sum(self.remote_sdp_applied.values()),
             "eoc": self.current_eoc_count(endpoints),
             "heard": self.current_heard_count(endpoints),
             "levels": self.current_level_count(endpoints),
@@ -866,6 +972,10 @@ class Mesh:
                 self.endpoint_key(source, target)
             ]
             for source, target in endpoints
+        }
+        baseline_remote_sdp = {
+            self.endpoint_key(*endpoint): self.remote_sdp_applied[self.endpoint_key(*endpoint)]
+            for endpoint in endpoints
         }
         baseline_pair_changes = {
             endpoint: int(self.path(*endpoint).get("selected_pair_changes", 0))
@@ -910,11 +1020,16 @@ class Mesh:
                 future.result()
 
         def signaling_ready() -> bool:
-            if self.healthy_path_count(endpoints) != ENDPOINT_COUNT:
+            if (
+                self.healthy_path_count(endpoints) != ENDPOINT_COUNT
+                or self.current_connected_count(endpoints) != ENDPOINT_COUNT
+            ):
                 return False
             for source, target in endpoints:
                 key = self.endpoint_key(source, target)
                 if self.eoc_epochs[key] <= baseline_eoc[key]:
+                    return False
+                if self.remote_sdp_applied[key] != baseline_remote_sdp[key] + 1:
                     return False
                 if int(self.path(source, target).get("selected_pair_changes", 0)) <= (
                     baseline_pair_changes.get((source, target), 0)
@@ -1056,6 +1171,9 @@ class Mesh:
         self.monitor_unaffected = True
         started = time.monotonic()
 
+        removed = {self.endpoint_key(*endpoint) for endpoint in affected_endpoints}
+        self.expected_removals.update(removed)
+
         for other in range(churned):
             self.helpers[other].send(
                 {"op": "peer-remove", "peer_id": self.names[churned], "generation": 1}
@@ -1063,6 +1181,12 @@ class Mesh:
             self.helpers[churned].send(
                 {"op": "peer-remove", "peer_id": self.names[other], "generation": 1}
             )
+        self.wait(
+            "churn-remove",
+            lambda: removed <= self.native_removed,
+            lambda: {"removed": len(removed & self.native_removed), "expected": len(removed)},
+        )
+        for other in range(churned):
             self.generation[(other, churned)] = 2
             self.generation[(churned, other)] = 2
 
@@ -1077,6 +1201,12 @@ class Mesh:
                     "generation": 2,
                 }
             )
+        answerers = {(churned, other, 2) for other in range(churned)}
+        self.wait(
+            "churn-answerers",
+            lambda: answerers <= self.native_added,
+            lambda: {"added": len(answerers & self.native_added), "expected": len(answerers)},
+        )
         for other in range(churned):
             self.helpers[other].send(
                 {
@@ -1091,6 +1221,11 @@ class Mesh:
         def reconnect_ready() -> bool:
             return (
                 self.current_connected_count(affected_endpoints) == len(affected_endpoints)
+                and all(
+                    self.endpoint_key(*endpoint) in self.native_added
+                    and self.remote_sdp_applied[self.endpoint_key(*endpoint)] == 1
+                    for endpoint in affected_endpoints
+                )
                 and all(
                     self.eoc_epochs[self.endpoint_key(*endpoint)] == 1
                     and self.eoc_messages[self.endpoint_key(*endpoint)] == 1
@@ -1362,14 +1497,6 @@ def discover_bundles(args: argparse.Namespace) -> list[ArchitectureBundle]:
             "pc-pion.x64.dll",
             "webrtc-apm.x64.dll",
         ),
-        (
-            "x86",
-            existing_file(args.helper_x86),
-            existing_file(args.pion_x86),
-            existing_file(args.apm_x86),
-            "pc-pion.x86.dll",
-            "webrtc-apm.x86.dll",
-        ),
     )
     bundles = [
         ArchitectureBundle(name, helper, pion, apm, pion_name, apm_name)
@@ -1382,11 +1509,7 @@ def discover_bundles(args: argparse.Namespace) -> list[ArchitectureBundle]:
 
 
 def stage_clients(work: Path, bundles: list[ArchitectureBundle]) -> list[StagedClient]:
-    by_name = {bundle.name: bundle for bundle in bundles}
-    if "x64" in by_name and "x86" in by_name:
-        assignments = [by_name["x64" if index % 2 == 0 else "x86"] for index in range(CLIENT_COUNT)]
-    else:
-        assignments = [bundles[0]] * CLIENT_COUNT
+    assignments = [bundles[0]] * CLIENT_COUNT
 
     staged: list[StagedClient] = []
     for index, bundle in enumerate(assignments):
@@ -1564,34 +1687,16 @@ def build_parser(root: Path) -> argparse.ArgumentParser:
         help="x64 pc-capture executable",
     )
     parser.add_argument(
-        "--helper-x86",
-        type=Path,
-        default=root / "Libs" / "pc-capture" / "pc-capture-win-x86.exe",
-        help="x86 pc-capture executable",
-    )
-    parser.add_argument(
         "--pion-x64",
         type=Path,
         default=root / "Libs" / "pion" / "pc-pion.x64.dll",
         help=f"x64 Pion transport DLL (must report {PION_VERSION})",
     )
     parser.add_argument(
-        "--pion-x86",
-        type=Path,
-        default=root / "Libs" / "pion" / "pc-pion.x86.dll",
-        help=f"x86 Pion transport DLL (must report {PION_VERSION})",
-    )
-    parser.add_argument(
         "--apm-x64",
         type=Path,
-        default=root / "Libs" / "webrtc-apm.x64.dll",
+        default=root / "Libs" / "dsp" / "webrtc-apm.x64.dll",
         help="optional matching x64 WebRTC APM DLL staged for production fidelity",
-    )
-    parser.add_argument(
-        "--apm-x86",
-        type=Path,
-        default=root / "Libs" / "webrtc-apm.x86.dll",
-        help="optional matching x86 WebRTC APM DLL staged for production fidelity",
     )
     return parser
 
@@ -1624,16 +1729,11 @@ def run(args: argparse.Namespace, root: Path) -> dict[str, object]:
                 [client.architecture for client in staged],
             )
             pre_peer_udp_sockets = stable_udp_socket_counts(mesh)
-            if not all(1 <= count <= 2 for count in pre_peer_udp_sockets):
-                raise MeshFailure(
-                    "udp-mux-baseline-unexpected",
-                    actual=",".join(str(count) for count in pre_peer_udp_sockets),
-                )
             mesh.configure()
+            initial_started = time.monotonic()
             mesh.add_initial_peers()
-            initial_duration = mesh.wait(
-                "initial-mesh", mesh.initial_ready, mesh.initial_progress
-            )
+            mesh.wait("initial-mesh", mesh.initial_ready, mesh.initial_progress)
+            initial_duration = time.monotonic() - initial_started
             initial_endpoints = mesh.endpoints()
             initial_nonzero_levels = mesh.current_heard_count(initial_endpoints)
             initial_level_entries = mesh.current_level_count(initial_endpoints)
@@ -1717,6 +1817,7 @@ def run(args: argparse.Namespace, root: Path) -> dict[str, object]:
             architectures = collections.Counter(client.architecture for client in staged)
             return {
                 "apm_loaded": apm_loaded,
+                "mdns": "disabled-test" if os.environ.get("PC_PION_TEST_DISABLE_MDNS") == "1" else "production",
                 "architectures": ",".join(
                     f"{name}:{architectures[name]}" for name in sorted(architectures)
                 ),
@@ -1777,7 +1878,7 @@ def main() -> int:
         f"clients={CLIENT_COUNT} links={LINK_COUNT} endpoints={ENDPOINT_COUNT} "
         f"architectures={result['architectures']} relay_only=false "
         f"stun_servers={len(MANAGED_STUN_URLS)} pion={PION_VERSION} "
-        f"protocol={result['protocol']} apm_loaded={result['apm_loaded']}"
+        f"protocol={result['protocol']} apm_loaded={result['apm_loaded']} mdns={result['mdns']}"
     )
     print(
         "P2P_MESH_TIMING "

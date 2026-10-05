@@ -80,10 +80,10 @@ public static class VoiceSettingsPanelTriggers
             Application.isFocused,
             VoiceUiKit.RebindRow.ShouldSuppressKeybinds,
             VoiceUiKit.AnyPanelOpen && !ownPanelOpen,
-            Minigame.Instance != null,
             VoiceChatPatches.IsFriendsListOpen());
-        return hardBlocked || VoiceChatPatches.ShouldBlockBindingForChat(
-            chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
+        return Minigame.Instance != null || hardBlocked ||
+               VoiceChatPatches.ShouldBlockBindingForChat(
+                   chatOpen, allowAllWhileChatOpen, binding.AllowWhileChatOpen);
     }
 
     private static void SuppressOtherBindingsAcrossPanelBoundary(VoiceKeybind allowedCloser)

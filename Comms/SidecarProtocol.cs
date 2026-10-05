@@ -146,6 +146,24 @@ internal static class SidecarProtocol
     public static byte[] StopFrame() => EncodeControl("{\"op\":\"stop\"}");
     public static byte[] PingFrame() => EncodeControl("{\"op\":\"ping\"}");
 
+    public static byte[] PrivateRadioFrame(bool active, IReadOnlyList<string> receivers)
+    {
+        using var stream = new System.IO.MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("op", "private-radio");
+            writer.WriteBoolean("active", active);
+            writer.WriteStartArray("receivers");
+            if (active)
+                foreach (var receiver in receivers)
+                    writer.WriteStringValue(receiver);
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+        return EncodeFrame(TypeControl, stream.ToArray());
+    }
+
     public static byte[] OutputAudioFrame(ReadOnlySpan<float> interleavedStereo)
     {
         if (interleavedStereo.Length != AudioOutSamples)

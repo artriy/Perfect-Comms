@@ -8,13 +8,12 @@
 		<Product>Perfect Comms</Product>
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
-		<Version>4.1.10</Version>
-		<!-- 4.1.7 is already immutable on NuGet.org; .1 carries the completed API 1.2 reference contract without changing the mod release version. -->
+		<Version>4.1.11</Version>
 		<PerfectCommsApiPackageVersion>4.1.7.1</PerfectCommsApiPackageVersion>
-		<AssemblyVersion>4.1.10.0</AssemblyVersion>
-		<FileVersion>4.1.10.0</FileVersion>
-		<InformationalVersion>4.1.10</InformationalVersion>
-		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.3.31</AmongUsGameLibsVersion>
+		<AssemblyVersion>4.1.11.0</AssemblyVersion>
+		<FileVersion>4.1.11.0</FileVersion>
+		<InformationalVersion>4.1.11</InformationalVersion>
+		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.9.29</AmongUsGameLibsVersion>
 		<LangVersion>preview</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -64,9 +63,6 @@
 		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x64.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x64.exe')">
 			<LogicalName>Lib.pc-capture.pc-capture-win-x64.exe</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\pc-capture\pc-capture-win-x86.exe" Condition="Exists('Libs\pc-capture\pc-capture-win-x86.exe')">
-			<LogicalName>Lib.pc-capture.pc-capture-win-x86.exe</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\pc-capture\pc-capture-linux-x64" Condition="Exists('Libs\pc-capture\pc-capture-linux-x64')">
 			<LogicalName>Lib.pc-capture.pc-capture-linux-x64</LogicalName>
 		</EmbeddedResource>
@@ -78,9 +74,6 @@
 	<ItemGroup>
 		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x64.dll" Condition="Exists('Libs\dsp\webrtc-apm.x64.dll')">
 			<LogicalName>Lib.dsp.webrtc-apm.x64.dll</LogicalName>
-		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\dsp\webrtc-apm.x86.dll" Condition="Exists('Libs\dsp\webrtc-apm.x86.dll')">
-			<LogicalName>Lib.dsp.webrtc-apm.x86.dll</LogicalName>
 		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\dsp\libwebrtc-apm.so" Condition="Exists('Libs\dsp\libwebrtc-apm.so')">
 			<LogicalName>Lib.dsp.libwebrtc-apm.so</LogicalName>
@@ -118,9 +111,6 @@
 		<EmbeddedResource Include="Libs\pion\pc-pion.x64.dll" Condition="Exists('Libs\pion\pc-pion.x64.dll')">
 			<LogicalName>Lib.pc-pion.pc-pion.x64.dll</LogicalName>
 		</EmbeddedResource>
-		<EmbeddedResource Include="Libs\pion\pc-pion.x86.dll" Condition="Exists('Libs\pion\pc-pion.x86.dll')">
-			<LogicalName>Lib.pc-pion.pc-pion.x86.dll</LogicalName>
-		</EmbeddedResource>
 		<EmbeddedResource Include="Libs\pion\libpc-pion.linux-x64.so" Condition="Exists('Libs\pion\libpc-pion.linux-x64.so')">
 			<LogicalName>Lib.pc-pion.libpc-pion.linux-x64.so</LogicalName>
 		</EmbeddedResource>
@@ -132,14 +122,11 @@
 	<Target Name="AssertDesktopReleaseAssets" BeforeTargets="PrepareResources"
 		Condition="'$(ValidateReleaseAssets)' == 'true'">
 		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x64.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x64.exe" />
-		<Error Condition="!Exists('Libs\pc-capture\pc-capture-win-x86.exe')" Text="Missing release helper: Libs\pc-capture\pc-capture-win-x86.exe" />
 		<Error Condition="!Exists('Libs\pc-capture\pc-capture-linux-x64')" Text="Missing release helper: Libs\pc-capture\pc-capture-linux-x64" />
 		<Error Condition="!Exists('Libs\pc-capture\pc-capture-mac.zip')" Text="Missing release helper: Libs\pc-capture\pc-capture-mac.zip" />
 		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x64.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x64.dll" />
-		<Error Condition="!Exists('Libs\dsp\webrtc-apm.x86.dll')" Text="Missing release DSP: Libs\dsp\webrtc-apm.x86.dll" />
 		<Error Condition="!Exists('Libs\dsp\libwebrtc-apm.so')" Text="Missing release DSP: Libs\dsp\libwebrtc-apm.so" />
 		<Error Condition="!Exists('Libs\pion\pc-pion.x64.dll')" Text="Missing release Pion transport: Libs\pion\pc-pion.x64.dll" />
-		<Error Condition="!Exists('Libs\pion\pc-pion.x86.dll')" Text="Missing release Pion transport: Libs\pion\pc-pion.x86.dll" />
 		<Error Condition="!Exists('Libs\pion\libpc-pion.linux-x64.so')" Text="Missing release Pion transport: Libs\pion\libpc-pion.linux-x64.so" />
 	</Target>
 

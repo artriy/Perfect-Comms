@@ -25,9 +25,13 @@ for arg in "$@"; do
   esac
 done
 
+case "$only" in
+  ""|x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu) ;;
+  *) echo "unsupported helper target: $only" >&2; exit 2 ;;
+esac
+
 declare -a targets=(
   "x86_64-pc-windows-msvc:pc-capture.exe:pc-capture-win-x64.exe"
-  "i686-pc-windows-msvc:pc-capture.exe:pc-capture-win-x86.exe"
   "x86_64-unknown-linux-gnu:pc-capture:pc-capture-linux-x64"
 )
 

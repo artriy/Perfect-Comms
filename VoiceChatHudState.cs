@@ -1107,6 +1107,8 @@ public static partial class VoiceChatHudState
         bool liveLocalReady = false;
         bool roleMuted;
         bool localDead;
+        bool localImpostorTeam;
+        bool localSpectator;
         PlayerControl? liveLocal = null;
         try
         {
@@ -1117,8 +1119,10 @@ public static partial class VoiceChatHudState
 
         if (liveLocalReady)
         {
-            roleMuted = VoiceRoleMuteState.IsLocalVoiceBlocked(phase);
-            localDead = VoiceRoleMuteState.IsVoiceDead(liveLocal);
+            roleMuted = VoiceRoleMuteState.TryGetLocalVoiceBlockReason(
+                phase, out _, out localDead, out localSpectator);
+            var localData = liveLocal!.Data!;
+            localImpostorTeam = localData.Role?.IsImpostor == true;
             if (snapshot != null
                 && snapshot.LiveLocalPlayerResolved
                 && snapshot.TryGetLocalPlayer(out var currentLocal)
@@ -1148,6 +1152,8 @@ public static partial class VoiceChatHudState
                 var local = trusted.Value;
                 roleMuted = IsSnapshotRoleVoiceBlocked(local, phase);
                 localDead = local.IsDead;
+                localImpostorTeam = local.IsImpostorTeam;
+                localSpectator = local.IsSpectator;
             }
             else
             {
@@ -1155,10 +1161,12 @@ public static partial class VoiceChatHudState
                 // mute. Lobby/Intro/EndGame are global voice phases and have no such restriction.
                 roleMuted = ShouldFailClosedWithoutLocalIdentity(phase);
                 localDead = false;
+                localImpostorTeam = false;
+                localSpectator = false;
             }
         }
 
-        bool policyMuted = IsLocalRoomPolicyVoiceBlocked(phase, localDead);
+        bool policyMuted = IsLocalRoomPolicyVoiceBlocked(phase, localDead, localImpostorTeam, localSpectator, out _);
         VoiceChatRoom.Current?.SetMicrophonePolicy(
             CombineTransmitMute(
                 _speakerMuted,
@@ -1308,17 +1316,35 @@ public static partial class VoiceChatHudState
 #endif
         && !TeamRadioBlockedByMeetingPolicy();
 
-    // Gating both input and active-mode prevents entering radio mid-meeting when host forbids it,
-    // avoiding a silent hard-mute to non-teammates during discussion.
     private static bool TeamRadioBlockedByMeetingPolicy()
     {
-        var s = VoiceRoomSettingsState.Current;
         var phase = VoiceSceneState.ResolvePhase();
-        // Meetings: blocked unless radio is allowed in meetings.
-        if (!s.TeamRadioInMeetings && VoiceSceneState.IsMeetingVoicePhase(phase))
+        var settings = VoiceRoomSettingsState.Current;
+        if (settings.TeamRadioInMeetings || !VoiceImpostorPolicy.MeetingRadioEnabled(settings, phase))
+            return TeamRadioBlockedByMeetingPolicy(
+                settings, phase, VoiceTeamRadioChannel.None, false, false, false);
+        var local = PlayerControl.LocalPlayer;
+        VoiceRoleMuteState.GetVoiceLifeState(local, phase, out bool voiceDead, out bool voiceSpectator);
+        return TeamRadioBlockedByMeetingPolicy(
+            settings, phase, NormalizeTeamRadioState().Channel,
+            local?.Data?.Role?.IsImpostor == true, voiceDead, voiceSpectator);
+    }
+
+    internal static bool TeamRadioBlockedByMeetingPolicy(
+        VoiceRoomSettingsSnapshot settings,
+        VoiceGamePhase phase,
+        VoiceTeamRadioChannel selectedChannel,
+        bool actualImpostor,
+        bool voiceDead,
+        bool voiceSpectator)
+    {
+        if (!VoiceSceneState.IsTaskVoicePhase(phase) && !VoiceSceneState.IsMeetingVoicePhase(phase))
             return true;
-        // Tasks: blocked when the meeting/lobby radio option is on but its "Usable in Tasks" sub-toggle is off.
-        if (s.TeamRadioInMeetings && !s.TeamRadioInTasks && VoiceSceneState.IsTaskVoicePhase(phase))
+        if (!settings.TeamRadioInMeetings && VoiceSceneState.IsMeetingVoicePhase(phase))
+            return !VoiceImpostorPolicy.MeetingRadioEnabled(settings, phase)
+                   || !VoiceRoleMuteState.CanUseTeamRadioChannel(
+                       settings, phase, actualImpostor, voiceDead, voiceSpectator, selectedChannel);
+        if (settings.TeamRadioInMeetings && !settings.TeamRadioInTasks && VoiceSceneState.IsTaskVoicePhase(phase))
             return true;
         return false;
     }
@@ -1382,7 +1408,13 @@ public static partial class VoiceChatHudState
 
     private static VoiceRadioState NormalizeTeamRadioState()
     {
+        var settings = VoiceRoomSettingsState.Current;
+        var phase = VoiceSceneState.ResolvePhase();
         if (_teamRadioChannel == VoiceTeamRadioChannel.External
+            && (settings.TeamRadioInMeetings
+                || !VoiceImpostorPolicy.MeetingRadioEnabled(settings, phase)
+                || !VoiceRoleMuteState.CanUseTeamRadioChannel(
+                    PlayerControl.LocalPlayer, VoiceTeamRadioChannel.Impostors))
             && TryFindLocalManagedRadio(_managedTeamRadioKey, out _))
             return VoiceRadioState.Managed(_managedTeamRadioKey);
         if (VoiceRoleMuteState.CanUseTeamRadioChannel(PlayerControl.LocalPlayer, _teamRadioChannel))
@@ -1430,6 +1462,9 @@ public static partial class VoiceChatHudState
     {
         channels = Array.Empty<ExternalVoiceManagedRadioState>();
         if (!VoiceRoomSettingsState.Current.TeamRadio) return false;
+        if (VoiceRoleMuteState.IsVoiceDead(PlayerControl.LocalPlayer) ||
+            VoiceImpostorPolicy.SpecialChatEnabled(VoiceRoomSettingsState.Current, VoiceSceneState.ResolvePhase()))
+            return false;
         var snapshot = VoiceChatRoom.Current?.CurrentSnapshot;
         if (snapshot == null || !snapshot.TryGetLocalPlayer(out var local)) return false;
         channels = local.External.ManagedRadioChannels ?? Array.Empty<ExternalVoiceManagedRadioState>();
@@ -2050,9 +2085,8 @@ public static partial class VoiceChatHudState
     private static bool CanUseTeamRadio()
         => PlayerControl.LocalPlayer != null
         && PlayerControl.LocalPlayer.Data != null
-        && !VoiceRoleMuteState.IsVoiceDead(PlayerControl.LocalPlayer)
         && (VoiceRoleMuteState.CanUseTeamRadio(PlayerControl.LocalPlayer)
-            || TryGetLocalManagedRadios(out _));
+            || (!VoiceRoleMuteState.IsVoiceDead(PlayerControl.LocalPlayer) && TryGetLocalManagedRadios(out _)));
 
     private static bool CanUseImpostorRadio()
         => CanUseTeamRadio();
@@ -2074,24 +2108,32 @@ public static partial class VoiceChatHudState
     }
 
     internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase)
-    {
-        var local = PlayerControl.LocalPlayer;
-        return IsLocalRoomPolicyVoiceBlocked(phase, VoiceRoleMuteState.IsVoiceDead(local), out _);
-    }
+        => IsLocalRoomPolicyVoiceBlocked(phase, out _);
 
-    internal static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead)
-        => IsLocalRoomPolicyVoiceBlocked(phase, localDead, out _);
+    internal static bool IsLocalRoomPolicyVoiceBlocked(
+        VoiceGamePhase phase, bool localDead, bool localImpostorTeam, bool localSpectator)
+        => IsLocalRoomPolicyVoiceBlocked(phase, localDead, localImpostorTeam, localSpectator, out _);
 
     private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, out string reason)
     {
         var local = PlayerControl.LocalPlayer;
-        return IsLocalRoomPolicyVoiceBlocked(phase, VoiceRoleMuteState.IsVoiceDead(local), out reason);
+        VoiceRoleMuteState.GetVoiceLifeState(local, phase, out bool localDead, out bool localSpectator);
+        return IsLocalRoomPolicyVoiceBlocked(phase, localDead,
+            local?.Data?.Role?.IsImpostor == true, localSpectator, out reason);
     }
 
-    private static bool IsLocalRoomPolicyVoiceBlocked(VoiceGamePhase phase, bool localDead, out string reason)
+    private static bool IsLocalRoomPolicyVoiceBlocked(
+        VoiceGamePhase phase, bool localDead, bool localImpostorTeam, bool localSpectator, out string reason)
     {
         reason = string.Empty;
         var settings = VoiceRoomSettingsState.Current;
+        if (VoiceImpostorPolicy.SpecialChatEnabled(settings, phase))
+        {
+            if (VoiceImpostorPolicy.CanTransmit(settings, localImpostorTeam, localDead, localSpectator))
+                return false;
+            reason = "Impostor Chat Only";
+            return true;
+        }
 
         if (settings.OnlyMeetingOrLobby &&
             VoiceSceneState.IsTaskVoicePhase(phase) &&

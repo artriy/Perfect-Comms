@@ -9,26 +9,15 @@ namespace VoiceChatPlugin.VoiceChat;
 /// </summary>
 internal static class VoiceRoleMuteState
 {
-    private static byte _gracePeriodCallerId = byte.MaxValue;
-    private static float _gracePeriodDeadline;
-    private static float _gracePeriodSeconds;
-    private static bool _gracePeriodArmed;
+    private static readonly MeetingVoiceFloor Floor = new();
 
     internal static void Update()
     {
-        var phase = VoiceSceneState.ResolvePhase();
-        if (VoiceSceneState.IsMeetingVoicePhase(phase))
-        {
-            if (_gracePeriodCallerId != byte.MaxValue && !_gracePeriodArmed && MeetingHud.Instance != null)
-            {
-                _gracePeriodDeadline = Time.time + _gracePeriodSeconds;
-                _gracePeriodArmed = true;
-            }
-            return;
-        }
-
-        if (_gracePeriodArmed && phase is VoiceGamePhase.Tasks or VoiceGamePhase.Lobby)
-            ClearGracePeriod();
+        Floor.Update(
+            VoiceSceneState.ResolvePhase(),
+            MeetingHud.Instance != null,
+            VoiceRoomSettingsState.Current.GracePeriodEnabled,
+            Time.unscaledTime);
     }
 
     internal static bool IsLocalVoiceBlocked()
@@ -43,39 +32,61 @@ internal static class VoiceRoleMuteState
 
     internal static bool IsVoiceDead(PlayerControl? player)
     {
+        GetVoiceLifeState(player, VoiceSceneState.ResolvePhase(), out bool voiceDead, out _);
+        return voiceDead;
+    }
+
+    internal static void GetVoiceLifeState(
+        PlayerControl? player, VoiceGamePhase phase, out bool voiceDead, out bool voiceSpectator)
+    {
+        voiceDead = false;
+        voiceSpectator = false;
         if (player == null)
-            return false;
+            return;
 
         var data = player.Data;
-        bool baseDead = data != null && (data.IsDead || data.Role?.IsDead == true);
+        bool dataDead = data?.IsDead == true;
+        bool roleDead = data?.Role?.IsDead == true;
         VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
             player,
-            VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase()),
+            VoiceModBridge.ToApiPhase(phase),
             player == PlayerControl.LocalPlayer,
-            baseDead);
-        return baseDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
+            dataDead || roleDead);
+        ResolveVoiceLifeState(dataDead, roleDead, traits, out voiceDead, out voiceSpectator);
+    }
+
+    internal static void ResolveVoiceLifeState(
+        bool dataDead, bool roleDead, VoicePlayerTraits traits,
+        out bool voiceDead, out bool voiceSpectator)
+    {
+        voiceDead = dataDead || roleDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
+        voiceSpectator = (roleDead && !dataDead) || (traits & VoicePlayerTraits.Spectator) != 0;
     }
 
     internal static bool TryGetLocalVoiceBlockReason(out string reason)
         => TryGetLocalVoiceBlockReason(VoiceSceneState.ResolvePhase(), out reason);
 
     internal static bool TryGetLocalVoiceBlockReason(VoiceGamePhase phase, out string reason)
+        => TryGetLocalVoiceBlockReason(phase, out reason, out _, out _);
+
+    internal static bool TryGetLocalVoiceBlockReason(
+        VoiceGamePhase phase, out string reason, out bool voiceDead, out bool voiceSpectator)
     {
         reason = string.Empty;
+        voiceDead = false;
+        voiceSpectator = false;
         Update();
 
         var local = PlayerControl.LocalPlayer;
         if (local == null)
             return false;
 
-        var data = local.Data;
-        bool baseDead = data != null && (data.IsDead || data.Role?.IsDead == true);
-        VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
-            local,
-            VoiceModBridge.ToApiPhase(phase),
-            isLocal: true,
-            baseDead);
-        bool voiceDead = baseDead || (traits & VoicePlayerTraits.VoiceDead) != 0;
+        GetVoiceLifeState(local, phase, out voiceDead, out voiceSpectator);
+        if (Floor.Blocks(local.PlayerId, voiceDead, phase, Time.unscaledTime))
+        {
+            reason = "Caller has the floor";
+            return true;
+        }
 
         if (!VoiceModRegistry.LocalGate(
                 local,
@@ -103,7 +114,9 @@ internal static class VoiceRoleMuteState
         => IsMeetingVoiceBlocked(player, VoiceSceneState.ResolvePhase());
 
     internal static bool IsMeetingVoiceBlocked(VoicePlayerSnapshot player, VoiceGamePhase phase)
-        => VoiceSceneState.IsMeetingVoicePhase(phase) && !player.IsDead && player.External.Muted;
+        => VoiceSceneState.IsMeetingVoicePhase(phase) &&
+           ((!player.IsDead && player.External.Muted) ||
+            (Floor.CallerId != byte.MaxValue && Floor.Blocks(player.PlayerId, player.IsDead, phase, Time.unscaledTime)));
 
     internal static VoiceProximityReason GetMeetingBlockReason(VoicePlayerSnapshot player)
         => GetMeetingBlockReason(player, VoiceSceneState.ResolvePhase());
@@ -113,7 +126,7 @@ internal static class VoiceRoleMuteState
         VoiceGamePhase phase)
         => player.External.Muted
             ? VoiceProximityReason.RoleMuted
-            : VoiceProximityReason.MeetingLiving;
+            : VoiceProximityReason.GracePeriod;
 
     internal static bool IsTaskVoiceBlocked(VoicePlayerSnapshot player)
         => !player.IsDead && player.External.Muted;
@@ -124,22 +137,6 @@ internal static class VoiceRoleMuteState
             : VoiceProximityReason.Proximity;
 
 
-    internal static bool IsVoiceImpostor(PlayerControl? player)
-    {
-        if (player?.Data?.Role?.IsImpostor == true)
-            return true;
-        if (player == null)
-            return false;
-
-        var data = player.Data;
-        bool baseDead = data != null && (data.IsDead || data.Role?.IsDead == true);
-        VoicePlayerTraits traits = VoiceModRegistry.ResolvePlayerTraits(
-            player,
-            VoiceModBridge.ToApiPhase(VoiceSceneState.ResolvePhase()),
-            player == PlayerControl.LocalPlayer,
-            baseDead);
-        return (traits & VoicePlayerTraits.ImpostorVoice) != 0;
-    }
 
     internal static bool CanUseTeamRadio(PlayerControl? player)
         => GetFirstTeamRadioChannel(player) != VoiceTeamRadioChannel.None;
@@ -172,50 +169,43 @@ internal static class VoiceRoleMuteState
     internal static bool CanUseTeamRadioChannel(
         PlayerControl? player,
         VoiceTeamRadioChannel channel)
-        => player != null &&
-           VoiceRoomSettingsState.Current.TeamRadio &&
-           channel == VoiceTeamRadioChannel.Impostors &&
-           VoiceRoomSettingsState.Current.TeamRadioImpostors &&
-           IsVoiceImpostor(player);
+    {
+        if (channel != VoiceTeamRadioChannel.Impostors || player?.Data?.Role?.IsImpostor != true)
+            return false;
+        var phase = VoiceSceneState.ResolvePhase();
+        GetVoiceLifeState(player, phase, out bool voiceDead, out bool voiceSpectator);
+        return CanUseTeamRadioChannel(
+            VoiceRoomSettingsState.Current, phase, true,
+            voiceDead, voiceSpectator, channel);
+    }
+
+    internal static bool CanUseTeamRadioChannel(
+        VoiceRoomSettingsSnapshot settings,
+        VoiceGamePhase phase,
+        bool actualImpostor,
+        bool voiceDead,
+        bool voiceSpectator,
+        VoiceTeamRadioChannel channel)
+        => channel == VoiceTeamRadioChannel.Impostors
+        && (VoiceImpostorPolicy.MeetingRadioEnabled(settings, phase) ||
+            settings.TeamRadio && settings.TeamRadioImpostors)
+        && VoiceImpostorPolicy.CanTransmit(settings, actualImpostor, voiceDead, voiceSpectator);
 
 
-    internal static void Reset() => ClearGracePeriod();
+    internal static void Reset() => Floor.Reset();
 
     internal static void OnMeetingStarted(byte callerId)
     {
-        var settings = VoiceRoomSettingsState.Current;
-        if (!settings.GracePeriodEnabled || settings.GracePeriodSeconds <= 0f)
-        {
-            ClearGracePeriod();
-            return;
-        }
-
-        _gracePeriodCallerId = callerId;
-        _gracePeriodSeconds = settings.GracePeriodSeconds;
-        _gracePeriodDeadline = 0f;
-        _gracePeriodArmed = false;
+        Floor.Begin(callerId, VoiceRoomSettingsState.Current);
+        VoiceChatHudState.InvalidateAudioPolicyCache();
         VoiceChatHudState.ApplyMicState();
     }
 
-    private static void ClearGracePeriod()
-    {
-        _gracePeriodCallerId = byte.MaxValue;
-        _gracePeriodDeadline = 0f;
-        _gracePeriodSeconds = 0f;
-        _gracePeriodArmed = false;
-    }
-
     internal static bool IsGracePeriodActive
-        => _gracePeriodCallerId != byte.MaxValue &&
-           _gracePeriodArmed &&
-           VoiceRoomSettingsState.Current.GracePeriodEnabled &&
-           MeetingHud.Instance != null &&
-           Time.time < _gracePeriodDeadline;
+        => Floor.CallerId != byte.MaxValue && Floor.Active(Time.unscaledTime);
 
-    internal static byte GracePeriodCallerId => _gracePeriodCallerId;
+    internal static byte GracePeriodCallerId => Floor.CallerId;
 
     internal static int GracePeriodSecondsRemaining
-        => IsGracePeriodActive
-            ? Mathf.Max(1, Mathf.CeilToInt(_gracePeriodDeadline - Time.time))
-            : 0;
+        => Floor.CallerId != byte.MaxValue ? Floor.SecondsRemaining(Time.unscaledTime) : 0;
 }

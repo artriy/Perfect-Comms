@@ -217,6 +217,15 @@ impl Apm {
         )
     }
 
+    pub fn reset_capture_history(&mut self) -> Result<(), String> {
+        let status = unsafe { (self.api.init)(self.a) };
+        if status != 0 {
+            return Err(format!("privacy-init:{status}"));
+        }
+        self.processed.fill(0.0);
+        Ok(())
+    }
+
     pub fn chunk(&self) -> usize {
         self.chunk
     }
@@ -340,7 +349,7 @@ impl Drop for Apm {
 mod tests {
     use super::{
         analyze_frame_chunks, noise_suppression_level, process_frame_chunks_fail_open,
-        sanitize_stream_delay_ms, Apm, FRAME, NS_LEVEL_HIGH, NS_LEVEL_VERY_HIGH,
+        sanitize_stream_delay_ms, Apm, FRAME, NS_LEVEL_HIGH, NS_LEVEL_VERY_HIGH, RATE,
     };
 
     #[test]
@@ -469,6 +478,65 @@ mod tests {
         assert!(
             suppressed_rms < bypass_rms * 0.85,
             "suppression RMS {suppressed_rms:.6} was not below bypass RMS {bypass_rms:.6}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn capture_privacy_reset_discards_noise_suppressor_and_filter_pcm_history() {
+        let path =
+            std::env::var("APM_LIB").expect("set APM_LIB to the webrtc-apm shared library path");
+        let mut reset = Apm::load(&path, false, true, false, false, true).expect("load reset APM");
+        let mut continuing =
+            Apm::load(&path, false, true, false, false, true).expect("load continuing APM");
+        let mut fresh = Apm::load(&path, false, true, false, false, true).expect("load fresh APM");
+        for frame_index in 0..12 {
+            let private_pcm: Vec<f32> = (0..FRAME)
+                .map(|sample| {
+                    ((frame_index * FRAME + sample) as f32 * std::f32::consts::TAU * 731.0
+                        / RATE as f32)
+                        .sin()
+                        * 0.6
+                })
+                .collect();
+            reset
+                .process_capture(&mut private_pcm.clone())
+                .expect("private reset capture");
+            continuing
+                .process_capture(&mut private_pcm.clone())
+                .expect("private continuing capture");
+        }
+        reset.reset_capture_history().expect("privacy reset");
+        let public_pcm: Vec<f32> = (0..FRAME)
+            .map(|sample| {
+                (sample as f32 * std::f32::consts::TAU * 317.0 / RATE as f32).sin() * 0.02
+            })
+            .collect();
+        let mut reset_output = public_pcm.clone();
+        let mut continuing_output = public_pcm.clone();
+        let mut fresh_output = public_pcm;
+        reset
+            .process_capture(&mut reset_output)
+            .expect("reset public capture");
+        continuing
+            .process_capture(&mut continuing_output)
+            .expect("continuing public capture");
+        fresh
+            .process_capture(&mut fresh_output)
+            .expect("fresh public capture");
+        assert!(
+            reset_output
+                .iter()
+                .zip(&fresh_output)
+                .all(|(reset, fresh)| (reset - fresh).abs() < 0.000001),
+            "private DSP PCM survived reset"
+        );
+        assert!(
+            continuing_output
+                .iter()
+                .zip(&fresh_output)
+                .any(|(continuing, fresh)| (continuing - fresh).abs() > 0.00001),
+            "test did not exercise retained DSP audio history"
         );
     }
 }

@@ -6,7 +6,10 @@ use std::slice;
 use cubeb_backend::SampleFormat;
 use num::cast::AsPrimitive;
 
-use super::ringbuf::RingBuffer;
+use super::ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapCons, HeapProd, HeapRb,
+};
 
 use self::LinearBuffer::*;
 use self::RingBufferConsumer::*;
@@ -136,13 +139,13 @@ fn process_data<T: DataType>(
 }
 
 pub enum RingBufferConsumer {
-    IntegerRingBufferConsumer(ringbuf::Consumer<i16>),
-    FloatRingBufferConsumer(ringbuf::Consumer<f32>),
+    IntegerRingBufferConsumer(HeapCons<i16>),
+    FloatRingBufferConsumer(HeapCons<f32>),
 }
 
 pub enum RingBufferProducer {
-    IntegerRingBufferProducer(ringbuf::Producer<i16>),
-    FloatRingBufferProducer(ringbuf::Producer<f32>),
+    IntegerRingBufferProducer(HeapProd<i16>),
+    FloatRingBufferProducer(HeapProd<f32>),
 }
 
 pub enum LinearBuffer {
@@ -180,7 +183,7 @@ impl BufferManager {
         let buffer_element_count = output_channel_count * buffer_size_frames * 8;
         match format {
             SampleFormat::S16LE | SampleFormat::S16BE | SampleFormat::S16NE => {
-                let ring = RingBuffer::<i16>::new(buffer_element_count);
+                let ring = HeapRb::<i16>::new(buffer_element_count);
                 let (prod, cons) = ring.split();
                 Self {
                     producer: IntegerRingBufferProducer(prod),
@@ -194,7 +197,7 @@ impl BufferManager {
                 }
             }
             SampleFormat::Float32LE | SampleFormat::Float32BE | SampleFormat::Float32NE => {
-                let ring = RingBuffer::<f32>::new(buffer_element_count);
+                let ring = HeapRb::<f32>::new(buffer_element_count);
                 let (prod, cons) = ring.split();
                 Self {
                     producer: FloatRingBufferProducer(prod),
@@ -339,8 +342,8 @@ impl BufferManager {
     pub fn available_frames(&self) -> usize {
         assert_ne!(self.stored_channel_count(), 0);
         let stored_samples = match &self.consumer {
-            IntegerRingBufferConsumer(p) => p.len(),
-            FloatRingBufferConsumer(p) => p.len(),
+            IntegerRingBufferConsumer(p) => p.occupied_len(),
+            FloatRingBufferConsumer(p) => p.occupied_len(),
         };
         stored_samples / self.stored_channel_count()
     }
@@ -348,16 +351,16 @@ impl BufferManager {
         let final_sample_count = final_frame_count * self.stored_channel_count();
         match &mut self.consumer {
             IntegerRingBufferConsumer(c) => {
-                let available = c.len();
+                let available = c.occupied_len();
                 assert!(available >= final_sample_count);
                 let to_pop = available - final_sample_count;
-                c.discard(to_pop);
+                c.skip(to_pop);
             }
             FloatRingBufferConsumer(c) => {
-                let available = c.len();
+                let available = c.occupied_len();
                 assert!(available >= final_sample_count);
                 let to_pop = available - final_sample_count;
-                c.discard(to_pop);
+                c.skip(to_pop);
             }
         }
     }
@@ -376,5 +379,53 @@ mod tests {
     fn remix_stereo_ints() {
         let mut data = [i16::MAX / 2 + 1, i16::MAX / 2 + 1];
         assert_eq!(remix_or_drop_channels(2, 1, &mut data, 1), 1);
+    }
+
+    #[test]
+    fn sample_buffer_integer_wraparound_trim_and_silence() {
+        let mut buffer = BufferManager::new(SampleFormat::S16NE, 1, 1, 0, 1);
+        let mut input = [1i16, 2, 3, 4, 5, 6, 7, 8, 9];
+        buffer.push_data(input.as_mut_ptr().cast(), input.len());
+        assert_eq!(buffer.available_frames(), 8);
+        let output = buffer.get_linear_data(3);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(output.cast::<i16>(), 3) },
+            [1, 2, 3]
+        );
+        let mut input = [10i16, 11, 12];
+        buffer.push_data(input.as_mut_ptr().cast(), input.len());
+        assert_eq!(buffer.available_frames(), 8);
+        buffer.trim(3);
+        assert_eq!(buffer.available_frames(), 3);
+        let output = buffer.get_linear_data(5);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(output.cast::<i16>(), 5) },
+            [10, 11, 12, 0, 0]
+        );
+        assert_eq!(buffer.available_frames(), 0);
+    }
+
+    #[test]
+    fn sample_buffer_float_wraparound_trim_and_silence() {
+        let mut buffer = BufferManager::new(SampleFormat::Float32NE, 1, 1, 0, 1);
+        let mut input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        buffer.push_data(input.as_mut_ptr().cast(), input.len());
+        assert_eq!(buffer.available_frames(), 8);
+        let output = buffer.get_linear_data(3);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(output.cast::<f32>(), 3) },
+            [1.0, 2.0, 3.0]
+        );
+        let mut input = [10.0f32, 11.0, 12.0];
+        buffer.push_data(input.as_mut_ptr().cast(), input.len());
+        assert_eq!(buffer.available_frames(), 8);
+        buffer.trim(3);
+        assert_eq!(buffer.available_frames(), 3);
+        let output = buffer.get_linear_data(5);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(output.cast::<f32>(), 5) },
+            [10.0, 11.0, 12.0, 0.0, 0.0]
+        );
+        assert_eq!(buffer.available_frames(), 0);
     }
 }

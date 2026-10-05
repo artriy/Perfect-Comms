@@ -232,6 +232,48 @@ func pc_pion_set_ice_servers(handle C.uint64_t, data *C.uint8_t, length C.uint32
 	}
 	return statusOK
 }
+func decodeRadioReceivers(data []byte) ([]string, error) {
+	if !utf8.Valid(data) {
+		return nil, errors.New("input is not UTF-8")
+	}
+	var receivers []string
+	if err := json.Unmarshal(data, &receivers); err != nil {
+		return nil, err
+	}
+	for _, id := range receivers {
+		if id == "" || len(id) > 256 || !utf8.ValidString(id) {
+			return nil, errors.New("invalid receiver id")
+		}
+	}
+	return receivers, nil
+}
+
+//export pc_pion_set_private_radio
+func pc_pion_set_private_radio(handle C.uint64_t, active C.uint32_t, data *C.uint8_t, length C.uint32_t, epoch C.uint64_t, timeoutMS C.uint32_t) (status C.int32_t) {
+	defer recoverStatus(&status)
+	e, code := registeredEngine(handle)
+	if code != statusOK {
+		return C.int32_t(code)
+	}
+	if active > 1 {
+		return statusArgument
+	}
+	var receivers []string
+	if active != 0 {
+		b, err := copiedBytes(data, length, 256*1024)
+		if err != nil {
+			return statusArgument
+		}
+		receivers, err = decodeRadioReceivers(b)
+		if err != nil {
+			return statusArgument
+		}
+	}
+	if !e.setPrivateRadio(active != 0, receivers, uint64(epoch), time.Duration(timeoutMS)*time.Millisecond) {
+		return statusState
+	}
+	return statusOK
+}
 
 //export pc_pion_add_peer
 func pc_pion_add_peer(

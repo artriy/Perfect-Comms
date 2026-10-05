@@ -1,5 +1,58 @@
 # Changelog
 
+## Perfect Comms v4.1.11
+
+Perfect Comms v4.1.11 supports Among Us v19 across all supported platforms, adds Push To Talk and Team Radio support while performing tasks, and introduces new host options for impostor chat across death and during meetings.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/artriy/Perfect-Comms/v4.1.11/assets/brand/divider.svg" alt="divider" width="900">
+</p>
+
+### Among Us v19 Compatibility
+
+- **Voice chat supports Among Us v19 across all supported platforms.**
+  > <sub>Compatibility covers Windows, Linux/Proton, macOS/Wine, and Starlight Android. The desktop build targets Steam Among Us <code>2026.9.29</code>. Windows x86 native payloads are no longer built, embedded, or packaged; Windows players need an x64 IL2CPP loader.</sub>
+
+### Task Voice and Impostor Chat
+
+- **Push To Talk and Team Radio work while performing tasks.**
+  > <sub>Task interactions no longer block those voice controls. Typing, open modals, rebinding, focus loss, and physical-release quarantine still prevent unintended transmission.</sub>
+
+- **New host option: global impostor chat during tasks.**
+  > <sub>Hosts can enable the new <b>Meeting Only - Impostor Chat</b> option to let living actual impostors speak across the map during tasks. All ghosts and spectators can listen, but living crew and mod-added voice privileges do not gain access. Meetings retain normal speech unless the separate meeting radio option is enabled.</sub>
+
+- **New host option: let dead impostors answer their living teammates.**
+  > <sub>Hosts can enable the new <b>Impostors Talk Across Death</b> option to let dead actual impostors reply in task-only impostor chat and impostor Team Radio. With it off, dead impostors can still hear living impostors. Crew ghosts and spectators remain listen-only on these channels; their normal ghost chat remains available.</sub>
+
+- **Haunting no longer removes ghosts from voice chat.**
+  > <sub>Ghosts remain voice participants when their player object is hidden. Ghost, impostor-only, and meeting restrictions still apply.</sub>
+
+### Private Meeting Radio
+
+- **New host option: private impostor radio during meetings.**
+  > <sub>The new <b>Impostors Talk Across Death in Meetings</b> option appears directly beneath <b>Impostors Talk Across Death</b>. When the host enables both, living and dead actual impostors can hold their existing radio control (default V on desktop or the Starlight radio button) to talk privately. Living actual impostors, all ghosts, and spectators can listen; living crew receive neither private audio packets nor radio state. Crew ghosts and spectators cannot transmit.</sub>
+
+- **Meeting radio has its own host setting and returns to normal speech on release.**
+  > <sub>The option works only during Meeting, independently of ordinary Team Radio and task-only impostor chat settings. Releasing radio restores ordinary meeting speech and death separation. Task and Exile rules stay unchanged, mute controls and caller grace still apply, and an explicit off preference survives turning the parent setting off and back on.</sub>
+
+- **Meeting caller grace now gives the caller the speaking floor.**
+  > <sub>The opening grace period blocks other living speakers rather than only showing a countdown. Existing ghost exemptions remain unchanged.</sub>
+
+### Voice Privacy and Compatibility
+
+- **Private speech stays within its authorized audience, including at channel changes.**
+  > <sub>Private Team Radio, task-only impostor chat, and impostor meeting radio send audio only to eligible peers. Audience changes discard captured speech, queued RTP, retransmission caches, and codec history before opening a wider audience. Windows capture stays muted until helper startup and the initial private audience configuration have both completed.</sub>
+
+- **Radio indicators follow the same audience and phase rules as audio.**
+  > <sub>Only authorized clients receive radio state, and phase transitions clear stale radio state and queued playback routes. Holding Team Radio does not restrict the global call in menus, lobbies, Intro, or results screens. Spectator capture and playback use the same eligibility rules, and a meeting voice failure no longer aborts the game transition.</sub>
+
+- **Mod integrations retain their pair mutes, volume, and voice routing.**
+  > <sub>Eligible private-chat listeners keep API pair-route gain and shape, including zero-volume silence. Pair routes cannot grant private-channel access or bypass normal meeting death separation; the host-authorized impostor meeting radio is the explicit exception. Native connection behavior and Pion dependency pins remain unchanged from v4.1.10.</sub>
+
+- **Native audio dependencies address a published memory-safety advisory.**
+  > <sub>The vendored CoreAudio and PulseAudio Rust backends now use patched <code>ringbuf 0.5.2</code>, addressing <a href="https://rustsec.org/advisories/RUSTSEC-2026-0293.html">RUSTSEC-2026-0293</a>. Existing sample buffers and callback logging use primitive types without a panicking destructor, so those consumers do not trigger the reported fault. Buffer capacity, overflow, sample order, and underrun silence remain unchanged.</sub>
+
+
 ## Perfect Comms v4.1.10
 
 Perfect Comms v4.1.10 supports the new Among Us v18 meeting player identifiers while retaining compatibility with validated pre-v18 releases.

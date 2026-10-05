@@ -113,8 +113,6 @@ pub struct Dsp {
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 const APM_LIB: &str = "webrtc-apm.x64.dll";
-#[cfg(all(windows, target_arch = "x86"))]
-const APM_LIB: &str = "webrtc-apm.x86.dll";
 #[cfg(target_os = "linux")]
 const APM_LIB: &str = "libwebrtc-apm.so";
 #[cfg(target_os = "macos")]
@@ -226,6 +224,16 @@ impl Dsp {
         // APM instance and its adaptive filter, but do not carry the previous stream's smoothed
         // delay marker into the first frame from the new generation.
         self.aec_stream_delay = AecStreamDelay::default();
+    }
+
+    pub fn reset_capture_history(&mut self) -> Result<(), String> {
+        if let Some(apm) = self.apm.as_mut() {
+            apm.reset_capture_history()?;
+        }
+        self.mono.fill(0.0);
+        self.aec_stream_delay = AecStreamDelay::default();
+        self.playback_timing_epoch = None;
+        Ok(())
     }
 
     pub fn far_end(&mut self, stereo: &[f32]) {

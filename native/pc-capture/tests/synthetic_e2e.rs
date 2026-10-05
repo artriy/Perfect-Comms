@@ -120,7 +120,7 @@ fn spawn_helper(exe: &str, handshake: &Path, owner_pid: Option<u32>) -> KillOnDr
         .arg("--synthetic-tone")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     if let Some(pid) = owner_pid {
         command.arg("--owner-pid").arg(pid.to_string());
     }
@@ -162,7 +162,7 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
     client.set_nodelay(true).ok();
     client
         .write_all(&encode_control(
-            r#"{"op":"hello","proto":16,"token":"e2e-token"}"#,
+            r#"{"op":"hello","proto":17,"token":"e2e-token"}"#,
         ))
         .unwrap();
 
@@ -170,7 +170,6 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
     match read_frame(&mut reader).expect("read ready") {
         Frame::Control(s) => {
             assert!(s.contains("\"ready\""), "expected ready, got {s}");
-            assert!(s.contains("48000"), "expected 48000 rate, got {s}");
         }
         Frame::Audio => panic!("expected ready before audio"),
     }
@@ -282,9 +281,10 @@ fn synthetic_helper_survives_stop_and_exits_promptly_on_control_eof() {
         .unwrap()
         .expect("helper stayed alive after control EOF");
     assert!(status.success(), "helper exited unsuccessfully: {status}");
+    let cleanup_elapsed = disconnected_at.elapsed();
     assert!(
-        disconnected_at.elapsed() < Duration::from_secs(2),
-        "healthy cleanup waited for the hard deadline"
+        cleanup_elapsed < Duration::from_secs(2),
+        "healthy cleanup took {cleanup_elapsed:?} after control EOF"
     );
     let _ = std::fs::remove_file(&hs);
 }

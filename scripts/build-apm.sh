@@ -7,7 +7,6 @@ set -euo pipefail
 #
 # Targets:
 #   win-x64    -> webrtc-apm.x64.dll   (mingw cross: x86_64-w64-mingw32)
-#   win-x86    -> webrtc-apm.x86.dll   (mingw cross: i686-w64-mingw32)
 #   linux-x64  -> libwebrtc-apm.so     (native gcc)
 #   mac-x64    -> libwebrtc-apm.x64.dylib  (native Intel macOS clang)
 #   mac-arm64  -> libwebrtc-apm.arm64.dylib (native Apple-Silicon clang)
@@ -22,11 +21,10 @@ target="${1:-}"
 
 case "$target" in
   win-x64)   crossfile="$cross/windows-x64.crossfile"; ext="dll";   out="webrtc-apm.x64.dll" ;;
-  win-x86)   crossfile="$cross/windows-x86.crossfile"; ext="dll";   out="webrtc-apm.x86.dll" ;;
   linux-x64) crossfile="";                             ext="so";    out="libwebrtc-apm.so" ;;
   mac-x64)   crossfile="";                             ext="dylib"; out="libwebrtc-apm.x64.dylib" ;;
   mac-arm64) crossfile="";                             ext="dylib"; out="libwebrtc-apm.arm64.dylib" ;;
-  *) echo "usage: build-apm.sh {win-x64|win-x86|linux-x64|mac-x64|mac-arm64}" >&2; exit 2 ;;
+  *) echo "usage: build-apm.sh {win-x64|linux-x64|mac-x64|mac-arm64}" >&2; exit 2 ;;
 esac
 
 if [[ ! -f "$src/meson.build" ]]; then

@@ -20,9 +20,7 @@ Perfect Comms is a standalone voice plugin for Among Us. The desktop build runs 
 > Use this path if your mod does not provide BepInEx, or if you are not using another mod.
 >
 > 1. Download **BepInEx 6 Unity IL2CPP** from the [official BepInEx build page](https://builds.bepinex.dev/projects/bepinex_be).
-> 2. Choose the build for your platform:
->    - **Steam or itch.io:** `Unity.IL2CPP-win-x86`
->    - **Epic Games Store or Microsoft Store:** `Unity.IL2CPP-win-x64`
+> 2. For the x64 Windows game on Windows, Linux/Proton, or macOS/Wine, including Steam Among Us `2026.9.29`, choose `Unity.IL2CPP-win-x64`. Windows x86 is not supported.
 > 3. Extract BepInEx directly into the folder containing `Among Us.exe`.
 > 4. Launch the game once to complete BepInEx setup, then close it.
 > 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
@@ -87,7 +85,7 @@ testing build's log instructions.
 | Reactor | No | No |
 | TOU-Mira | No; optional role integration | No |
 
-Perfect Comms v4.1.10 supports Among Us `2026.3.31`, `2026.6.5`, and `2026.8.18` (v18.0.0). Desktop requires BepInEx 6 Unity IL2CPP and uses `PerfectComms.dll`. Android uses the managed net10.0 `PerfectCommsStarlight.dll`, compiled against the locked `AmongUs.GameLibs.Android` package and distributed as one self-contained managed assembly. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
+Desktop releases support Windows, Linux/Proton, and macOS/Wine, using the x64 Windows game build with BepInEx 6 Unity IL2CPP. The latest desktop build targets Steam Among Us `2026.9.29` and uses `PerfectComms.dll` with host-native audio helpers; Windows x86 is not supported. Android uses the managed net10.0 `PerfectCommsStarlight.dll`, compiled against `AmongUs.GameLibs.Android` `2026.8.18` and the Starlight `1.6.3` host contract, and distributed as one self-contained managed assembly. Perfect Comms detects supported mods such as TOU-Mira at runtime and enables their voice behavior only when they are present. Those mods provide their own MiraAPI or Reactor dependencies; Perfect Comms does not load or require them.
 
 ## Updating
 

@@ -1527,7 +1527,9 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }
@@ -2458,6 +2460,7 @@ struct CaptureCallbackProcessor {
     resources: CaptureCallbackResources,
     sample_rate: u32,
     device_change_epoch: u64,
+    encoder_epoch: u64,
     capture_clock: CaptureClockMapper,
     resampler: Resampler,
     accumulator: FrameAccumulator,
@@ -2470,6 +2473,7 @@ impl CaptureCallbackProcessor {
         let mut resampler = Resampler::new(sample_rate);
         resampler.reserve_realtime_input(CAPTURE_PROCESS_CHUNK_FRAMES);
         let device_change_epoch = resources.device_change.epoch();
+        let encoder_epoch = resources.encoder_epoch.load(Ordering::Acquire);
         let preroll_filter = WasapiPrerollFilter::new(
             resources.wasapi_preroll_filter,
             sample_rate,
@@ -2479,6 +2483,7 @@ impl CaptureCallbackProcessor {
             resources,
             sample_rate,
             device_change_epoch,
+            encoder_epoch,
             capture_clock: CaptureClockMapper::default(),
             resampler,
             accumulator: FrameAccumulator::with_capacity(
@@ -2488,6 +2493,17 @@ impl CaptureCallbackProcessor {
             resampled_scratch: Vec::with_capacity(MAX_RESAMPLED_CHUNK_SAMPLES),
             preroll_filter,
         }
+    }
+
+    fn begin_callback(&mut self) -> u64 {
+        let epoch = self.resources.encoder_epoch.load(Ordering::Acquire);
+        if epoch != self.encoder_epoch {
+            self.resampler.reset();
+            self.accumulator.reset();
+            self.resources.diagnostics.set_accumulator_pending(0);
+            self.encoder_epoch = epoch;
+        }
+        epoch
     }
 
     fn classify_preroll(
@@ -2519,7 +2535,18 @@ impl CaptureCallbackProcessor {
         decision
     }
 
-    fn process(&mut self, mono: &[f32], raw: &[f32], input_frames: usize) {
+    fn process(
+        &mut self,
+        mono: &[f32],
+        raw: &[f32],
+        input_frames: usize,
+        callback_encoder_epoch: u64,
+    ) {
+        if callback_encoder_epoch != self.encoder_epoch
+            || callback_encoder_epoch != self.resources.encoder_epoch.load(Ordering::Acquire)
+        {
+            return;
+        }
         if self
             .resources
             .device_change
@@ -2536,7 +2563,6 @@ impl CaptureCallbackProcessor {
             self.resources.diagnostics.note_timestamp_discontinuity();
         }
         let resources = &self.resources;
-        let callback_encoder_epoch = resources.encoder_epoch.load(Ordering::Acquire);
         let observation = resources.aec_timing.observe_input_callback(
             &mut self.capture_clock,
             load_cubeb_latency(&resources.backend_latency_frames),
@@ -2574,6 +2600,9 @@ impl CaptureCallbackProcessor {
 
         let mut produced_frames = 0;
         for (chunk_index, chunk) in mono.chunks(CAPTURE_PROCESS_CHUNK_FRAMES).enumerate() {
+            if callback_encoder_epoch != resources.encoder_epoch.load(Ordering::Acquire) {
+                break;
+            }
             let frame_offset = chunk_index.saturating_mul(CAPTURE_PROCESS_CHUNK_FRAMES);
             let chunk_capture_ts_ns = observation.first_sample_mono_ns.saturating_add(
                 (frame_offset as u64).saturating_mul(1_000_000_000) / u64::from(self.sample_rate),
@@ -2593,6 +2622,9 @@ impl CaptureCallbackProcessor {
                 &self.resampled_scratch,
                 timing,
                 |timing, samples| {
+                    if callback_encoder_epoch != resources.encoder_epoch.load(Ordering::Acquire) {
+                        return;
+                    }
                     let _ = resources.ring.push(
                         CaptureFrameMetadata {
                             encoder_epoch: callback_encoder_epoch,
@@ -2684,6 +2716,7 @@ impl StereoCaptureRealtime {
     }
 
     fn process<T: CubebCaptureSample>(&mut self, input: &[StereoFrame<T>]) -> bool {
+        let callback_encoder_epoch = self.processor.begin_callback();
         let decision = self.processor.classify_preroll(input.len(), |index| {
             input[index].l.to_float() == 0.0 && input[index].r.to_float() == 0.0
         });
@@ -2703,7 +2736,8 @@ impl StereoCaptureRealtime {
         }
         let raw = &self.raw_scratch[..samples];
         let mono = self.downmixer.process(raw);
-        self.processor.process(mono, raw, input.len());
+        self.processor
+            .process(mono, raw, input.len(), callback_encoder_epoch);
         true
     }
 }
@@ -2741,6 +2775,7 @@ impl MonoCaptureRealtime {
     }
 
     fn process<T: CubebCaptureSample>(&mut self, input: &[MonoFrame<T>]) -> bool {
+        let callback_encoder_epoch = self.processor.begin_callback();
         let decision = self
             .processor
             .classify_preroll(input.len(), |index| input[index].m.to_float() == 0.0);
@@ -2752,7 +2787,8 @@ impl MonoCaptureRealtime {
             *sample = frame.m.to_float();
         }
         let mono = &self.scratch[..input.len()];
-        self.processor.process(mono, mono, input.len());
+        self.processor
+            .process(mono, mono, input.len(), callback_encoder_epoch);
         true
     }
 }
@@ -2770,6 +2806,7 @@ impl<const CHANNELS: usize> MultichannelCaptureRealtime<CHANNELS> {
     }
 
     fn process<T: CubebCaptureSample>(&mut self, input: &[MultichannelFrame<T, CHANNELS>]) -> bool {
+        let callback_encoder_epoch = self.processor.begin_callback();
         let decision = self.processor.classify_preroll(input.len(), |index| {
             input[index]
                 .channels
@@ -2795,7 +2832,8 @@ impl<const CHANNELS: usize> MultichannelCaptureRealtime<CHANNELS> {
         }
         let raw = &self.raw_scratch[..samples];
         let mono = self.downmixer.process(raw);
-        self.processor.process(mono, raw, input.len());
+        self.processor
+            .process(mono, raw, input.len(), callback_encoder_epoch);
         true
     }
 }
@@ -4600,6 +4638,114 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::AtomicUsize;
+
+    fn privacy_capture_fixture(
+        sample_rate: u32,
+    ) -> (
+        MonoCaptureRealtime,
+        crate::proto::CaptureFrameConsumer,
+        Arc<AtomicU64>,
+    ) {
+        let (ring, consumer) = crate::proto::capture_frame_ring(8);
+        let encoder_epoch = Arc::new(AtomicU64::new(1));
+        let resources = CaptureCallbackResources {
+            ring,
+            encoder_epoch: encoder_epoch.clone(),
+            aec_timing: Arc::new(AecTiming::default()),
+            diagnostics: Arc::new(CaptureDiagnostics::default()),
+            device_change: Arc::new(CubebDeviceChangeSignal::default()),
+            backend_latency_frames: Arc::new(AtomicU32::new(UNKNOWN_CUBEB_LATENCY_FRAMES)),
+            latency_probe_requested: Arc::new(AtomicBool::new(false)),
+            first_callback_ns: Arc::new(AtomicU64::new(0)),
+            first_callback_frames: Arc::new(AtomicU64::new(0)),
+            wasapi_preroll_filter: false,
+            requested_latency_frames: FRAME_SAMPLES as u32,
+            stream_generation: 1,
+            open_attempt: 1,
+        };
+        (
+            MonoCaptureRealtime::new(resources, sample_rate),
+            consumer,
+            encoder_epoch,
+        )
+    }
+
+    #[test]
+    fn capture_privacy_epoch_discards_private_half_frame_before_public_callback() {
+        let (mut capture, consumer, encoder_epoch) = privacy_capture_fixture(SAMPLE_RATE);
+        assert!(capture.process(&vec![MonoFrame { m: 0.75f32 }; FRAME_SAMPLES / 2]));
+        assert_eq!(
+            capture.processor.accumulator.pending_samples(),
+            FRAME_SAMPLES / 2
+        );
+        encoder_epoch.store(2, Ordering::Release);
+        let public_half = vec![MonoFrame { m: 0.0f32 }; FRAME_SAMPLES / 2];
+        assert!(capture.process(&public_half));
+        assert_eq!(consumer.len(), 0, "private half-frame became public PCM");
+        assert!(capture.process(&public_half));
+        let mut frame = AudioFrame {
+            samples: vec![0.0; FRAME_SAMPLES],
+            encoder_epoch: 0,
+            capture_generation: 0,
+            capture_open_attempt: 0,
+            capture_ts_ns: 0,
+            capture_callback_ts_ns: 0,
+            capture_timestamp_valid: false,
+        };
+        assert!(consumer.pop_into(&mut frame));
+        assert_eq!(frame.encoder_epoch, 2);
+        assert!(frame.samples.iter().all(|sample| *sample == 0.0));
+        assert_eq!(consumer.len(), 0);
+    }
+
+    #[test]
+    fn capture_privacy_epoch_discards_resampler_history_and_old_callback_continuation() {
+        for sample_rate in [44_100, 96_000] {
+            let (mut capture, consumer, encoder_epoch) = privacy_capture_fixture(sample_rate);
+            let private_half = vec![MonoFrame { m: 0.75f32 }; sample_rate as usize / 100];
+            assert!(capture.process(&private_half));
+            let pending = capture.processor.accumulator.pending_samples();
+            assert!(pending > 0 && pending < FRAME_SAMPLES);
+            assert!(capture
+                .processor
+                .resampler
+                .source
+                .iter()
+                .any(|sample| *sample != 0.0));
+            let old_callback_epoch = capture.processor.begin_callback();
+            encoder_epoch.store(2, Ordering::Release);
+            let old_callback_pcm = vec![0.5; sample_rate as usize / 100];
+            capture.processor.process(
+                &old_callback_pcm,
+                &old_callback_pcm,
+                old_callback_pcm.len(),
+                old_callback_epoch,
+            );
+            let mut frame = AudioFrame {
+                samples: vec![0.0; FRAME_SAMPLES],
+                encoder_epoch: 0,
+                capture_generation: 0,
+                capture_open_attempt: 0,
+                capture_ts_ns: 0,
+                capture_callback_ts_ns: 0,
+                capture_timestamp_valid: false,
+            };
+            let public_pcm = vec![MonoFrame { m: 0.0f32 }; sample_rate as usize / 100];
+            let mut public_frames = 0;
+            for _ in 0..4 {
+                assert!(capture.process(&public_pcm));
+                while consumer.pop_into(&mut frame) {
+                    public_frames += 1;
+                    assert_eq!(frame.encoder_epoch, 2);
+                    assert!(
+                        frame.samples.iter().all(|sample| *sample == 0.0),
+                        "private resampler/accumulator PCM survived at {sample_rate}Hz"
+                    );
+                }
+            }
+            assert!(public_frames > 0);
+        }
+    }
 
     fn stereo_test_pairs(count: usize) -> Vec<f32> {
         let mut samples = Vec::with_capacity(count * 2);
