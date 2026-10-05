@@ -43,6 +43,10 @@ and APM can be built locally; Linux and macOS builds use the existing GitHub
 Actions runners. Starlight produces a managed DLL and does not require an
 Android SDK or NDK.
 
+Bullseye containers use signed Debian archive repositories to retain the glibc
+2.31 baseline. Only archive metadata expiry checks are disabled; package
+signatures and checksums are still verified.
+
 
 ## Managed gate
 

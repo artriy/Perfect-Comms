@@ -129,16 +129,9 @@ jobs:
           -p:MergedStarlightAssemblyPath="$env:MERGED_STARLIGHT_ASSEMBLY_PATH"
       - name: Test merged managed WebRTC against the desktop Pion transport
         env:
-          MERGED_STARLIGHT_ASSEMBLY_PATH: ${{ github.workspace }}\artifacts\PerfectCommsStarlight.dll
           PC_PION_TEST_DISABLE_MDNS: "1"
-        run: >-
-          dotnet run
-          --project Starlight/InteropProbe/PerfectComms.Starlight.InteropProbe.csproj
-          --configuration Release
-          --no-restore
-          -p:MergedStarlightAssemblyPath="$env:MERGED_STARLIGHT_ASSEMBLY_PATH"
-          --
-          --pion "${{ github.workspace }}\Libs\pion\pc-pion.x64.dll"
+        shell: pwsh
+        run: .\scripts\starlight-pion-interop.ps1
 
 
   native-quality:
