@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Voice Settings Interface
+
+- Voice settings now use the helper logo's cyan, blue, and purple palette, Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions.
+- Microphone mode has separate Open Mic and Push To Talk buttons. Sliders and enabled toggles use the same spectrum accent.
+- The settings panel fits the available canvas and retains scrolling, key rebinding, device selection, and the speaking-bar preview. Desktop shortcut hints follow the configured bindings.
+- Removed TextMeshPro's automatic extra tracking from bold interface text so headings and labels retain the font's intended spacing.
+- Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
+
 ## Perfect Comms v4.1.11
 
 > [!IMPORTANT]

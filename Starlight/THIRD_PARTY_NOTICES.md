@@ -12,6 +12,15 @@ The two Microsoft abstractions are supplied by the Starlight host rather than
 merged into `PerfectCommsStarlight.dll`. They remain part of the managed
 runtime closure and are listed here.
 
+## Interface font
+
+Space Grotesk, copyright 2020 The Space Grotesk Project Authors
+(https://github.com/floriankarsten/space-grotesk), is distributed as a static
+UI atlas and glyph metrics under the SIL Open Font License 1.1. The complete
+copyright and license text is embedded as
+`VoiceChatPlugin.Resources.VoiceUi.SpaceGrotesk-OFL.txt`.
+
+
 ## Dependency inventory
 
 | NuGet package | Version | Runtime assembly | Project URL | Declared license |

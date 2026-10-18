@@ -3,6 +3,15 @@
 Perfect Comms embeds native platform engines and DSP libraries as assembly resources and extracts them at
 runtime for the applicable platform. Their licenses are reproduced or referenced below.
 
+## Space Grotesk (interface font)
+
+- Source: `assets/brand/fonts/SpaceGrotesk.ttf`, https://github.com/floriankarsten/space-grotesk.
+- Copyright 2020 The Space Grotesk Project Authors. License: SIL Open Font License 1.1.
+- The static UI atlas and glyph metrics are embedded under `VoiceChatPlugin.Resources.VoiceUi`.
+  The complete copyright and license text is embedded as
+  `VoiceChatPlugin.Resources.VoiceUi.SpaceGrotesk-OFL.txt`.
+
+
 ## Mozilla Cubeb (desktop audio input/output)
 
 - Files: compiled from the pinned `cubeb` / `cubeb-sys` Rust crates and their vendored Cubeb source,

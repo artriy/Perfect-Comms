@@ -189,7 +189,7 @@ Full guide, every primitive, and copy-paste examples are in the **[Mod Integrati
 
 ## Credits
 
-- Original repo: [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
+- AmongUs-VoiceChat: [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
 - BetterCrewLink: [OhMyGuus/BetterCrewLink](https://github.com/OhMyGuus/BetterCrewLink)
 - Peer transport: [Pion WebRTC](https://github.com/pion/webrtc)
 - Special thanks to [idkimneil](https://github.com/idkimneil), the reason I made this.

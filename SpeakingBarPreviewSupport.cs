@@ -186,18 +186,18 @@ internal static class SpeakingBarLivePreviewLifecyclePolicy
 }
 
 /// <summary>
-/// Pure sizing policy for placing the unchanged settings card and preview card side-by-side.
+/// Pure sizing policy for placing the settings and preview cards side-by-side.
 /// </summary>
 internal static class SpeakingBarLivePreviewWorkspacePolicy
 {
-    internal const float SettingsWidth = 908f;
-    internal const float SettingsHeight = 554f;
+    internal const float SettingsWidth = 1296f;
+    internal const float SettingsHeight = 840f;
     internal const float PreviewWidth = 450f;
     internal const float PreviewHeight = 554f;
     internal const float Gap = 18f;
-    // Includes the settings and preview cards' outer glow/shadow footprint at normal scale.
+    // Includes the cards' outer shadow footprint at normal scale.
     internal const float SafeMargin = 64f;
-    internal const float NormalScale = 1.30f;
+    internal const float NormalScale = 1f;
 
     internal static SpeakingBarPreviewWorkspace Compute(float canvasWidth, float canvasHeight)
     {

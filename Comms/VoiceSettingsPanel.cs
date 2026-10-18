@@ -16,13 +16,13 @@ public static class VoiceSettingsPanel
         DeadFocus,
     }
 
-    private const float PanelW = 908f;
-    private const float PanelH = 554f;
-    private const float PanelScale = 1.3f;
-    private const float RowH = 72f;
+    private const float PanelW = SpeakingBarLivePreviewWorkspacePolicy.SettingsWidth;
+    private const float PanelH = SpeakingBarLivePreviewWorkspacePolicy.SettingsHeight;
+    private const float PanelScale = SpeakingBarLivePreviewWorkspacePolicy.NormalScale;
+    private const float RowH = 70f;
     private const float DeviceRowH = 142f;
-    private const float HeaderH = 42f;
-    private const float TopPad = 12f;
+    private const float HeaderH = 30f;
+    private const float TopPad = 0f;
     private const float SmoothScrollRate = 18f;
     private const float ScrollbarMinThumbHeight = 30f;
 
@@ -144,9 +144,10 @@ public static class VoiceSettingsPanel
 
     private static void Build()
     {
-        _shell = new VoiceUiKit.PanelShell("VC_SettingsPanel", "PERFECT COMMS", PanelW, PanelH, HeaderClose);
+        _shell = new VoiceUiKit.PanelShell("VC_SettingsPanel", "Perfect Comms", PanelW, PanelH,
+            HeaderClose, personalSettings: true);
         _rail = new VoiceUiKit.CategoryRail();
-        _rail.Build(_shell.RailRoot, _shell.RailWidth, Categories);
+        _rail.Build(_shell.RailRoot, _shell.RailWidth, Categories, categories: CategoryOrder);
         _rail.OnSelect = selectedIndex =>
         {
             if (SpeakingBarLivePreviewLifecyclePolicy.ShouldDisableForCategory(
@@ -313,6 +314,7 @@ public static class VoiceSettingsPanel
         if (_shell == null) return;
         VoiceUiKit.RebindRow.CancelCapture();
         CancelScrollbarDrag();
+        _shell.SetPage(CategoryOrder[_rail!.Selected]);
         for (int i = _shell.PaneRoot.childCount - 1; i >= 0; i--)
             Object.Destroy(_shell.PaneRoot.GetChild(i).gameObject);
         _rows.Clear();
@@ -325,14 +327,49 @@ public static class VoiceSettingsPanel
         for (int i = 0; i < visible.Count; i++)
         {
             var e = visible[i];
+            if (e.IsHeader)
+            {
+                if (i > 0) y -= 20f;
+                float groupHeight = 0f;
+                for (int next = i + 1; next < visible.Count && !visible[next].IsHeader; next++)
+                    groupHeight += visible[next].Height;
+                if (groupHeight > 0f)
+                {
+                    var frame = VoiceUiKit.Panel("SettingsGroup", _shell.PaneRoot, VoiceUiKit.Divider);
+                    frame.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
+                    frame.rectTransform.sizeDelta = new Vector2(0f, groupHeight);
+                    frame.rectTransform.anchoredPosition = new Vector2(0f, y - e.Height);
+                    frame.rectTransform.SetAsFirstSibling();
+                    var fill = VoiceUiKit.Panel("Fill", frame.transform, VoiceUiKit.PanelInner);
+                    fill.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                    fill.rectTransform.offsetMin = Vector2.one;
+                    fill.rectTransform.offsetMax = -Vector2.one;
+                }
+            }
             var row = e.Build(_shell.PaneRoot, _shell.PaneWidth, y);
-            if (row != null) _rows.Add(row);
+            if (row != null)
+            {
+                row.ShowDescription(e.Key switch
+                {
+                    "Mic Volume" => "How loud other players hear you.",
+                    "Mic Sensitivity" => "How easily your mic detects speech.",
+                    "Speaker Volume" => "The voice audio you hear.",
+                    "Meeting Spatial Audio" => "Directional voices during meetings.",
+                    "Mic Mode" => "Choose when your microphone transmits.",
+                    "Noise Gate" => "Gate residual room noise between phrases.",
+                    "Noise Suppression" => "Reduce background noise while preserving speech.",
+                    "Stronger Noise Suppression" => "More reduction, with a tradeoff for quieter speech.",
+                    "Echo Cancellation" => "Reduce speaker audio picked up by your mic.",
+                    _ => null,
+                });
+                _rows.Add(row);
+            }
             bool nextIsRow = i < visible.Count - 1 && !visible[i + 1].IsHeader;
             if (!e.IsHeader && nextIsRow)
             {
                 var div = VoiceUiKit.Panel("Div", _shell.PaneRoot, VoiceUiKit.Divider, false);
                 div.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
-                div.rectTransform.sizeDelta = new Vector2(-20f, 1f);
+                div.rectTransform.sizeDelta = new Vector2(-44f, 1f);
                 div.rectTransform.anchoredPosition = new Vector2(0f, y - e.Height + 1f);
             }
             if (_revealExpandedMix
@@ -445,9 +482,9 @@ public static class VoiceSettingsPanel
         UpdateScrollbarVisual();
     }
 
-    private static Func<float, string> Pct => v => $"<color=#22D3EE>{Mathf.RoundToInt(v * 100f)}%</color>";
+    private static Func<float, string> Pct => v => $"{Mathf.RoundToInt(v * 100f)}%";
     private static Func<float, string> VolumePct => v => v <= 0.005f
-        ? "<color=#8C9CB2>None</color>"
+        ? "None"
         : Pct(v);
     private static Func<float, string> Num2 => v => v.ToString("0.00", CultureInfo.InvariantCulture);
 
@@ -531,7 +568,13 @@ public static class VoiceSettingsPanel
         Slider(defs, "Speaker Volume", s.MasterVolume, Pct);
         EnumStep(defs, "Meeting Spatial Audio", s.MeetingSpatial, new[] { "Off", "Low", "Full" });
         Section(defs, "PROCESSING");
-        EnumStep(defs, "Mic Mode", s.MicMode, new[] { "Open Mic", "Push To Talk" });
+        defs.Add(new Entry
+        {
+            Key = "Mic Mode",
+            Build = (pane, paneW, y) => new VoiceUiKit.MicModeRow(
+                    () => s.MicMode.Value, value => s.MicMode.Value = value)
+                .Build(pane, paneW, y, RowH, SettingHelp(s.MicMode)),
+        });
         Toggle(defs, "Noise Gate", s.NoiseGateEnabled);
 #if WINDOWS
         Toggle(defs, "Noise Suppression", s.NoiseSuppressionEnabled);
@@ -673,8 +716,16 @@ public static class VoiceSettingsPanel
             Visible = Always,
             Build = (pane, paneW, y) => new VoiceUiKit.RebindRow(
                 () => bind.CurrentKey,
-                (key, modifier, match) => bind.SetBinding(key, modifier, match),
-                () => bind.Clear(),
+                (key, modifier, match) =>
+                {
+                    bind.SetBinding(key, modifier, match);
+                    _shell!.SetPage(CategoryOrder[_rail!.Selected]);
+                },
+                () =>
+                {
+                    bind.Clear();
+                    _shell!.SetPage(CategoryOrder[_rail!.Selected]);
+                },
                 () => bind.Modifier,
                 () => bind.ModifierMatch,
                 configure,
@@ -1076,7 +1127,10 @@ public static class VoiceSettingsPanel
 
         var workspace = CurrentPreviewWorkspace();
         float move = SpeakingBarLivePreviewTransitionPolicy.Resolve(_livePreviewProgress).Move;
-        float targetScale = Mathf.Lerp(PanelScale, workspace.Scale, move);
+        Rect canvas = VoiceUiKit.CanvasRect.rect;
+        float normalScale = Mathf.Min(PanelScale,
+            Mathf.Min((canvas.width - 64f) / PanelW, (canvas.height - 64f) / PanelH));
+        float targetScale = Mathf.Lerp(normalScale, workspace.Scale, move);
         float appearScale = VoiceUiKit.AppearScale(_animT);
         if (move > 0.001f)
             appearScale = Mathf.Min(1f, appearScale);

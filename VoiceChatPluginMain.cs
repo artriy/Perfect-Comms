@@ -114,6 +114,7 @@ public class VoiceChatPluginMain : BasePlugin
         ResidentObject.hideFlags |= HideFlags.DontUnloadUnusedAsset | HideFlags.HideAndDontSave;
         VCManager.RegisterSceneHook();
         VoiceUiDriver.Register();
+        IL2CPPChainloader.Instance.Finished += () => VoiceReactorCredits.Register(Harmony);
         VoiceChatHudState.Init();
         VoiceChatPatches.RegisterKeybindHandlers();
         ApplyHarmonyPatchesResiliently();

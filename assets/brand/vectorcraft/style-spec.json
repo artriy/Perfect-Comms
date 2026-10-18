@@ -1,0 +1,27 @@
+{
+  "name": "Perfect Comms capsule microphone",
+  "grid": 24,
+  "palette": {"cyan": "#6ACBEC", "violet": "#956AEC"},
+  "controls": {"fill": "#FFFFFF", "keyline": "#10131B", "strokeWidth": 2, "keylineWidth": 3.25, "filledKeylineWidth": 1.25, "strokeLinecap": "round", "strokeLinejoin": "round", "muteSlashKeylineWidth": 4},
+  "diagonalAxis": "bottom-left to top-right",
+  "muteSlash": "M4 4 20 20",
+  "elements": {
+    "logo-stand": "M12 19v2M8.5 21h7",
+    "logo-yoke": "M4.5 10V12a7.5 7.5 0 0 0 15 0v-2",
+    "logo-capsule": {"x": 8, "y": 2, "width": 8, "height": 13, "radius": 4},
+    "logo-capsule-lower": "M8 9H16v2a4 4 0 0 1-8 0Z",
+    "microphone-capsule": {"x": 9, "y": 3, "width": 6, "height": 10, "radius": 3},
+    "microphone-yoke": "M6 10.5V12a6 6 0 0 0 12 0v-1.5",
+    "microphone-stand": "M12 18v3.5M9 21.5h6",
+    "speaker-horn": "M4.75 9H8L11.72 5.28A0.75 0.75 0 0 1 13 5.81V18.19A0.75 0.75 0 0 1 11.72 18.72L8 15H4.75A0.75 0.75 0 0 1 4 14.25V9.75A0.75 0.75 0 0 1 4.75 9Z",
+    "speaker-wave": "M17 7a7 7 0 0 1 0 10"
+  },
+  "assets": [
+    {"name": "perfect-comms-logo", "resource": "Resources/miclogo.png", "size": 144},
+    {"name": "microphone-on", "resource": "Resources/MicOn.png", "size": 413},
+    {"name": "microphone-off", "resource": "Resources/MicOff.png", "size": 413},
+    {"name": "speaker-on", "resource": "Resources/SpeakerOn.png", "size": 413},
+    {"name": "speaker-off", "resource": "Resources/SpeakerOff.png", "size": 413}
+  ],
+  "websiteLogo": {"resource": "website/assets/perfect-comms-helper.png", "size": 128}
+}

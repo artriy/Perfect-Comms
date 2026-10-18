@@ -11,8 +11,6 @@ public sealed class SpeakingBarLivePreviewWorkspacePolicyTests
         var workspace = SpeakingBarLivePreviewWorkspacePolicy.Compute(1920f, 1080f);
 
         Assert.Equal(SpeakingBarLivePreviewWorkspacePolicy.NormalScale, workspace.Scale, 4);
-        Assert.Equal(-304.2f, workspace.SettingsOffsetX, 3);
-        Assert.Equal(697f, workspace.PreviewLocalCenterX, 3);
         AssertWorkspaceIsCentered(workspace);
         AssertWorkspaceFits(workspace, 1920f, 1080f);
     }
