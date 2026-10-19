@@ -2212,11 +2212,13 @@ public static partial class VoiceChatHudState
     {
         if (_controlSpriteCache.TryGetValue(path, out var cached)) return cached;
 
-        var source = LoadSprite(path);
+        var source = LoadSprite(path, highQuality: true);
         if (source == null) return null!;
         try
         {
             var texture = source.texture;
+            texture.filterMode = FilterMode.Trilinear;
+            texture.mipMapBias = 0f;
             var pixels = texture.GetPixels32();
             int minX = texture.width;
             int minY = texture.height;

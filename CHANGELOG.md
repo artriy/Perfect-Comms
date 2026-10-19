@@ -9,6 +9,7 @@
 - The settings panel fits the available canvas and retains scrolling, key rebinding, device selection, and the speaking-bar preview. Desktop shortcut hints follow the configured bindings.
 - Removed TextMeshPro's automatic extra tracking from bold interface text so headings and labels retain the font's intended spacing.
 - Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
+- Microphone and speaker HUD icons use mipmaps and trilinear filtering when scaled down; artwork, size, and positioning are unchanged.
 
 ## Perfect Comms v4.1.11
 
