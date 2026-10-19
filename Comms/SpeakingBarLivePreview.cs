@@ -32,6 +32,9 @@ internal sealed class SpeakingBarLivePreview
     private const float EmbeddedRevealSlide = 12f;
     private const float PixelsPerWorldUnit = 36f;
     private const int SlotsPerPrewarmTick = 3;
+    private const float MaximumRingPulseScale = 1.12f;
+    private const float IconHalfExtent =
+        SpeakingBarVisualMetrics.RingScale * MaximumRingPulseScale * 0.5f;
     internal static Vector2 EmbeddedCardSize => new(EmbeddedCardWidth, EmbeddedCardHeight);
 
     private static readonly Color BackdropColor = new(0f, 0f, 0f, 0.5f);
@@ -303,8 +306,8 @@ internal sealed class SpeakingBarLivePreview
             new Vector2(0.5f, 0.5f),
             new Vector2(0.5f, 0.5f));
         _backdrop = backdropRect.gameObject.AddComponent<Image>();
-        _backdrop.sprite = VoiceUiKit.Rounded(true);
-        _backdrop.type = Image.Type.Sliced;
+        _backdrop.sprite = VoiceUiKit.Solid(Color.white);
+        _backdrop.type = Image.Type.Simple;
         _backdrop.color = BackdropColor;
         _backdrop.raycastTarget = false;
 
@@ -621,10 +624,8 @@ internal sealed class SpeakingBarLivePreview
             itemMaxY = Mathf.Max(itemMaxY, maxY);
         }
 
-        float primaryPitch = namePosition == SpeakingBarNamePosition.Top
-            ? SpeakingBarVisualMetrics.SlotHeight +
-              SpeakingBarVisualMetrics.TopNameExtraPitch
-            : SpeakingBarVisualMetrics.SlotHeight;
+        float primaryPitch = SpeakingBarVisualMetrics.VerticalPitch(
+            namePosition, itemMaxY - itemMinY);
         float outerPad = SpeakingBarVisualMetrics.BackdropPad * 2f;
         float itemWidth = itemMaxX - itemMinX + outerPad;
         float itemHeight = itemMaxY - itemMinY + outerPad;
@@ -771,7 +772,7 @@ internal sealed class SpeakingBarLivePreview
         PreviewSlot slot,
         SpeakingBarNamePosition namePosition)
     {
-        const float ringHalf = SpeakingBarVisualMetrics.RingScale * 0.5f;
+        const float ringHalf = IconHalfExtent;
         return namePosition switch
         {
             SpeakingBarNamePosition.Left or SpeakingBarNamePosition.Right
@@ -790,7 +791,7 @@ internal sealed class SpeakingBarLivePreview
         out float min,
         out float max)
     {
-        const float ringHalf = SpeakingBarVisualMetrics.RingScale * 0.5f;
+        const float ringHalf = IconHalfExtent;
         switch (namePosition)
         {
             case SpeakingBarNamePosition.Left:
@@ -816,7 +817,7 @@ internal sealed class SpeakingBarLivePreview
         out float min,
         out float max)
     {
-        const float ringHalf = SpeakingBarVisualMetrics.RingScale * 0.5f;
+        const float ringHalf = IconHalfExtent;
         float labelHalf = slot.LabelHeight * 0.5f;
         switch (namePosition)
         {
@@ -926,7 +927,7 @@ internal sealed class SpeakingBarLivePreview
             Color color = SpeakingGreen;
             color.a = Mathf.Lerp(0.24f, 0.90f, brightness);
             slot.Ring.color = color;
-            float scale = Mathf.Lerp(0.92f, 1.12f, brightness);
+            float scale = Mathf.Lerp(0.92f, MaximumRingPulseScale, brightness);
             slot.RingRoot.localScale = new Vector3(scale, scale, 1f);
         }
     }

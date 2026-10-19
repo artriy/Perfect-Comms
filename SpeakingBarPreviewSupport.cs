@@ -19,6 +19,11 @@ internal static class SpeakingBarVisualMetrics
     internal const float NameGap = 0.10f;
     internal const float MaximumLabelWidth = 1.40f;
     internal const float MaximumLabelHeight = 0.45f;
+
+    internal static float VerticalPitch(SpeakingBarNamePosition namePosition, float footprintHeight)
+        => Math.Max(
+            SlotHeight + (namePosition == SpeakingBarNamePosition.Top ? TopNameExtraPitch : 0f),
+            footprintHeight + NameGap);
 }
 
 /// <summary>

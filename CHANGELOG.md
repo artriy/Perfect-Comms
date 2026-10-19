@@ -10,6 +10,7 @@
 - Removed TextMeshPro's automatic extra tracking from bold interface text so headings and labels retain the font's intended spacing.
 - Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
 - Microphone and speaker HUD icons use mipmaps and trilinear filtering when scaled down; artwork, size, and positioning are unchanged.
+- Speaking-bar backdrops have square corners in gameplay and settings previews. Name measurements refresh after font changes, stacked labels clear neighboring rings, and preview bounds include animated rings and avatars.
 
 ## Perfect Comms v4.1.11
 

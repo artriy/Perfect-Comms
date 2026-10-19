@@ -315,7 +315,8 @@ internal static class VoiceUiKit
         var tex = new Texture2D(1, 1, TextureFormat.RGBA32, false) { hideFlags = HideFlags.HideAndDontSave };
         tex.SetPixel(0, 0, c);
         tex.Apply();
-        var sprite = Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
+        var sprite = Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f),
+            100f, 0, SpriteMeshType.FullRect);
         sprite.hideFlags |= HideFlags.HideAndDontSave;
         _solid[key] = sprite;
         return sprite;
