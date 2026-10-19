@@ -92,17 +92,41 @@ internal static class SpeakingBarPreviewRoster
 }
 
 /// <summary>
-/// Keeps the miniature preview's topology aligned with the live HUD. The preview viewport may
-/// uniformly shrink that topology to fit, but its smaller canvas must not create extra rows or
-/// columns that would not exist in game.
+/// Selects topology at HUD size, then uniformly fits it into the miniature.
+/// Without a HUD camera, retains the preferred reference topology.
 /// </summary>
 internal static class SpeakingBarLivePreviewLayoutPolicy
 {
-    internal static int? RequiredLineCount(int itemCount, bool singleLane)
+    internal static SpeakingBarLayoutSolution Solve(
+        int itemCount,
+        bool vertical,
+        float itemWidth,
+        float itemHeight,
+        float horizontalPitch,
+        float verticalPitch,
+        float previewWidth,
+        float previewHeight,
+        float requestedScale,
+        bool singleLane,
+        float hudWidth,
+        float hudHeight)
     {
-        int preferredLineCount = SpeakingBarLayoutPolicy.GetLineCount(itemCount);
-        if (preferredLineCount == 0) return null;
-        return singleLane ? 1 : preferredLineCount;
+        int maxItemsPerLine = singleLane
+            ? itemCount
+            : SpeakingBarLayoutPolicy.PreferredMaxItemsPerLine;
+        int requiredLines = singleLane ? 1 : SpeakingBarLayoutPolicy.GetLineCount(itemCount);
+        if (hudWidth > 0f && hudHeight > 0f)
+        {
+            var hud = SpeakingBarLayoutPolicy.SolveTwoDimensional(
+                itemCount, vertical, itemWidth, itemHeight, horizontalPitch, verticalPitch,
+                hudWidth, hudHeight, requestedScale, maxItemsPerLine,
+                requiredLineCount: singleLane ? 1 : null);
+            requiredLines = hud.LineCount;
+            requestedScale = hud.EffectiveScale;
+        }
+        return SpeakingBarLayoutPolicy.SolveTwoDimensional(
+            itemCount, vertical, itemWidth, itemHeight, horizontalPitch, verticalPitch,
+            previewWidth, previewHeight, requestedScale, maxItemsPerLine, requiredLines);
     }
 }
 

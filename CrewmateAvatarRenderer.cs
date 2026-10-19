@@ -229,13 +229,14 @@ internal static class CrewmateAvatarRenderer
         var bodyRenderer = AddSprite(root.transform, AliveBodyName, baseSprite, Vector3.zero, Quaternion.identity, Vector3.one * BodyScale, Color.white, BodyOrder);
         if (isRainbow) AddRainbowBodyAnimator(bodyRenderer);
         var ghostSprite = TryGetVanillaGhostSprite(pc);
-        TryAddVanillaGhostBody(root.transform, ghostSprite, colorId, isRainbow, concealed, pc);
+        var ghostBodyLayers = DefaultGhostBodyLayers(pc, ghostSprite);
+        TryAddGhostBody(root.transform, ghostBodyLayers, colorId, isRainbow, concealed);
         // Cosmetics are built straight from the player's live outfit (hat/skin/visor), so they render
         // immediately and reliably — no idle-pose capture, GameObject-name matching, or fingerprint gate.
         var capturedLayers = new List<CachedCosmeticLayer>();
         if (!concealed)
             TryAddOutfitCosmetics(root.transform, pc, capturedLayers);
-        CacheOutfit(playerId, pc, ghostSprite, capturedLayers);
+        CacheOutfit(playerId, pc, ghostSprite, capturedLayers, ghostBodyLayers);
         ApplySorting(root);
         VCOverlayCamera.EnsureOnTop(root);
         iconGO = root;
@@ -594,9 +595,8 @@ internal static class CrewmateAvatarRenderer
     private static bool SkinLoaded(CosmeticsLayer c)  { try { return c.skin  != null && c.skin.IsLoaded;  } catch { return false; } }
     private static bool VisorLoaded(CosmeticsLayer c) { try { return c.visor != null && c.visor.IsLoaded; } catch { return false; } }
 
-    // True once every cosmetic the outfit DECLARES has finished loading, i.e. nothing is still loading on the
-    // player's own CosmeticsLayer. Concealed players are trivially resolved (they intentionally show no cosmetics).
-    internal static bool OutfitCosmeticsResolved(PlayerControl? pc)
+    // Ghosts omit skins; readiness covers only the cosmetics that surface actually renders.
+    internal static bool OutfitCosmeticsResolved(PlayerControl? pc, bool ghost = false)
     {
         try
         {
@@ -609,13 +609,14 @@ internal static class CrewmateAvatarRenderer
             {
                 return OutfitCache.TryGetValue(pc.PlayerId, out var cached)
                        && !cached.Concealed
-                       && cached.CosmeticsResolved;
+                       && cached.Identity == GetGhostAppearanceIdentity(pc)
+                       && (cached.CosmeticsResolved || ghost && cached.GhostAppearanceCaptured);
             }
             var c = pc.cosmetics;
             if (c == null) return false;
             var outfit = GetDisplayOutfit(pc);
             return (IsEmptyCosmeticId(outfit.HatId)   || HatLoaded(c))
-                && (IsEmptyCosmeticId(outfit.SkinId)  || SkinLoaded(c))
+                && (ghost || IsEmptyCosmeticId(outfit.SkinId) || SkinLoaded(c))
                 && (IsEmptyCosmeticId(outfit.VisorId) || VisorLoaded(c));
         }
         catch { return false; }
@@ -870,16 +871,17 @@ internal static class CrewmateAvatarRenderer
         var ghostSprite = TryGetVanillaGhostSprite(pc);
         bool concealed = RenderAsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
+        var ghostBodyLayers = DefaultGhostBodyLayers(pc, ghostSprite);
         ReplaceGhostBody(
             iconRoot.transform,
-            DefaultGhostBodyLayers(pc, ghostSprite),
+            ghostBodyLayers,
             colorId,
             !concealed && IsRainbowColorId(colorId),
             concealed);
         var capturedLayers = new List<CachedCosmeticLayer>();
         if (!concealed)
             TryAddOutfitCosmetics(iconRoot.transform, pc, capturedLayers);
-        CacheOutfit(playerId, pc, ghostSprite, capturedLayers);
+        CacheOutfit(playerId, pc, ghostSprite, capturedLayers, ghostBodyLayers);
         ApplySorting(iconRoot);
         VCOverlayCamera.EnsureOnTop(iconRoot);
     }
@@ -897,18 +899,23 @@ internal static class CrewmateAvatarRenderer
         RemoveCosmeticLayers(iconRoot, ghost: true);
         bool concealed = RenderAsConcealed(pc);
         int colorId = GetPlayerColorId(pc);
-        bool liveGhostBodyApplied = IsLiveGhostBodyApplied(pc);
-        var bodyLayers = new List<CachedGhostBodyLayer>();
+        var identity = GetGhostAppearanceIdentity(pc);
+        var bodyLayers = OutfitCache.TryGetValue(pc.PlayerId, out var cached) &&
+                         cached.Identity == identity && cached.GhostBodyLayers.Count > 0
+            ? cached.GhostBodyLayers
+            : DefaultGhostBodyLayers(pc, TryGetVanillaGhostSprite(pc));
         int sourceBodyOrder = CurrentBodySortingOrder(pc);
-        bool capturedLiveBody = false;
-        if (liveGhostBodyApplied
-            && TryCaptureLiveGhostBody(pc, bodyLayers, out int capturedBodyOrder))
+        if (RequiresLiveGhostBodyRefresh(pc))
         {
-            sourceBodyOrder = capturedBodyOrder;
-            capturedLiveBody = true;
+            var liveBodyLayers = new List<CachedGhostBodyLayer>();
+            if (TryCaptureLiveGhostBody(pc, liveBodyLayers, out int capturedBodyOrder))
+            {
+                bodyLayers = liveBodyLayers;
+                sourceBodyOrder = capturedBodyOrder;
+                ReplaceGhostBody(iconRoot.transform, bodyLayers, colorId,
+                    !concealed && IsRainbowColorId(colorId), concealed);
+            }
         }
-        if (!capturedLiveBody)
-            bodyLayers.AddRange(DefaultGhostBodyLayers(pc, TryGetVanillaGhostSprite(pc)));
 
         var ghostLayers = new List<CachedCosmeticLayer>();
         if (!concealed)
@@ -947,7 +954,7 @@ internal static class CrewmateAvatarRenderer
     /// </summary>
     internal static void TryRefreshPublicGhostBody(GameObject? iconRoot, PlayerControl? pc)
     {
-        if (iconRoot == null || pc?.Data == null || !IsLiveGhostBodyApplied(pc)) return;
+        if (iconRoot == null || pc?.Data == null || !RequiresLiveGhostBodyRefresh(pc)) return;
 
         var bodyLayers = new List<CachedGhostBodyLayer>();
         if (!TryCaptureLiveGhostBody(pc, bodyLayers, out _)) return;
@@ -1158,6 +1165,8 @@ internal static class CrewmateAvatarRenderer
         try
         {
             if (!IsLiveGhostBodyApplied(pc)) return false;
+            if (ShowRealIdentity && pc != null && (IsDisguised(pc) || IsConcealed(pc)))
+                return false;
             var cosmetics = pc?.cosmetics;
             var body = cosmetics?.currentBodySprite;
             var primary = body?.BodySprite;
@@ -1192,7 +1201,8 @@ internal static class CrewmateAvatarRenderer
         byte playerId,
         PlayerControl pc,
         Sprite? ghostSprite,
-        List<CachedCosmeticLayer> layers)
+        List<CachedCosmeticLayer> layers,
+        List<CachedGhostBodyLayer> ghostBodyLayers)
     {
         // Never overwrite the cache with a disguise; keep the last real outfit so a meeting/roster can rebuild it.
         if (IsDisguised(pc)) return;
@@ -1219,7 +1229,7 @@ internal static class CrewmateAvatarRenderer
             concealed || OutfitCosmeticsResolved(pc),
             ghostSprite,
             concealed ? new List<CachedCosmeticLayer>() : layers,
-            preserveGhostAppearance ? previous!.GhostBodyLayers : null,
+            preserveGhostAppearance ? previous!.GhostBodyLayers : ghostBodyLayers,
             preserveGhostAppearance ? previous!.GhostLayers : null,
             preserveGhostAppearance);
     }
@@ -1243,7 +1253,7 @@ internal static class CrewmateAvatarRenderer
             existing.Layers,
             bodyLayers,
             ghostLayers,
-            ghostAppearanceCaptured: bodyLayers.Count > 0);
+            ghostAppearanceCaptured: bodyLayers.Count > 0 && OutfitCosmeticsResolved(pc, ghost: true));
     }
 
     private static void CacheGhostBodyAppearance(
@@ -1263,7 +1273,7 @@ internal static class CrewmateAvatarRenderer
             existing.Layers,
             bodyLayers,
             existing.GhostLayers,
-            ghostAppearanceCaptured: bodyLayers.Count > 0);
+            ghostAppearanceCaptured: bodyLayers.Count > 0 && existing.GhostAppearanceCaptured);
     }
 
     /// <summary>
@@ -1350,9 +1360,7 @@ internal static class CrewmateAvatarRenderer
         if (vanillaGhostSprite != null) return vanillaGhostSprite;
         try
         {
-            // This HUD intentionally renders the canonical upright/normal body. Special Long/Horse
-            // bodies require ExtraGhostSprites plus game-mode callbacks, so copying only their main
-            // sprite would be incomplete. normalBodySprite.GhostSprite is the complete standard art.
+            // Use complete normal artwork until an alternate body's full live renderer set is ready.
             var bodySet = pc?.cosmetics?.normalBodySprite;
             var sprite = bodySet?.GhostSprite;
             if (sprite != null) vanillaGhostSprite = sprite;

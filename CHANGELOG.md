@@ -11,6 +11,9 @@
 - Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
 - Microphone and speaker HUD icons use mipmaps and trilinear filtering when scaled down; artwork, size, and positioning are unchanged.
 - Speaking-bar backdrops have square corners in gameplay and settings previews. Name measurements refresh after font changes, stacked labels clear neighboring rings, and preview bounds include animated rings and avatars.
+- The synthetic speaking-bar preview now selects wrapping from the live HUD's available space before scaling into its card, and updates when that space changes.
+- Abandoned one-frame avatar color changes no longer apply on a later, unrelated flicker.
+- Public ghost avatars finish loading hats and visors without waiting for unused skins. Ready and delayed multipart ghost bodies render consistently, while normal ghost poses and stable-identity caches remain unchanged.
 
 ## Perfect Comms v4.1.11
 

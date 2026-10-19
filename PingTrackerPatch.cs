@@ -392,7 +392,8 @@ public static class PingTrackerPatch
                     UpdateSlotLabel(existing, player);
                     continue;
                 }
-                else if (!existing.CosmeticsComplete && player != null && CrewmateAvatarRenderer.OutfitCosmeticsResolved(player))
+                else if (!existing.CosmeticsComplete && !_publiclyDead.Contains(id) &&
+                         CrewmateAvatarRenderer.OutfitCosmeticsResolved(player))
                 {
                     CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(existing.IconGO, player, id);
                     existing.CosmeticsComplete = true;
@@ -483,7 +484,8 @@ public static class PingTrackerPatch
 
             bool retryGhostCosmetics = publiclyDead
                                        && slot.PublicGhostCosmeticRefreshFrames > 0;
-            if (!iconChanged && !stateChanged && !retryGhostCosmetics)
+            bool pendingGhostCosmetics = publiclyDead && !slot.CosmeticsComplete;
+            if (!iconChanged && !stateChanged && !retryGhostCosmetics && !pendingGhostCosmetics)
                 continue;
 
             bool cosmeticsRefreshed = false;
@@ -506,8 +508,17 @@ public static class PingTrackerPatch
                         bool ghostCosmeticsReady =
                             CrewmateAvatarRenderer.IsLiveGhostBodyApplied(player);
                         CrewmateAvatarRenderer.TryRefreshPublicGhostCosmetics(slot.IconGO, player);
-                        slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player);
+                        slot.CosmeticsComplete = CrewmateAvatarRenderer.OutfitCosmeticsResolved(player, ghost: true);
                         if (ghostCosmeticsReady)
+                            slot.PublicGhostCosmeticRefreshFrames = 0;
+                        cosmeticsRefreshed = true;
+                    }
+                    else if (pendingGhostCosmetics &&
+                             CrewmateAvatarRenderer.OutfitCosmeticsResolved(player, ghost: true))
+                    {
+                        CrewmateAvatarRenderer.TryRefreshPublicGhostCosmetics(slot.IconGO, player);
+                        slot.CosmeticsComplete = true;
+                        if (CrewmateAvatarRenderer.IsLiveGhostBodyApplied(player))
                             slot.PublicGhostCosmeticRefreshFrames = 0;
                         cosmeticsRefreshed = true;
                     }
@@ -772,13 +783,15 @@ public static class PingTrackerPatch
                     }
                     else
                     {
+                        slot.PendingFingerprint = default;
                         slot.TargetLevel = level;
                         slot.IsSpeaking = true;
                         if (slot.IconGO == null)
                         {
                             TryCreateSlotIcon(id, slot);
                         }
-                        else if (!slot.CosmeticsComplete && player != null && CrewmateAvatarRenderer.OutfitCosmeticsResolved(player))
+                        else if (!slot.CosmeticsComplete && player != null && !_publiclyDead.Contains(id) &&
+                                 CrewmateAvatarRenderer.OutfitCosmeticsResolved(player))
                         {
                             // The player's cosmetics finished loading — attach them in place (no destroy/recreate pop).
                             CrewmateAvatarRenderer.TryRefreshOutfitCosmetics(slot.IconGO, player, id);
@@ -1841,7 +1854,7 @@ public static class PingTrackerPatch
         minY = Mathf.Min(minY, syMin); maxY = Mathf.Max(maxY, syMax);
     }
 
-    private static bool TryGetAvailableLayoutSize(Camera? cam, out float width, out float height)
+    internal static bool TryGetAvailableLayoutSize(Camera? cam, out float width, out float height)
     {
         width = 0f;
         height = 0f;

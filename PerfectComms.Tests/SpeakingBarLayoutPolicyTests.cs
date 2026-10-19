@@ -282,18 +282,43 @@ public sealed class SpeakingBarLayoutPolicyTests
     }
 
     [Theory]
-    [InlineData(15, false, 2)]
-    [InlineData(15, true, 1)]
-    [InlineData(10, false, 2)]
-    [InlineData(9, false, 1)]
-    public void MiniaturePreviewPreservesLiveHudTopology(
-        int itemCount,
-        bool singleLane,
-        int expectedLineCount)
+    [InlineData(false, 6f, 6f, 3f, 2f)]
+    [InlineData(false, 3f, 8f, 8f, 2f)]
+    [InlineData(true, 8f, 3f, 2f, 8f)]
+    [InlineData(true, 4f, 4f, 8f, 8f)]
+    public void MiniaturePreservesViewportSelectedTopologyAndScale(
+        bool vertical, float hudWidth, float hudHeight, float previewWidth, float previewHeight)
     {
-        Assert.Equal(
-            expectedLineCount,
-            SpeakingBarLivePreviewLayoutPolicy.RequiredLineCount(itemCount, singleLane));
+        var hud = Solve(15, vertical, hudWidth, hudHeight, requestedScale: 2f);
+        var preview = SpeakingBarLivePreviewLayoutPolicy.Solve(
+            15, vertical, 1f, 1f, 1f, 1f, previewWidth, previewHeight,
+            2f, false, hudWidth, hudHeight);
+
+        Assert.True(hud.LineCount > SpeakingBarLayoutPolicy.GetLineCount(15));
+        Assert.Equal(hud.LineCount, preview.LineCount);
+        Assert.InRange(preview.EffectiveScale, 0f, hud.EffectiveScale);
+        Assert.True(preview.ContentWidth * preview.EffectiveScale <= previewWidth + 0.0001f);
+        Assert.True(preview.ContentHeight * preview.EffectiveScale <= previewHeight + 0.0001f);
+    }
+
+    [Fact]
+    public void MiniatureKeepsSingleLaneWhenHudAndPreviewMustShrink()
+    {
+        var preview = SpeakingBarLivePreviewLayoutPolicy.Solve(
+            15, true, 1f, 1f, 1f, 1f, 3f, 2f, 2f, true, 4f, 5f);
+
+        Assert.Equal(1, preview.LineCount);
+        Assert.Equal(2f / 15f, preview.EffectiveScale, 4);
+    }
+
+    [Fact]
+    public void MiniatureWithoutHudCapacityFitsReferenceTopology()
+    {
+        var preview = SpeakingBarLivePreviewLayoutPolicy.Solve(
+            15, false, 1f, 1f, 1f, 1f, 2f, 3f, 2f, false, 0f, 0f);
+
+        Assert.Equal(2, preview.LineCount);
+        Assert.Equal(0.25f, preview.EffectiveScale, 4);
     }
 
     private static int[] LineSizes(int itemCount, int safeCapacity = int.MaxValue)

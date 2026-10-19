@@ -110,6 +110,8 @@ internal sealed class SpeakingBarLivePreview
     private bool _hasLastSettings;
     private float _lastViewportWidth = -1f;
     private float _lastViewportHeight = -1f;
+    private float _lastHudWidth;
+    private float _lastHudHeight;
     private int _lastLineCount;
     private bool _shouldRender;
     private bool _disposed;
@@ -401,8 +403,6 @@ internal sealed class SpeakingBarLivePreview
         _ = unscaledDeltaTime;
         AdvanceSlotBuild();
         if (!IsWarmupReady) return false;
-        _badgeText.text = _liveBadgeLabel;
-        _badgeText.color = new Color32(118, 239, 165, 255);
         UpdatePreview(settings);
         return true;
     }
@@ -575,24 +575,35 @@ internal sealed class SpeakingBarLivePreview
         float height = _viewportRoot.rect.height;
         if (width <= 1f) width = _viewportMaxWidth;
         if (height <= 1f) height = _viewportMaxHeight;
+        bool hasHudCapacity = global::VoiceChatPlugin.PingTrackerPatch.TryGetAvailableLayoutSize(
+            Camera.main, out float hudWidth, out float hudHeight);
 
         if (!_hasLastSettings ||
             settings != _lastSettings ||
             Mathf.Abs(width - _lastViewportWidth) > 0.01f ||
-            Mathf.Abs(height - _lastViewportHeight) > 0.01f)
+            Mathf.Abs(height - _lastViewportHeight) > 0.01f ||
+            Mathf.Abs(hudWidth - _lastHudWidth) > 0.001f ||
+            Mathf.Abs(hudHeight - _lastHudHeight) > 0.001f)
         {
-            Layout(settings, width / PixelsPerWorldUnit, height / PixelsPerWorldUnit);
+            Layout(settings, width / PixelsPerWorldUnit, height / PixelsPerWorldUnit,
+                hudWidth, hudHeight);
+            _badgeText.text = hasHudCapacity ? _liveBadgeLabel : "PREVIEW";
+            _badgeText.color = hasHudCapacity ? new Color32(118, 239, 165, 255) : VoiceUiKit.TextMuted;
             _lastSettings = settings;
             _hasLastSettings = true;
             _lastViewportWidth = width;
             _lastViewportHeight = height;
+            _lastHudWidth = hudWidth;
+            _lastHudHeight = hudHeight;
         }
     }
 
     private void Layout(
         SpeakingBarPreviewSettings settings,
         float availableWidth,
-        float availableHeight)
+        float availableHeight,
+        float hudWidth,
+        float hudHeight)
     {
         if (_slots.Count == 0) return;
 
@@ -634,7 +645,7 @@ internal sealed class SpeakingBarLivePreview
             SpeakingBarLayoutPolicy.UsesSingleVerticalLaneFor(
                 settings.Position,
                 settings.SideLayout);
-        var solution = SpeakingBarLayoutPolicy.SolveTwoDimensional(
+        var solution = SpeakingBarLivePreviewLayoutPolicy.Solve(
             _slots.Count,
             vertical,
             itemWidth,
@@ -644,12 +655,9 @@ internal sealed class SpeakingBarLivePreview
             availableWidth,
             availableHeight,
             requestedScale,
-            maxItemsPerLine: singleLane
-                ? _slots.Count
-                : SpeakingBarLayoutPolicy.PreferredMaxItemsPerLine,
-            requiredLineCount: SpeakingBarLivePreviewLayoutPolicy.RequiredLineCount(
-                _slots.Count,
-                singleLane));
+            singleLane,
+            hudWidth,
+            hudHeight);
 
         var primaryDirection = SpeakingBarLayoutPolicy.ResolvePrimaryDirection(
             settings.ManualLayout,
