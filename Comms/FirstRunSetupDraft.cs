@@ -35,8 +35,6 @@ internal readonly record struct FirstRunHudPreset(
 
 internal static class FirstRunHudPresets
 {
-    internal const int CommonCount = 3;
-
     internal static readonly IReadOnlyList<FirstRunHudPreset> All =
         new FirstRunHudPreset[]
         {

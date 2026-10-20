@@ -479,6 +479,7 @@ internal static class VoiceUiKit
             foreach (var t in Object.FindObjectsOfType<TextMeshPro>())
                 if (t != null && t.font != null) { _font = t.font; break; }
         }
+        if (_font == null) _font = TMP_Settings.defaultFontAsset;
         return VoiceUiBranding.Font(_font);
     }
 
@@ -624,7 +625,7 @@ internal static class VoiceUiKit
             Width = w; Height = h;
             _onClose = onClose;
             _guided = guided;
-            _closeRestColor = guided ? new Color32(20, 25, 33, 205) : ControlBg;
+            _closeRestColor = ControlBg;
 
             Root = Rect(objName, Canvas.transform).gameObject;
             RootRect = Root.GetComponent<RectTransform>();
@@ -675,16 +676,16 @@ internal static class VoiceUiKit
             surfaceImg.color = Color.white;
             surfaceImg.raycastTarget = false;
 
-            float headerH = personalSettings ? 98f : 76f;
+            float headerH = personalSettings || guided ? 98f : 76f;
             float footerH = personalSettings ? 48f : 0f;
             HeaderRect = Rect("Header", RootRect);
             HeaderRect.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             HeaderRect.sizeDelta = new Vector2(0f, headerH);
             HeaderRect.anchoredPosition = Vector2.zero;
             var headerBg = HeaderRect.gameObject.AddComponent<Image>();
-            headerBg.sprite = guided ? Solid(Color.white) : HeaderGradient();
-            headerBg.type = guided ? Image.Type.Simple : Image.Type.Sliced;
-            headerBg.color = guided ? new Color32(16, 20, 27, 255) : Color.white;
+            headerBg.sprite = HeaderGradient();
+            headerBg.type = Image.Type.Sliced;
+            headerBg.color = Color.white;
             headerBg.raycastTarget = false;
 
             var headerDivider = Panel("HeaderDivider", HeaderRect, Divider, false);
@@ -692,7 +693,7 @@ internal static class VoiceUiKit
             headerDivider.rectTransform.sizeDelta = new Vector2(0f, 1.5f);
             headerDivider.rectTransform.anchoredPosition = new Vector2(0f, 0f);
 
-            if (personalSettings)
+            if (personalSettings || guided)
             {
                 var logo = Rect("Logo", HeaderRect).gameObject.AddComponent<Image>();
                 logo.sprite = VoiceUiBranding.Logo();
@@ -707,7 +708,8 @@ internal static class VoiceUiKit
                 brand.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
                 brand.rectTransform.sizeDelta = new Vector2(320f, 38f);
                 brand.rectTransform.anchoredPosition = new Vector2(94f, 11f);
-                var subtitle = Text("Subtitle", HeaderRect, "VOICE SETTINGS", 11f, TextMuted, TextAlignmentOptions.Left);
+                var subtitle = Text("Subtitle", HeaderRect, guided ? "FIRST-TIME SETUP" : "VOICE SETTINGS",
+                    11f, TextMuted, TextAlignmentOptions.Left);
                 subtitle.characterSpacing = 4f;
                 subtitle.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
                 subtitle.rectTransform.sizeDelta = new Vector2(320f, 22f);
@@ -718,27 +720,23 @@ internal static class VoiceUiKit
                 spectrum.rectTransform.sizeDelta = new Vector2(-48f, 2f);
                 spectrum.rectTransform.anchoredPosition = Vector2.zero;
 #if WINDOWS
-                _menuKey = Text("MenuShortcut", HeaderRect, "", 13f, TextMuted, TextAlignmentOptions.Right);
-                _menuKey.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-                _menuKey.rectTransform.sizeDelta = new Vector2(300f, 30f);
-                _menuKey.rectTransform.anchoredPosition = new Vector2(-92f, 0f);
+                if (personalSettings)
+                {
+                    _menuKey = Text("MenuShortcut", HeaderRect, "", 13f, TextMuted, TextAlignmentOptions.Right);
+                    _menuKey.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+                    _menuKey.rectTransform.sizeDelta = new Vector2(300f, 30f);
+                    _menuKey.rectTransform.anchoredPosition = new Vector2(-92f, 0f);
+                }
 #endif
             }
             else
             {
-                float titleSize = guided ? 30f : 28f;
-                var titleTmp = Text("Title", HeaderRect, title, titleSize, TextBright,
+                var titleTmp = Text("Title", HeaderRect, title, 28f, TextBright,
                     TextAlignmentOptions.Left, FontStyles.Bold);
                 titleTmp.overflowMode = TextOverflowModes.Ellipsis;
-                if (guided)
-                {
-                    titleTmp.enableAutoSizing = true;
-                    titleTmp.fontSizeMin = 24f;
-                    titleTmp.fontSizeMax = titleSize;
-                }
                 titleTmp.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 0.5f));
-                titleTmp.rectTransform.sizeDelta = new Vector2(guided ? -170f : -200f, headerH);
-                titleTmp.rectTransform.anchoredPosition = new Vector2(guided ? 32f : 38f, 0f);
+                titleTmp.rectTransform.sizeDelta = new Vector2(-200f, headerH);
+                titleTmp.rectTransform.anchoredPosition = new Vector2(38f, 0f);
             }
 
             _closeRt = Rect("Close", HeaderRect);
@@ -784,15 +782,15 @@ internal static class VoiceUiKit
             PaneWidth = w - RailWidth - pad * 2f;
             PaneHeight = h - headerH - footerH - pageHeadingH - pad - bottomPad;
 
-            if (!personalSettings)
+            if (!personalSettings && !guided)
             {
                 var inner = Panel("InnerPane", RootRect, PanelInner, true);
-                inner.color = guided ? new Color32(10, 14, 20, 255) : new Color32(0, 0, 0, 70);
+                inner.color = new Color32(0, 0, 0, 70);
                 inner.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
                 inner.rectTransform.offsetMin = new Vector2(RailWidth + pad, pad);
                 inner.rectTransform.offsetMax = new Vector2(-pad, -headerH - pad);
             }
-            else
+            else if (personalSettings)
             {
                 _pageTitle = Text("PageTitle", RootRect, "", 31f, TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
                 _pageTitle.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
@@ -1505,7 +1503,8 @@ internal static class VoiceUiKit
             _set = set;
         }
 
-        public MicModeRow Build(RectTransform pane, float width, float y, float height, string helpText)
+        public MicModeRow Build(RectTransform pane, float width, float y, float height,
+            string helpText)
         {
             BuildBase(pane, "Mic Mode", width, y, height, helpText);
             var frame = Panel("MicMode", Root, PanelOuter);
