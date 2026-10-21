@@ -2,7 +2,9 @@
 
 The host controls the match-wide voice rules. Host changes sync automatically to every player; players separately control their own devices, volumes, keybinds, and HUD.
 
-Open **Host Voice Settings** from the lobby game-settings console. On desktop, the host can also press `F11`. The panel closes automatically if host authority moves to another player. Hover the **!** beside an option for its in-game explanation.
+Open **Host Voice Settings** from the lobby game-settings console. On desktop, the host can also press `F11`. The panel closes automatically if host authority moves to another player. Hover the **?** beside an option for its full in-game explanation.
+
+The **Applies to everyone** badge distinguishes these shared rules from personal settings. Related rules are grouped, with dependent options indented below their parent. Use the scrollbars for long rule lists or mod-tab lists; changes apply immediately without a save step.
 
 ## Proximity tab
 
@@ -23,7 +25,7 @@ Open **Host Voice Settings** from the lobby game-settings console. On desktop, t
 
 The directory handles public-lobby discovery only. It does not carry voice audio or signaling and does not change the host's voice rules.
 
-## Meeting & Voice tab
+## Voice rules tab
 
 | Setting | Default | What it controls |
 | :--- | :---: | :--- |

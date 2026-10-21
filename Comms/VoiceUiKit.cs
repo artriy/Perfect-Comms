@@ -598,6 +598,7 @@ internal static class VoiceUiKit
         private float _closeScale = 1f;
         private readonly Action _onClose;
         private readonly bool _guided;
+        private readonly bool _hostSettings;
         private readonly Color32 _closeRestColor;
         private readonly TextMeshProUGUI? _pageTitle;
         private readonly TextMeshProUGUI? _pageSubtitle;
@@ -620,11 +621,15 @@ internal static class VoiceUiKit
             bool rail = true,
             bool backdrop = true,
             bool guided = false,
-            bool personalSettings = false)
+            bool personalSettings = false,
+            bool hostSettings = false)
         {
             Width = w; Height = h;
             _onClose = onClose;
             _guided = guided;
+            _hostSettings = hostSettings;
+            bool settingsStyle = personalSettings || hostSettings;
+            bool branded = settingsStyle || guided;
             _closeRestColor = ControlBg;
 
             Root = Rect(objName, Canvas.transform).gameObject;
@@ -676,8 +681,8 @@ internal static class VoiceUiKit
             surfaceImg.color = Color.white;
             surfaceImg.raycastTarget = false;
 
-            float headerH = personalSettings || guided ? 98f : 76f;
-            float footerH = personalSettings ? 48f : 0f;
+            float headerH = branded ? 98f : 76f;
+            float footerH = settingsStyle ? 48f : 0f;
             HeaderRect = Rect("Header", RootRect);
             HeaderRect.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             HeaderRect.sizeDelta = new Vector2(0f, headerH);
@@ -693,7 +698,7 @@ internal static class VoiceUiKit
             headerDivider.rectTransform.sizeDelta = new Vector2(0f, 1.5f);
             headerDivider.rectTransform.anchoredPosition = new Vector2(0f, 0f);
 
-            if (personalSettings || guided)
+            if (branded)
             {
                 var logo = Rect("Logo", HeaderRect).gameObject.AddComponent<Image>();
                 logo.sprite = VoiceUiBranding.Logo();
@@ -708,7 +713,8 @@ internal static class VoiceUiKit
                 brand.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
                 brand.rectTransform.sizeDelta = new Vector2(320f, 38f);
                 brand.rectTransform.anchoredPosition = new Vector2(94f, 11f);
-                var subtitle = Text("Subtitle", HeaderRect, guided ? "FIRST-TIME SETUP" : "VOICE SETTINGS",
+                var subtitle = Text("Subtitle", HeaderRect,
+                    guided ? "FIRST-TIME SETUP" : hostSettings ? "HOST VOICE SETTINGS" : "VOICE SETTINGS",
                     11f, TextMuted, TextAlignmentOptions.Left);
                 subtitle.characterSpacing = 4f;
                 subtitle.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
@@ -719,6 +725,18 @@ internal static class VoiceUiKit
                 spectrum.rectTransform.Anchor(new Vector2(0f, 1f), Vector2.one, new Vector2(0.5f, 1f));
                 spectrum.rectTransform.sizeDelta = new Vector2(-48f, 2f);
                 spectrum.rectTransform.anchoredPosition = Vector2.zero;
+                if (hostSettings)
+                {
+                    var scope = Panel("LobbyScope", HeaderRect, ControlBg);
+                    scope.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+                    scope.rectTransform.sizeDelta = new Vector2(226f, 36f);
+                    scope.rectTransform.anchoredPosition = new Vector2(-94f, 0f);
+                    var scopeText = Text("Scope", scope.transform, "APPLIES TO EVERYONE", 12f,
+                        TextPrimary, TextAlignmentOptions.Center, FontStyles.Bold);
+                    scopeText.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                    scopeText.rectTransform.offsetMin = Vector2.zero;
+                    scopeText.rectTransform.offsetMax = Vector2.zero;
+                }
 #if WINDOWS
                 if (personalSettings)
                 {
@@ -751,11 +769,11 @@ internal static class VoiceUiKit
             _closeBar1 = CloseBar(_closeRt, 45f);
             _closeBar2 = CloseBar(_closeRt, -45f);
 
-            float pad = personalSettings ? 32f : 20f;
-            float bottomPad = personalSettings ? 8f : pad;
-            float clipPad = personalSettings ? 0f : 8f;
-            float pageHeadingH = personalSettings ? 92f : 0f;
-            RailWidth = rail ? (personalSettings ? 226f : Mathf.Round(w * 0.25f)) : 0f;
+            float pad = settingsStyle ? 32f : 20f;
+            float bottomPad = settingsStyle ? 8f : pad;
+            float clipPad = settingsStyle ? 0f : 8f;
+            float pageHeadingH = settingsStyle ? 92f : 0f;
+            RailWidth = rail ? (hostSettings ? 248f : personalSettings ? 226f : Mathf.Round(w * 0.25f)) : 0f;
 
             RailRoot = Rect("Rail", RootRect);
             RailRoot.Anchor(new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f));
@@ -782,7 +800,7 @@ internal static class VoiceUiKit
             PaneWidth = w - RailWidth - pad * 2f;
             PaneHeight = h - headerH - footerH - pageHeadingH - pad - bottomPad;
 
-            if (!personalSettings && !guided)
+            if (!settingsStyle && !guided)
             {
                 var inner = Panel("InnerPane", RootRect, PanelInner, true);
                 inner.color = new Color32(0, 0, 0, 70);
@@ -790,7 +808,7 @@ internal static class VoiceUiKit
                 inner.rectTransform.offsetMin = new Vector2(RailWidth + pad, pad);
                 inner.rectTransform.offsetMax = new Vector2(-pad, -headerH - pad);
             }
-            else if (personalSettings)
+            else if (settingsStyle)
             {
                 _pageTitle = Text("PageTitle", RootRect, "", 31f, TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
                 _pageTitle.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
@@ -801,15 +819,18 @@ internal static class VoiceUiKit
                 _pageSubtitle.rectTransform.sizeDelta = new Vector2(PaneWidth, 26f);
                 _pageSubtitle.rectTransform.anchoredPosition = new Vector2(RailWidth + pad, -headerH - 66f);
 
-                var railHeading = Text("RailHeading", RailRoot, "YOUR SETTINGS", 11f,
-                    TextFaint, TextAlignmentOptions.Left);
+                var railHeading = Text("RailHeading", hostSettings ? RootRect : RailRoot,
+                    hostSettings ? "LOBBY RULES" : "YOUR SETTINGS", 11f, TextFaint, TextAlignmentOptions.Left);
                 railHeading.characterSpacing = 3f;
-                railHeading.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0f, 1f));
-                railHeading.rectTransform.sizeDelta = new Vector2(-40f, 24f);
-                railHeading.rectTransform.anchoredPosition = new Vector2(30f, -24f);
+                railHeading.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
+                railHeading.rectTransform.sizeDelta = new Vector2(RailWidth - 40f, 24f);
+                railHeading.rectTransform.anchoredPosition = new Vector2(30f, hostSettings ? -headerH - 24f : -24f);
 #if WINDOWS
-                _pushToTalkKey = Shortcut(RailRoot, "Push to talk", 76f);
-                _muteKey = Shortcut(RailRoot, "Mute mic", 42f);
+                if (personalSettings)
+                {
+                    _pushToTalkKey = Shortcut(RailRoot, "Push to talk", 76f);
+                    _muteKey = Shortcut(RailRoot, "Mute mic", 42f);
+                }
 #endif
                 var footer = Panel("Footer", RootRect, RailSurface, false);
                 footer.rectTransform.Anchor(Vector2.zero, new Vector2(1f, 0f), new Vector2(0.5f, 0f));
@@ -827,7 +848,8 @@ internal static class VoiceUiKit
                 footerMark.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
                 footerMark.rectTransform.sizeDelta = new Vector2(22f, 3f);
                 footerMark.rectTransform.anchoredPosition = new Vector2(28f, 0f);
-                var footerNote = Text("Note", footer.transform, "Changes apply immediately", 12f,
+                var footerNote = Text("Note", footer.transform,
+                    hostSettings ? "Changes apply immediately to the lobby" : "Changes apply immediately", 12f,
                     TextMuted, TextAlignmentOptions.Right);
                 footerNote.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(1f, 0.5f));
                 footerNote.rectTransform.offsetMin = new Vector2(300f, 0f);
@@ -864,6 +886,19 @@ internal static class VoiceUiKit
             key.rectTransform.anchoredPosition = new Vector2(-24f, y);
             return key;
         }
+        public void SetPage(string title, string subtitle)
+        {
+            if (_pageTitle == null || _pageSubtitle == null) return;
+            _pageTitle.richText = false;
+            _pageTitle.enableAutoSizing = true;
+            _pageTitle.fontSizeMax = 31f;
+            _pageTitle.fontSizeMin = 20f;
+            _pageTitle.overflowMode = TextOverflowModes.Ellipsis;
+            _pageTitle.text = title;
+            _pageSubtitle.richText = false;
+            _pageSubtitle.text = subtitle;
+        }
+
 
         public void SetPage(VoiceSettingsCategory category)
         {
@@ -932,6 +967,8 @@ internal static class VoiceUiKit
             }
         }
 
+        public void CancelDrag() => _dragging = false;
+
         public void SetLayoutOffset(Vector2 offset)
         {
             _layoutOffset = offset;
@@ -941,7 +978,17 @@ internal static class VoiceUiKit
         private void ApplyRootPosition()
         {
             if (RootRect != null)
+            {
+                if (_hostSettings)
+                {
+                    Rect canvas = CanvasRect.rect;
+                    float limitX = Mathf.Max(0f, (canvas.width - Width * RootRect.localScale.x) * 0.5f - 24f);
+                    float limitY = Mathf.Max(0f, (canvas.height - Height * RootRect.localScale.y) * 0.5f - 24f);
+                    _userPosition.x = Mathf.Clamp(_userPosition.x, -limitX, limitX);
+                    _userPosition.y = Mathf.Clamp(_userPosition.y, -limitY, limitY);
+                }
                 RootRect.anchoredPosition = _userPosition + _layoutOffset;
+            }
         }
     }
 
@@ -962,19 +1009,41 @@ internal static class VoiceUiKit
         public Action<int>? OnSelect;
 
         private RectTransform _highlight = null!;
-        private RectTransform _hiBar = null!;
         private float _hiY;
+        private RectTransform? _scrollView;
+        private RectTransform? _scrollContent;
+        private RectTransform? _scrollbar;
+        private RectTransform? _scrollThumb;
+        private Image? _scrollThumbImage;
+        private float _contentHeight;
+        private float _scroll;
+        private bool _scrollbarDragging;
+        private float _scrollbarDragOffset;
         private const float RowH = 62f;
         private const float ItemH = RowH - 8f;
 
         public void Build(RectTransform railRoot, float railWidth, string[] labels,
             (int index, string title)[]? sections = null,
-            VoiceSettingsCategory[]? categories = null)
+            VoiceSettingsCategory[]? categories = null,
+            bool scrollable = false)
         {
-            float top = categories != null ? -64f : -22f;
+            var parent = railRoot;
+            if (scrollable)
+            {
+                _scrollView = Rect("RailClip", railRoot);
+                _scrollView.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                _scrollView.offsetMin = new Vector2(0f, 8f);
+                _scrollView.offsetMax = new Vector2(0f, -56f);
+                _scrollView.gameObject.AddComponent<RectMask2D>();
+                _scrollContent = Rect("RailContent", _scrollView);
+                _scrollContent.Anchor(new Vector2(0f, 1f), Vector2.one, new Vector2(0.5f, 1f));
+                _scrollContent.sizeDelta = Vector2.zero;
+                parent = _scrollContent;
+            }
+            float top = scrollable ? -4f : categories != null ? -64f : -22f;
             const float sectionGap = 30f;
 
-            _highlight = Rect("RailHighlight", railRoot);
+            _highlight = Rect("RailHighlight", parent);
             _highlight.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             _highlight.sizeDelta = new Vector2(-32f, ItemH);
             var hiImg = _highlight.gameObject.AddComponent<Image>();
@@ -983,11 +1052,10 @@ internal static class VoiceUiKit
             hiImg.color = new Color32(255, 255, 255, 28);
             hiImg.raycastTarget = false;
 
-            _hiBar = Rect("RailBar", _highlight);
-            _hiBar.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            _hiBar.sizeDelta = new Vector2(2f, ItemH - 24f);
-            _hiBar.anchoredPosition = Vector2.zero;
-            var barImg = _hiBar.gameObject.AddComponent<Image>();
+            var hiBar = Rect("RailBar", _highlight);
+            hiBar.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            hiBar.sizeDelta = new Vector2(2f, ItemH - 24f);
+            var barImg = hiBar.gameObject.AddComponent<Image>();
             barImg.sprite = Rounded(true);
             barImg.type = Image.Type.Sliced;
             barImg.color = Accent;
@@ -1002,12 +1070,12 @@ internal static class VoiceUiKit
                     {
                         if (sections[sidx].index != i) continue;
                         y -= sectionGap;
-                        BuildSection(railRoot, sections[sidx].title, y + ItemH * 0.5f);
+                        BuildSection(parent, sections[sidx].title, y + ItemH * 0.5f);
                         break;
                     }
                 }
 
-                var rt = Rect("Cat_" + labels[i], railRoot);
+                var rt = Rect("Cat_" + labels[i], parent);
                 rt.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
                 rt.sizeDelta = new Vector2(-32f, ItemH);
                 rt.anchoredPosition = new Vector2(0f, y);
@@ -1032,9 +1100,16 @@ internal static class VoiceUiKit
                     icon.rectTransform.sizeDelta = new Vector2(20f, 20f);
                     icon.rectTransform.anchoredPosition = new Vector2(16f, 0f);
                 }
-                var label = Text("Label", rt, caption, categories != null ? 17f : 19f,
+                var label = Text("Label", rt, caption, categories != null ? 17f : scrollable ? 18f : 19f,
                     TextMuted, TextAlignmentOptions.Left, FontStyles.Bold);
                 label.overflowMode = TextOverflowModes.Ellipsis;
+                if (scrollable)
+                {
+                    label.richText = false;
+                    label.enableAutoSizing = true;
+                    label.fontSizeMax = 18f;
+                    label.fontSizeMin = 13f;
+                }
                 label.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 0.5f));
                 label.rectTransform.sizeDelta = new Vector2(categories != null ? -66f : -32f, RowH);
                 label.rectTransform.anchoredPosition = new Vector2(categories != null ? 49f : 22f, 0f);
@@ -1045,20 +1120,45 @@ internal static class VoiceUiKit
 
             _hiY = _items.Count > 0 ? _items[_selected].Y : top;
             _highlight.anchoredPosition = new Vector2(0f, _hiY);
+            _contentHeight = -y + 4f;
+            if (scrollable)
+            {
+                _scrollbar = Rect("RailScrollbar", _scrollView!);
+                _scrollbar.Anchor(new Vector2(1f, 0f), Vector2.one, new Vector2(1f, 0.5f));
+                _scrollbar.sizeDelta = new Vector2(18f, -8f);
+                _scrollbar.anchoredPosition = new Vector2(0f, 0f);
+                var track = Panel("Track", _scrollbar, TrackBg, true, true);
+                track.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                track.rectTransform.offsetMin = new Vector2(7f, 0f);
+                track.rectTransform.offsetMax = new Vector2(-7f, 0f);
+                _scrollThumb = Rect("RailScrollThumb", _scrollbar);
+                _scrollThumb.Anchor(new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f));
+                _scrollThumb.sizeDelta = new Vector2(18f, 30f);
+                _scrollThumbImage = Panel("Thumb", _scrollThumb, TextMuted, true, true);
+                _scrollThumbImage.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                _scrollThumbImage.rectTransform.offsetMin = new Vector2(6f, 0f);
+                _scrollThumbImage.rectTransform.offsetMax = new Vector2(-6f, 0f);
+                ApplyScroll();
+            }
             Apply();
         }
 
         public void Tick()
         {
+            bool scrollbarInput = HandleScroll();
+            bool withinClip = _scrollView == null || Contains(_scrollView);
             for (int i = 0; i < _items.Count; i++)
             {
                 bool sel = i == _selected;
                 var it = _items[i];
-                bool hover = !sel && Contains(it.Root);
+                bool over = !scrollbarInput && withinClip && Contains(it.Root);
+                bool hover = !sel && over;
                 it.Hover.color = Lerp(it.Hover.color, hover ? RowHover : Clear, 0.25f);
                 it.Label.color = Lerp(it.Label.color, sel || hover ? TextPrimary : TextMuted, 0.25f);
                 if (it.Icon != null)
                     it.Icon.color = Lerp(it.Icon.color, sel ? Accent : TextFaint, 0.25f);
+                if (_scrollView != null && over)
+                    RequestTooltip(it.Label.text, "Lobby-wide voice rules.", plainTextDescription: true);
                 if (hover && Input.GetMouseButtonDown(0)) Select(i);
             }
 
@@ -1072,10 +1172,99 @@ internal static class VoiceUiKit
 
         public void Select(int idx)
         {
-            if (idx < 0 || idx >= _items.Count || idx == _selected) { if (idx == _selected) return; }
-            _selected = Mathf.Clamp(idx, 0, _items.Count - 1);
+            if (_items.Count == 0) return;
+            int selected = Mathf.Clamp(idx, 0, _items.Count - 1);
+            if (selected == _selected) return;
+            _selected = selected;
+            if (_scrollView != null)
+            {
+                float top = -_items[_selected].Y;
+                float bottom = top + ItemH;
+                if (top < _scroll + 4f) _scroll = top - 4f;
+                else if (bottom > _scroll + _scrollView.rect.height - 4f)
+                    _scroll = bottom - _scrollView.rect.height + 4f;
+                ApplyScroll();
+            }
             Apply();
             OnSelect?.Invoke(_selected);
+        }
+
+        public void CancelDrag()
+        {
+            _scrollbarDragging = false;
+            _scrollbarDragOffset = 0f;
+        }
+
+        private float MaxScroll() => _scrollView == null ? 0f
+            : VoiceSettingsScrollPolicy.MaxScroll(_contentHeight, _scrollView.rect.height);
+
+        private void ApplyScroll()
+        {
+            if (_scrollView == null || _scrollContent == null || _scrollbar == null || _scrollThumb == null) return;
+            float maxScroll = MaxScroll();
+            _scroll = VoiceSettingsScrollPolicy.Clamp(_scroll, maxScroll);
+            _scrollContent.anchoredPosition = new Vector2(0f, _scroll);
+            bool visible = maxScroll > 0.5f;
+            if (_scrollbar.gameObject.activeSelf != visible) _scrollbar.gameObject.SetActive(visible);
+            if (!visible)
+            {
+                _scrollbarDragging = false;
+                return;
+            }
+            float trackHeight = _scrollbar.rect.height;
+            float thumbHeight = VoiceSettingsScrollPolicy.ThumbHeight(
+                trackHeight, _scrollView.rect.height, _contentHeight, 30f);
+            _scrollThumb.sizeDelta = new Vector2(18f, thumbHeight);
+            _scrollThumb.anchoredPosition = new Vector2(0f,
+                -VoiceSettingsScrollPolicy.ThumbTopFromScroll(_scroll, maxScroll, trackHeight, thumbHeight));
+        }
+
+        private void SetScrollFromThumbTop(float top)
+        {
+            if (_scrollbar == null || _scrollThumb == null) return;
+            _scroll = VoiceSettingsScrollPolicy.ScrollFromThumbTop(
+                top, MaxScroll(), _scrollbar.rect.height, _scrollThumb.rect.height);
+            ApplyScroll();
+        }
+
+        private bool HandleScroll()
+        {
+            if (_scrollView == null || _scrollbar == null || _scrollThumb == null) return false;
+            ApplyScroll();
+            if (!_scrollbar.gameObject.activeSelf) return false;
+            bool overBar = Contains(_scrollbar);
+            bool overThumb = Contains(_scrollThumb);
+            if (_scrollThumbImage != null)
+                _scrollThumbImage.color = Lerp(_scrollThumbImage.color,
+                    _scrollbarDragging ? Accent : overBar ? TextPrimary : TextMuted, 0.24f);
+            if (_scrollbarDragging)
+            {
+                if (!Input.GetMouseButton(0)) _scrollbarDragging = false;
+                else if (LocalPoint(_scrollbar, out var local))
+                    SetScrollFromThumbTop(_scrollbar.rect.yMax - local.y - _scrollbarDragOffset);
+                return true;
+            }
+            if (overBar && Input.GetMouseButtonDown(0))
+            {
+                if (LocalPoint(_scrollbar, out var local))
+                {
+                    float top = _scrollbar.rect.yMax - local.y;
+                    if (overThumb)
+                    {
+                        _scrollbarDragging = true;
+                        _scrollbarDragOffset = top + _scrollThumb.anchoredPosition.y;
+                    }
+                    else SetScrollFromThumbTop(top - _scrollThumb.rect.height * 0.5f);
+                }
+                SwallowClick();
+                return true;
+            }
+            if (Contains(_scrollView) && Mathf.Abs(Input.mouseScrollDelta.y) > 0.01f)
+            {
+                _scroll -= Input.mouseScrollDelta.y * RowH;
+                ApplyScroll();
+            }
+            return overBar;
         }
 
         private void Apply()
@@ -1191,21 +1380,32 @@ internal static class VoiceUiKit
                 BuildHelp(helpText);
         }
 
-        public void ShowDescription(string? summary = null)
+        public void ShowDescription(string? summary = null, bool expanded = false)
         {
             string? content = summary ?? _helpText;
             if (Height > 100f || string.IsNullOrWhiteSpace(content)) return;
             Title.fontSizeMax = 18f;
             Title.fontSizeMin = 15f;
             Title.fontSize = 18f;
+            if (expanded)
+            {
+                for (int i = 0; i < Root.childCount; i++)
+                {
+                    var child = Root.GetChild(i).GetComponent<RectTransform>();
+                    if (child == Title.rectTransform || (Hover != null && child == Hover.rectTransform)) continue;
+                    child.anchoredPosition += new Vector2(0f, 18f);
+                }
+            }
             Title.rectTransform.sizeDelta = new Vector2(Title.rectTransform.sizeDelta.x, 28f);
-            Title.rectTransform.anchoredPosition = new Vector2(EdgePad, 11f);
+            Title.rectTransform.anchoredPosition = new Vector2(EdgePad, expanded ? 18f : 11f);
             var description = Text("Description", Title.rectTransform, content!, 13f, TextMuted, TextAlignmentOptions.Left);
             description.richText = false;
             description.overflowMode = TextOverflowModes.Ellipsis;
             description.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            description.rectTransform.sizeDelta = new Vector2(LabelColW, 23f);
-            description.rectTransform.anchoredPosition = new Vector2(0f, -26f);
+            description.enableWordWrapping = expanded;
+            description.rectTransform.sizeDelta = new Vector2(
+                expanded ? PaneW - EdgePad * 2f : LabelColW, expanded ? 36f : 23f);
+            description.rectTransform.anchoredPosition = new Vector2(0f, expanded ? -42f : -26f);
             if (_helpRt != null)
             {
                 float preferredWidth = Title.GetPreferredValues(Title.text).x;

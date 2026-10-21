@@ -15,6 +15,8 @@
 - Abandoned one-frame avatar color changes no longer apply on a later, unrelated flicker.
 - Public ghost avatars finish loading hats and visors without waiting for unused skins. Ready and delayed multipart ghost bodies render consistently, while normal ghost poses and stable-identity caches remain unchanged.
 - First-time setup has its own four-step layout: paired audio controls, grouped shortcuts, a preview-first HUD workspace, and compact review rows with direct editing. A fixed footer and canvas-aware scaling keep navigation visible. Existing HUD layouts can be restored; changes stay staged until Save & finish. Capsule-mic branding, Space Grotesk text, and cyan-to-purple accents match the rest of PerfectComms.
+- Host voice settings now group related match rules, show inline explanations, and mark their lobby-wide scope. The panel fits the canvas, with scrollbars for long rule lists and mod tabs; changes still apply immediately.
+- Conditional host options retain their values and scroll position when hidden. Registered mod tabs refresh when added or removed while the host menu is open, avoiding stale controls and invalid category selections.
 
 ## Perfect Comms v4.1.11
 
