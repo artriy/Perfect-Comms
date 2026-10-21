@@ -70,6 +70,7 @@ public static class HostSettingsPanel
 
         VoiceSettingsPanel.ForceClose();
         VoiceVolumeMenu.ForceClose();
+        VoiceLobbyBrowserUi.ForceClose();
 
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();

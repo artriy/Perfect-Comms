@@ -2521,6 +2521,8 @@ fn run_authenticated_session(
     // Establish the process-local monotonic epoch before either audio stream can callback.
     let _ = monotonic_ns();
     let conn = Arc::new(Mutex::new(stream.try_clone()?));
+    #[cfg(windows)]
+    let mut obs_window = crate::obs_window::ObsCaptureWindow::new();
 
     // Codec initialization is a session prerequisite even when microphone capture is absent:
     // receive-only users still need decoding, and a helper that can report levels but never
@@ -3978,6 +3980,20 @@ fn run_authenticated_session(
                     InboundOp::SetDiagnostics { enabled } => {
                         media_diagnostics.set_enabled(enabled);
                     }
+                    #[cfg(windows)]
+                    InboundOp::SetObsCompatibility { enabled } => {
+                        if let Err(error) = obs_window.set_enabled(enabled) {
+                            let message = format!("OBS compatibility window: {error}");
+                            if write_frame(
+                                &conn,
+                                &encode_control(&error_json("obs-window", &message)),
+                            )
+                            .is_err()
+                            {
+                                break 'control;
+                            }
+                        }
+                    }
                     InboundOp::SetInput {
                         gain,
                         vad_threshold,
@@ -4223,6 +4239,10 @@ fn run_authenticated_session(
         eprintln!("pc-capture: capture teardown exceeded its bound: {error}");
     }
     stop.store(true, Ordering::Relaxed);
+    #[cfg(windows)]
+    if let Err(error) = obs_window.set_enabled(false) {
+        eprintln!("pc-capture: OBS compatibility window cleanup failed: {error}");
+    }
     if let Err(error) =
         stop_playback_bounded(&playback_lifecycle, &out_progress, PLAYBACK_STOP_TIMEOUT)
     {

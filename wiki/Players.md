@@ -24,6 +24,8 @@ On desktop, press `F10` to open Voice Settings. Hosts can press `F11` to open Ho
 Managed Starlight players and desktop `PerfectComms.dll` players interoperate in
 the same voice lobby. The desktop installation and media stack are unchanged.
 
+When an update notification appears in the main menu, **View release** opens its release page and **Dismiss** closes the card for that menu visit. The card waits while a PerfectComms panel or first-time setup is open.
+
 ## First-time setup
 
 The setup saves everything only after you finish the final Review step. Existing settings remain unchanged if you leave early.
@@ -101,7 +103,7 @@ Team Radio provides private hold-to-talk channels when the host enables it and y
 
 ### Player volumes, mute, and deafen
 
-- Press `Shift+B` to open persistent local volume sliders and live speaking meters for other players. Each slider ranges from 0% to 200% and affects only what you hear.
+- Press `Shift+B` to open the personal volume mixer with persistent local sliders and live speaking meters for other players. Scroll to reach the full roster. Each slider ranges from 0% to 200% and affects only what you hear; the reset arrow restores that player to 100%.
 - Muting stops your microphone transmission without silencing other players.
 - Deafening mutes Perfect Comms playback and pauses your microphone transmission until you undeafen.
 - The optional alive/dead focus bindings temporarily apply separate group volume levels while held.
@@ -113,6 +115,10 @@ The speaking bar can show only active speakers or reserve a slot for every conne
 ### Voice Lobbies
 
 Open **Voice Lobbies** from the main menu to browse public voice-enabled lobbies. A host chooses whether to publish the lobby and which supported directory to use. Directory selection changes discovery only; it does not change the match's voice rules.
+
+The directory scrolls through all listed lobbies. Each row shows its player count and whether it can be joined; full, in-game, incompatible, or incomplete listings are unavailable. **Refresh** requests a fresh list.
+
+**Edit lobby info** opens separate lobby-title and language fields with 40- and 16-character limits. **Save** applies the text; **Cancel** or closing the panel discards unfinished changes. These details appear publicly only when you host and enable Public Voice Lobby. On desktop, `Tab` switches fields, `Enter` saves, and `Esc` cancels.
 
 ## Host Voice Settings overview
 

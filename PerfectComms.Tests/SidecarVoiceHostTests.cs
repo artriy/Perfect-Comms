@@ -803,6 +803,111 @@ public sealed class SidecarVoiceHostTests
         await AwaitCompletion(release);
     }
 
+    [Fact]
+    public async Task ObsCompatibilityUsesCurrentSettingAfterColdStartAndHelperReplacement()
+    {
+        var enabled = false;
+        var firstClient = new FakeSidecarVoiceClient();
+        var secondClient = new FakeSidecarVoiceClient();
+        var createCount = 0;
+        var host = new SidecarVoiceHostCore(
+            () => Interlocked.Increment(ref createCount) == 1 ? firstClient : secondClient,
+            () => enabled);
+        enabled = true;
+        host.ApplyObsCompatibilityMode();
+        var first = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(first.EnsureStarted("mic", "speaker"));
+        Assert.True(first.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Equal(new[] { true }, firstClient.ObsCompatibilityCalls);
+
+        enabled = false;
+        host.ApplyObsCompatibilityMode();
+        Assert.True(first.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Equal(new[] { true, false }, firstClient.ObsCompatibilityCalls);
+        Assert.Equal(1, firstClient.StartCount);
+        Assert.Empty(firstClient.MicActiveCalls);
+        Assert.Empty(firstClient.SyntheticCalls);
+        Assert.Empty(firstClient.AudioRouteCalls);
+        Assert.Empty(firstClient.OutputSelectionCalls);
+        await AwaitCompletion(first.ReleaseAsync());
+
+        enabled = true;
+        host.ApplyObsCompatibilityMode();
+        var second = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(second.EnsureStarted("mic", "speaker"));
+        Assert.True(second.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Equal(new[] { true }, secondClient.ObsCompatibilityCalls);
+        Assert.Equal(new[] { true, false }, firstClient.ObsCompatibilityCalls);
+        await AwaitCompletion(second.ReleaseAsync());
+    }
+
+    [Fact]
+    public async Task ObsCompatibilityChangeDuringReadinessUsesLatestSetting()
+    {
+        using var startEntered = new ManualResetEventSlim();
+        using var allowStart = new ManualResetEventSlim();
+        var fake = new FakeSidecarVoiceClient
+        {
+            StartEntered = startEntered,
+            AllowStart = allowStart,
+        };
+        var enabled = false;
+        var host = new SidecarVoiceHostCore(() => fake, () => enabled);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        var startup = Task.Run(() => lease.EnsureStarted("mic", "speaker"));
+        try
+        {
+            Assert.True(startEntered.Wait(TimeSpan.FromSeconds(2)));
+            enabled = true;
+            host.ApplyObsCompatibilityMode();
+        }
+        finally
+        {
+            allowStart.Set();
+        }
+        Assert.True(await startup);
+        Assert.True(lease.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Equal(new[] { true }, fake.ObsCompatibilityCalls);
+        await AwaitCompletion(lease.ReleaseAsync());
+    }
+
+    [Fact]
+    public async Task UnsupportedHelperReceivesNoObsCompatibilityCommand()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        var host = new SidecarVoiceHostCore(() => fake, () => null);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "speaker"));
+        host.ApplyObsCompatibilityMode();
+        Assert.True(lease.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Empty(fake.ObsCompatibilityCalls);
+        Assert.Equal(CaptureHealth.Healthy, lease.Health);
+        await AwaitCompletion(lease.ReleaseAsync());
+    }
+
+    [Fact]
+    public async Task ObsCompatibilityReappliesAfterDeadHelperRestartOnSameLease()
+    {
+        var firstClient = new FakeSidecarVoiceClient();
+        var secondClient = new FakeSidecarVoiceClient();
+        var createCount = 0;
+        var host = new SidecarVoiceHostCore(
+            () => Interlocked.Increment(ref createCount) == 1 ? firstClient : secondClient,
+            () => true);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        Assert.True(lease.EnsureStarted("mic", "speaker"));
+        Assert.True(lease.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        firstClient.RaiseDead("helper exited");
+        Assert.False(lease.EnsureStarted("mic", "speaker"));
+
+        Assert.True(await TryUntilAsync(() => lease.EnsureStarted("mic", "speaker")));
+        Assert.True(lease.SendOutputTestFrameAndWait(new[] { 0f, 0f }));
+        Assert.Equal(new[] { true }, firstClient.ObsCompatibilityCalls);
+        Assert.Equal(new[] { true }, secondClient.ObsCompatibilityCalls);
+        Assert.Equal(1, secondClient.StartCount);
+        await AwaitCompletion(lease.ReleaseAsync());
+    }
+
     private static async Task AwaitCompletion(Task completion)
     {
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -884,6 +989,7 @@ public sealed class SidecarVoiceHostTests
         public bool OutputFrameResult { get; init; } = true;
         public List<bool> MicActiveCalls { get; } = new();
         public List<bool> SyntheticCalls { get; } = new();
+        public List<bool> ObsCompatibilityCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
         public List<string> OutputSelectionCalls { get; } = new();
         public List<(string Input, string Output, SidecarCaptureMode Mode, bool Synthetic)> AudioRouteCalls { get; } = new();
@@ -919,6 +1025,7 @@ public sealed class SidecarVoiceHostTests
             return InitialConfigurationResult;
         }
         public void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf) { }
+        public void SetObsCompatibilityMode(bool enabled) => ObsCompatibilityCalls.Add(enabled);
         public void SetSynthetic(bool enabled)
         {
             SyntheticCalls.Add(enabled);

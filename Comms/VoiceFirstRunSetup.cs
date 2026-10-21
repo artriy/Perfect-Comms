@@ -51,15 +51,15 @@ internal static class VoiceFirstRunSetup
     private static SpeakingBarLivePreview? _hudPreview;
     private static VoiceUiKit.LiveLevelMeter? _micLevelMeter;
     private static readonly List<VoiceUiKit.Row> Rows = new();
-    private static readonly List<SetupButton> Buttons = new();
-    private static readonly List<SetupButton> PromptButtons = new();
+    private static readonly List<VoiceUiKit.ActionButton> Buttons = new();
+    private static readonly List<VoiceUiKit.ActionButton> PromptButtons = new();
     private static readonly List<HudPresetCard> HudCards = new();
 
     private static TextMeshProUGUI? _outputStatus;
     private static TextMeshProUGUI? _micModeHelpText;
     private static TextMeshProUGUI? _hudDescriptionText;
-    private static SetupButton? _micTestButton;
-    private static SetupButton? _speakerTestButton;
+    private static VoiceUiKit.ActionButton? _micTestButton;
+    private static VoiceUiKit.ActionButton? _speakerTestButton;
     private static TextMeshProUGUI? _finishError;
     private static TextMeshProUGUI? _promptMessage;
     private static VoiceUiKit.Row? _pushToTalkRow;
@@ -105,7 +105,8 @@ internal static class VoiceFirstRunSetup
         var settings = VoiceSettings.Instance;
         if (settings == null || !settings.NeedsFirstRunSetup || _automaticAttemptedThisSession)
             return false;
-        if (VoiceSettingsPanel.IsOpen || HostSettingsPanel.IsOpen || VoiceVolumeMenu.IsOpen)
+        if (VoiceSettingsPanel.IsOpen || HostSettingsPanel.IsOpen || VoiceVolumeMenu.IsOpen ||
+            VoiceLobbyBrowserUi.IsOpen)
             return false;
 
         bool shown = Show(settings, manual: false);
@@ -121,6 +122,7 @@ internal static class VoiceFirstRunSetup
         VoiceSettingsPanel.ForceClose();
         HostSettingsPanel.ForceClose();
         VoiceVolumeMenu.ForceClose();
+        VoiceLobbyBrowserUi.ForceClose();
         if (Show(settings, manual: true))
             _automaticAttemptedThisSession = true;
     }
@@ -386,7 +388,7 @@ internal static class VoiceFirstRunSetup
             .Build(input, "Microphone", channelWidth, -30f, 86f,
                 "The microphone Perfect Comms captures."));
         _micTestButton = AddButton(input, "Test mic", 154f, 44f,
-            22f, -136f, ButtonKind.Secondary,
+            22f, -136f, VoiceUiKit.ButtonKind.Secondary,
             () =>
             {
                 if (_audioPreview == null || _draft == null) return;
@@ -418,7 +420,7 @@ internal static class VoiceFirstRunSetup
             "Output follows your current Android audio route.", VoiceUiKit.Accent);
 #endif
         _speakerTestButton = AddButton(output, "Test output", 154f, 44f,
-            22f, -136f, ButtonKind.Secondary,
+            22f, -136f, VoiceUiKit.ButtonKind.Secondary,
             () => _audioPreview?.PlayTestSound(_draft),
             () => _audioPreview is { IsSpeakerTestBusy: false, IsMicrophoneTestStarting: false });
         _outputStatus = AddText(_pageRoot, "Mic and output tests are optional", 16f,
@@ -527,8 +529,8 @@ internal static class VoiceFirstRunSetup
         picker.gameObject.AddComponent<CanvasGroup>().alpha = _draft.HideSpeakingBar ? 0.38f : 1f;
         AddText(picker, "LAYOUTS", 13f, SetupTextSecondary, TextAlignmentOptions.Left, FontStyles.Bold,
             Vector2.zero, new Vector2(pickerWidth, 24f));
-        Buttons.Add(new SetupButton(picker, "Use existing layout", 200f, 32f,
-            pickerWidth - 200f, 4f, ButtonKind.Ghost,
+        Buttons.Add(new VoiceUiKit.ActionButton(picker, "Use existing layout", 200f, 32f,
+            pickerWidth - 200f, 4f, VoiceUiKit.ButtonKind.Ghost,
             () =>
             {
                 _draft.SelectOriginalHud();
@@ -670,29 +672,29 @@ internal static class VoiceFirstRunSetup
         if (_completed)
         {
             AddButton(footer.rectTransform, "Advanced settings", 210f, 48f,
-                28f, -16f, ButtonKind.Secondary, () =>
+                28f, -16f, VoiceUiKit.ButtonKind.Secondary, () =>
                 {
                     CloseInternal(destroy: true);
                     VoiceSettingsPanel.ShowDeferred();
                 });
             AddButton(footer.rectTransform, "Done", 182f, 48f,
-                nextX, -16f, ButtonKind.Primary, () => CloseInternal(destroy: true));
+                nextX, -16f, VoiceUiKit.ButtonKind.Primary, () => CloseInternal(destroy: true));
             return;
         }
         AddButton(footer.rectTransform, "Use existing settings", 210f, 48f,
-            28f, -16f, ButtonKind.Ghost, UseExistingSettings);
+            28f, -16f, VoiceUiKit.ButtonKind.Ghost, UseExistingSettings);
         if (_page > AudioPage && !_returnToReview)
             AddButton(footer.rectTransform, "Back", 108f, 48f,
-                nextX - 124f, -16f, ButtonKind.Secondary, () => GoTo(_page - 1));
+                nextX - 124f, -16f, VoiceUiKit.ButtonKind.Secondary, () => GoTo(_page - 1));
         if (_returnToReview)
             AddButton(footer.rectTransform, "Back to review", 182f, 48f,
-                nextX, -16f, ButtonKind.Primary, () => GoTo(ReadyPage));
+                nextX, -16f, VoiceUiKit.ButtonKind.Primary, () => GoTo(ReadyPage));
         else if (_page < ReadyPage)
             AddButton(footer.rectTransform, "Continue", 182f, 48f,
-                nextX, -16f, ButtonKind.Primary, () => GoTo(_page + 1));
+                nextX, -16f, VoiceUiKit.ButtonKind.Primary, () => GoTo(_page + 1));
         else
             AddButton(footer.rectTransform, "Save & finish", 182f, 48f,
-                nextX, -16f, ButtonKind.Primary, FinishSetup, () => SetupValidationIssue() == null);
+                nextX, -16f, VoiceUiKit.ButtonKind.Primary, FinishSetup, () => SetupValidationIssue() == null);
     }
 
     private static void UseExistingSettings()
@@ -817,10 +819,10 @@ internal static class VoiceFirstRunSetup
             SetupTextTertiary, TextAlignmentOptions.Left, FontStyles.Normal,
             new Vector2(28f, -160f), new Vector2(564f, 28f));
         PromptButtons.Clear();
-        PromptButtons.Add(new SetupButton(card.rectTransform, "Use existing settings", 230f, 48f,
-            28f, -216f, ButtonKind.Secondary, UseExistingSettings));
-        PromptButtons.Add(new SetupButton(card.rectTransform, "Continue setup", 230f, 48f,
-            362f, -216f, ButtonKind.Primary, HideClosePrompt));
+        PromptButtons.Add(new VoiceUiKit.ActionButton(card.rectTransform, "Use existing settings", 230f, 48f,
+            28f, -216f, VoiceUiKit.ButtonKind.Secondary, UseExistingSettings));
+        PromptButtons.Add(new VoiceUiKit.ActionButton(card.rectTransform, "Continue setup", 230f, 48f,
+            362f, -216f, VoiceUiKit.ButtonKind.Primary, HideClosePrompt));
         VoiceUiKit.SwallowClick();
         _inputLockedUntilFrame = Time.frameCount + 1;
     }
@@ -1041,13 +1043,13 @@ internal static class VoiceFirstRunSetup
         }
     }
 
-    private static void TickButtons(List<SetupButton> buttons, float dt)
+    private static void TickButtons(List<VoiceUiKit.ActionButton> buttons, float dt)
     {
         for (int i = 0; i < buttons.Count; i++)
             buttons[i].Tick(dt, Time.frameCount > _inputLockedUntilFrame);
     }
 
-    private static bool PointerOverAnyButton(List<SetupButton> buttons)
+    private static bool PointerOverAnyButton(List<VoiceUiKit.ActionButton> buttons)
     {
         for (int i = 0; i < buttons.Count; i++)
             if (buttons[i].IsPointerOver) return true;
@@ -1182,7 +1184,7 @@ internal static class VoiceFirstRunSetup
         PlaceTopLeft(icon.rectTransform, 22f, -6f, 34f, 34f);
         AddText(row, title, 20f, VoiceUiKit.TextBright, TextAlignmentOptions.Left, FontStyles.Bold,
             new Vector2(80f, 0f), new Vector2(ContentWidth - 210f, 32f));
-        AddButton(row, "Edit", 76f, 44f, ContentWidth - 98f, 0f, ButtonKind.Ghost, edit);
+        AddButton(row, "Edit", 76f, 44f, ContentWidth - 98f, 0f, VoiceUiKit.ButtonKind.Ghost, edit);
         float width = (ContentWidth - 118f) * 0.5f;
         for (int i = 0; i < lines.Count && i < 4; i++)
         {
@@ -1204,18 +1206,18 @@ internal static class VoiceFirstRunSetup
         return row;
     }
 
-    private static SetupButton AddButton(
+    private static VoiceUiKit.ActionButton AddButton(
         RectTransform parent,
         string text,
         float width,
         float height,
         float x,
         float y,
-        ButtonKind kind,
+        VoiceUiKit.ButtonKind kind,
         Action click,
         Func<bool>? enabled = null)
     {
-        var button = new SetupButton(parent, text, width, height, x, y, kind, click, enabled);
+        var button = new VoiceUiKit.ActionButton(parent, text, width, height, x, y, kind, click, enabled);
         Buttons.Add(button);
         return button;
     }
@@ -1395,120 +1397,7 @@ internal static class VoiceFirstRunSetup
         return value * value * (3f - 2f * value);
     }
 
-    private enum ButtonKind
-    {
-        Primary,
-        Secondary,
-        Ghost,
-    }
 
-    private sealed class SetupButton
-    {
-        private readonly RectTransform _root;
-        private readonly Image _surface;
-        private readonly Image? _spectrum;
-        private readonly TextMeshProUGUI _label;
-        private readonly ButtonKind _kind;
-        private readonly Action _click;
-        private readonly Func<bool> _enabled;
-
-        internal SetupButton(
-            RectTransform parent,
-            string text,
-            float width,
-            float height,
-            float x,
-            float y,
-            ButtonKind kind,
-            Action click,
-            Func<bool>? enabled = null)
-        {
-            _kind = kind;
-            _click = click;
-            _enabled = enabled ?? (() => true);
-            _root = VoiceUiKit.Rect("SetupButton", parent);
-            PlaceTopLeft(_root, x, y, width, height);
-            _surface = _root.gameObject.AddComponent<Image>();
-            _surface.sprite = VoiceUiKit.Rounded(true);
-            _surface.type = Image.Type.Sliced;
-            _surface.color = RestColor();
-            _surface.raycastTarget = false;
-            if (kind == ButtonKind.Primary)
-            {
-                _root.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-                _spectrum = VoiceUiKit.SpectrumImage("ButtonSpectrum", _root);
-                _spectrum.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-                _spectrum.rectTransform.offsetMin = Vector2.zero;
-                _spectrum.rectTransform.offsetMax = Vector2.zero;
-            }
-            _label = VoiceUiKit.Text("ButtonLabel", _root, text, 18f,
-                LabelColor(),
-                TextAlignmentOptions.Center, FontStyles.Bold);
-            _label.characterSpacing = 0f;
-            _label.enableAutoSizing = true;
-            _label.fontSizeMax = 18f;
-            _label.fontSizeMin = 15f;
-            _label.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-            _label.rectTransform.offsetMin = new Vector2(8f, 0f);
-            _label.rectTransform.offsetMax = new Vector2(-8f, 0f);
-        }
-
-        internal void SetText(string text)
-        {
-            if (_label.text != text) _label.text = text;
-        }
-
-        internal bool IsPointerOver => _root != null && _root.gameObject.activeInHierarchy &&
-                                       _enabled() && VoiceUiKit.Contains(_root);
-
-        internal void Tick(float dt, bool allowInput)
-        {
-            if (_root == null || !_root.gameObject.activeInHierarchy) return;
-            bool enabled = _enabled();
-            bool over = enabled && VoiceUiKit.Contains(_root);
-            bool down = over && Input.GetMouseButton(0);
-            Color32 target = !enabled
-                ? VoiceUiKit.ToggleOffTrack
-                : over ? HoverColor() : RestColor();
-            _surface.color = VoiceUiKit.Lerp(_surface.color, target, Mathf.Clamp01(dt * 15f));
-            if (_spectrum != null)
-                _spectrum.color = VoiceUiKit.Lerp(_spectrum.color,
-                    !enabled ? VoiceUiKit.Clear : over ? new Color32(224, 232, 255, 255) : new Color32(255, 255, 255, 255),
-                    Mathf.Clamp01(dt * 14f));
-            _label.color = VoiceUiKit.Lerp(_label.color,
-                enabled ? LabelColor() : VoiceUiKit.TextFaint,
-                Mathf.Clamp01(dt * 14f));
-            float targetScale = down ? 0.98f : over ? 1.015f : 1f;
-            float scale = Mathf.Lerp(_root.localScale.x, targetScale, Mathf.Clamp01(dt * 18f));
-            _root.localScale = new Vector3(scale, scale, 1f);
-            if (allowInput && over && Input.GetMouseButtonDown(0))
-            {
-                VoiceUiKit.SwallowClick();
-                _click();
-            }
-        }
-
-        private Color32 RestColor() => _kind switch
-        {
-            ButtonKind.Primary => VoiceUiKit.ControlBg,
-            ButtonKind.Secondary => VoiceUiKit.ControlBg,
-            _ => VoiceUiKit.Clear,
-        };
-
-        private Color32 HoverColor() => _kind switch
-        {
-            ButtonKind.Primary => SetupSurfaceHover,
-            ButtonKind.Secondary => SetupSurfaceHover,
-            _ => VoiceUiKit.AccentFaint,
-        };
-
-        private Color32 LabelColor() => _kind switch
-        {
-            ButtonKind.Primary => VoiceUiKit.PanelOuter,
-            _ => VoiceUiKit.TextPrimary,
-        };
-
-    }
 
     private sealed class HudPresetCard
     {

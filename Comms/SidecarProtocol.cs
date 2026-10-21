@@ -190,6 +190,9 @@ internal static class SidecarProtocol
     public static byte[] SetDiagnosticsFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-diagnostics\",\"enabled\":{JsonBool(enabled)}}}");
 
+    public static byte[] SetObsCompatibilityFrame(bool enabled)
+        => EncodeControl($"{{\"op\":\"set-obs-compatibility\",\"enabled\":{JsonBool(enabled)}}}");
+
     public static byte[] SetSyntheticFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-synthetic\",\"enabled\":{JsonBool(enabled)}}}");
 

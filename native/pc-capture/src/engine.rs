@@ -660,6 +660,9 @@ impl Engine {
                     .collect();
                 self.gs.apply(local, master, peer_states);
             }
+            #[cfg(windows)]
+            // The OBS window belongs to the sidecar session, not this audio engine.
+            InboundOp::SetObsCompatibility { .. } => {}
             InboundOp::Hello { .. }
             | InboundOp::SelectDevice { .. }
             | InboundOp::SelectOutputDevice { .. }

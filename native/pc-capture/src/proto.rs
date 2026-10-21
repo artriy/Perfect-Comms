@@ -663,6 +663,9 @@ pub enum InboundOp {
     },
     #[serde(rename = "set-diagnostics")]
     SetDiagnostics { enabled: bool },
+    #[cfg(windows)]
+    #[serde(rename = "set-obs-compatibility")]
+    SetObsCompatibility { enabled: bool },
     #[serde(rename = "set-synthetic")]
     SetSynthetic { enabled: bool },
     #[serde(rename = "set-monitor")]

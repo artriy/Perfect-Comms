@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### OBS Audio Capture
+
+- Added an optional, default-off OBS Compatibility Mode under Audio > Streaming on native Windows. While the voice helper is running, it exposes a minimized Perfect Comms Audio window for OBS Application Audio Capture.
+- The setting saves locally and applies without restarting voice. Closing the helper window minimizes it; disabling the option removes it. Microphone capture, voice routing, and privacy rules are unchanged.
+
 ### Voice Settings Interface
 
 - Voice settings now use the helper logo's cyan, blue, and purple palette, Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions.
@@ -17,6 +22,12 @@
 - First-time setup has its own four-step layout: paired audio controls, grouped shortcuts, a preview-first HUD workspace, and compact review rows with direct editing. A fixed footer and canvas-aware scaling keep navigation visible. Existing HUD layouts can be restored; changes stay staged until Save & finish. Capsule-mic branding, Space Grotesk text, and cyan-to-purple accents match the rest of PerfectComms.
 - Host voice settings now group related match rules, show inline explanations, and mark their lobby-wide scope. The panel fits the canvas, with scrollbars for long rule lists and mod tabs; changes still apply immediately.
 - Conditional host options retain their values and scroll position when hidden. Registered mod tabs refresh when added or removed while the host menu is open, avoiding stale controls and invalid category selections.
+- Player volumes now use a personal mixer layout with wider name labels, local-only scope text, a scrollable roster, and per-player reset controls. Saved 0%-200% volumes and privacy-filtered speaking meters are retained; closing or rebuilding the panel finishes an active volume adjustment.
+- Voice Lobbies retain their original illustrated main-menu button and open a scrollable directory instead of a three-row view. Each lobby shows its player count and join availability; live updates reuse rows and keep join actions bound to the current listing.
+- The lobby-info editor has separate title and language fields, character counts, focus indicators, keyboard hints, and a fixed Save/Cancel footer. Counts, fields, buttons, and scrollbars stay within the panel's clipped content area.
+- Voice Settings and Host Voice Settings use smaller capsule-mic launcher tiles with personal or lobby-wide scope labels. Their existing menu visibility and host-authority gates are retained.
+- Update notifications use a compact bottom-right card with the available version, View release, and Dismiss actions. They defer while another PerfectComms panel is open. New menu loads discard an earlier completed check when notifications are disabled.
+- The update card intercepts clicks over its visible area without blocking the rest of the game menu. The original native lobby button retains its own click handling. Persistent-panel transitions close the lobby browser and discard unfinished editor changes.
 
 ## Perfect Comms v4.1.11
 

@@ -21,5 +21,7 @@ pub mod build_info;
 pub mod diagnostics;
 #[cfg(not(target_os = "android"))]
 pub mod ipc;
+#[cfg(windows)]
+pub mod obs_window;
 #[cfg(not(target_os = "android"))]
 pub mod owner;

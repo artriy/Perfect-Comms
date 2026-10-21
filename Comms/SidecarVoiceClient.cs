@@ -444,6 +444,14 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             $"aec={aec} agc={agc} ns={ns} nsVeryHigh={ns && nsVeryHigh} hpf={hpf}");
     }
 
+    public void SetObsCompatibilityMode(bool enabled)
+    {
+        SendCommand(
+            "set-obs-compatibility",
+            () => SidecarProtocol.SetObsCompatibilityFrame(enabled),
+            $"enabled={enabled}");
+    }
+
     public void SetSynthetic(bool enabled)
     {
         SendCommand("set-synthetic", () => SidecarProtocol.SetSyntheticFrame(enabled), $"enabled={enabled}");
@@ -1277,6 +1285,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             VoiceDiagnostics.Log(
                 "sidecar.helper-error",
                 $"code=\"{SafeDiagnosticText(code, 64)}\" message=\"{SafeDiagnosticText(msg, 240)}\" payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
+            if (string.Equals(code, "obs-window", StringComparison.OrdinalIgnoreCase))
+                return;
             // The native capture loop reports mic-error once per outage, then keeps retrying the
             // input device while the WebRTC/control connection and speaker remain healthy. Treating
             // that recoverable device outage as transport death poisoned Health without raising the

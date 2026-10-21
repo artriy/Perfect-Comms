@@ -93,6 +93,7 @@ public static class VoiceSettingsPanel
 
         HostSettingsPanel.ForceClose();
         VoiceVolumeMenu.ForceClose();
+        VoiceLobbyBrowserUi.ForceClose();
 
         VoiceUiKit.EnsureCanvas();
         VoiceUiKit.EnsureDriver();
@@ -585,6 +586,13 @@ public static class VoiceSettingsPanel
         Section(defs, "STARTUP");
         Toggle(defs, "Start Muted", s.StartMuted);
         Toggle(defs, "Start Deafened", s.StartDeafened);
+#if WINDOWS
+        if (SidecarVoiceHost.SupportsObsCompatibilityMode)
+        {
+            Section(defs, "STREAMING");
+            Toggle(defs, "OBS Compatibility Mode", s.ObsCompatibilityMode);
+        }
+#endif
     }
 
     private static void BuildDevices(List<Entry> defs, VoiceChatLocalSettings s)

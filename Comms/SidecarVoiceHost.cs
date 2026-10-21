@@ -67,6 +67,7 @@ internal interface ISidecarVoiceClient : IDisposable
         float monitorGain,
         IEnumerable<IceServer>? iceServers);
     void SetDsp(bool aec, bool agc, bool ns, bool nsVeryHigh, bool hpf);
+    void SetObsCompatibilityMode(bool enabled);
     void SetSynthetic(bool enabled);
     void SetMonitor(bool enabled, bool delayed, float gain);
     void SetInput(float gain, float vadThreshold, float noiseGateThreshold);
@@ -572,6 +573,7 @@ internal sealed class SidecarVoiceHostCore
     private readonly Func<ISidecarVoiceClient> _createClient;
     private readonly Action<ThreadStart, string> _startCommandWorker;
     private readonly int _commandCapacity;
+    private readonly Func<bool?>? _obsCompatibilityMode;
     private CommandSession? _session;
     private RetirementSession? _retiring;
     private StartupAttempt? _starting;
@@ -580,20 +582,24 @@ internal sealed class SidecarVoiceHostCore
     private long _nextGeneration;
     private bool _shutdown;
 
-    internal SidecarVoiceHostCore(Func<ISidecarVoiceClient> createClient)
-        : this(createClient, DefaultCommandCapacity)
+    internal SidecarVoiceHostCore(
+        Func<ISidecarVoiceClient> createClient,
+        Func<bool?>? obsCompatibilityMode = null)
+        : this(createClient, DefaultCommandCapacity, obsCompatibilityMode: obsCompatibilityMode)
     {
     }
 
     internal SidecarVoiceHostCore(
         Func<ISidecarVoiceClient> createClient,
         int commandCapacity,
-        Action<ThreadStart, string>? startCommandWorker = null)
+        Action<ThreadStart, string>? startCommandWorker = null,
+        Func<bool?>? obsCompatibilityMode = null)
     {
         _createClient = createClient ?? throw new ArgumentNullException(nameof(createClient));
         if (commandCapacity <= 0) throw new ArgumentOutOfRangeException(nameof(commandCapacity));
         _commandCapacity = commandCapacity;
         _startCommandWorker = startCommandWorker ?? StartCommandWorker;
+        _obsCompatibilityMode = obsCompatibilityMode;
     }
 
     internal SidecarVoiceLease? TryAcquire(SidecarVoiceCallbacks callbacks, out string failure)
@@ -725,7 +731,10 @@ internal sealed class SidecarVoiceHostCore
                        && _session == null
                        && _retiring == null;
             if (accepted)
+            {
                 _session = session;
+                ApplyObsCompatibilityMode();
+            }
             else
             {
                 retirement ??= session;
@@ -777,6 +786,21 @@ internal sealed class SidecarVoiceHostCore
             return OwnsLocked(lease) && ReferenceEquals(_session, session)
                 ? devices
                 : Array.Empty<VoiceDeviceInfo>();
+    }
+
+    internal void ApplyObsCompatibilityMode()
+    {
+        lock (_gate)
+        {
+            if (_obsCompatibilityMode == null || _owner == null) return;
+            Submit(_owner, client =>
+            {
+                var enabled = _obsCompatibilityMode();
+                if (enabled.HasValue)
+                    client.SetObsCompatibilityMode(enabled.Value);
+                return true;
+            });
+        }
     }
 
     internal void Submit(SidecarVoiceLease lease, Action<ISidecarVoiceClient> action)
@@ -1036,7 +1060,19 @@ internal sealed class SidecarVoiceHostCore
 
 internal static class SidecarVoiceHost
 {
-    private static readonly SidecarVoiceHostCore Host = new(CreateClient);
+    private static readonly SidecarVoiceHostCore Host = new(
+        CreateClient,
+        () => SupportsObsCompatibilityMode
+            ? VoiceSettings.Instance?.ObsCompatibilityMode.Value ?? false
+            : null);
+
+    internal static bool SupportsObsCompatibilityMode =>
+        !WineEnvironment.IsWine
+        && System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+            System.Runtime.InteropServices.OSPlatform.Windows)
+        && SidecarLauncher.TargetTriple() == "x86_64-pc-windows-msvc";
+
+    internal static void ApplyObsCompatibilityMode() => Host.ApplyObsCompatibilityMode();
 
     internal static SidecarVoiceLease? TryAcquire(SidecarVoiceCallbacks callbacks, out string failure)
         => Host.TryAcquire(callbacks, out failure);

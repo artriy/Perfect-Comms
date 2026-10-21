@@ -3,30 +3,37 @@ using System.Threading.Tasks;
 using HarmonyLib;
 using TMPro;
 using UnityEngine;
-using UnityEngine.Events;
 using VoiceChatPlugin.VoiceChat;
-using static UnityEngine.UI.Button;
 using Object = UnityEngine.Object;
 
 namespace VoiceChatPlugin;
 
 internal static class PerfectCommsUpdateNotifier
 {
-    private const int SortBase = 32740;
-    private const float PanelWidth = 3.45f;
-    private const float PanelHeight = 0.82f;
-    private static readonly Color Accent = new(0f, 0.898f, 1f, 1f);
+    private const float PanelWidth = 420f;
+    private const float PanelHeight = 160f;
 
     private static GameObject? _root;
+    private static RectTransform? _rootRect;
+    private static CanvasGroup? _group;
+    private static MainMenuManager? _owner;
+    private static VoiceUiKit.ActionButton? _downloadButton;
+    private static VoiceUiKit.ActionButton? _dismissButton;
+    private static float _appear;
+    private static int _tickFrame = -1;
     private static Task<PerfectCommsUpdateInfo?>? _checkTask;
     private static int _mainMenuLoadId;
     private static int _shownLoadId;
+
+    internal static bool CursorOverNotice =>
+        _rootRect != null && _rootRect.gameObject.activeInHierarchy && VoiceUiKit.Contains(_rootRect);
 
     internal static void OnMainMenuLoaded(MainMenuManager menu)
     {
         _mainMenuLoadId++;
         _shownLoadId = -1;
         Clear();
+        _checkTask = null;
 
         var settings = VoiceSettings.Instance;
         if (settings?.UpdateNotificationsEnabled.Value == false) return;
@@ -37,9 +44,8 @@ internal static class PerfectCommsUpdateNotifier
 
     internal static void Update(MainMenuManager menu)
     {
-        // Do not consume this menu load's notification while first-run setup is pending/open.
-        // Once setup releases the gate, the completed task is handled by a later LateUpdate.
-        if (VoiceFirstRunSetup.ShouldDeferMainMenuPopups) return;
+        TickUi();
+        if (VoiceFirstRunSetup.ShouldDeferMainMenuPopups || VoiceUiKit.AnyPanelOpen) return;
         if (_root != null) return;
         if (_shownLoadId == _mainMenuLoadId) return;
         if (_checkTask == null || !_checkTask.IsCompleted) return;
@@ -64,9 +70,16 @@ internal static class PerfectCommsUpdateNotifier
     {
         if (_root != null)
         {
+            _root.SetActive(false);
             Object.Destroy(_root);
-            _root = null;
         }
+        _root = null;
+        _rootRect = null;
+        _group = null;
+        _owner = null;
+        _downloadButton = null;
+        _dismissButton = null;
+        _appear = 0f;
     }
 
     private static bool ShouldShow(PerfectCommsUpdateInfo? info)
@@ -79,87 +92,111 @@ internal static class PerfectCommsUpdateNotifier
 
     private static void Show(MainMenuManager menu, PerfectCommsUpdateInfo info)
     {
-        var parent = menu.PlayOnlineButton?.transform.parent ?? menu.transform;
-        _root = new GameObject("PerfectComms_UpdateNotification");
-        _root.transform.SetParent(parent, false);
-        _root.transform.localPosition = new Vector3(1.02f, 2.32f, -30f);
+        VoiceUiKit.EnsureCanvas();
+        VoiceUiKit.EnsureDriver();
+        _owner = menu;
+        _rootRect = VoiceUiKit.Rect("PerfectComms_UpdateNotification", VoiceUiKit.Canvas.transform);
+        _rootRect.Anchor(new Vector2(1f, 0f), new Vector2(1f, 0f), new Vector2(1f, 0f));
+        _rootRect.sizeDelta = new Vector2(PanelWidth, PanelHeight);
+        _root = _rootRect.gameObject;
+        _group = _root.AddComponent<CanvasGroup>();
+        _appear = 0f;
 
-        CreatePanelArt();
-        CreateAccentLine();
+        var border = _root.AddComponent<UnityEngine.UI.Image>();
+        border.sprite = VoiceUiKit.Rounded();
+        border.type = UnityEngine.UI.Image.Type.Sliced;
+        border.color = VoiceUiKit.Divider;
+        border.raycastTarget = false;
+        var surface = VoiceUiKit.Panel("Surface", _rootRect, VoiceUiKit.PanelInner);
+        surface.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+        surface.rectTransform.offsetMin = Vector2.one;
+        surface.rectTransform.offsetMax = -Vector2.one;
+        var mark = VoiceUiKit.SpectrumImage("Spectrum", _rootRect);
+        mark.rectTransform.Anchor(new Vector2(0f, 1f), Vector2.one, new Vector2(0.5f, 1f));
+        mark.rectTransform.sizeDelta = new Vector2(-32f, 2f);
 
-        CreateClickArea(info.ReleaseUrl);
+        var logo = VoiceUiKit.Rect("Logo", _rootRect).gameObject.AddComponent<UnityEngine.UI.Image>();
+        logo.sprite = VoiceUiBranding.Logo();
+        logo.preserveAspect = true;
+        logo.raycastTarget = false;
+        logo.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
+        logo.rectTransform.sizeDelta = new Vector2(28f, 40f);
+        logo.rectTransform.anchoredPosition = new Vector2(20f, -22f);
+        var title = VoiceUiKit.Text("Title", _rootRect,
+            string.IsNullOrWhiteSpace(info.Title) ? "Update available" : info.Title.Trim(),
+            18f, VoiceUiKit.TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
+        title.richText = false;
+        title.enableAutoSizing = true;
+        title.fontSizeMax = 18f;
+        title.fontSizeMin = 14f;
+        title.overflowMode = TextOverflowModes.Ellipsis;
+        title.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
+        title.rectTransform.sizeDelta = new Vector2(328f, 30f);
+        title.rectTransform.anchoredPosition = new Vector2(68f, -20f);
+        var version = VoiceUiKit.Text("Version", _rootRect,
+            string.IsNullOrWhiteSpace(info.LatestVersion) ? "View the latest release."
+                : "Available version " + info.LatestVersion.Trim(),
+            14f, VoiceUiKit.TextMuted, TextAlignmentOptions.Left);
+        version.richText = false;
+        version.overflowMode = TextOverflowModes.Ellipsis;
+        version.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
+        version.rectTransform.sizeDelta = new Vector2(328f, 24f);
+        version.rectTransform.anchoredPosition = new Vector2(68f, -54f);
 
-        CreateText("Title", new Vector3(0f, 0.17f, -0.2f), "Perfect Comms Update Available", 0.92f, Accent, TextAlignmentOptions.Center);
-        CreateText("Message", new Vector3(0f, -0.16f, -0.2f), "(Click here to download)", 0.64f, Color.white, TextAlignmentOptions.Center);
-
+        string releaseUrl = info.ReleaseUrl;
+        _downloadButton = new VoiceUiKit.ActionButton(_rootRect, "View release", 156f, 40f,
+            20f, -104f, VoiceUiKit.ButtonKind.Primary, () =>
+            {
+                if (!string.IsNullOrWhiteSpace(releaseUrl)) Application.OpenURL(releaseUrl);
+                Clear();
+            }, () => !string.IsNullOrWhiteSpace(releaseUrl));
+        _dismissButton = new VoiceUiKit.ActionButton(_rootRect, "Dismiss", 108f, 40f,
+            190f, -104f, VoiceUiKit.ButtonKind.Ghost, Clear);
+        ApplyPresentation();
         VoiceDiagnostics.DebugInfo($"[VC] Showing update notification: {info.Title}");
     }
 
-    private static void CreateClickArea(string releaseUrl)
+    internal static void TickUi()
     {
-        var go = new GameObject("ClickArea");
-        go.transform.SetParent(_root!.transform, false);
-        go.transform.localPosition = new Vector3(0f, 0f, -0.3f);
-        var collider = go.AddComponent<BoxCollider2D>();
-        collider.size = new Vector2(PanelWidth, PanelHeight);
-        var button = go.AddComponent<PassiveButton>();
-        button.ClickMask = collider;
-        button.Colliders = new Collider2D[] { collider };
-        button.OnClick = new ButtonClickedEvent();
-        button.OnMouseOver = new UnityEvent();
-        button.OnMouseOut = new UnityEvent();
-        button.OnClick.AddListener((Action)(() =>
+        if (_tickFrame == Time.frameCount) return;
+        _tickFrame = Time.frameCount;
+        if (_root == null) return;
+        if (_owner == null)
         {
-            if (!string.IsNullOrWhiteSpace(releaseUrl))
-                Application.OpenURL(releaseUrl);
             Clear();
-        }));
+            return;
+        }
+        bool visible = _owner.gameObject.activeInHierarchy &&
+            !VoiceFirstRunSetup.ShouldDeferMainMenuPopups && !VoiceUiKit.AnyPanelOpen;
+        if (_root.activeSelf != visible) _root.SetActive(visible);
+        if (!visible) return;
+        _appear = Mathf.MoveTowards(_appear, 1f, Time.unscaledDeltaTime / 0.18f);
+        ApplyPresentation();
+        _downloadButton?.Tick(Time.unscaledDeltaTime, _appear >= 1f);
+        _dismissButton?.Tick(Time.unscaledDeltaTime, _appear >= 1f);
     }
 
-    private static void CreatePanelArt()
+    private static void ApplyPresentation()
     {
-        var panelArt = new GameObject("PanelArt");
-        panelArt.transform.SetParent(_root!.transform, false);
-        panelArt.transform.localPosition = new Vector3(0f, 0f, -0.05f);
-        var sr = panelArt.AddComponent<SpriteRenderer>();
-        sr.sprite = VoiceChatHudState.LoadSprite("VoiceChatPlugin.Resources.LobbyBrowserPanel.png")
-                    ?? VoiceUiKit.Solid(new Color(0.02f, 0.06f, 0.10f, 0.94f));
-        sr.sortingLayerName = "UI";
-        sr.sortingOrder = SortBase;
-
-        var size = sr.sprite.bounds.size;
-        if (size.x > 0f && size.y > 0f)
-            panelArt.transform.localScale = new Vector3(PanelWidth / size.x, PanelHeight / size.y, 1f);
-    }
-
-    private static void CreateAccentLine()
-    {
-        var line = new GameObject("AccentLine");
-        line.transform.SetParent(_root!.transform, false);
-        line.transform.localPosition = new Vector3(0f, 0.035f, -0.10f);
-        line.transform.localScale = new Vector3(1.48f, 0.012f, 1f);
-        var sr = line.AddComponent<SpriteRenderer>();
-        sr.sprite = VoiceUiKit.Solid(Accent);
-        sr.sortingLayerName = "UI";
-        sr.sortingOrder = SortBase + 2;
-    }
-
-    private static TextMeshPro CreateText(string name, Vector3 pos, string text, float size, Color color, TextAlignmentOptions align)
-    {
-        var go = new GameObject(name);
-        go.transform.SetParent(_root!.transform, false);
-        go.transform.localPosition = pos;
-        var tmp = go.AddComponent<TextMeshPro>();
-        tmp.text = text;
-        tmp.fontSize = size;
-        tmp.color = color;
-        tmp.alignment = align;
-        tmp.enableWordWrapping = false;
-        tmp.overflowMode = TextOverflowModes.Overflow;
-        tmp.sortingLayerID = SortingLayer.NameToID("UI");
-        tmp.sortingOrder = SortBase + 3;
-        tmp.rectTransform.sizeDelta = new Vector2(3.10f, 0.42f);
-        return tmp;
+        if (_rootRect == null || _group == null) return;
+        Rect canvas = VoiceUiKit.CanvasRect.rect;
+        Rect safe = canvas;
+        Rect screenSafe = Screen.safeArea;
+        if (Screen.width > 0 && Screen.height > 0 && screenSafe.width > 0f && screenSafe.height > 0f)
+            safe = Rect.MinMaxRect(
+                canvas.xMin + screenSafe.xMin / Screen.width * canvas.width,
+                canvas.yMin + screenSafe.yMin / Screen.height * canvas.height,
+                canvas.xMin + screenSafe.xMax / Screen.width * canvas.width,
+                canvas.yMin + screenSafe.yMax / Screen.height * canvas.height);
+        float fit = Mathf.Min(1f,
+            Mathf.Min(Mathf.Max(0f, safe.width - 48f) / PanelWidth,
+                Mathf.Max(0f, safe.height - 48f) / PanelHeight));
+        float eased = 1f - Mathf.Pow(1f - _appear, 3f);
+        float scale = fit * Mathf.Lerp(0.98f, 1f, eased);
+        _rootRect.localScale = new Vector3(scale, scale, 1f);
+        _rootRect.anchoredPosition = new Vector2(
+            safe.xMax - canvas.xMax - 24f, safe.yMin - canvas.yMin + 24f);
+        _group.alpha = eased;
     }
 
 }

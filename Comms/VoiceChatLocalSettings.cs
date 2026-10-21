@@ -265,6 +265,7 @@ public class VoiceChatLocalSettings
     public ConfigEntry<MicDeviceEnum> MicrophoneDeviceIndex { get; }
 #if WINDOWS
     public ConfigEntry<SpkDeviceEnum> SpeakerDeviceIndex { get; }
+    public ConfigEntry<bool> ObsCompatibilityMode { get; }
 #endif
     public ConfigEntry<float> ButtonPositionX { get; }
     public ConfigEntry<float> ButtonPositionY { get; }
@@ -492,6 +493,9 @@ public class VoiceChatLocalSettings
         SpeakerDeviceIndex = config.Bind("Audio", "Speaker",
             SpkDeviceEnum.Default,
             new ConfigDescription("Selects the playback device Perfect Comms uses for voice audio. Default follows the system's default output device."));
+        ObsCompatibilityMode = config.Bind("Audio", "ObsCompatibilityMode", false,
+            new ConfigDescription(
+                "Adds a minimized Perfect Comms Audio window for OBS. Voice routing is unchanged."));
 #endif
 
         ApplyLegacyDefaultCanonicalization(
@@ -1650,6 +1654,10 @@ public class VoiceChatLocalSettings
             _lastResolvedSpkAvailable = device.IsAvailable;
             if (device.IsAvailable)
                 VoiceChatRoom.Current?.SetSpeaker(id);
+        }
+        else if (configEntry == ObsCompatibilityMode)
+        {
+            SidecarVoiceHost.ApplyObsCompatibilityMode();
         }
 #endif
         else if (configEntry == ShowVoiceConnectionStatus)

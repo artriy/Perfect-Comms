@@ -46,9 +46,9 @@ public static class VoiceOptionsMenuEntry
         if (_chip.Built) return;
         try
         {
-            _chip.Build("PERFECT COMMS", "VOICE SETTINGS",
+            _chip.Build("Personal · PerfectComms", "Voice settings",
                 new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f),
-                new Vector2(14f, 0f),
+                new Vector2(16f, 0f),
                 VoiceSettingsPanel.Show,
                 static () => _menu != null && _menu.gameObject != null && _menu.gameObject.activeInHierarchy,
                 static () => true, 1.0f);
