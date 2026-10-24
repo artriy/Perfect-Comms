@@ -21,14 +21,15 @@ public sealed class VoiceProximityRulesTests : IDisposable
     }
 
     [Fact]
-    public void ClientsWithoutCrossDeathMeetingRadioAreRejected()
+    public void ClientsWithoutGhostListeningAudiencePolicyAreRejected()
     {
-        Assert.True(VoiceProtocol.IsCompatible(7, 7));
+        Assert.True(VoiceProtocol.IsCompatible(8, 8));
+        Assert.True(VoiceProtocol.IsCompatible(9, 8));
         Assert.True(VoiceProtocol.IsCompatible(8, 7));
-        Assert.True(VoiceProtocol.IsCompatible(7, 6));
+        Assert.False(VoiceProtocol.IsCompatible(7, 7));
+        Assert.False(VoiceProtocol.IsCompatible(7, 8));
+        Assert.False(VoiceProtocol.IsCompatible(9, 9));
         Assert.False(VoiceProtocol.IsCompatible(6, 6));
-        Assert.False(VoiceProtocol.IsCompatible(6, 7));
-        Assert.False(VoiceProtocol.IsCompatible(8, 8));
         Assert.False(VoiceProtocol.IsCompatible(5, 5));
         Assert.False(VoiceProtocol.IsCompatible(3, 3));
         Assert.False(VoiceProtocol.IsCompatible(4, 4));

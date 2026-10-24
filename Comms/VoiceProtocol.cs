@@ -12,9 +12,9 @@ internal enum VoiceFrameFlags : byte
 
 internal static class VoiceProtocol
 {
-    // Protocol 7 adds radio-held cross-death impostor chat during meetings.
-    public const int ProtocolVersion = 7;
-    public const int MinCompatibleVersion = 7;
+    // Protocol 8 requires the task-phase ghost-listening audience policy.
+    public const int ProtocolVersion = 8;
+    public const int MinCompatibleVersion = 8;
 
     public const int MaxEncodedAudioBytes = 4096;
     public const int AudioSequenceBytes = 4;

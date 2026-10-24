@@ -12,7 +12,7 @@ internal static class VoiceSnapshotBuilder
     private static DateTime _lastCameraDiagnosticUtc;
     private static string _lastCameraDiagnosticKey = string.Empty;
 
-    public static VoiceGameStateSnapshot Build(bool commsSabotageActive)
+    public static VoiceGameStateSnapshot Build(bool commsSabotageActive, ISet<int>? authenticatedClientIds)
     {
         long roleTicks = VoiceFrameProfiler.Begin();
         VoiceRoleMuteState.Update();
@@ -126,7 +126,8 @@ internal static class VoiceSnapshotBuilder
                     ? localControlledVictimLight
                     : -1f,
                 External: external,
-                IsImpostorTeam: data?.Role?.IsImpostor == true));
+                IsImpostorTeam: data?.Role?.IsImpostor == true,
+                IsAuthenticatedClient: authenticatedClientIds?.Contains(clientId) == true));
         }
         }
         catch

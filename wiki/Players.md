@@ -97,6 +97,8 @@ Task-phase voice is proximity-based by default. Distance, falloff, walls, vision
 
 You cannot override these match rules from Voice Settings. See **[Host Settings](Host-Settings)** for their exact behavior.
 
+If the host enables **Ghosts Hear Living During Tasks**, nearby ghosts can hear you during tasks even when living players cannot hear each other. A persistent yellow lobby notice warns you before the match. During tasks, **Ghosts only** identifies that microphone audience; manual mute, deafen, and Push To Talk still control transmission. The option is off by default and does not let ghosts reply to living players.
+
 ### Team Radio
 
 Team Radio provides private hold-to-talk channels when the host enables it and your current team or role is eligible. On desktop, hold `V` to transmit and press `G` to cycle available channels. On Android, tap the radio button to cycle or hold it to transmit. The host decides whether channels work during tasks, meetings, or both.

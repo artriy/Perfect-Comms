@@ -88,8 +88,9 @@ APM libraries.
 Desktop helpers require sidecar protocol 17 and Pion ABI 3 for private-only audio
 recipient selection. Rebuild every platform's helper and Pion companion together;
 older binaries must not be packaged. Public fanout and ICE behavior are unchanged.
-Voice clients use game protocol 7 for the impostor settings and phase-scoped radio
-state; the mobile interop contract remains ABI 5.
+Voice clients use game protocol 8 and host-settings schema 5 for the default-off
+ghost-listening rule and its restricted task audience. All voice participants must
+update together; the mobile interop contract remains ABI 5.
 
 RustSec audits every native lockfile during CI. The desktop codec is the bundled
 libopus 1.6.1 source from the pinned `opusic-sys` binding, compiled with DRED on

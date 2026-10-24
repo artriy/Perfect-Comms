@@ -366,6 +366,8 @@ public static class HostSettingsPanel
         if (holder == g.MeetingOnlyImpostorChat)
             return "During tasks, actual impostors speak globally to impostors, ghosts and spectators. Dead impostor replies need Across Death.";
         if (holder == g.OnlyGhostsCanTalk) return "Restrict task-phase voice to dead players.";
+        if (holder == g.GhostsHearLivingDuringTasks)
+            return "During Tasks, ghosts hear nearby living speech despite task restrictions. Does not enable living-to-living speech.";
         if (holder == g.GhostsHearEachOtherUnlimited) return "Dead players hear each other anywhere on the map.";
         if (holder == g.ImpostorHearGhosts) return "Living impostors hear dead players when other ghost rules allow speech.";
         if (holder == g.ImpostorsTalkAcrossDeath)
@@ -409,7 +411,7 @@ public static class HostSettingsPanel
             {
                 g.GracePeriodEnabled, g.GracePeriodSeconds,
                 g.OnlyMeetingOrLobby, g.MeetingOnlyImpostorChat, g.OnlyMeetingOrLobbyAffectsGhosts,
-                g.OnlyGhostsCanTalk, g.GhostsHearEachOtherUnlimited, g.ImpostorHearGhosts,
+                g.OnlyGhostsCanTalk, g.GhostsHearLivingDuringTasks, g.GhostsHearEachOtherUnlimited, g.ImpostorHearGhosts,
                 g.ImpostorsTalkAcrossDeath, g.ImpostorsTalkAcrossDeathInMeetings,
                 g.HearInVent, g.VentPrivateChat, g.CommsSabDisables
             },

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Ghost Listening During Tasks
+
+- Added **Ghosts Hear Living During Tasks**, a default-off host setting. Living players can speak to nearby ghosts and spectators while ordinary living-to-living task voice is disabled. Ghost hearing distance, falloff, vent privacy, and mute controls remain in effect; **Ghosts Also Meeting/Lobby Only** still blocks the exception.
+- Added a persistent yellow bottom-right lobby notice and a **Ghosts only** microphone audience status. Mute, deafen, and Push To Talk take priority, and existing private-radio audiences are unchanged.
+- Ghost-only speech uses restricted packet recipients and existing capture cutover fences. Host migration revokes the opt-in until fresh host settings arrive; unavailable or retained rosters cannot authorize ghost listeners.
+- Updated voice protocol to 8 and host-settings schema to 5. All voice participants need the updated mod.
+
 ### OBS Audio Capture
 
 - Added an optional, default-off OBS Compatibility Mode under Audio > Streaming on native Windows. While the voice helper is running, it exposes a minimized Perfect Comms Audio window for OBS Application Audio Capture.

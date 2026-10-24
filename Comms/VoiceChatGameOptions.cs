@@ -24,6 +24,7 @@ public class VoiceChatGameOptions
     public ToggleHolder TeamRadioInMeetings { get; }
     public ToggleHolder TeamRadioInTasks { get; }
     public ToggleHolder OnlyGhostsCanTalk { get; }
+    public ToggleHolder GhostsHearLivingDuringTasks { get; }
     public ToggleHolder GhostsHearEachOtherUnlimited { get; }
     public ToggleHolder OnlyMeetingOrLobby { get; }
     public ToggleHolder OnlyMeetingOrLobbyAffectsGhosts { get; }
@@ -80,6 +81,8 @@ public class VoiceChatGameOptions
         };
         OnlyGhostsCanTalk = new ToggleHolder(cfg, Section, "OnlyGhostsCanTalk", "Only Ghosts can Talk/Hear", false,
             "Restricts task-phase voice communication to dead players only.");
+        GhostsHearLivingDuringTasks = new ToggleHolder(cfg, Section, "GhostsHearLivingDuringTasks", "Ghosts Hear Living During Tasks", false,
+            "During Tasks only, ghosts hear nearby living players despite Meetings/Lobby Only or Only Ghosts can Talk/Hear. Does not enable living-to-living speech. Normal ghost range, falloff and vent privacy apply. Ghosts Also Meeting/Lobby Only takes priority while Meetings/Lobby Only is on. Mute, push-to-talk, deafen and host role mutes still apply.");
         GhostsHearEachOtherUnlimited = new ToggleHolder(cfg, Section, "GhostsHearEachOtherUnlimited", "Ghosts Hear Each Other Anywhere", false,
             "Lets dead players hear one another across the entire map instead of using proximity distance.");
         OnlyMeetingOrLobby = new ToggleHolder(cfg, Section, "OnlyMeetingOrLobby", "Meetings/Lobby Only", false,

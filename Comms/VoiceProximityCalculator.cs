@@ -230,7 +230,15 @@ internal static class VoiceProximityCalculator
         if (IsUnavailableTarget(target))
             return VoiceProximityResult.Muted(VoiceProximityReason.TargetUnavailable, previousWallCoefficient);
         var s = VoiceRoomSettingsState.Current;
-        if (VoiceImpostorPolicy.SpecialChatEnabled(s, VoiceGamePhase.Tasks))
+        bool ghostOnlySpeaker = !targetRadioActive && VoiceGhostListeningPolicy.IsGhostOnlySpeaker(
+            s, VoiceGamePhase.Tasks, target.IsDead, target.IsSpectator, target.IsImpostorTeam);
+        bool ghostListening = ghostOnlySpeaker && localPlayer.HasValue &&
+            VoiceGhostListeningPolicy.CanReceive(s, VoiceGamePhase.Tasks, localPlayer.Value, target);
+        if (ghostOnlySpeaker && !ghostListening)
+            return VoiceProximityResult.Muted(
+                s.OnlyMeetingOrLobby ? VoiceProximityReason.OnlyMeetingOrLobby : VoiceProximityReason.OnlyGhostsCanTalk,
+                previousWallCoefficient);
+        if (VoiceImpostorPolicy.SpecialChatEnabled(s, VoiceGamePhase.Tasks) && !ghostListening)
         {
             if (!localPlayer.HasValue || !VoiceImpostorPolicy.CanListen(localPlayer.Value) ||
                 !VoiceImpostorPolicy.CanTransmit(s, target))
@@ -254,7 +262,7 @@ internal static class VoiceProximityCalculator
             activeCameraPosition,
             targetPos,
             out cameraPosition);
-        bool localDead = localPlayer?.IsDead == true;
+        bool localDead = localPlayer?.IsDead == true || ghostListening;
         bool targetDead = target.IsDead;
         var targetRadioState = targetRadioChannel == VoiceTeamRadioChannel.External
             ? VoiceRadioState.Managed(targetManagedRadioKey)
@@ -267,7 +275,7 @@ internal static class VoiceProximityCalculator
         bool localBypassesTaskVoiceGates =
             localPlayer?.External.ListenerBypassTaskVoiceGates == true;
 
-        if (ShouldMeetingLobbyOnlyBlockTaskVoice(s, localDead, targetDead))
+        if (!ghostListening && ShouldMeetingLobbyOnlyBlockTaskVoice(s, localDead, targetDead))
             return VoiceProximityResult.Muted(VoiceProximityReason.OnlyMeetingOrLobby, previousWallCoefficient);
 
         // Host-enforced speaker mutes remain authoritative over every private API route.
@@ -326,7 +334,7 @@ internal static class VoiceProximityCalculator
         {
             if (targetDead)
                 return CalculateLocalDeadGhostHearing(targetPos, localListenerPos, localLightRadius, s, previousWallCoefficient);
-            if (s.OnlyGhostsCanTalk)
+            if (s.OnlyGhostsCanTalk && !ghostListening)
                 return VoiceProximityResult.Muted(VoiceProximityReason.OnlyGhostsCanTalk, previousWallCoefficient);
         }
 

@@ -125,6 +125,7 @@ public class VoiceChatRoom
     private bool _retainingTransitionSnapshot;
     private readonly Dictionary<int, float> _missingSnapshotClientSince = new();
     private readonly HashSet<int> _authenticatedSnapshotClientIds = new();
+    private bool _authenticatedRosterIncludesLocal;
     private float _authRosterUnavailableSince = -1f;
     private float _completeRemoteRosterWaitStart = -1f;
     private float _bootstrapUntilTime = -999f;
@@ -529,7 +530,14 @@ public class VoiceChatRoom
         {
             _snapshotRefreshTimer = StateRefreshInterval;
             long __snapTicks = VoiceFrameProfiler.Begin();
-            var refreshedSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive);
+            var authRosterState = CollectAuthenticatedSnapshotClientIds();
+            var refreshedSnapshot = VoiceSnapshotBuilder.Build(_commsSabActive,
+                authRosterState == AuthenticatedRosterCollectionState.Populated ? _authenticatedSnapshotClientIds : null);
+            refreshedSnapshot = refreshedSnapshot with
+            {
+                AuthenticatedRosterAvailable = authRosterState == AuthenticatedRosterCollectionState.Populated &&
+                    _authenticatedRosterIncludesLocal,
+            };
             var observedGameId = ResolveCurrentGameId();
             var explicitDisconnect = VoiceRoomLifetimeGate.IsExplicitDisconnectLatched;
             var currentGameId = VoiceRoomLifetimeGate.ResolveSnapshotSessionGameId(
@@ -564,7 +572,6 @@ public class VoiceChatRoom
                     _completeRemoteRosterWaitStart = -1f;
                 }
 
-                var authRosterState = CollectAuthenticatedSnapshotClientIds();
                 if (authRosterState == AuthenticatedRosterCollectionState.Populated)
                 {
                     _authRosterUnavailableSince = -1f;
@@ -793,6 +800,7 @@ public class VoiceChatRoom
     private AuthenticatedRosterCollectionState CollectAuthenticatedSnapshotClientIds()
     {
         _authenticatedSnapshotClientIds.Clear();
+        _authenticatedRosterIncludesLocal = false;
         try
         {
             var client = AmongUsClient.Instance;
@@ -808,6 +816,8 @@ public class VoiceChatRoom
                 {
                     resolvedRosterEntries++;
                     _authenticatedSnapshotClientIds.Add(member.Id);
+                    if (member.Id == client.ClientId)
+                        _authenticatedRosterIncludesLocal = true;
                 }
             }
             return resolvedRosterEntries == 0
@@ -817,6 +827,7 @@ public class VoiceChatRoom
         catch
         {
             _authenticatedSnapshotClientIds.Clear();
+            _authenticatedRosterIncludesLocal = false;
             return AuthenticatedRosterCollectionState.Unavailable;
         }
     }
@@ -1104,6 +1115,7 @@ public class VoiceChatRoom
                     _hostSettingsResyncPending))
             {
                 _hostSettingsResyncPending = true;
+                VoiceRoomSettingsState.RevokeGhostListening();
                 _hostPolicyWaitStartTime = Time.realtimeSinceStartup;
                 _hostPolicyFallbackLogged = false;
                 _hostSettingsRequestGate.Reset();
@@ -1137,6 +1149,7 @@ public class VoiceChatRoom
         _hostSettingsRequestGate.Reset();
         _hostSettingsResponseGates.Clear();
         _hostSettingsResyncPending = true;
+        VoiceRoomSettingsState.RevokeGhostListening();
         _hostPolicyWaitStartTime = Time.realtimeSinceStartup;
         _hostPolicyFallbackLogged = false;
 
@@ -1859,6 +1872,7 @@ public class VoiceChatRoom
         if (!current._hostSettingsResyncPending)
             current._hostPolicyWaitStartTime = Time.realtimeSinceStartup;
         current._hostSettingsResyncPending = true;
+        VoiceRoomSettingsState.RevokeGhostListening();
         current._hostSettingsRequestGate.Reset();
     }
 

@@ -37,6 +37,7 @@ public sealed class VoiceRoomSettingsRpcSchemaTests
             MeetingOnlyImpostorChat = !defaults.MeetingOnlyImpostorChat,
             ImpostorsTalkAcrossDeath = !defaults.ImpostorsTalkAcrossDeath,
             ImpostorsTalkAcrossDeathInMeetings = !defaults.ImpostorsTalkAcrossDeathInMeetings,
+            GhostsHearLivingDuringTasks = !defaults.GhostsHearLivingDuringTasks,
         };
         var options = new[]
         {
@@ -56,12 +57,13 @@ public sealed class VoiceRoomSettingsRpcSchemaTests
         Assert.Equal(options, decodedOptions);
         Assert.Equal(VoiceRoomSettingsRpc.SnapshotSchema, payload[0]);
         Assert.Equal(payload.Length - 3, BinaryPrimitives.ReadUInt16LittleEndian(payload.AsSpan(1)));
-        Assert.Equal(4, payload[0]);
-        Assert.Equal(3 + 39 + 4 + options.Length * 9, payload.Length);
+        Assert.Equal(5, payload[0]);
+        Assert.Equal(3 + 40 + 4 + options.Length * 9, payload.Length);
         Assert.Equal(source.ImpostorsTalkAcrossDeath ? 1 : 0, payload[3 + 16 + 17]);
         Assert.Equal(source.ImpostorsTalkAcrossDeathInMeetings ? 1 : 0, payload[3 + 16 + 18]);
+        Assert.Equal(source.GhostsHearLivingDuringTasks ? 1 : 0, payload[3 + 16 + 19]);
         Assert.Equal(source.GracePeriodSeconds,
-            BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(payload.AsSpan(3 + 16 + 19))));
+            BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(payload.AsSpan(3 + 16 + 20))));
     }
 
     [Theory]
@@ -87,15 +89,89 @@ public sealed class VoiceRoomSettingsRpcSchemaTests
             (decoded with { ImpostorsTalkAcrossDeath = !parentEnabled }).Clamp().ImpostorsTalkAcrossDeathInMeetings);
     }
 
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public void GhostListeningPreferenceSurvivesTaskRestrictionsAndWire(
+        bool meetingOnly, bool ghostsMeetingOnly, bool ghostListening)
+    {
+        var source = VoiceRoomSettingsSnapshot.Defaults with
+        {
+            OnlyMeetingOrLobby = meetingOnly,
+            OnlyMeetingOrLobbyAffectsGhosts = ghostsMeetingOnly,
+            OnlyGhostsCanTalk = true,
+            GhostsHearLivingDuringTasks = ghostListening,
+        };
+        var payload = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            source, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+
+        Assert.True(VoiceRoomSettingsRpc.TryDecodeSnapshotPayload(
+            VoiceRoomSettingsRpc.SnapshotKind, payload, out var decoded, out _, out var reason), reason);
+        Assert.Equal(source.Clamp(), decoded);
+        Assert.Equal(ghostListening, decoded.GhostsHearLivingDuringTasks);
+        Assert.Equal(ghostListening,
+            (decoded with { OnlyMeetingOrLobby = !meetingOnly }).Clamp().GhostsHearLivingDuringTasks);
+    }
+
+    [Fact]
+    public void SchemaFourWithoutGhostListeningPreferenceIsRejected()
+    {
+        var current = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+        const int ghostListeningOffset = 3 + 16 + 19;
+        var old = new byte[current.Length - 1];
+        current.AsSpan(0, ghostListeningOffset).CopyTo(old);
+        current.AsSpan(ghostListeningOffset + 1).CopyTo(old.AsSpan(ghostListeningOffset));
+        old[0] = 4;
+        BinaryPrimitives.WriteUInt16LittleEndian(old.AsSpan(1), checked((ushort)(old.Length - 3)));
+
+        AssertRejected(old, "unsupported-schema");
+    }
+
+    [Fact]
+    public void CurrentSchemaWithoutGhostListeningPreferenceFailsClosed()
+    {
+        var current = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+        const int ghostListeningOffset = 3 + 16 + 19;
+        var missingPreference = new byte[current.Length - 1];
+        current.AsSpan(0, ghostListeningOffset).CopyTo(missingPreference);
+        current.AsSpan(ghostListeningOffset + 1).CopyTo(missingPreference.AsSpan(ghostListeningOffset));
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            missingPreference.AsSpan(1), checked((ushort)(missingPreference.Length - 3)));
+
+        AssertRejected(missingPreference, "settings-truncated");
+    }
+
+    [Fact]
+    public void MissingSchemaHeaderFailsClosed()
+        => AssertRejected(Array.Empty<byte>(), "header-truncated");
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(255)]
+    public void MalformedGhostListeningBooleanFailsClosed(byte invalidValue)
+    {
+        var payload = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
+            VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
+        payload[3 + 16 + 19] = invalidValue;
+
+        AssertRejected(payload, "invalid-boolean");
+    }
+
     [Fact]
     public void SchemaThreeWithoutMeetingPreferenceIsRejected()
     {
         var current = VoiceRoomSettingsRpc.EncodeSnapshotPayload(
             VoiceRoomSettingsSnapshot.Defaults, Array.Empty<VoiceRoomSettingsRpc.SyncedModOptionValue>());
         const int meetingPreferenceOffset = 3 + 16 + 18;
-        var old = new byte[current.Length - 1];
+        var old = new byte[current.Length - 2];
         current.AsSpan(0, meetingPreferenceOffset).CopyTo(old);
-        current.AsSpan(meetingPreferenceOffset + 1).CopyTo(old.AsSpan(meetingPreferenceOffset));
+        current.AsSpan(meetingPreferenceOffset + 2).CopyTo(old.AsSpan(meetingPreferenceOffset));
         old[0] = 3;
         BinaryPrimitives.WriteUInt16LittleEndian(old.AsSpan(1), checked((ushort)(old.Length - 3)));
 

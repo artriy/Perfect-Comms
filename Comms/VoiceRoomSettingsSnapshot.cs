@@ -27,7 +27,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
     float GracePeriodSeconds,
     bool MeetingOnlyImpostorChat,
     bool ImpostorsTalkAcrossDeath,
-    bool ImpostorsTalkAcrossDeathInMeetings)
+    bool ImpostorsTalkAcrossDeathInMeetings,
+    bool GhostsHearLivingDuringTasks)
 {
     public const float MinChatDistance = 1.5f;
     public const float MaxChatDistanceLimit = 20f;
@@ -61,7 +62,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
         GracePeriodSeconds: 5f,
         MeetingOnlyImpostorChat: false,
         ImpostorsTalkAcrossDeath: false,
-        ImpostorsTalkAcrossDeathInMeetings: true);
+        ImpostorsTalkAcrossDeathInMeetings: true,
+        GhostsHearLivingDuringTasks: false);
 
     public static VoiceRoomSettingsSnapshot FromGameOptions()
     {
@@ -91,7 +93,8 @@ public readonly record struct VoiceRoomSettingsSnapshot(
             GracePeriodSeconds: options.GracePeriodSeconds.Value,
             MeetingOnlyImpostorChat: options.MeetingOnlyImpostorChat.Value,
             ImpostorsTalkAcrossDeath: options.ImpostorsTalkAcrossDeath.Value,
-            ImpostorsTalkAcrossDeathInMeetings: options.ImpostorsTalkAcrossDeathInMeetings.Value).Clamp();
+            ImpostorsTalkAcrossDeathInMeetings: options.ImpostorsTalkAcrossDeathInMeetings.Value,
+            GhostsHearLivingDuringTasks: options.GhostsHearLivingDuringTasks.Value).Clamp();
     }
 
     public VoiceRoomSettingsSnapshot Clamp()
@@ -113,6 +116,7 @@ public readonly record struct VoiceRoomSettingsSnapshot(
 internal static class VoiceRoomSettingsState
 {
     private static VoiceRoomSettingsSnapshot? _remoteSnapshot;
+    private static bool _remoteGhostListeningAuthorized;
     private static int _sessionGameId;
     private static bool _sessionConfirmed;
 
@@ -132,7 +136,9 @@ internal static class VoiceRoomSettingsState
         get
         {
             if (_remoteSnapshot.HasValue)
-                return _remoteSnapshot.Value;
+                return _remoteGhostListeningAuthorized
+                    ? _remoteSnapshot.Value
+                    : _remoteSnapshot.Value with { GhostsHearLivingDuringTasks = false };
 
             int frame = SafeFrameCount();
             if (frame != _frameCacheFrame)
@@ -140,8 +146,22 @@ internal static class VoiceRoomSettingsState
                 _frameCache = VoiceRoomSettingsSnapshot.FromGameOptions();
                 _frameCacheFrame = frame;
             }
-            return _frameCache;
+            return _frameCache.GhostsHearLivingDuringTasks && !IsLocalGhostListeningHost()
+                ? _frameCache with { GhostsHearLivingDuringTasks = false }
+                : _frameCache;
         }
+    }
+
+    private static bool IsLocalGhostListeningHost()
+    {
+        try { return AmongUsClient.Instance?.AmHost == true; }
+        catch { return false; }
+    }
+
+    internal static void RevokeGhostListening()
+    {
+        _remoteGhostListeningAuthorized = false;
+        VoiceChatHudState.InvalidateAudioPolicyCache();
     }
 
     // Mirrors VoiceFrameProfiler.SafeFrameCount: Time.frameCount can throw when read off the Unity
@@ -184,6 +204,7 @@ internal static class VoiceRoomSettingsState
     public static void ApplyRemote(VoiceRoomSettingsSnapshot snapshot)
     {
         _remoteSnapshot = snapshot.Clamp();
+        _remoteGhostListeningAuthorized = true;
         VoiceChatHudState.InvalidateAudioPolicyCache();
     }
 
@@ -204,6 +225,7 @@ internal static class VoiceRoomSettingsState
     public static void ClearRemote()
     {
         _remoteSnapshot = null;
+        _remoteGhostListeningAuthorized = false;
         VoiceModRemoteOptionState.Clear();
         VoiceChatHudState.InvalidateAudioPolicyCache();
         // Drop any cached host-options rebuild so the next Current read after a host change is fresh.

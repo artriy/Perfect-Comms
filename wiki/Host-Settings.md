@@ -35,9 +35,10 @@ The directory handles public-lobby discovery only. It does not carry voice audio
 | **Private Talk in Vents** | On | Prevents players outside vents from hearing vented speech. |
 | **Impostors Hear Dead** | Off | Allows living impostors to hear dead players when the ghost rules permit speech. |
 | **Comms Sabotage Disables Voice** | On | Disables ordinary voice while Communications sabotage is active. |
-| **Only Ghosts can Talk/Hear** | Off | Restricts task-phase voice to dead players. |
+| **Only Ghosts can Talk/Hear** | Off | Restricts task-phase voice to dead players, except for the optional living-to-ghost rule below. |
+| **Ghosts Hear Living During Tasks** | Off | Lets living players speak to nearby ghosts and spectators while Meetings/Lobby Only or Only Ghosts can Talk/Hear blocks living-to-living voice. Keeps normal ghost hearing distance, falloff, vent privacy, and mute controls. |
 | **Ghosts Hear Each Other Anywhere** | Off | Removes proximity distance between dead players. |
-| **Meetings/Lobby Only** | Off | Disables living-player voice during tasks. |
+| **Meetings/Lobby Only** | Off | Disables ordinary living-to-living voice during tasks. |
 | **Meeting Only - Impostor Chat** | Off | Beneath Meetings/Lobby Only when enabled. Living actual impostors can speak globally during tasks; all ghosts and spectators listen, but living crew and mod-added impostor voice privileges do not gain access. |
 | **Ghosts Also Meeting/Lobby Only** | Off | Applies Meetings/Lobby Only to dead players too. |
 | **Impostors Talk Across Death** | Off | Lets dead actual impostors reply in task-only impostor chat and impostor Team Radio. Crew ghosts and spectators remain listen-only on these channels. |
@@ -46,6 +47,8 @@ The directory handles public-lobby discovery only. It does not carry voice audio
 Conditional rows appear only when their parent rule is enabled.
 
 The meeting exception requires both across-death options, independently of ordinary Team Radio settings. It does not apply in Exile or tasks. Releasing radio restores normal speech and death separation; mute and meeting-floor rules remain authoritative. Hiding the meeting child does not reset its saved value.
+
+Ghost listening does not let ghosts reply to living players or grant Team Radio access. **Ghosts Also Meeting/Lobby Only**, while its parent is enabled, blocks this exception. Existing impostor chat and private-radio audiences stay unchanged. A yellow bottom-right lobby notice warns everyone when the exception is active; the task microphone status reads **Ghosts only**, with mute, deafen, and Push To Talk taking priority. Clients wait for a fresh host grant after host migration, and ghost-only delivery stops when authenticated roster information is unavailable.
 
 ## Team Radio tab
 

@@ -13,14 +13,14 @@ internal static class VoiceRoomSettingsRpc
     internal const byte LegacySnapshotKind = 1;
     private const byte RequestKind = 2;
     internal const byte SnapshotKind = 3;
-    internal const byte SnapshotSchema = 4;
+    internal const byte SnapshotSchema = 5;
     private const int MaxSyncedModOptions = 256;
 
     // Each schema is a self-contained, exact binary layout. The old kind-1 envelope had no
     // schema marker and was extended in-place repeatedly; its remaining-byte heuristics can
     // misread later fields at earlier offsets, so it must never enter the current decoder.
     private const int SnapshotHeaderBytes = 3; // schema:byte + bodyLength:ushort
-    private const int FixedSettingsBytes = 39;
+    private const int FixedSettingsBytes = 40;
     private const int ModOptionBytes = 9; // keyHash:int + isEnum:byte + value:int
     private const int MaxBackendServerUrlBytes = 512;
     internal const int MaxSnapshotPayloadBytes = SnapshotHeaderBytes + FixedSettingsBytes + 2
@@ -186,6 +186,7 @@ internal static class VoiceRoomSettingsRpc
         WriteBoolean(payload, ref offset, settings.MeetingOnlyImpostorChat);
         WriteBoolean(payload, ref offset, settings.ImpostorsTalkAcrossDeath);
         WriteBoolean(payload, ref offset, settings.ImpostorsTalkAcrossDeathInMeetings);
+        WriteBoolean(payload, ref offset, settings.GhostsHearLivingDuringTasks);
         WriteSingle(payload, ref offset, settings.GracePeriodSeconds);
 
         if (offset != SnapshotHeaderBytes + FixedSettingsBytes)
@@ -282,7 +283,8 @@ internal static class VoiceRoomSettingsRpc
             || !TryReadBoolean(payload, ref offset, out bool gracePeriodEnabled)
             || !TryReadBoolean(payload, ref offset, out bool meetingOnlyImpostorChat)
             || !TryReadBoolean(payload, ref offset, out bool impostorsTalkAcrossDeath)
-            || !TryReadBoolean(payload, ref offset, out bool impostorsTalkAcrossDeathInMeetings))
+            || !TryReadBoolean(payload, ref offset, out bool impostorsTalkAcrossDeathInMeetings)
+            || !TryReadBoolean(payload, ref offset, out bool ghostsHearLivingDuringTasks))
         {
             reason = "invalid-boolean";
             return false;
@@ -371,7 +373,8 @@ internal static class VoiceRoomSettingsRpc
             gracePeriodSeconds,
             meetingOnlyImpostorChat,
             impostorsTalkAcrossDeath,
-            impostorsTalkAcrossDeathInMeetings).Clamp();
+            impostorsTalkAcrossDeathInMeetings,
+            ghostsHearLivingDuringTasks).Clamp();
         modOptions = parsedOptions;
         return true;
     }

@@ -67,4 +67,26 @@ public sealed class VoiceRoomSettingsStateTests : IDisposable
         Assert.True(VoiceRoomSettingsState.SessionConfirmed);
         Assert.Null(VoiceRoomSettingsState.RemoteSnapshot);
     }
+
+    [Fact]
+    public void HostResyncRevokesGhostPermissionWithoutChangingTransitionalPolicy()
+    {
+        var settings = VoiceRoomSettingsSnapshot.Defaults with
+        {
+            OnlyMeetingOrLobby = true,
+            GhostsHearLivingDuringTasks = true,
+            MaxChatDistance = 8.5f,
+        };
+        VoiceRoomSettingsState.ApplyRemote(settings);
+        Assert.True(VoiceGhostListeningPolicy.Enabled(VoiceRoomSettingsState.Current));
+
+        VoiceRoomSettingsState.RevokeGhostListening();
+
+        Assert.False(VoiceGhostListeningPolicy.Enabled(VoiceRoomSettingsState.Current));
+        Assert.True(VoiceRoomSettingsState.Current.OnlyMeetingOrLobby);
+        Assert.Equal(8.5f, VoiceRoomSettingsState.Current.MaxChatDistance);
+        Assert.True(VoiceRoomSettingsState.RemoteSnapshot!.Value.GhostsHearLivingDuringTasks);
+        VoiceRoomSettingsState.ApplyRemote(settings);
+        Assert.True(VoiceGhostListeningPolicy.Enabled(VoiceRoomSettingsState.Current));
+    }
 }

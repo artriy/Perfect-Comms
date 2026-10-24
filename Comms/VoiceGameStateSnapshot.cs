@@ -21,7 +21,8 @@ internal sealed record VoiceGameStateSnapshot(
     int ClosedDoorCount,
     bool LiveLocalPlayerResolved = true,
     bool RoutingRosterRetained = false,
-    bool PlayerEnumerationCompleted = true)
+    bool PlayerEnumerationCompleted = true,
+    bool AuthenticatedRosterAvailable = false)
 {
     public bool TryGetLocalPlayer(out VoicePlayerSnapshot player)
         => TryGetPlayer(LocalPlayerId, out player);

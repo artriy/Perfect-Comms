@@ -235,6 +235,7 @@ public sealed class PeerSessionManagerTests
     [InlineData(5, 5)]
     [InlineData(6, 6)]
     [InlineData(6, 7)]
+    [InlineData(7, 7)]
     [InlineData(99, 99)]
     public void IncompatibleHelloDoesNotPair(int protocol, int minimum)
     {
@@ -251,6 +252,7 @@ public sealed class PeerSessionManagerTests
 
     [Theory]
     [InlineData(6, 6)]
+    [InlineData(7, 7)]
     [InlineData(99, 99)]
     public void IncompatibleRosterPeerStopsHelloRetriesUntilCompatibleHelloArrives(int protocol, int minimum)
     {
@@ -2292,6 +2294,7 @@ public sealed class PeerSessionManagerTests
 
     [Theory]
     [InlineData(6, 6)]
+    [InlineData(7, 7)]
     [InlineData(99, 99)]
     public void IncompatiblePeerIsQuiescedUntilACompatibleHelloArrives(int protocol, int minimum)
     {

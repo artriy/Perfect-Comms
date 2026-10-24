@@ -1065,20 +1065,32 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (VoiceSceneState.IsLobbyVoicePhase(phase))
             return false;
         var specialChat = VoiceImpostorPolicy.SpecialChatEnabled(settings, phase);
+        var ghostListening = phase == VoiceGamePhase.Tasks && VoiceGhostListeningPolicy.Enabled(settings);
+        var hasSpeaker = snapshot != null && snapshot.TryGetLocalPlayer(out _);
         var trusted = hostPolicyReady && snapshot != null && snapshot.Phase == phase &&
-            snapshot.LiveLocalPlayerResolved && snapshot.PlayerEnumerationCompleted &&
+            snapshot.LiveLocalPlayerResolved && snapshot.PlayerEnumerationCompleted && hasSpeaker &&
             !snapshot.RoutingRosterRetained;
-        var active = radio.IsActive || specialChat || !trusted && wasPrivate;
+        var ghostOnlySpeaker = hasSpeaker && snapshot!.TryGetLocalPlayer(out var localSpeaker) &&
+            VoiceGhostListeningPolicy.IsGhostOnlySpeaker(settings, phase,
+                localSpeaker.IsDead, localSpeaker.IsSpectator, localSpeaker.IsImpostorTeam);
+        var active = radio.IsActive || specialChat ||
+            ghostListening && (!trusted || ghostOnlySpeaker) || !trusted && wasPrivate;
         if (!active || !trusted || !snapshot!.TryGetLocalPlayer(out var speaker) ||
+            speaker.Disconnected || speaker.IsDummy || !speaker.IsVisible && !speaker.IsDead ||
             speaker.External.Muted || VoiceRoleMuteState.IsMeetingVoiceBlocked(speaker, phase))
+            return active;
+        if (ghostOnlySpeaker && (!snapshot.AuthenticatedRosterAvailable || !speaker.IsAuthenticatedClient))
             return active;
         foreach (var listener in snapshot.Players)
         {
             if (listener.IsLocal || listener.ClientId == snapshot.LocalClientId || listener.ClientId < 0)
                 continue;
-            var allowed = specialChat
-                ? VoiceImpostorPolicy.CanTransmit(settings, speaker) && VoiceImpostorPolicy.CanListen(listener)
-                : VoiceProximityCalculator.CanReceiveRadioState(settings, phase, speaker, listener, radio);
+            var allowed = specialChat && VoiceImpostorPolicy.CanTransmit(settings, speaker)
+                ? VoiceImpostorPolicy.CanListen(listener)
+                : radio.IsActive
+                    ? VoiceProximityCalculator.CanReceiveRadioState(settings, phase, speaker, listener, radio)
+                    : ghostOnlySpeaker && listener.IsAuthenticatedClient &&
+                      VoiceGhostListeningPolicy.CanReceive(settings, phase, listener, speaker);
             if (allowed)
                 receivers.Add(listener.ClientId);
         }

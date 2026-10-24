@@ -13,6 +13,10 @@ internal static class VoiceHudWarnings
     private static float _nextRefreshTime;
     private static string _cached = string.Empty;
 
+    internal static bool ShouldShowGhostListeningNotice(
+        VoiceRoomSettingsSnapshot settings, VoiceGamePhase phase, bool settingsSynced)
+        => settingsSynced && phase == VoiceGamePhase.Lobby && VoiceGhostListeningPolicy.Enabled(settings);
+
     internal static string BuildWarning()
     {
         if (Time.unscaledTime < _nextRefreshTime) return _cached;
