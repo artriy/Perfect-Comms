@@ -13,6 +13,7 @@
 
 - Added an optional, default-off OBS Compatibility Mode under Audio > Streaming on native Windows. While the voice helper is running, it exposes a minimized Perfect Comms Audio window for OBS Application Audio Capture.
 - The setting saves locally and applies without restarting voice. Closing the helper window minimizes it; disabling the option removes it. Microphone capture, voice routing, and privacy rules are unchanged.
+- OBS toggle changes are no longer dropped when the helper's command queue is full. Repeated changes coalesce to the current setting without interrupting voice or reordering critical audio commands; leaving the lobby discards pending OBS work.
 
 ### Voice Settings Interface
 

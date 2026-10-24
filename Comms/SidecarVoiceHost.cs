@@ -464,6 +464,7 @@ internal sealed class SidecarVoiceHostCore
         private readonly int _capacity;
         private readonly Action<CommandSession> _criticalStateFailed;
         private CommandWork? _reservedCriticalState;
+        private CommandWork? _pendingObsCompatibility;
         private bool _accepting = true;
 
         internal CommandSession(
@@ -498,12 +499,33 @@ internal sealed class SidecarVoiceHostCore
             }
         }
 
+        internal void ApplyObsCompatibilityMode(Func<bool?> setting)
+        {
+            lock (_queueGate)
+            {
+                if (!_accepting) return;
+                _pendingObsCompatibility = new CommandWork
+                {
+                    Generation = Generation,
+                    Action = client =>
+                    {
+                        var enabled = setting();
+                        if (enabled.HasValue)
+                            client.SetObsCompatibilityMode(enabled.Value);
+                        return true;
+                    },
+                };
+                _available.Set();
+            }
+        }
+
         internal override void BeginRetirement(bool quiesce, string reason)
         {
             lock (_queueGate)
             {
                 if (!_accepting) return;
                 _accepting = false;
+                _pendingObsCompatibility = null;
                 if (_reservedCriticalState != null)
                 {
                     _queue.Enqueue(_reservedCriticalState);
@@ -528,7 +550,12 @@ internal sealed class SidecarVoiceHostCore
                 CommandWork? work = null;
                 lock (_queueGate)
                 {
-                    if (_queue.Count != 0)
+                    if (_pendingObsCompatibility != null && _reservedCriticalState == null)
+                    {
+                        work = _pendingObsCompatibility;
+                        _pendingObsCompatibility = null;
+                    }
+                    else if (_queue.Count != 0)
                         work = _queue.Dequeue();
                     else if (_reservedCriticalState != null)
                     {
@@ -792,14 +819,9 @@ internal sealed class SidecarVoiceHostCore
     {
         lock (_gate)
         {
-            if (_obsCompatibilityMode == null || _owner == null) return;
-            Submit(_owner, client =>
-            {
-                var enabled = _obsCompatibilityMode();
-                if (enabled.HasValue)
-                    client.SetObsCompatibilityMode(enabled.Value);
-                return true;
-            });
+            if (_obsCompatibilityMode == null || _owner == null || !OwnsLocked(_owner) || _starting != null)
+                return;
+            _session?.ApplyObsCompatibilityMode(_obsCompatibilityMode);
         }
     }
 
