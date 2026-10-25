@@ -193,6 +193,14 @@ internal static class SidecarProtocol
     public static byte[] SetObsCompatibilityFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-obs-compatibility\",\"enabled\":{JsonBool(enabled)}}}");
 
+    public static byte[] SetObsRecordingFrame(bool enabled, VoiceObsRecordingMode mode)
+    {
+        if (!enabled) mode = VoiceObsRecording.NormalizeMode(mode);
+        else if (mode is not (VoiceObsRecordingMode.PerPlayer or VoiceObsRecordingMode.AliveDead))
+            throw new ArgumentOutOfRangeException(nameof(mode));
+        return EncodeControl($"{{\"op\":\"set-obs-recording\",\"enabled\":{JsonBool(enabled)},\"mode\":{(int)mode}}}");
+    }
+
     public static byte[] SetSyntheticFrame(bool enabled)
         => EncodeControl($"{{\"op\":\"set-synthetic\",\"enabled\":{JsonBool(enabled)}}}");
 
@@ -293,14 +301,21 @@ internal static class SidecarProtocol
         public readonly float Pan;
         public readonly int Mode;
         public readonly bool Muffled;
+        public readonly uint RecordingId;
+        public readonly string RecordingName;
+        public readonly byte RecordingGroup;
 
-        public GameStatePeerInput(string id, float gain, float pan, int mode, bool muffled)
+        public GameStatePeerInput(string id, float gain, float pan, int mode, bool muffled,
+            uint recordingId = 0, string recordingName = "", byte recordingGroup = 0)
         {
             Id = id;
             Gain = gain;
             Pan = pan;
             Mode = mode;
             Muffled = muffled;
+            RecordingId = recordingId;
+            RecordingName = recordingId == 0 ? string.Empty : recordingName;
+            RecordingGroup = recordingId == 0 ? (byte)0 : recordingGroup;
         }
     }
 
@@ -327,6 +342,9 @@ internal static class SidecarProtocol
                 w.WriteNumber("pan", NormalizePan(p.Pan));
                 w.WriteNumber("mode", p.Mode);
                 w.WriteBoolean("muffled", p.Muffled);
+                w.WriteNumber("recording_id", p.RecordingId);
+                w.WriteString("recording_name", p.RecordingName);
+                w.WriteNumber("recording_group", p.RecordingGroup);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -367,6 +385,12 @@ internal static class SidecarProtocol
             hash = Mix(hash, unchecked((uint)BitConverter.SingleToInt32Bits(NormalizePan(peer.Pan))));
             hash = Mix(hash, unchecked((uint)peer.Mode));
             hash = (hash ^ (peer.Muffled ? (byte)1 : (byte)0)) * prime;
+            hash = Mix(hash, peer.RecordingId);
+            hash = Mix(hash, peer.RecordingGroup);
+            var recordingName = peer.RecordingName ?? string.Empty;
+            for (var c = 0; c < recordingName.Length; c++)
+                hash = Mix(hash, recordingName[c]);
+            hash = Mix(hash, 0xFFFFu);
         }
         return hash;
     }
@@ -411,6 +435,29 @@ internal static class SidecarProtocol
         {
             return false;
         }
+    }
+
+    public static bool TryReadObsRecordingStatus(string json, out VoiceObsRecordingStatus status)
+    {
+        status = new VoiceObsRecordingStatus("waiting", string.Empty);
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("op", out var op) || op.GetString() != "obs-recording-status" ||
+                !root.TryGetProperty("state", out var state) || state.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.String)
+                return false;
+            var stateText = state.GetString();
+            var messageText = message.GetString() ?? string.Empty;
+            if (stateText is not ("disabled" or "waiting" or "ready" or "recording" or "paused" or "error") ||
+                Encoding.UTF8.GetByteCount(messageText) > 1024)
+                return false;
+            status = new VoiceObsRecordingStatus(stateText, messageText);
+            return true;
+        }
+        catch (JsonException) { return false; }
+        catch (InvalidOperationException) { return false; }
     }
 
     public static bool TryReadDevices(string json, out List<VoiceDeviceInfo> devices)

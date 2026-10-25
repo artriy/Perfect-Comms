@@ -1,0 +1,7 @@
+Perfect Comms OBS recording plugin
+
+The OBS-linked plugin binary and its corresponding plugin source are distributed under the GNU General Public License, version 2 or (at your option) any later version. GPL-2.0.txt contains the license text.
+
+For this distributed plugin copy, the GNU Lesser General Public License version 2.1 section 3 conversion permission applies to Perfect Comms code combined with OBS Studio's GPL-2.0-or-later libobs and frontend API. LGPL-2.1.txt preserves the original license notice. This does not change the license of the rest of the Perfect Comms repository.
+
+OBS Studio is a separate installation requirement. This package does not redistribute OBS Studio or its runtime libraries. Plugin source and reproducible build instructions are available at https://github.com/artriy/Perfect-Comms/tree/main/native/obs-plugin and in BUILD.md in the same repository.

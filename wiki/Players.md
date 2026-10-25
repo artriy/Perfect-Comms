@@ -135,6 +135,43 @@ Only the current lobby host can edit these synced settings.
 
 Compatible mods can register additional tabs under **Mod Behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
 
+## OBS Recording Integration
+
+Optional, off by default, and available only with native Windows x64 Perfect Comms and 64-bit OBS Studio 32.2.2. Linux/Proton, macOS/Wine/CrossOver, and Android do not provide this integration. It adds one combined **Perfect Comms** audio source to OBS and saves separate incoming-voice WAV files beside your recording. It does not record your own microphone.
+
+### Install and set up
+
+1. Install the matching desktop `PerfectComms.dll` normally. Download the separate `PerfectComms-OBS-win-x64.zip` from the same release.
+2. Close OBS. Extract the ZIP into your OBS installation folder, the folder containing `bin`, `data`, and `obs-plugins`. Merge its `obs-plugins` folder, rather than placing the ZIP inside another plugin folder. The DLL belongs at `obs-plugins/64bit/perfect-comms-obs.dll`. Restart OBS. This ZIP is not an installer and does not include OBS itself.
+3. In Perfect Comms, open **Voice Settings > Audio > Streaming**, enable **OBS Recording Integration**, and join voice. Under **Separate Voice Files**, choose **Per player** (default) or **Alive / dead**. Changes to this mode apply to the next recording.
+4. In OBS **Sources**, add **Perfect Comms** once. Use **Add Existing** to reuse that source in other scenes; additional new instances stay silent. Keep its **Sync Offset** at **0 ms** in **Advanced Audio Properties**.
+5. Disable any Application Audio Capture of **Perfect Comms Audio** and any desktop/game capture route that also includes incoming Perfect Comms voices. Keep your microphone as a separate OBS input and capture game audio separately. **OBS Compatibility Mode** remains available for combined Application Audio Capture without this plugin; it is not needed for the recording integration.
+6. In **Settings > Output**, use Advanced output mode to select recording audio tracks. For example, track 1 can hold your combined listening mix, track 2 game audio, track 3 your microphone, and track 4 the Perfect Comms combined source. In **Advanced Audio Properties**, assign each source accordingly and enable those tracks in Recording. These are ordinary OBS tracks, not the individual voice files.
+7. Choose standard **MKV** or **MP4**, or **Hybrid MP4/MOV**, with automatic recording file splitting disabled. Custom FFmpeg output is not supported. Record to a writable NTFS or ReFS location with enough free space, without junctions or symbolic links anywhere in the recording folder path.
+
+### Record and edit
+
+Use OBS **Start Recording**, **Pause/Resume**, and **Stop Recording** normally. OBS controls the voice files automatically, including removing paused time and adding silence before late joins or after a player stops speaking. After stopping, allow up to ten seconds for voice-file finalization before closing OBS or disconnecting voice.
+
+For `match.mkv`, look beside the video for `match-voices`, or a numbered variant if that folder already exists. Existing files are never overwritten. Import the video and every voice WAV into your editor at **timeline 0**, without trimming each WAV's leading silence or aligning it to the first spoken word. The files are 48 kHz stereo, 32-bit float WAV, switching to RF64 for large files; your editor must support those formats.
+
+- **Per player:** a file for each permitted displayed identity that contributes audio. Safe aliases share their displayed identity's file. Hidden identities share **Private voices.wav**, not individually named files.
+- **Alive / dead:** **Alive voices.wav** and **Dead voices.wav** as needed, plus **Private voices.wav** when privacy hides a speaker's group. An absent or silent voice does not require a file.
+
+Separate files avoid OBS's six-track limit. When editing with these files, mute or remove the combined Perfect Comms audio from the video to avoid doubling voices. Keep the separately recorded game and microphone tracks.
+
+Voice files follow the incoming audio you are allowed to hear, including player/group volume, spatial audio, voice filters, deafen, and Speaker Volume. They follow the mod's logical voice routing, not whether your physical Windows speakers are working. They exclude your local mic and any unpermitted audio. OBS source fader changes and OBS filters affect the combined OBS source only, not the separate files.
+
+### Status and recording problems
+
+**Audio > Streaming** shows **Off**, **Waiting for OBS**, **Connected**, **Recording**, **Paused**, or **Recording error**. **Open Guide** opens this section. The OBS source's Properties also shows status and the recording folder; use **Refresh connection and recording status** there.
+
+- **Perfect Comms source missing:** check the ZIP's folder layout, restart 64-bit OBS 32.2.2, and check its log for a plugin load error. Installing only the mod DLL does not install the OBS plugin.
+- **Waiting for OBS:** enable the integration, join voice, and add the source. Run OBS and Among Us as the same Windows user.
+- **Echo or doubled voices:** remove duplicate application/desktop capture, check source monitoring, and do not play the combined voice track alongside the separate voice files in your editor.
+- **No named file or unexpected Private voices:** check local deafen, Speaker Volume, player volumes, and the host's hearing rules. Privacy-hidden voices intentionally share one anonymous file; recording cannot recover their real identities.
+- **Recording error:** read the status message. Keep Sync Offset at 0, disable automatic file splitting, use a supported output, and check free space, folder permissions, sparse-file support, and junctions/symbolic links. Invalid encoder timestamps, output errors, queue overflow, or a disconnect during finalization can leave incomplete files. Correct the cause before starting a new recording; do not treat an errored voice folder as complete. Voice chat continues when recording fails.
+
 ## Troubleshooting
 
 - **No Voice Settings, HUD, or Voice Lobbies on desktop:** confirm `PerfectComms.dll` is directly inside `BepInEx/plugins`, not inside another folder. Then check `BepInEx/LogOutput.log` for load errors.

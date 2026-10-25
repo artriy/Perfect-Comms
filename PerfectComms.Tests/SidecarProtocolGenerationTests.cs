@@ -6,6 +6,26 @@ using Xunit;
 
 public sealed class SidecarProtocolGenerationTests
 {
+    [Theory]
+    [InlineData(-1, 0)]
+    [InlineData(99, 0)]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    public void RecordingDisableAlwaysSerializesAValidMode(int requested, int expected)
+    {
+        var frame = SidecarProtocol.SetObsRecordingFrame(false, (VoiceObsRecordingMode)requested);
+        Assert.True(SidecarProtocol.TryParseFrame(frame, frame.Length, out _, out var offset, out var length, out _));
+        using var json = JsonDocument.Parse(Encoding.UTF8.GetString(frame, offset, length));
+        Assert.Equal("set-obs-recording", json.RootElement.GetProperty("op").GetString());
+        Assert.False(json.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.Equal(expected, json.RootElement.GetProperty("mode").GetInt32());
+        Assert.Equal((VoiceObsRecordingMode)expected,
+            VoiceObsRecording.NormalizeMode((VoiceObsRecordingMode)requested));
+        if (requested is not (0 or 1))
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                SidecarProtocol.SetObsRecordingFrame(true, (VoiceObsRecordingMode)requested));
+    }
+
     [Fact]
     public void PeerAddCarriesRequiredGeneration()
     {

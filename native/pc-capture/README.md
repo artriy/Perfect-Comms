@@ -14,7 +14,7 @@ libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and th
 Pion WebRTC v4.2.17 peer transport with proximity mixing, so mic, peer audio,
 and playback all live in this helper. The Rust media core loads Pion through
 the companion C-shared library built from `native/pc-pion`; transport startup
-fails closed if the matching library is missing. Protocol version 17, Pion ABI 3.
+fails closed if the matching library is missing. Sidecar protocol version 18, Pion ABI 3.
 
 Private radio audio is sent only to selected peer IDs. An empty private audience
 sends no audio; public speech retains the existing fanout. Scope changes discard
@@ -50,9 +50,9 @@ Frame: `[u8 type][u32 len little-endian][payload]`.
 
 Control ops (mod->helper): `hello`, `select-device`, `select-output-device`, `start`, `stop`,
 `ping`, `set-dsp`, `set-diagnostics`, `set-input`, `set-synthetic`, `set-monitor`, `set-ice-servers`, `peer-add`, `peer-remove`, `set-remote-sdp`,
-`add-ice-candidate`, `game-state`.
+`add-ice-candidate`, `game-state`, `set-obs-recording`; Windows also supports `set-obs-compatibility`.
 Control ops (helper->mod): `ready`, `devices`, `outputDevices`, `level`, `error`, `pong`,
-`local-sdp`, `local-candidate`, `peer-state`, `peer-levels`, `media-state`, `stats`.
+`local-sdp`, `local-candidate`, `peer-state`, `peer-levels`, `media-state`, `stats`, `obs-recording-status`.
 
 `set-input` carries finite/clamped `gain`, `vad_threshold`, and `noise_gate_threshold`. Gain is
 soft-limited before Opus; VAD only classifies the local speaking meter. The frame-aware gate has
@@ -65,6 +65,44 @@ between the selected live microphone and the diagnostic tone without restarting 
 `set-monitor` mixes the processed local microphone into the selected output with a bounded gain
 and optional delayed playout. Monitor timing is clock-corrected independently from remote voice,
 and capture-generation changes discard and re-prime its local-only timeline.
+
+### Optional OBS recording bridge (sidecar protocol 18)
+
+`{"op":"set-obs-recording","enabled":true,"mode":0}` enables the native Windows
+bridge; default is disabled. Mode `0` is Per player, `1` Alive / dead, with
+changes latched on the next recording. Other platforms return a nonfatal
+unsupported error. `obs-recording` errors do not terminate voice. The separate
+`set-obs-compatibility` operation retains the existing combined Application
+Audio Capture window behavior.
+
+Each `game-state` peer can carry `recording_id` (u32, default `0` anonymous),
+`recording_name` (UTF-8, at most 192 bytes, default empty), and
+`recording_group` (`0` private/unknown, `1` alive, `2` dead; default `0`).
+Managed projection supplies only permitted displayed identities, not raw
+transport/player identities. Safe aliases collapse with their displayed target;
+hidden identities/groups share Private voices. The helper assigns opaque
+per-connection export IDs. Audio remains subject to hearing, mute/deafen,
+master/player/group gains, spatial routing, and voice filters. Neither the
+local microphone nor unpermitted incoming voice is exported.
+
+The current-user Windows pipe
+`\\.\pipe\PerfectComms.OBS.<current-process-user-SID>` admits only that user
+and SYSTEM, rejects remote clients, and is verified by OBS against the server
+process user. It adds no network endpoint. Bridge framing is separate from the
+mod control protocol: u32 little-endian body length (maximum 262144), then kind
+and payload. Version-1 HELLO declares mode and 48000 Hz stereo; AUDIO carries
+shared-QPC nanosecond timestamps, opaque identity/group, safe name, and up to
+960 frames of interleaved float32 PCM. Track `0` is the combined incoming mix;
+nonzero tracks are stems. STATUS returns ready/recording/paused/error.
+`obs-recording-status` relays `state` and `message` to the mod, also reporting
+waiting or disabled lifecycle states. Bounded queues fail visibly rather than
+stalling voice.
+
+The separate [OBS plugin](../obs-plugin/README.md) owns recording lifecycle,
+pause removal, output-clock alignment, and sibling float-WAV/RF64 files.
+Import every file at timeline zero. OBS source filters/fader do not alter stems;
+the bridge follows logical audible routing, not physical output-device health.
+No OBS runtime is embedded in this helper.
 
 ## Test
 
@@ -148,7 +186,7 @@ PE, ELF, and Mach-O checks reject external Cubeb
 or speexdsp libraries, covering stale local Cargo/CMake caches as well as clean
 CI builds.
 
-`pc-capture --build-info` reports protocol 17, Cubeb 0.36.0, the immutable
+`pc-capture --build-info` reports protocol 18, Cubeb 0.36.0, the immutable
 Perfect Comms audio-contract marker, and the exact backends compiled into that
 binary. Packaging executes this probe, and the managed launcher requires the
 same contract before every uncached native launch, including host-native

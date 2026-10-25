@@ -35,6 +35,7 @@ scripts/*
 !scripts/generate-cubeb-license-inventories.py
 !scripts/verify-cubeb-provenance.py
 !scripts/build-pion.sh
+!scripts/build-obs-plugin.ps1
 !scripts/verify-pion-license-inventory.py
 !scripts/package-starlight.sh
 !scripts/package-starlight.ps1

@@ -169,7 +169,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     // for the first-run selected-speaker test; older protocol-7 helpers accepted those frames but
     // discarded their samples silently.
     // Protocol 7 introduced native input gain/VAD, runtime synthetic capture, and remote levels.
-    public const int Proto = 17;
+    public const int Proto = 18;
     private const int HandshakeTimeoutMs = 10_000;
     private const int WriteTimeoutMs = 250;
     private const int GameStateLogIntervalMs = 5000;
@@ -232,6 +232,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
     public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels;
     public event Action<SidecarPlaybackState>? OnPlaybackState;
     public event Action<SidecarCaptureState>? OnCaptureState;
+    public event Action<VoiceObsRecordingStatus>? OnObsRecordingStatus;
     private long _deadNotificationState;
     public CaptureHealth Health => (CaptureHealth)Volatile.Read(ref _health);
     public IReadOnlyList<VoiceDeviceInfo> OutputDevices => _outputDevices;
@@ -450,6 +451,14 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             "set-obs-compatibility",
             () => SidecarProtocol.SetObsCompatibilityFrame(enabled),
             $"enabled={enabled}");
+    }
+
+    public void SetObsRecording(bool enabled, VoiceObsRecordingMode mode)
+    {
+        SendCommand(
+            "set-obs-recording",
+            () => SidecarProtocol.SetObsRecordingFrame(enabled, mode),
+            $"enabled={enabled} mode={mode}");
     }
 
     public void SetSynthetic(bool enabled)
@@ -948,6 +957,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             _heartbeat = null;
             SetHealth(CaptureHealth.Dead);
         }
+        PublishObsRecordingStatus(new VoiceObsRecordingStatus("waiting", "Voice helper stopped."));
         var launch = Interlocked.Exchange(ref _launchResult, null);
         if (wasRunning || stream != null)
             VoiceDiagnostics.Log("sidecar.lifecycle", "event=stop-detached health=Dead cleanup=background");
@@ -1250,6 +1260,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         {
             VoiceDiagnostics.Log("sidecar.lifecycle", $"event=reader-ended reason={exitReason} health=Dead bufferedBytes={have}");
             SetHealth(CaptureHealth.Dead);
+            PublishObsRecordingStatus(new VoiceObsRecordingStatus("waiting", "Voice helper disconnected."));
         }
     }
 
@@ -1287,6 +1298,11 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                 $"code=\"{SafeDiagnosticText(code, 64)}\" message=\"{SafeDiagnosticText(msg, 240)}\" payloadBytes={payloadBytes}{DescribeControlMetadata(json)}");
             if (string.Equals(code, "obs-window", StringComparison.OrdinalIgnoreCase))
                 return;
+            if (string.Equals(code, "obs-recording", StringComparison.OrdinalIgnoreCase))
+            {
+                PublishObsRecordingStatus(new VoiceObsRecordingStatus("error", msg));
+                return;
+            }
             // The native capture loop reports mic-error once per outage, then keeps retrying the
             // input device while the WebRTC/control connection and speaker remain healthy. Treating
             // that recoverable device outage as transport death poisoned Health without raising the
@@ -1310,6 +1326,13 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             // recoverable. RaiseDead (rather than merely changing Health) gives the host/backend one
             // coherent restart path and preserves the exactly-once dead notification contract.
             RaiseDead($"helper error code={SafeDiagnosticText(code, 64)}", managedGeneration);
+        }
+        else if (op == "obs-recording-status")
+        {
+            if (SidecarProtocol.TryReadObsRecordingStatus(json, out var recording))
+                PublishObsRecordingStatus(recording);
+            else
+                VoiceDiagnostics.Log("sidecar.control.reject", "op=obs-recording-status reason=invalid-fields");
         }
         else if (op == "pong")
         {
@@ -2164,7 +2187,8 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
             or "peer-levels"
             or "devices"
             or "media-state"
-            or "stats";
+            or "stats"
+            or "obs-recording-status";
 
     internal static bool IsWorkerGenerationCurrent(bool running, int currentGeneration, int workerGeneration)
         => running && currentGeneration == workerGeneration;
@@ -2192,6 +2216,16 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
         => IsWorkerGenerationCurrent(running, currentGeneration, failingGeneration)
            && TryBeginDeadNotification(ref state, failingGeneration);
 
+    private void PublishObsRecordingStatus(VoiceObsRecordingStatus status)
+    {
+        try { OnObsRecordingStatus?.Invoke(status); }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log("sidecar.event",
+                $"op=obs-recording-status event=handler-failed error={ExceptionDiagnostic(ex)}");
+        }
+    }
+
     private void RaiseDead(string reason, int managedGeneration)
     {
         lock (_gate)
@@ -2205,6 +2239,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
 
             SetHealth(CaptureHealth.Dead);
         }
+        PublishObsRecordingStatus(new VoiceObsRecordingStatus("waiting", "Voice helper disconnected."));
         VoiceDiagnostics.Log("sidecar.lifecycle", $"event=dead reason=\"{SafeDiagnosticText(reason, 160)}\"");
         try { OnDead?.Invoke(reason); }
         catch (Exception ex)

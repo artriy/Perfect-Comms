@@ -15,6 +15,14 @@
 - The setting saves locally and applies without restarting voice. Closing the helper window minimizes it; disabling the option removes it. Microphone capture, voice routing, and privacy rules are unchanged.
 - OBS toggle changes are no longer dropped when the helper's command queue is full. Repeated changes coalesce to the current setting without interrupting voice or reordering critical audio commands; leaving the lobby discards pending OBS work.
 
+### OBS Recording Integration
+
+- Added optional, default-off **OBS Recording Integration** under **Audio > Streaming** on native Windows, with **Separate Voice Files** set to **Per player** by default or **Alive / dead** for grouped editing. Status and **Open Guide** expose setup and recording errors; mode changes apply to the next recording.
+- Added a separate Windows x64 OBS 32.2.2 plugin ZIP, `PerfectComms-OBS-win-x64.zip`. One combined **Perfect Comms** source accompanies 48 kHz stereo float-WAV/RF64 stems beside the video. OBS Start/Stop/Pause/Resume controls them; import every voice file at timeline zero. Game audio and the user's microphone remain separately configured OBS sources.
+- Recording follows permitted incoming audio, local hearing/deafen/mute/volume rules, spatial routing, and mod filters. Safe aliases share their displayed identity; concealed identities use **Private voices**, including in alive/dead mode. The bridge uses a current-user Windows pipe, not a network endpoint, and does not export the local microphone. OBS source filters and fader do not change separate voice files.
+- Supported outputs are standard MKV/MP4 and hybrid MP4/MOV with automatic file splitting disabled. Stem files require sparse-file support such as NTFS/ReFS. Exclusive, atomic directory creation rejects whole-path reparse points; failures stop stems visibly without terminating voice chat.
+- Updated the desktop sidecar protocol to 18 for recording control and privacy-safe identity metadata. Game voice protocol 8, host-settings schema 5, and Pion ABI 3 are unchanged by this integration. Existing OBS Compatibility Mode remains available.
+
 ### Voice Settings Interface
 
 - Voice settings now use the helper logo's cyan, blue, and purple palette, Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions.

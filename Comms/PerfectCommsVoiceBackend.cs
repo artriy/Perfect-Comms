@@ -43,6 +43,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private readonly Dictionary<int, PeerConnection> _canonicalRouteScratch = new();
     private readonly HashSet<int> _snapshotRouteClientIds = new();
     private readonly List<SidecarProtocol.GameStatePeerInput> _helperGameStatePeers = new(32);
+#if WINDOWS
+    private Dictionary<string, VoicePlayerSnapshot>? _obsRecordingTargets;
+    private VoiceObsRecordingProjection? _obsRecordingProjection;
+#endif
     private readonly List<byte> _meetingSpatialRosterScratch = new(32);
     private readonly Dictionary<byte, float> _meetingSpatialPanByPlayerId = new(32);
     private readonly GameStateSendGate _gameStateSendGate = new();
@@ -4432,6 +4436,18 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             helperGameStatePeers = _helperGameStatePeers;
 #endif
         helperGameStatePeers?.Clear();
+#if WINDOWS
+        bool recordVoices = localSettings?.ObsRecordingIntegration.Value == true &&
+                            SidecarVoiceHost.SupportsObsCompatibilityMode;
+        if (recordVoices)
+        {
+            _obsRecordingTargets ??= new Dictionary<string, VoicePlayerSnapshot>(StringComparer.Ordinal);
+            _obsRecordingTargets.Clear();
+            _obsRecordingProjection ??= new VoiceObsRecordingProjection();
+        }
+        _obsRecordingProjection?.UpdateParticipants(AmongUsClient.Instance?.GameId ?? 0, snapshot.Players,
+            snapshot.PlayerEnumerationCompleted && !snapshot.RoutingRosterRetained && snapshot.AuthenticatedRosterAvailable);
+#endif
         foreach (var peer in _updatePeerScratch)
         {
             if (peer.ClientId >= 0 &&
@@ -4494,6 +4510,10 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
                 helperGameStatePeers.Add(new SidecarProtocol.GameStatePeerInput(
                     peer.ClientIdText,
                     gain, result.Pan, (int)result.FilterMode, result.Muffled));
+#if WINDOWS
+                if (recordVoices && target.HasValue && gain > 0f)
+                    _obsRecordingTargets![peer.ClientIdText] = target.Value;
+#endif
             }
             LogCenteredLoudRoute(peer, target, listenerPos, result, snapshot.Phase);
 
@@ -4504,6 +4524,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         VoiceFrameProfiler.End("room.backend.proximity", proxTicks);
 
 #if WINDOWS
+        if (recordVoices && helperGameStatePeers != null && VoiceChatRoom.Current is { } recordingRoom &&
+            ReferenceEquals(recordingRoom.CurrentSnapshot, snapshot))
+            ApplyObsRecordingIdentities(recordingRoom, snapshot, helperGameStatePeers);
         if (helperGameStatePeers != null)
             SendNativeGameStateIfDue(VoiceChatHudState.IsSpeakerMuted, _masterVolume, helperGameStatePeers);
 #elif ANDROID
@@ -4513,6 +4536,18 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
         MaybeLogStats(snapshot, "ok");
     }
+
+#if WINDOWS
+    private void ApplyObsRecordingIdentities(
+        VoiceChatRoom room,
+        VoiceGameStateSnapshot snapshot,
+        List<SidecarProtocol.GameStatePeerInput> routes)
+    {
+        var privacy = VoiceIdentityPrivacyRuntime.Current(VoiceOverlayState.Current(room), snapshot.Phase);
+        _obsRecordingProjection!.Apply(routes, _obsRecordingTargets!, snapshot,
+            privacy.HideAllForViewer || privacy.DimAll, VoiceIdentityPrivacyRuntime.Peek);
+    }
+#endif
 
     internal void ResetRadioState()
     {
@@ -4600,7 +4635,8 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
         if (!_voiceReady || desktopVoice == null || desktopVoice.Health != CaptureHealth.Healthy)
             return;
         if (!_gameStateSendGate.ShouldSend(Environment.TickCount64, fingerprint)) return;
-        desktopVoice.SendGameState(deaf, master, peers);
+        if (!desktopVoice.SendGameState(deaf, master, peers))
+            _gameStateSendGate.Reset();
 #elif ANDROID
         var mobileVoice = _mobileVoice;
         if (mobileVoice?.IsRunning != true) return;

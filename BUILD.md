@@ -85,9 +85,10 @@ x64, Linux x64, the final APM-containing/signature-verified universal macOS
 app, the matching desktop Pion C-shared transport libraries, and desktop WebRTC
 APM libraries.
 
-Desktop helpers require sidecar protocol 17 and Pion ABI 3 for private-only audio
-recipient selection. Rebuild every platform's helper and Pion companion together;
-older binaries must not be packaged. Public fanout and ICE behavior are unchanged.
+Desktop helpers require sidecar protocol 18 for OBS recording control and
+privacy-safe recording metadata; Pion ABI remains 3. Rebuild every platform's
+helper and Pion companion together; older binaries must not be packaged.
+Public fanout and ICE behavior are unchanged.
 Voice clients use game protocol 8 and host-settings schema 5 for the default-off
 ghost-listening rule and its restricted task audience. All voice participants must
 update together; the mobile interop contract remains ABI 5.
@@ -118,6 +119,42 @@ Build both macOS architecture slices before `mac-universal`; the normal
 `scripts/build-mac.sh` flow does this automatically and seals
 `libpc-pion.dylib` into the app before signing. For a manual macOS build, run
 `mac-x64` and `mac-arm64` without `--stage`, then run `mac-universal --stage`.
+
+## Optional Windows OBS plugin
+
+The recording integration targets native Windows x64 and official OBS Studio
+32.2.2, independently of desktop mod installation. With PowerShell, CMake 3.24+,
+Visual Studio x64 C++ tools, and a Windows SDK installed, run from the repository
+root:
+
+```powershell
+pwsh -File scripts/build-obs-plugin.ps1 -Configuration Release
+```
+
+The script downloads SHA-256-pinned official OBS 32.2.2 source/runtime archives,
+generates import libraries from official DLL exports, builds the plugin, runs
+CTest by default, and creates `artifacts/PerfectComms-OBS-win-x64.zip`.
+`-SkipTests` explicitly skips CTest. Optional `-ObsRoot`, `-ObsSource`, and
+`-BuildDirectory` select existing runtime/source roots and the build directory;
+caller-supplied SDK/runtime roots are not hash-verified downloads.
+
+MSVC builds statically link the C/C++ runtime. Before uploading the ZIP, CI runs
+`scripts/verify-release-assets.py --pe-no-private-runtime` against the plugin DLL
+to reject unbundled compiler-runtime dependencies.
+
+The ZIP contains `obs-plugins/64bit/perfect-comms-obs.dll`, the plugin README,
+GPL/LGPL texts, and the scoped GPL conversion notice. It contains no OBS runtime
+and is not an installer. Users extract it into their OBS installation folder and
+restart OBS;
+the script does not write into an installed OBS copy. See
+[`native/obs-plugin/README.md`](native/obs-plugin/README.md) for source/track
+routing, supported recording outputs, and timeline-zero WAV import.
+
+The native-helper workflow builds/uploads `obs-plugin-win-x64`; the release
+workflow publishes `PerfectComms-OBS-win-x64.zip` alongside the existing desktop
+assets as an optional download. Starlight remains a separate managed-only DLL
+with its existing packaging guards. This plugin build does not establish local
+Linux/macOS rebuilds or compatibility with other OBS versions.
 
 ## Release assembly
 

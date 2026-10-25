@@ -13,13 +13,38 @@ commands, such as forcing every client to rebuild its voice session, are disable
 roster checks are compatibility safeguards, not a security boundary against a hostile lobby participant.
 Microphone audio flows peer-to-peer over WebRTC to the other players in the room, or through a TURN relay
 when a direct connection cannot be established. This carries the network metadata (IP addresses and ICE
-candidates) inherent to a real-time voice connection. Audio is not stored by the mod. The Perfect Comms
-registry is used only for optional public-lobby discovery/publishing and may also provide short-lived managed
-TURN credentials.
+candidates) inherent to a real-time voice connection. Audio is not stored by the mod during ordinary voice
+use. Optional OBS recording can save incoming voice locally as described below. The Perfect Comms registry
+is used only for optional public-lobby discovery/publishing and may also provide short-lived managed TURN
+credentials.
 
 Opus packets may carry up to 100 ms of encrypted speech redundancy so an authorized receiver can repair a
 short network loss. This history is transient, and the encoder is reset at microphone stop/start and before
 a newly authorized peer is added so that peer cannot recover speech from before its authorization boundary.
+
+## Optional local OBS recording
+
+**OBS Recording Integration** is off by default and available only on native Windows with the separately
+installed OBS plugin. Enabling it exposes a local current-user named pipe,
+`\\.\pipe\PerfectComms.OBS.<current-process-user-SID>`, not a new network endpoint. Its access control
+admits the current Windows user and SYSTEM only, remote pipe clients are rejected, and OBS verifies that the
+pipe server belongs to the same user. The pipe carries incoming voice PCM, timestamps, opaque export IDs,
+privacy-projected names/groups, and recording status. It does not upload audio to a recording service.
+
+Only incoming audio the listener is permitted to hear is exported, with hearing rules, player/group volume,
+voice filters, spatial routing, deafen, and master volume applied. The bridge follows logical audible routing,
+not whether a physical Windows output device is working. The local microphone is not exported; record it
+separately in OBS if wanted. OBS source filters and fader changes affect its combined audio source, not the
+separate files.
+
+When OBS records, the plugin writes local float-WAV/RF64 files beside the video. On-disk identity names
+follow the same permitted presentation projection as speaking indicators: safe aliases share the displayed
+identity, and hidden identities share **Private voices** rather than revealing underlying player IDs or
+names. Alive/dead mode uses **Alive voices** and **Dead voices**, with **Private voices** when the group
+must remain hidden. OBS receives opaque per-connection export IDs, not raw game client/player IDs.
+Existing files are not overwritten. Disabling the integration closes the bridge and discards queued audio;
+it does not delete recordings already saved. Their storage, retention, and sharing remain under the user's
+control.
 
 ## Public lobby discovery and publishing
 

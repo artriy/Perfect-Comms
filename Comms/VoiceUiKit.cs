@@ -1576,6 +1576,43 @@ internal static class VoiceUiKit
         }
     }
 
+#if WINDOWS
+    public sealed class ObsRecordingStatusRow : Row
+    {
+        private TextMeshProUGUI _value = null!;
+        private TextMeshProUGUI _message = null!;
+
+        public ObsRecordingStatusRow Build(RectTransform pane, float width, float y)
+        {
+            BuildBase(pane, "OBS Recording Status", width, y, 104f);
+            Title.rectTransform.anchoredPosition = new Vector2(EdgePad, 19f);
+            Title.rectTransform.sizeDelta = new Vector2(LabelColW, 32f);
+            _value = Text("RecordingState", Root, "", 18f, Accent, TextAlignmentOptions.Right);
+            _value.richText = false;
+            _value.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+            _value.rectTransform.anchoredPosition = new Vector2(-EdgePad, 19f);
+            _value.rectTransform.sizeDelta = new Vector2(width - LabelColW - EdgePad * 2f, 32f);
+            _message = Text("RecordingMessage", Root, "", 14f, TextMuted, TextAlignmentOptions.Left);
+            _message.richText = false;
+            _message.enableWordWrapping = true;
+            _message.overflowMode = TextOverflowModes.Ellipsis;
+            _message.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
+            _message.rectTransform.anchoredPosition = new Vector2(EdgePad, -21f);
+            _message.rectTransform.sizeDelta = new Vector2(width - EdgePad * 2f, 44f);
+            Tick(0f);
+            return this;
+        }
+
+        public override void Tick(float dt)
+        {
+            var status = VoiceObsRecording.Status;
+            _value.text = status.Label;
+            _value.color = status.State == "error" ? Danger : Accent;
+            _message.text = status.Message;
+        }
+    }
+#endif
+
     public sealed class ActionRow : Row
     {
         private const float ButtonWidth = 220f;

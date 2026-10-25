@@ -66,6 +66,12 @@ internal static class VoiceHudWarnings
         if (!room.UsingSpeaker && !VoiceChatHudState.IsSpeakerMuted)
             return "speaker unavailable";
 
+#if WINDOWS
+        if (VoiceSettings.Instance?.ObsRecordingIntegration.Value == true &&
+            VoiceObsRecording.Status.State == "error")
+            return "OBS recording failed, check Audio settings";
+#endif
+
         return string.Empty;
     }
 }

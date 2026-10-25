@@ -22,6 +22,8 @@ pub mod diagnostics;
 #[cfg(not(target_os = "android"))]
 pub mod ipc;
 #[cfg(windows)]
+pub(crate) mod obs_recording;
+#[cfg(windows)]
 pub mod obs_window;
 #[cfg(not(target_os = "android"))]
 pub mod owner;

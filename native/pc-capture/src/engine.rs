@@ -644,6 +644,19 @@ impl Engine {
                 peers,
             } => {
                 let local = LocalState { deafened: deaf };
+                let recording = peers
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.id.clone(),
+                            crate::gamestate::RecordingIdentity {
+                                id: p.recording_id,
+                                name: p.recording_name.clone(),
+                                group: p.recording_group,
+                            },
+                        )
+                    })
+                    .collect();
                 let peer_states: Vec<(String, PeerState)> = peers
                     .into_iter()
                     .map(|p| {
@@ -658,11 +671,15 @@ impl Engine {
                         )
                     })
                     .collect();
-                self.gs.apply(local, master, peer_states);
+                self.gs
+                    .apply_recording(local, master, peer_states, recording);
             }
             #[cfg(windows)]
             // The OBS window belongs to the sidecar session, not this audio engine.
             InboundOp::SetObsCompatibility { .. } => {}
+            InboundOp::SetObsRecording { .. } => {
+                eprintln!("pc-capture: OBS recording is only available in the Windows sidecar");
+            }
             InboundOp::Hello { .. }
             | InboundOp::SelectDevice { .. }
             | InboundOp::SelectOutputDevice { .. }

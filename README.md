@@ -63,6 +63,8 @@ Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra 
 | Team Radio channels | Meeting spatial audio, plus noise suppression and echo cancellation on desktop |
 | Role-based mutes (with supported mods) | Per-player volume and HUD layout |
 
+Native Windows users can optionally install `PerfectComms-OBS-win-x64.zip` for OBS Studio 32.2.2, then enable the default-off **OBS Recording Integration** to save editable per-player or alive/dead voice WAVs beside recordings. [OBS setup and timeline-zero import](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+
 ## Controls
 
 ### Desktop shortcuts

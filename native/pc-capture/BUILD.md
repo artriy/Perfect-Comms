@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required ABI 3 companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), protocol version 17.
+Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required ABI 3 companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), sidecar protocol version 18.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -132,13 +132,19 @@ On macOS, mic permission (TCC) attributes to the **CrossOver / host process that
 ## CI
 
 - `.github/workflows/native-helpers.yml`: builds the four desktop Rust targets and their Pion companions on GitHub-hosted runners (`windows-latest` x64, glibc-2.31 Linux x64, `macos-latest` universal x64+arm64). It uploads the native artifacts and runs `scripts/ci-smoke-helper.sh`. The smoke verifies the Cubeb build contract/backend inventory, managed/native protocol version, Pion startup, control-only ready handshake, synthetic level cadence, reusable `stop`, prompt exit on control EOF, and final macOS DSP/Pion loading.
-- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, Starlight, and packaging gates, then publishes the self-contained desktop `PerfectComms.dll`. It also retains `PerfectCommsStarlight.dll` as the sole managed Starlight tester artifact for Starlight beta or staff-approved local-mod testing. The Starlight DLL contains its merged managed dependencies and embedded legal notices; no companion DLL is required. BepInEx remains an external desktop runtime selected by the player or modpack and is not included in release assets. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
+- `.github/workflows/release.yml`: on `v*` tags, waits for the managed, helper, DSP, RTC/TURN, Starlight, and packaging gates, then publishes the self-contained desktop `PerfectComms.dll` and optional `PerfectComms-OBS-win-x64.zip`. It also retains `PerfectCommsStarlight.dll` as the sole managed Starlight tester artifact for Starlight beta or staff-approved local-mod testing. The Starlight DLL contains its merged managed dependencies and embedded legal notices; no companion DLL is required. BepInEx remains an external desktop runtime selected by the player or modpack and is not included in release assets. The final macOS app embedded in the desktop DLL is ad-hoc signed after both DSP dylibs are staged.
 
 ## Compatibility
 
-The helper announces `proto` in its `ready` payload. Before launch, the mod requires the helper's `--build-info` response to prove protocol 17, Cubeb 0.36.0, and the platform's exact backend inventory. The native transport requires Pion ABI 3. Game voice protocol 6 requires the current impostor settings and phase-scoped radio state.
+The helper announces `proto` in its `ready` payload. Before launch, the mod requires the helper's `--build-info` response to prove sidecar protocol 18, Cubeb 0.36.0, and the platform's exact backend inventory. Protocol 18 adds OBS recording control and privacy-safe recording metadata. The native transport remains Pion ABI 3; game voice protocol 8 and host-settings schema 5 are separate contracts. Rebuild all desktop helper targets for packaging; the Windows OBS build does not prove local Linux/macOS rebuilds.
 
 The `private-radio` control operation carries `active` and a `receivers` array of peer-ID strings. Public mode (`active: false`) keeps ordinary fanout. Private mode sends only to the named peers; an empty array sends nothing. Scope changes close capture and reset captured PCM, Opus FEC/DRED history, queued RTP, and retransmission caches through the existing privacy epoch before restoring transmission. This does not renegotiate or disconnect healthy peers.
+
+## Optional OBS recording plugin
+
+The helper's OBS bridge is disabled by default and implemented only on native Windows. It connects locally to the separately installed Windows x64 OBS plugin, not to a network service. It does not change the desktop helper's launch or Pion packaging requirements. The existing OBS Compatibility Mode remains a separate combined Application Audio Capture path.
+
+From the repository root, `pwsh -File scripts/build-obs-plugin.ps1 -Configuration Release` builds/tests/packages the plugin against SHA-256-pinned official OBS 32.2.2 source/runtime downloads. Prerequisites: CMake 3.24+, Visual Studio x64 C++ tools, and a Windows SDK. Output: `artifacts/PerfectComms-OBS-win-x64.zip`, also built by the native-helper workflow and published as an optional release asset. It contains the plugin, locale, README, and license notices, not OBS or an installer. Extract into the OBS installation folder and restart OBS. See [plugin setup and output restrictions](../obs-plugin/README.md) and the [repository build guide](../../BUILD.md#optional-windows-obs-plugin).
 
 ## Media diagnostics
 

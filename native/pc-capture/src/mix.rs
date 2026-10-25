@@ -2,8 +2,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::gamestate::GameState;
+use crate::gamestate::{GameState, PeerState};
 use crate::loudness::{LookaheadLimiter, PeerLoudnessNormalizer};
+#[cfg(windows)]
+#[path = "mix_obs.rs"]
+mod obs;
+#[cfg(windows)]
+use obs::RecordingMix;
+#[cfg(windows)]
+pub(crate) use obs::RecordingPool;
 
 pub const GAIN_GLIDE_K: f32 = 0.002;
 pub const PLAYBACK_SOFT_LIMIT_START: f32 = 0.92;
@@ -438,6 +445,8 @@ pub struct Mixer {
     wall_tail: usize,
     observed_deafen_epoch: u64,
     had_input_last_round: bool,
+    #[cfg(windows)]
+    recording: Option<RecordingMix>,
 }
 
 impl Default for Mixer {
@@ -467,6 +476,8 @@ impl Mixer {
             wall_tail: 0,
             observed_deafen_epoch: 0,
             had_input_last_round: false,
+            #[cfg(windows)]
+            recording: None,
         }
     }
 
@@ -500,6 +511,34 @@ impl Mixer {
     pub fn reset_peer(&mut self, peer: &str) {
         self.glide.remove(peer);
         self.levelers.remove(peer);
+        #[cfg(windows)]
+        if let Some(tap) = self.recording.as_mut() {
+            tap.remove(peer);
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_recording_bridge(
+        &mut self,
+        bridge: std::sync::Arc<crate::obs_recording::Shared>,
+    ) {
+        self.recording = Some(RecordingMix::new(
+            bridge,
+            (self.lp650, self.hp650, self.muffle_lowpass),
+        ));
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn publish_recording(
+        &mut self,
+        gs: &GameState,
+        combined: &[f32],
+        audible: bool,
+        timestamp: u64,
+    ) {
+        if let Some(tap) = self.recording.as_mut() {
+            tap.publish(gs, combined, audible, timestamp, self.lp1900);
+        }
     }
 
     pub fn control_snapshot(&self) -> MixControlSnapshot {
@@ -522,10 +561,19 @@ impl Mixer {
         gs: &GameState,
         out_stereo: &mut [f32],
     ) {
+        #[cfg(windows)]
+        let recording_active = self
+            .recording
+            .as_ref()
+            .is_some_and(|tap| tap.bridge.active());
         for s in out_stereo.iter_mut() {
             *s = 0.0;
         }
         let snap = gs.snapshot();
+        #[cfg(windows)]
+        if let Some(tap) = self.recording.as_mut() {
+            tap.begin(&snap, recording_active);
+        }
         if self.observed_deafen_epoch != snap.deafen_epoch {
             self.reset_effect_state();
             self.observed_deafen_epoch = snap.deafen_epoch;
@@ -551,25 +599,23 @@ impl Mixer {
         let mut any_ghost = false;
         let mut any_wall = false;
         let mut had_input = false;
+        let silent_peer = PeerState {
+            gain: 0.0,
+            pan: 0.0,
+            mode: 0,
+            muffled: false,
+        };
         for (peer_id, mono, measurement_eligible) in per_peer {
             had_input = true;
-            let (target, mode, muffled) = match snap.peers.get(peer_id) {
-                Some(p) => {
-                    let (lg, rg) = pan_gains(p.pan);
-                    (
-                        (lg * p.gain, rg * p.gain),
-                        FilterMode::from_i32(p.mode),
-                        p.muffled,
-                    )
-                }
-                None => ((0.0, 0.0), FilterMode::None, false),
-            };
+            let peer = snap.peers.get(peer_id).unwrap_or(&silent_peer);
             if !self.glide.contains_key(peer_id) {
+                let (left, right) = pan_gains(peer.pan);
+                let mode = FilterMode::from_i32(peer.mode);
                 self.glide.insert(
                     peer_id.to_string(),
                     Glide {
-                        left: target.0,
-                        right: target.1,
+                        left: left * peer.gain,
+                        right: right * peer.gain,
                         mode,
                         bz1: 0.0,
                         bz2: 0.0,
@@ -577,8 +623,8 @@ impl Mixer {
                         previous_bz1: 0.0,
                         previous_bz2: 0.0,
                         transition_remaining: 0,
-                        muffled,
-                        previous_muffled: muffled,
+                        muffled: peer.muffled,
+                        previous_muffled: peer.muffled,
                         muffle_path: MufflePath::default(),
                         previous_primary_muffle_path: MufflePath::default(),
                         muffle_transition_remaining: 0,
@@ -598,100 +644,19 @@ impl Mixer {
                 .expect("leveler inserted above");
             let level_ramp = leveler.process_frame_with_measurement(mono, measurement_eligible);
             control_snapshot.observe_peer(leveler.snapshot());
-            if g.mode != mode {
-                g.previous_mode = g.mode;
-                g.previous_bz1 = g.bz1;
-                g.previous_bz2 = g.bz2;
-                g.previous_primary_muffle_path = g.muffle_path;
-                g.transition_remaining = FILTER_TRANSITION_SAMPLES;
-                g.mode = mode;
-                g.bz1 = 0.0;
-                g.bz2 = 0.0;
-            }
-            if g.muffled != muffled {
-                g.previous_muffled = g.muffled;
-                g.muffle_path.begin_transition();
-                g.previous_primary_muffle_path.begin_transition();
-                g.muffle_transition_remaining = FILTER_TRANSITION_SAMPLES;
-                g.muffled = muffled;
-            }
-            let transition_mode = (g.transition_remaining > 0).then_some(g.previous_mode);
-            for active_mode in [Some(mode), transition_mode].into_iter().flatten() {
-                match active_mode {
-                    FilterMode::Ghost => any_ghost = true,
-                    FilterMode::WallMuffle => any_wall = true,
-                    _ => {}
-                }
-            }
-            let n = frames.min(mono.len());
-            for (f, &sample) in mono.iter().take(n).enumerate() {
-                let normalized = sample * level_ramp.at(f, n);
-                let current_primary =
-                    apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, normalized);
-                let current = g.muffle_path.process(
-                    current_primary,
-                    g.muffled,
-                    g.previous_muffled,
-                    g.muffle_transition_remaining,
-                    &muffle_lowpass,
-                );
-                g.left += GAIN_GLIDE_K * (target.0 - g.left);
-                g.right += GAIN_GLIDE_K * (target.1 - g.right);
-                if g.transition_remaining == 0 {
-                    add_routed_sample(
-                        mode,
-                        f,
-                        current * g.left,
-                        current * g.right,
-                        out_stereo,
-                        &mut self.ghost_send,
-                        &mut self.wall_send,
-                    );
-                    g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
-                    continue;
-                }
-
-                let previous_primary = apply_filter(
-                    g.previous_mode,
-                    &lp650,
-                    &hp650,
-                    &mut g.previous_bz1,
-                    &mut g.previous_bz2,
-                    normalized,
-                );
-                let previous = g.previous_primary_muffle_path.process(
-                    previous_primary,
-                    g.muffled,
-                    g.previous_muffled,
-                    g.muffle_transition_remaining,
-                    &muffle_lowpass,
-                );
-                let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
-                let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
-                    1.0
-                } else {
-                    completed as f32 / (FILTER_TRANSITION_SAMPLES - 1) as f32
-                };
-                add_routed_sample(
-                    g.previous_mode,
-                    f,
-                    previous * g.left * (1.0 - progress),
-                    previous * g.right * (1.0 - progress),
-                    out_stereo,
-                    &mut self.ghost_send,
-                    &mut self.wall_send,
-                );
-                add_routed_sample(
-                    mode,
-                    f,
-                    current * g.left * progress,
-                    current * g.right * progress,
-                    out_stereo,
-                    &mut self.ghost_send,
-                    &mut self.wall_send,
-                );
-                g.transition_remaining -= 1;
-                g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
+            let (ghost, wall) = render_peer(
+                g,
+                mono,
+                level_ramp,
+                peer,
+                (lp650, hp650, muffle_lowpass),
+                (out_stereo, &mut self.ghost_send, &mut self.wall_send),
+            );
+            any_ghost |= ghost;
+            any_wall |= wall;
+            #[cfg(windows)]
+            if let Some(recording) = self.recording.as_mut() {
+                recording.render(peer_id, mono, level_ramp, &snap);
             }
         }
 
@@ -783,6 +748,110 @@ impl Mixer {
         self.glide.retain(|k, _| snap.peers.contains_key(k));
         self.levelers.retain(|k, _| snap.peers.contains_key(k));
     }
+}
+
+fn render_peer(
+    g: &mut Glide,
+    mono: &[f32],
+    level_ramp: crate::loudness::GainRamp,
+    peer: &PeerState,
+    (lp650, hp650, muffle_lowpass): (Biquad, Biquad, Biquad),
+    (out, ghost_send, wall_send): (&mut [f32], &mut [f32], &mut [f32]),
+) -> (bool, bool) {
+    let (left, right) = pan_gains(peer.pan);
+    let target = (left * peer.gain, right * peer.gain);
+    let mode = FilterMode::from_i32(peer.mode);
+    let muffled = peer.muffled;
+    if g.mode != mode {
+        g.previous_mode = g.mode;
+        g.previous_bz1 = g.bz1;
+        g.previous_bz2 = g.bz2;
+        g.previous_primary_muffle_path = g.muffle_path;
+        g.transition_remaining = FILTER_TRANSITION_SAMPLES;
+        g.mode = mode;
+        g.bz1 = 0.0;
+        g.bz2 = 0.0;
+    }
+    if g.muffled != muffled {
+        g.previous_muffled = g.muffled;
+        g.muffle_path.begin_transition();
+        g.previous_primary_muffle_path.begin_transition();
+        g.muffle_transition_remaining = FILTER_TRANSITION_SAMPLES;
+        g.muffled = muffled;
+    }
+    let transition_mode = (g.transition_remaining > 0).then_some(g.previous_mode);
+    let any_ghost = [Some(mode), transition_mode].contains(&Some(FilterMode::Ghost));
+    let any_wall = [Some(mode), transition_mode].contains(&Some(FilterMode::WallMuffle));
+    let n = (out.len() / 2).min(mono.len());
+    for (f, &sample) in mono.iter().take(n).enumerate() {
+        let normalized = sample * level_ramp.at(f, n);
+        let current_primary =
+            apply_filter(mode, &lp650, &hp650, &mut g.bz1, &mut g.bz2, normalized);
+        let current = g.muffle_path.process(
+            current_primary,
+            g.muffled,
+            g.previous_muffled,
+            g.muffle_transition_remaining,
+            &muffle_lowpass,
+        );
+        g.left += GAIN_GLIDE_K * (target.0 - g.left);
+        g.right += GAIN_GLIDE_K * (target.1 - g.right);
+        if g.transition_remaining == 0 {
+            add_routed_sample(
+                mode,
+                f,
+                current * g.left,
+                current * g.right,
+                out,
+                ghost_send,
+                wall_send,
+            );
+            g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
+            continue;
+        }
+        let previous_primary = apply_filter(
+            g.previous_mode,
+            &lp650,
+            &hp650,
+            &mut g.previous_bz1,
+            &mut g.previous_bz2,
+            normalized,
+        );
+        let previous = g.previous_primary_muffle_path.process(
+            previous_primary,
+            g.muffled,
+            g.previous_muffled,
+            g.muffle_transition_remaining,
+            &muffle_lowpass,
+        );
+        let completed = FILTER_TRANSITION_SAMPLES - g.transition_remaining;
+        let progress = if FILTER_TRANSITION_SAMPLES <= 1 {
+            1.0
+        } else {
+            completed as f32 / (FILTER_TRANSITION_SAMPLES - 1) as f32
+        };
+        add_routed_sample(
+            g.previous_mode,
+            f,
+            previous * g.left * (1.0 - progress),
+            previous * g.right * (1.0 - progress),
+            out,
+            ghost_send,
+            wall_send,
+        );
+        add_routed_sample(
+            mode,
+            f,
+            current * g.left * progress,
+            current * g.right * progress,
+            out,
+            ghost_send,
+            wall_send,
+        );
+        g.transition_remaining -= 1;
+        g.muffle_transition_remaining = g.muffle_transition_remaining.saturating_sub(1);
+    }
+    (any_ghost, any_wall)
 }
 
 pub const JITTER_PRIME_FRAMES: usize = 2;

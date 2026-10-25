@@ -266,6 +266,8 @@ public class VoiceChatLocalSettings
 #if WINDOWS
     public ConfigEntry<SpkDeviceEnum> SpeakerDeviceIndex { get; }
     public ConfigEntry<bool> ObsCompatibilityMode { get; }
+    public ConfigEntry<bool> ObsRecordingIntegration { get; }
+    public ConfigEntry<VoiceObsRecordingMode> ObsRecordingMode { get; }
 #endif
     public ConfigEntry<float> ButtonPositionX { get; }
     public ConfigEntry<float> ButtonPositionY { get; }
@@ -496,6 +498,14 @@ public class VoiceChatLocalSettings
         ObsCompatibilityMode = config.Bind("Audio", "ObsCompatibilityMode", false,
             new ConfigDescription(
                 "Adds a minimized Perfect Comms Audio window for OBS. Voice routing is unchanged."));
+        ObsRecordingIntegration = config.Bind("Audio", "ObsRecordingIntegration", false,
+            new ConfigDescription(
+                "Saves separate voice files with the optional OBS plugin. Does not record your own microphone."));
+        ObsRecordingMode = config.Bind("Audio", "ObsRecordingMode", VoiceObsRecordingMode.PerPlayer,
+            new ConfigDescription(
+                "Separate players or groups. Applies next recording."));
+        ObsRecordingMode.Value = VoiceObsRecording.NormalizeMode(ObsRecordingMode.Value);
+        VoiceObsRecording.SettingChanged(ObsRecordingIntegration.Value);
 #endif
 
         ApplyLegacyDefaultCanonicalization(
@@ -1658,6 +1668,13 @@ public class VoiceChatLocalSettings
         else if (configEntry == ObsCompatibilityMode)
         {
             SidecarVoiceHost.ApplyObsCompatibilityMode();
+        }
+        else if (configEntry == ObsRecordingIntegration || configEntry == ObsRecordingMode)
+        {
+            var mode = VoiceObsRecording.NormalizeMode(ObsRecordingMode.Value);
+            if (ObsRecordingMode.Value != mode) ObsRecordingMode.Value = mode;
+            VoiceObsRecording.SettingChanged(ObsRecordingIntegration.Value);
+            SidecarVoiceHost.ApplyObsRecording();
         }
 #endif
         else if (configEntry == ShowVoiceConnectionStatus)

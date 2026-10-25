@@ -1,4 +1,4 @@
-pub const PROTO_VERSION: u32 = 17;
+pub const PROTO_VERSION: u32 = 18;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_SAMPLES: usize = 960;
@@ -666,6 +666,8 @@ pub enum InboundOp {
     #[cfg(windows)]
     #[serde(rename = "set-obs-compatibility")]
     SetObsCompatibility { enabled: bool },
+    #[serde(rename = "set-obs-recording")]
+    SetObsRecording { enabled: bool, mode: u8 },
     #[serde(rename = "set-synthetic")]
     SetSynthetic { enabled: bool },
     #[serde(rename = "set-monitor")]
@@ -739,6 +741,12 @@ pub struct GameStatePeer {
     pub mode: i32,
     #[serde(default)]
     pub muffled: bool,
+    #[serde(default)]
+    pub recording_id: u32,
+    #[serde(default)]
+    pub recording_name: String,
+    #[serde(default)]
+    pub recording_group: u8,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -752,6 +760,29 @@ pub struct IceServer {
 
 pub fn parse_inbound(json: &str) -> Result<InboundOp, serde_json::Error> {
     let op: InboundOp = serde_json::from_str(json)?;
+    if matches!(&op, InboundOp::SetObsRecording { mode, .. } if *mode > 1) {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "invalid OBS recording mode",
+        ));
+    }
+    if let InboundOp::SetObsRecording { .. } = &op {
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        if value.as_object().is_some_and(|fields| fields.len() != 3) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "unknown OBS recording setting",
+            ));
+        }
+    }
+    if let InboundOp::GameState { peers, .. } = &op {
+        if peers
+            .iter()
+            .any(|peer| peer.recording_name.len() > 192 || peer.recording_group > 2)
+        {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "invalid recording identity",
+            ));
+        }
+    }
     let generation = match &op {
         InboundOp::PeerAdd { generation, .. }
         | InboundOp::PeerRemove { generation, .. }
@@ -1184,8 +1215,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn obs_recording_setting_requires_exact_fields_and_mode() {
+        assert!(matches!(
+            parse_inbound(r#"{"op":"set-obs-recording","enabled":true,"mode":1}"#).unwrap(),
+            InboundOp::SetObsRecording {
+                enabled: true,
+                mode: 1
+            }
+        ));
+        for json in [
+            r#"{"op":"set-obs-recording","enabled":true}"#,
+            r#"{"op":"set-obs-recording","enabled":1,"mode":0}"#,
+            r#"{"op":"set-obs-recording","enabled":true,"mode":2}"#,
+            r#"{"op":"set-obs-recording","enabled":true,"mode":0,"extra":true}"#,
+        ] {
+            assert!(parse_inbound(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn old_peer_metadata_is_private_and_names_are_byte_bounded() {
+        let InboundOp::GameState { peers, .. } = parse_inbound(
+            r#"{"op":"game-state","deaf":false,"master":1,"peers":[{"id":"transport"}]}"#,
+        )
+        .unwrap() else {
+            panic!("game state expected")
+        };
+        assert_eq!(peers[0].recording_id, 0);
+        assert_eq!(peers[0].recording_group, 0);
+        assert!(peers[0].recording_name.is_empty());
+        let json = serde_json::json!({"op":"game-state","deaf":false,"master":1,"peers":[{
+            "id":"transport", "recording_name":"é".repeat(97)
+        }]})
+        .to_string();
+        assert!(parse_inbound(&json).is_err());
+    }
+
+    #[test]
     fn frozen_constants_match_contract() {
-        assert_eq!(PROTO_VERSION, 17);
+        assert_eq!(PROTO_VERSION, 18);
         assert_eq!(SAMPLE_RATE, 48_000);
         assert_eq!(CHANNELS, 1);
         assert_eq!(FRAME_SAMPLES, 960);

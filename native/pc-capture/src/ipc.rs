@@ -155,6 +155,8 @@ struct TelemetrySources {
     media_diagnostics: Arc<MediaDiagnostics>,
     rtc: Arc<RtcEngine>,
     rtc_scheduler: Arc<RtcOpScheduler>,
+    #[cfg(windows)]
+    obs_recording: Arc<crate::obs_recording::Shared>,
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -1016,6 +1018,13 @@ fn spawn_telemetry_writer(
         const STATS_INTERVAL: Duration = Duration::from_secs(2);
         let mut last_stats = Instant::now() - STATS_INTERVAL;
         while !stop.load(Ordering::Acquire) {
+            #[cfg(windows)]
+            if let Some((state, message)) = sources.obs_recording.take_status() {
+                let json = serde_json::json!({"op":"obs-recording-status","state":state,"message":message}).to_string();
+                if write_frame(&conn, &encode_control(&json)).is_err() {
+                    return;
+                }
+            }
             while let Ok(event) = media_events.try_recv() {
                 let bytes = encode_control(&media_state_json(&event));
                 if write_frame(&conn, &bytes).is_err() {
@@ -2523,6 +2532,8 @@ fn run_authenticated_session(
     let conn = Arc::new(Mutex::new(stream.try_clone()?));
     #[cfg(windows)]
     let mut obs_window = crate::obs_window::ObsCaptureWindow::new();
+    #[cfg(windows)]
+    let mut obs_recording = crate::obs_recording::ObsRecording::new();
 
     // Codec initialization is a session prerequisite even when microphone capture is absent:
     // receive-only users still need decoding, and a helper that can report levels but never
@@ -2631,6 +2642,8 @@ fn run_authenticated_session(
             media_diagnostics: media_diagnostics.clone(),
             rtc_scheduler: rtc_scheduler.clone(),
             rtc: rtc.clone(),
+            #[cfg(windows)]
+            obs_recording: obs_recording.shared.clone(),
         },
         session_supervisor.clone(),
     );
@@ -3117,6 +3130,8 @@ fn run_authenticated_session(
     let drain_telemetry = telemetry.clone();
     let drain_counters = counters.clone();
     let drain_aec_timing = aec_timing.clone();
+    #[cfg(windows)]
+    let drain_obs = obs_recording.shared.clone();
     let drain_handle =
         spawn_critical_worker("decoder-mixer", session_supervisor.clone(), move || {
             let mut decoders: HashMap<String, OpusCodec> = HashMap::new();
@@ -3126,6 +3141,8 @@ fn run_authenticated_session(
             let mut encoded_scan_work: Vec<String> = Vec::new();
             let mut generations: HashMap<String, u32> = HashMap::new();
             let mut mixer = Mixer::new();
+            #[cfg(windows)]
+            mixer.set_recording_bridge(drain_obs.clone());
             let mut peer_levels = PeerLevelCadence::new(Instant::now());
 
             // The encoded buffer owns network jitter adaptation. Keep only a one-frame decoded
@@ -3274,7 +3291,11 @@ fn run_authenticated_session(
                     drain_telemetry.publish_peers(levels);
                 }
                 let needs_idle_mix = mixer.needs_idle_mix();
-                if jitter.is_idle() && !needs_idle_mix {
+                #[cfg(windows)]
+                let recording_active = drain_obs.active();
+                #[cfg(not(windows))]
+                let recording_active = false;
+                if jitter.is_idle() && !needs_idle_mix && !recording_active {
                     drain_counters
                         .jitter_idle_ticks
                         .fetch_add(1, Ordering::Relaxed);
@@ -3284,7 +3305,13 @@ fn run_authenticated_session(
                 }
 
                 let round = jitter.playout_round();
-                if !round.is_empty() || needs_idle_mix {
+                if !round.is_empty() || needs_idle_mix || recording_active {
+                    #[cfg(windows)]
+                    let recording_timestamp = if recording_active {
+                        crate::obs_recording::qpc_ns()
+                    } else {
+                        0
+                    };
                     drain_counters.mix_rounds.fetch_add(1, Ordering::Relaxed);
                     drain_counters
                         .mixed_peer_frames
@@ -3321,6 +3348,10 @@ fn run_authenticated_session(
                                 .playback_queued_pairs
                                 .fetch_add((stereo.len() / 2) as u64, Ordering::Relaxed);
                         }
+                    }
+                    #[cfg(windows)]
+                    if recording_active {
+                        mixer.publish_recording(&drain_gs, &stereo, true, recording_timestamp);
                     }
                 }
 
@@ -3994,6 +4025,31 @@ fn run_authenticated_session(
                             }
                         }
                     }
+                    InboundOp::SetObsRecording { enabled, mode } => {
+                        #[cfg(windows)]
+                        if let Err(error) =
+                            obs_recording.configure(enabled, mode, game_state.clone())
+                        {
+                            obs_recording
+                                .shared
+                                .status("error", format!("OBS recording bridge: {error}"));
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            let _ = (enabled, mode);
+                            if write_frame(
+                                &conn,
+                                &encode_control(&error_json(
+                                    "obs-recording",
+                                    "OBS recording requires native Windows x64",
+                                )),
+                            )
+                            .is_err()
+                            {
+                                break 'control;
+                            }
+                        }
+                    }
                     InboundOp::SetInput {
                         gain,
                         vad_threshold,
@@ -4174,6 +4230,19 @@ fn run_authenticated_session(
                         peers,
                     } => {
                         let local = LocalState { deafened: deaf };
+                        let recording = peers
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p.id.clone(),
+                                    crate::gamestate::RecordingIdentity {
+                                        id: p.recording_id,
+                                        name: p.recording_name.clone(),
+                                        group: p.recording_group,
+                                    },
+                                )
+                            })
+                            .collect();
                         let peer_states: Vec<(String, PeerState)> = peers
                             .into_iter()
                             .map(|p| {
@@ -4195,7 +4264,7 @@ fn run_authenticated_session(
                             })
                             .count();
                         let peer_count = peer_states.len();
-                        game_state.apply(local, master, peer_states);
+                        game_state.apply_recording(local, master, peer_states, recording);
                         counters.record_game_state(deaf, master, peer_count, nonzero_gain_peers);
                     }
                     InboundOp::Hello { .. } => {}
@@ -4239,6 +4308,8 @@ fn run_authenticated_session(
         eprintln!("pc-capture: capture teardown exceeded its bound: {error}");
     }
     stop.store(true, Ordering::Relaxed);
+    #[cfg(windows)]
+    obs_recording.shutdown();
     #[cfg(windows)]
     if let Err(error) = obs_window.set_enabled(false) {
         eprintln!("pc-capture: OBS compatibility window cleanup failed: {error}");

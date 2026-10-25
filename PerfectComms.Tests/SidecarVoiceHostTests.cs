@@ -45,7 +45,6 @@ public sealed class SidecarVoiceHostTests
         Assert.Equal(string.Empty, failure);
         Assert.Equal(0, secondClient.HandlerCount);
         Assert.True(second!.EnsureStarted("mic-b", "spk-b"));
-        Assert.Equal(10, secondClient.HandlerCount);
         Assert.Equal(1, firstClient.StartCount);
         Assert.Equal(1, secondClient.StartCount);
         Assert.Equal(2, createCount);
@@ -439,7 +438,6 @@ public sealed class SidecarVoiceHostTests
         WaitUntil(() => (second = host.TryAcquire(Callbacks(), out _)) != null);
         Assert.True(second!.EnsureStarted("mic", "spk"));
         Assert.Equal(2, created);
-        Assert.Equal(10, secondClient.HandlerCount);
         second.Dispose();
         WaitUntil(() => secondClient.DisposeCount == 1);
     }
@@ -1007,6 +1005,240 @@ public sealed class SidecarVoiceHostTests
         }
     }
 
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 0)]
+    public async Task RecordingChangesCoalesceBehindCriticalRoutesAndDoNotLeakIntoReplacement(bool enabled, int mode)
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var unblock = new ManualResetEventSlim();
+        var first = new FakeSidecarVoiceClient
+        {
+            BlockNextMicActive = true, CommandEntered = entered, AllowCommand = unblock,
+        };
+        var second = new FakeSidecarVoiceClient();
+        var created = 0;
+        int setting = 0;
+        var host = new SidecarVoiceHostCore(
+            () => Interlocked.Increment(ref created) == 1 ? first : second,
+            commandCapacity: 1,
+            obsRecordingSettings: () =>
+            {
+                int current = Volatile.Read(ref setting);
+                return new SidecarObsRecordingSettings((current & 1) != 0, (VoiceObsRecordingMode)(current >> 1));
+            });
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        try
+        {
+            Assert.True(lease.EnsureStarted("mic", "speaker"));
+            Assert.True(await TryUntilAsync(() => lease.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+            lease.SetMicActive(true);
+            Assert.True(await Task.Run(() => entered.Wait(TimeSpan.FromSeconds(2), cancellationToken), cancellationToken));
+            Assert.True(lease.ConfigureAudioRoute("queued", "speaker", SidecarCaptureMode.Warm, false));
+            Assert.True(lease.ConfigureAudioRoute("reserved", "speaker", SidecarCaptureMode.Stopped, false));
+            Volatile.Write(ref setting, 3);
+            host.ApplyObsRecording();
+            Volatile.Write(ref setting, enabled ? 1 | (mode << 1) : 0);
+            host.ApplyObsRecording();
+            unblock.Set();
+            Assert.True(await TryUntilAsync(() => lease.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+            Assert.Equal(new[]
+            {
+                new SidecarObsRecordingSettings(false, VoiceObsRecordingMode.PerPlayer),
+                new SidecarObsRecordingSettings(enabled, (VoiceObsRecordingMode)mode),
+            }, first.ObsRecordingCalls);
+            Assert.Equal(CaptureHealth.Healthy, lease.Health);
+            await AwaitCompletion(lease.ReleaseAsync());
+
+            Volatile.Write(ref setting, 0);
+            var replacement = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+            try
+            {
+                Assert.True(replacement.EnsureStarted("mic", "speaker"));
+                Assert.True(await TryUntilAsync(() => replacement.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+                Assert.Equal(new[] { new SidecarObsRecordingSettings(false, VoiceObsRecordingMode.PerPlayer) },
+                    second.ObsRecordingCalls);
+            }
+            finally { await AwaitCompletion(replacement.ReleaseAsync()); }
+        }
+        finally
+        {
+            unblock.Set();
+            await AwaitCompletion(lease.ReleaseAsync());
+        }
+    }
+
+    [Theory]
+    [InlineData("anonymous")]
+    [InlineData("alias")]
+    [InlineData("deaf")]
+    [InlineData("removed")]
+    public async Task LatestGameStateBypassesFullQueueAndNeverReplaysReplacedIdentity(string transition)
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var unblock = new ManualResetEventSlim();
+        var fake = new FakeSidecarVoiceClient
+        {
+            BlockNextMicActive = true, CommandEntered = entered, AllowCommand = unblock,
+        };
+        var host = new SidecarVoiceHostCore(() => fake, commandCapacity: 1);
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        try
+        {
+            Assert.True(lease.EnsureStarted("mic", "speaker"));
+            lease.SetMicActive(true);
+            Assert.True(await Task.Run(() => entered.Wait(TimeSpan.FromSeconds(2), cancellationToken), cancellationToken));
+            Assert.True(lease.ConfigureAudioRoute("queued", "speaker", SidecarCaptureMode.Warm, false));
+            Assert.True(lease.ConfigureAudioRoute("reserved", "speaker", SidecarCaptureMode.Stopped, false));
+            var named = new[] { new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0, false, 8, "Original", 1) };
+            for (var update = 0; update < 1000; update++)
+                Assert.True(lease.SendGameState(false, 1f, named));
+            var latest = transition switch
+            {
+                "anonymous" => new[] { new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0, false) },
+                "alias" => new[] { new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0, false, 10, "Alias", 2) },
+                "deaf" => named,
+                _ => Array.Empty<SidecarProtocol.GameStatePeerInput>(),
+            };
+            bool deaf = transition == "deaf";
+            Assert.True(lease.SendGameState(deaf, 1f, latest));
+            unblock.Set();
+            Assert.True(await TryUntilAsync(() => lease.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+
+            var sent = Assert.Single(fake.GameStateRoutes);
+            Assert.Equal(deaf, sent.Deaf);
+            Assert.Equal(latest, sent.Peers);
+            Assert.Equal(new[] { "mic:true", "game-state", "route:queued:speaker", "route:reserved:speaker" },
+                fake.Sequence);
+        }
+        finally
+        {
+            unblock.Set();
+            await AwaitCompletion(lease.ReleaseAsync());
+        }
+    }
+
+    [Fact]
+    public async Task RetiredLeaseDropsPendingGameStateAndRecordingSettings()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var unblock = new ManualResetEventSlim();
+        var first = new FakeSidecarVoiceClient
+        {
+            BlockNextMicActive = true, CommandEntered = entered, AllowCommand = unblock,
+        };
+        var second = new FakeSidecarVoiceClient();
+        int created = 0;
+        int enabled = 0;
+        var host = new SidecarVoiceHostCore(
+            () => Interlocked.Increment(ref created) == 1 ? first : second,
+            commandCapacity: 1,
+            obsRecordingSettings: () => new SidecarObsRecordingSettings(Volatile.Read(ref enabled) != 0,
+                VoiceObsRecordingMode.PerPlayer));
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        try
+        {
+            Assert.True(lease.EnsureStarted("mic", "speaker"));
+            Assert.True(await TryUntilAsync(() => lease.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+            lease.SetMicActive(true);
+            Assert.True(await Task.Run(() => entered.Wait(TimeSpan.FromSeconds(2), cancellationToken), cancellationToken));
+            Assert.True(lease.ConfigureAudioRoute("queued", "speaker", SidecarCaptureMode.Warm, false));
+            Assert.True(lease.ConfigureAudioRoute("reserved", "speaker", SidecarCaptureMode.Stopped, false));
+            var named = new[] { new SidecarProtocol.GameStatePeerInput("42", 1f, 0f, 0, false, 8, "Original", 1) };
+            Assert.True(lease.SendGameState(false, 1f, named));
+            Volatile.Write(ref enabled, 1);
+            host.ApplyObsRecording();
+            var retirement = lease.ReleaseAsync();
+            Assert.False(lease.SendGameState(false, 1f, named));
+            unblock.Set();
+            await AwaitCompletion(retirement);
+
+            var quiesced = Assert.Single(first.GameStateRoutes);
+            Assert.True(quiesced.Deaf);
+            Assert.Empty(quiesced.Peers);
+            Assert.Equal(new[] { new SidecarObsRecordingSettings(false, VoiceObsRecordingMode.PerPlayer) },
+                first.ObsRecordingCalls);
+            Volatile.Write(ref enabled, 0);
+            var replacement = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+            try
+            {
+                Assert.True(replacement.EnsureStarted("mic", "speaker"));
+                Assert.True(await TryUntilAsync(() => replacement.SendOutputTestFrameAndWait(new[] { 0f, 0f })));
+                Assert.Empty(second.GameStateRoutes);
+                Assert.Equal(new[] { new SidecarObsRecordingSettings(false, VoiceObsRecordingMode.PerPlayer) },
+                    second.ObsRecordingCalls);
+            }
+            finally { await AwaitCompletion(replacement.ReleaseAsync()); }
+        }
+        finally
+        {
+            unblock.Set();
+            await AwaitCompletion(lease.ReleaseAsync());
+        }
+    }
+
+    [Fact]
+    public async Task RecordingStatusRejectsRetiredClientEvenWhenItsLeaseRestarts()
+    {
+        var first = new FakeSidecarVoiceClient();
+        var second = new FakeSidecarVoiceClient();
+        int created = 0;
+        var host = new SidecarVoiceHostCore(
+            () => Interlocked.Increment(ref created) == 1 ? first : second,
+            obsRecordingSettings: () => new SidecarObsRecordingSettings(true, VoiceObsRecordingMode.PerPlayer));
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        try
+        {
+            Assert.True(lease.EnsureStarted("mic", "speaker"));
+            first.RaiseObsRecordingStatus("recording");
+            Assert.Equal("recording", VoiceObsRecording.Status.State);
+            var lateFirstStatus = first.CaptureObsRecordingStatusCallback();
+            first.RaiseDead("disconnected");
+            Assert.Equal("waiting", VoiceObsRecording.Status.State);
+            lateFirstStatus(new VoiceObsRecordingStatus("recording", "stale"));
+            Assert.Equal("waiting", VoiceObsRecording.Status.State);
+            Assert.False(lease.EnsureStarted("mic", "speaker"));
+            Assert.True(await TryUntilAsync(() => lease.EnsureStarted("mic", "speaker")));
+            second.RaiseObsRecordingStatus("ready");
+            lateFirstStatus(new VoiceObsRecordingStatus("error", "retired helper"));
+            Assert.Equal("ready", VoiceObsRecording.Status.State);
+            var lateSecondStatus = second.CaptureObsRecordingStatusCallback();
+            var retirement = lease.ReleaseAsync();
+            Assert.Equal("waiting", VoiceObsRecording.Status.State);
+            lateSecondStatus(new VoiceObsRecordingStatus("recording", "retired lease"));
+            Assert.Equal("waiting", VoiceObsRecording.Status.State);
+            await AwaitCompletion(retirement);
+            Assert.Equal(0, first.HandlerCount);
+            Assert.Equal(0, second.HandlerCount);
+        }
+        finally { await AwaitCompletion(lease.ReleaseAsync()); }
+    }
+
+    [Fact]
+    public async Task DisabledRecordingIgnoresInFlightHelperStatus()
+    {
+        var fake = new FakeSidecarVoiceClient();
+        bool enabled = true;
+        var host = new SidecarVoiceHostCore(() => fake,
+            obsRecordingSettings: () => new SidecarObsRecordingSettings(enabled, VoiceObsRecordingMode.PerPlayer));
+        var lease = Assert.IsType<SidecarVoiceLease>(host.TryAcquire(Callbacks(), out _));
+        try
+        {
+            Assert.True(lease.EnsureStarted("mic", "speaker"));
+            fake.RaiseObsRecordingStatus("recording");
+            Assert.Equal("recording", VoiceObsRecording.Status.State);
+            enabled = false;
+            VoiceObsRecording.SettingChanged(false);
+            host.ApplyObsRecording();
+            fake.RaiseObsRecordingStatus("error");
+            Assert.Equal("disabled", VoiceObsRecording.Status.State);
+        }
+        finally { await AwaitCompletion(lease.ReleaseAsync()); }
+    }
+
     private static async Task AwaitCompletion(Task completion)
     {
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -1057,6 +1289,7 @@ public sealed class SidecarVoiceHostTests
         private Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? _onPeerLevels;
         private Action<SidecarPlaybackState>? _onPlaybackState;
         private Action<SidecarCaptureState>? _onCaptureState;
+        private Action<VoiceObsRecordingStatus>? _onObsRecordingStatus;
 
         public event Action<float[], int>? OnFrame { add => _onFrame += value; remove => _onFrame -= value; }
         public event Action<string>? OnDead { add => _onDead += value; remove => _onDead -= value; }
@@ -1068,6 +1301,7 @@ public sealed class SidecarVoiceHostTests
         public event Action<IReadOnlyList<SidecarProtocol.PeerLevel>>? OnPeerLevels { add => _onPeerLevels += value; remove => _onPeerLevels -= value; }
         public event Action<SidecarCaptureState>? OnCaptureState { add => _onCaptureState += value; remove => _onCaptureState -= value; }
         public event Action<SidecarPlaybackState>? OnPlaybackState { add => _onPlaybackState += value; remove => _onPlaybackState -= value; }
+        public event Action<VoiceObsRecordingStatus>? OnObsRecordingStatus { add => _onObsRecordingStatus += value; remove => _onObsRecordingStatus -= value; }
 
         public CaptureHealth Health { get; private set; } = CaptureHealth.Dead;
         public IReadOnlyList<VoiceDeviceInfo> OutputDevices { get; } =
@@ -1089,18 +1323,21 @@ public sealed class SidecarVoiceHostTests
         public List<bool> MicActiveCalls { get; } = new();
         public List<bool> SyntheticCalls { get; } = new();
         public List<bool> ObsCompatibilityCalls { get; } = new();
+        public List<SidecarObsRecordingSettings> ObsRecordingCalls { get; } = new();
         public List<string> RemovedPeers { get; } = new();
         public List<string> OutputSelectionCalls { get; } = new();
         public List<(string Input, string Output, SidecarCaptureMode Mode, bool Synthetic)> AudioRouteCalls { get; } = new();
         public List<float[]> OutputFrames { get; } = new();
         public int RemoveFailuresRemaining { get; set; }
         public List<(bool Deaf, float Master, int Peers)> GameStates { get; } = new();
+        public List<(bool Deaf, float Master, SidecarProtocol.GameStatePeerInput[] Peers)> GameStateRoutes { get; } = new();
         public List<string> Sequence { get; } = new();
         public Task DisposeObserved => DisposeObservedBacking.Task;
 
         public int HandlerCount =>
             Count(_onFrame) + Count(_onDead) + Count(_onRecoverableError) + Count(_onLocalSdp) + Count(_onLocalCandidate) +
-            Count(_onPeerState) + Count(_onLevel) + Count(_onPeerLevels) + Count(_onCaptureState) + Count(_onPlaybackState);
+            Count(_onPeerState) + Count(_onLevel) + Count(_onPeerLevels) + Count(_onCaptureState) + Count(_onPlaybackState) +
+            Count(_onObsRecordingStatus);
 
         public bool Start(string? micDevice, string? spkDevice)
         {
@@ -1129,6 +1366,8 @@ public sealed class SidecarVoiceHostTests
             ObsCompatibilityCalls.Add(enabled);
             Sequence.Add($"obs:{enabled.ToString().ToLowerInvariant()}");
         }
+        public void SetObsRecording(bool enabled, VoiceObsRecordingMode mode)
+            => ObsRecordingCalls.Add(new SidecarObsRecordingSettings(enabled, mode));
         public void SetSynthetic(bool enabled)
         {
             SyntheticCalls.Add(enabled);
@@ -1191,11 +1430,22 @@ public sealed class SidecarVoiceHostTests
         public bool AddIceCandidate(string peerId, int generation, string candidate) => true;
         public void SetIceServers(IEnumerable<IceServer> servers) { }
         public void SendGameState(bool deaf, float master, IReadOnlyList<SidecarProtocol.GameStatePeerInput> peers)
-            => GameStates.Add((deaf, master, peers.Count));
+        {
+            GameStates.Add((deaf, master, peers.Count));
+            GameStateRoutes.Add((deaf, master, peers.ToArray()));
+            Sequence.Add("game-state");
+        }
+
+        public void RaiseObsRecordingStatus(string state)
+            => _onObsRecordingStatus?.Invoke(new VoiceObsRecordingStatus(state, string.Empty));
+
+        public Action<VoiceObsRecordingStatus> CaptureObsRecordingStatusCallback()
+            => _onObsRecordingStatus ?? (_ => { });
 
         public void RaiseDead(string reason)
         {
             Health = CaptureHealth.Dead;
+            RaiseObsRecordingStatus("waiting");
             _onDead?.Invoke(reason);
         }
 

@@ -11,6 +11,7 @@ on:
       - "PerfectComms.csproj"
       - "native/cmake/**"
       - "native/pc-capture/**"
+      - "native/obs-plugin/**"
       - "native/vendor/**"
       - "native/pc-pion/**"
       - "native/pion-sys/**"
@@ -20,6 +21,7 @@ on:
       - "scripts/build-helpers.sh"
       - "scripts/build-mac.sh"
       - "scripts/build-pion.sh"
+      - "scripts/build-obs-plugin.ps1"
       - "scripts/ci-smoke-helper.sh"
       - "scripts/package-release.ps1"
       - "scripts/package-release.sh"
@@ -124,7 +126,7 @@ jobs:
       - name: Verify helper has no private MSVC runtime dependency
         run: python scripts/verify-release-assets.py --pe-no-private-runtime Libs/pc-capture/${{ matrix.dest }}
       - name: Verify linked Cubeb backend inventory
-        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 17
+        run: python scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/${{ matrix.dest }} --expected-protocol 18
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -155,7 +157,7 @@ jobs:
       - name: Verify static Cubeb and Linux audio runtime contract
         run: python3 scripts/verify-release-assets.py --elf-cubeb-runtime Libs/pc-capture/pc-capture-linux-x64
       - name: Verify linked Cubeb backend inventory
-        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 17
+        run: python3 scripts/verify-release-assets.py --helper-build-info Libs/pc-capture/pc-capture-linux-x64 --expected-protocol 18
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-linux-x64
@@ -489,3 +491,19 @@ jobs:
         run: |
           PC_PION_LIB="$(cd dl && pwd -W)/pc-pion.x64.dll" PC_REQUIRE_PION=1 \
             cargo test --locked --manifest-path native/pc-capture/Cargo.toml loopback_two_engines_exchange_opus -- --nocapture
+
+  obs-plugin:
+    name: OBS recording plugin (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build, test, and package OBS plugin
+        shell: pwsh
+        run: ./scripts/build-obs-plugin.ps1
+      - name: Verify OBS plugin runtime dependencies
+        run: python scripts/verify-release-assets.py --pe-no-private-runtime artifacts/obs-plugin-build/Release/perfect-comms-obs.dll
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obs-plugin-win-x64
+          path: artifacts/PerfectComms-OBS-win-x64.zip
+          if-no-files-found: error
