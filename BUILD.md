@@ -122,8 +122,9 @@ Build both macOS architecture slices before `mac-universal`; the normal
 
 ## Optional Windows OBS plugin
 
-The recording integration targets native Windows x64 and official OBS Studio
-32.2.2, independently of desktop mod installation. With PowerShell, CMake 3.24+,
+The recording integration targets native Windows x64 and is built and tested with
+official OBS Studio 32.2.2, independently of desktop mod installation. Other OBS
+versions are unverified. With PowerShell, CMake 3.24+,
 Visual Studio x64 C++ tools, and a Windows SDK installed, run from the repository
 root:
 

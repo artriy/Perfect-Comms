@@ -1,6 +1,6 @@
 # Perfect Comms OBS recording
 
-Optional Windows x64 plugin for native Windows Perfect Comms and official 64-bit OBS Studio 32.2.2. The integration is off by default. One combined OBS audio source accompanies separate synchronized incoming-voice files; it does not create an OBS track per player or record your own microphone. Other OBS versions are not covered by this compatibility target. Linux/Proton, macOS/Wine/CrossOver, and Android are not supported by this integration.
+Optional Windows x64 plugin for native Windows Perfect Comms and official 64-bit OBS Studio. Tested with OBS Studio 32.2.2; other OBS versions may work, but compatibility and recording synchronization are unverified. The integration is off by default. One combined OBS audio source accompanies separate synchronized incoming-voice files; it does not create an OBS track per player or record your own microphone. Linux/Proton, macOS/Wine/CrossOver, and Android are not supported by this integration.
 
 ## Install and record
 
@@ -27,7 +27,7 @@ Stems follow permitted incoming voice, local deafen and Speaker Volume, player/g
 
 Perfect Comms **Audio > Streaming** shows Off, Waiting for OBS, Connected, Recording, Paused, or Recording error. **Open Guide** opens the [player setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration). OBS source Properties shows status and output folder; click **Refresh connection and recording status** to update it.
 
-- Missing source: check the installed DLL/data paths, restart 64-bit OBS 32.2.2, and inspect the OBS log for load errors.
+- Missing source: check the installed DLL/data paths, restart 64-bit OBS, and inspect the OBS log for load errors.
 - Waiting for OBS: join voice with the integration enabled, add the source, and run OBS and Among Us as the same Windows user.
 - Echo/doubling: disable duplicate application/desktop voice capture and check monitoring. In your editor, do not mix the combined voice track with the same separate voices.
 - Missing named files: check hearing rules, deafen, Speaker Volume, and player volumes. Hidden identities intentionally merge into Private voices.
@@ -35,7 +35,7 @@ Perfect Comms **Audio > Streaming** shows Off, Waiting for OBS, Connected, Recor
 
 ## Output and synchronization contract
 
-Supported outputs: official OBS 32.2.2 `ffmpeg_muxer` (standard MKV/MP4), `mp4_output` (hybrid MP4), and `mov_output` (hybrid MOV). Turn off automatic recording file splitting. Split output buffers defer multiple packet submissions, so their acceptance cannot be confirmed individually through the public API. Other output implementations are rejected visibly.
+Supported output types (tested with OBS Studio 32.2.2): `ffmpeg_muxer` (standard MKV/MP4), `mp4_output` (hybrid MP4), and `mov_output` (hybrid MOV). Turn off automatic recording file splitting. Split output buffers defer multiple packet submissions, so their acceptance cannot be confirmed individually through the public API. Other output implementations are rejected visibly.
 
 Synchronization uses OBS composition timestamps and PTS denominator ticks, including fractional FPS and encoder frame-rate divisors. Missing composition timestamps stop stems instead of guessing from DTS. The first `ffmpeg_muxer` callback accounts for exact encoder-header bytes; packet acceptance then requires its complete payload-byte increment. Hybrid MP4/MOV normalize relative PTS against the first video packet and delay clock commitment by one accepted video packet, matching the muxer's retained final sample. Audio packets never release that held video sample. Finalization on `deactivate` drops the sample the hybrid muxer does not write. Rejected stopping packets, counter mismatches, and output errors cannot silently extend stems.
 Hybrid sample durations use adjacent accepted raw DTS differences, not nominal FPS, including stretched samples after dropped frames.

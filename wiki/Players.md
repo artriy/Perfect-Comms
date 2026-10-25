@@ -137,7 +137,7 @@ Compatible mods can register additional tabs under **Mod Behaviour**. Those tabs
 
 ## OBS Recording Integration
 
-Optional, off by default, and available only with native Windows x64 Perfect Comms and 64-bit OBS Studio 32.2.2. Linux/Proton, macOS/Wine/CrossOver, and Android do not provide this integration. It adds one combined **Perfect Comms** audio source to OBS and saves separate incoming-voice WAV files beside your recording. It does not record your own microphone.
+Optional, off by default, and available for native Windows x64 Perfect Comms with 64-bit OBS Studio. Tested with OBS Studio 32.2.2; other OBS versions may work, but compatibility and recording synchronization are unverified. Linux/Proton, macOS/Wine/CrossOver, and Android do not provide this integration. It adds one combined **Perfect Comms** audio source to OBS and saves separate incoming-voice WAV files beside your recording. It does not record your own microphone.
 
 ### Install and set up
 
@@ -166,7 +166,7 @@ Voice files follow the incoming audio you are allowed to hear, including player/
 
 **Audio > Streaming** shows **Off**, **Waiting for OBS**, **Connected**, **Recording**, **Paused**, or **Recording error**. **Open Guide** opens this section. The OBS source's Properties also shows status and the recording folder; use **Refresh connection and recording status** there.
 
-- **Perfect Comms source missing:** check the ZIP's folder layout, restart 64-bit OBS 32.2.2, and check its log for a plugin load error. Installing only the mod DLL does not install the OBS plugin.
+- **Perfect Comms source missing:** check the ZIP's folder layout, restart 64-bit OBS, and check its log for a plugin load error. Installing only the mod DLL does not install the OBS plugin.
 - **Waiting for OBS:** enable the integration, join voice, and add the source. Run OBS and Among Us as the same Windows user.
 - **Echo or doubled voices:** remove duplicate application/desktop capture, check source monitoring, and do not play the combined voice track alongside the separate voice files in your editor.
 - **No named file or unexpected Private voices:** check local deafen, Speaker Volume, player volumes, and the host's hearing rules. Privacy-hidden voices intentionally share one anonymous file; recording cannot recover their real identities.
