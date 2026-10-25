@@ -1,0 +1,37 @@
+name: Publish approved v4.1.11 notes
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/publish-v411-notes-once.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'artriy/Perfect-Comms'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: c40a28de5a98d57c7ffb999956669e2b3ba65a1a
+          persist-credentials: false
+      - name: Replace existing release notes only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view --repo artriy/Perfect-Comms --json tagName --jq .tagName)" = v4.1.11
+          release_heading="## Perfect Comms v4.1.11"
+          awk -v heading="$release_heading" '
+            $0 == heading { in_release = 1; next }
+            in_release && /^## Perfect Comms v[0-9]+\.[0-9]+\.[0-9]+$/ { exit }
+            in_release { print }
+          ' CHANGELOG.md > release-notes.md
+          sed -i '/./,$!d' release-notes.md
+          echo '4b95cb5316a5ed0c62701486e62e8f0fd54b2f8d12ac0403f85bc58d0a9a1cb1  release-notes.md' | sha256sum --check --status
+          gh release edit v4.1.11 --repo artriy/Perfect-Comms --notes-file release-notes.md
