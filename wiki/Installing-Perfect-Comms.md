@@ -63,7 +63,7 @@ players in the same voice lobby.
 
 ## Guided setup
 
-On a new install, Perfect Comms walks through five steps: Welcome, Audio, Controls, HUD, and Review. You can select and test audio devices, set talk mode and shortcuts, choose whether desktop keybinds remain active while chat is open, choose whether to show the voice controls, lobby connection status, speaking bar, and meeting overlay, preview a visible speaking bar with a live lobby mockup, then save all choices together. Open **Voice Settings > Advanced > First-Time Setup** to run the guide again without changing anything unless you finish and save.
+On a new install, Perfect Comms walks through four steps: Audio, Controls, HUD, and Review. You can select and test audio devices, set talk mode and shortcuts, choose whether desktop keybinds remain active while chat is open, choose whether to show the voice controls, lobby connection status, speaking bar, and meeting overlay, preview a visible speaking bar with a live lobby mockup, then save all choices together. Open **Voice Settings > Advanced > First-Time Setup** to run the guide again without changing anything unless you finish and save.
 
 ## Verify it loaded
 

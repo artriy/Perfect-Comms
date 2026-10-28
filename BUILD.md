@@ -230,28 +230,32 @@ The workflow requests only a short-lived OIDC credential; no long-lived NuGet AP
 Before tagging, open **Actions -> Release -> Run workflow** and run it against
 `main`. A manual run never creates a GitHub Release. It runs the complete
 managed, native, RTC, desktop, Starlight, and packaging gates, then uploads
-three Actions artifacts for 14 days:
+four Actions artifacts for 14 days:
 
 - `PerfectComms-standalone-dlls-*`, containing the desktop `PerfectComms.dll`;
 - `PerfectComms-Starlight-testers-*`, containing only
   `PerfectCommsStarlight.dll` for Starlight beta or approved local-mod testing;
+- `PerfectComms-OBS-*`, containing the optional `PerfectComms-OBS-win-x64.zip` OBS plugin;
 - `PerfectComms-api-nuget-*`, containing the reference-only `PerfectComms.Api.<PerfectCommsApiPackageVersion>.nupkg`.
 
 ### Publishing a release
 
-1. Set `<Version>` and `<InformationalVersion>` to `X.Y.Z`, set
-   `<AssemblyVersion>` and `<FileVersion>` to `X.Y.Z.0`, set
+1. Set `<Version>` and `<InformationalVersion>` to `X.Y.Z` and
+   `<AssemblyVersion>` and `<FileVersion>` to `X.Y.Z.0` in both
+   `PerfectComms.csproj` and `PerfectComms.Starlight.csproj`, set
    `VoiceChatPluginMain.Version` to `X.Y.Z`, and set
    `<PerfectCommsApiPackageVersion>` to the immutable NuGet version published for that API contract.
-2. Add the matching `Perfect Comms vX.Y.Z` changelog entry, commit the changes
+2. Add the matching `## Perfect Comms vX.Y.Z` changelog entry, commit the changes
    on `main`, and wait for every workflow triggered by that push.
-3. Run the manual Release rehearsal and inspect its packaged artifact.
-4. Create and push tag `vX.Y.Z` on that tested `main` commit.
+3. Copy any changed `wiki/` pages to the GitHub wiki (see `wiki/README.md`).
+4. Run the manual Release rehearsal and inspect its packaged artifacts.
+5. Create and push tag `vX.Y.Z` on that tested `main` commit.
 
 The tag run repeats every gate, verifies the tag is the current `main` tip,
-checks every version field, publishes the desktop `PerfectComms.dll` GitHub
-release asset, and publishes the reference-only API package to NuGet.org using
-OIDC. The single managed `PerfectCommsStarlight.dll` remains the
-`PerfectComms-Starlight-testers-*` workflow artifact for Starlight beta or
-approved local-mod testing. GitHub release notes are generated automatically.
+checks every version field, publishes the desktop `PerfectComms.dll` and
+`PerfectComms-OBS-win-x64.zip` GitHub release assets, and publishes the
+reference-only API package to NuGet.org using OIDC. The single managed
+`PerfectCommsStarlight.dll` remains the `PerfectComms-Starlight-testers-*`
+workflow artifact for Starlight beta or approved local-mod testing. The GitHub
+release notes are the matching `CHANGELOG.md` section.
 A failed gate cannot publish a partial release.

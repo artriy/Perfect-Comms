@@ -8,11 +8,11 @@
 		<Product>Perfect Comms</Product>
 		<Company>Perfect Comms</Company>
 		<Description>Native proximity voice for modded Among Us.</Description>
-		<Version>4.1.11</Version>
+		<Version>4.1.12</Version>
 		<PerfectCommsApiPackageVersion>4.1.7.1</PerfectCommsApiPackageVersion>
-		<AssemblyVersion>4.1.11.0</AssemblyVersion>
-		<FileVersion>4.1.11.0</FileVersion>
-		<InformationalVersion>4.1.11</InformationalVersion>
+		<AssemblyVersion>4.1.12.0</AssemblyVersion>
+		<FileVersion>4.1.12.0</FileVersion>
+		<InformationalVersion>4.1.12</InformationalVersion>
 		<AmongUsGameLibsVersion Condition="'$(AmongUsGameLibsVersion)' == ''">2026.9.29</AmongUsGameLibsVersion>
 		<LangVersion>preview</LangVersion>
 		<Nullable>enable</Nullable>

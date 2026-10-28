@@ -22,6 +22,9 @@ The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top L
 | **Voice Falloff Softness** | 30% | Keeps voices clearer through more of the host's allowed range, then fades near the edge. It never extends that range. |
 | **Start Muted** | Off | Starts each voice session with your microphone muted. |
 | **Start Deafened** | Off | Starts each voice session with playback muted and microphone transmission paused until you undeafen. |
+| **OBS Compatibility Mode** | Off | Windows only. Adds a minimized Perfect Comms Audio window so OBS Application Audio Capture can capture voice chat separately. Voice routing is unchanged. |
+| **OBS Recording Integration** | Off | Windows only. Saves separate voice files beside your OBS recording with the optional OBS plugin. Does not record your own microphone. See [OBS Recording Integration](Players#obs-recording-integration). |
+| **Separate Voice Files** | Per player | Shown while OBS Recording Integration is on. Choose **Per player** or **Alive / dead** files; the change applies to the next recording. |
 
 Mic and speaker volume range from 10% to 200%. Mic Sensitivity ranges from 0.25 to 2.00, and Voice Falloff Softness ranges from 0% to 100%.
 
@@ -116,7 +119,7 @@ Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at th
 
 ## Advanced tab
 
-- **First-Time Setup > Run setup again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes. On desktop, the Controls step can globally allow every keybind while chat is open; choose individual chat keybinds later from the full Keybinds tab. The HUD step exposes Hide controls, Hide connection status, Hide speaking bar, and Hide meeting overlay; hiding the speaking bar hides its preset picker and live preview.
+- **First-Time Setup > Run setup again** reopens the guided Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes. On desktop, the Controls step can globally allow every keybind while chat is open; choose individual chat keybinds later from the full Keybinds tab. The HUD step exposes Hide controls, Hide connection status, Hide speaking bar, and Hide meeting overlay; hiding the speaking bar hides its preset picker and live preview.
 - **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It resets off on every game launch.
 - **Diagnostics** writes detailed voice and microphone-calibration logs. It resets off on launch; leave it off unless you are investigating a problem.
 

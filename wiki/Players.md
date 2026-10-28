@@ -32,7 +32,6 @@ The setup saves everything only after you finish the final Review step. Existing
 
 | Step | What you choose |
 | :--- | :--- |
-| **Welcome** | Begin a new setup or keep the settings you already have. |
 | **Audio** | Select and test your microphone and output, set levels, and choose Open Mic or Push To Talk. |
 | **Controls** | Review voice controls and, on desktop, choose whether keybinds stay active while chat is open. |
 | **HUD** | Show or hide voice controls, connection status, the speaking bar, and the meeting overlay; choose a speaking-bar layout with a live preview. |
@@ -130,8 +129,8 @@ Only the current lobby host can edit these synced settings.
 | :--- | :--- |
 | **Proximity** | Maximum hearing distance, falloff, wall/vision occlusion, and security-camera hearing. |
 | **Lobby** | Public voice-lobby listing and directory selection. |
-| **Meeting & Voice** | Meeting-floor grace period, vent voice, ghost rules, Communications sabotage, and Meetings/Lobby Only mode. |
-| **Team Radio** | Team Radio, the impostor channel, and task/meeting availability. |
+| **Voice rules** | Meeting-floor grace period, vent voice, ghost rules, Communications sabotage, and Meetings/Lobby Only mode. |
+| **Team radio** | Team Radio, the impostor channel, and task/meeting availability. |
 
 Compatible mods can register additional tabs under **Mod behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
 

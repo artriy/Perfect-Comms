@@ -1,52 +1,67 @@
 # Changelog
 
-## Unreleased
+## Perfect Comms v4.1.12
 
-### Ghost Listening During Tasks
+> [!IMPORTANT]
+> Everyone in a voice lobby needs **v4.1.12**. Older versions show **Wrong version** in Voice Lobbies and cannot talk with v4.1.12 players.
+> OBS recording uses the optional **PerfectComms-OBS-win-x64.zip** plugin attached to this release.
 
-- Added **Ghosts Hear Living During Tasks**, a default-off host setting. Living players can speak to nearby ghosts and spectators while ordinary living-to-living task voice is disabled. Ghost hearing distance, falloff, vent privacy, and mute controls remain in effect; **Ghosts Also Meeting/Lobby Only** still blocks the exception.
-- Added a persistent yellow bottom-right lobby notice and a **Ghosts only** microphone audience status. Mute, deafen, and Push To Talk take priority, and existing private-radio audiences are unchanged.
-- Ghost-only speech uses restricted packet recipients and existing capture cutover fences. Host migration revokes the opt-in until fresh host settings arrive; unavailable or retained rosters cannot authorize ghost listeners.
-- Updated voice protocol to 8 and host-settings schema to 5. All voice participants need the updated mod.
+### New
 
-### OBS Audio Capture
+- Hosts can enable **Ghosts Hear Living During Tasks** (off by default). Living players can speak to nearby ghosts and spectators while ordinary living-to-living task voice is off. Ghost hearing distance, falloff, vent privacy, and mute controls still apply, and **Ghosts Also Meeting/Lobby Only** still blocks it. A yellow lobby notice shows when it is on, and your microphone status reads **Ghosts only** while only ghosts and spectators can hear you.
+- **OBS Compatibility Mode** (Windows, off by default, **Audio > Streaming**) shows a minimized Perfect Comms Audio window, so OBS Application Audio Capture can capture voice chat separately from the game. Closing the window minimizes it; turning the option off removes it.
+- **OBS Recording Integration** (Windows, off by default, **Audio > Streaming**) saves a separate voice file for each player, or one for alive and one for dead players, next to your OBS video. Install the plugin from `PerfectComms-OBS-win-x64.zip` and add the **Perfect Comms** source once; OBS Start, Stop, Pause, and Resume then control the voice files. The setting shows the bridge status with an **Open Guide** button, and the HUD warns if recording fails. [Setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+- Perfect Comms appears in Reactor's main-menu and in-game credits when Reactor is installed.
 
-- Added an optional, default-off OBS Compatibility Mode under Audio > Streaming on native Windows. While the voice helper is running, it exposes a minimized Perfect Comms Audio window for OBS Application Audio Capture.
-- The setting saves locally and applies without restarting voice. Closing the helper window minimizes it; disabling the option removes it. Microphone capture, voice routing, and privacy rules are unchanged.
-- OBS toggle changes are no longer dropped when the helper's command queue is full. Repeated changes coalesce to the current setting without interrupting voice or reordering critical audio commands; leaving the lobby discards pending OBS work.
+### Improved
 
-### OBS Recording Integration
+- Redesigned Voice Settings: Space Grotesk text, an icon sidebar, grouped controls with inline descriptions, separate Open Mic and Push To Talk buttons, chevron option steppers, and a redrawn microphone logo. Controls use solid cyan, and shortcut hints follow your key bindings.
+- Smooth mouse-wheel scrolling in Voice Settings, Host Voice Settings, Player Volumes, and Voice Lobbies. Quick wheel turns build on the current motion, and dragging a scrollbar still moves the content directly.
+- First-time setup has four steps (Audio, Controls, HUD, Review) with a preview-first HUD page. You can keep your existing HUD layout, and nothing is saved until **Save & finish**.
+- Host Voice Settings group related match rules into cards with inline explanations. Hidden options keep their values, and the panel scrolls for long rule lists and mod tabs.
+- Player Volumes have wider names, a quiet level meter, a scrollable roster, and per-player reset buttons. Saved 0%-200% volumes are kept.
+- Voice Lobbies open a scrollable list. Each lobby shows its player count, and its button says whether you can join or why not (Full, Wrong version, In game, No code, No region).
+- The lobby-info editor has separate title and language fields with character counts and a fixed Save/Cancel footer.
+- The Voice Settings and Host Voice Settings launchers are smaller microphone-logo tiles.
+- Update notifications appear as a small bottom-right card with **View release** and **Dismiss**, and wait while another Perfect Comms panel is open.
+- The microphone and speaker HUD icons are redrawn and stay smooth when scaled down.
 
-- Added optional, default-off **OBS Recording Integration** under **Audio > Streaming** on native Windows, with **Separate Voice Files** set to **Per player** by default or **Alive / dead** for grouped editing. Status and **Open Guide** expose setup and recording errors; mode changes apply to the next recording.
-- Added a separate Windows x64 OBS plugin ZIP, `PerfectComms-OBS-win-x64.zip`, tested with OBS Studio 32.2.2; other OBS versions are unverified. One combined **Perfect Comms** source accompanies 48 kHz stereo float-WAV/RF64 stems beside the video. OBS Start/Stop/Pause/Resume controls them; import every voice file at timeline zero. Game audio and the user's microphone remain separately configured OBS sources.
-- Recording follows permitted incoming audio, local hearing/deafen/mute/volume rules, spatial routing, and mod filters. Safe aliases share their displayed identity; concealed identities use **Private voices**, including in alive/dead mode. The bridge uses a current-user Windows pipe, not a network endpoint, and does not export the local microphone. OBS source filters and fader do not change separate voice files.
-- Supported outputs are standard MKV/MP4 and hybrid MP4/MOV with automatic file splitting disabled. Stem files require sparse-file support such as NTFS/ReFS. Exclusive, atomic directory creation rejects whole-path reparse points; failures stop stems visibly without terminating voice chat.
-- Updated the desktop sidecar protocol to 18 for recording control and privacy-safe identity metadata. Game voice protocol 8, host-settings schema 5, and Pion ABI 3 are unchanged by this integration. Existing OBS Compatibility Mode remains available.
+### Fixed
 
-### Voice Settings Interface
+- Speaking-bar names no longer overlap neighboring rings, and the settings preview wraps and sizes like the live HUD.
+- A one-frame avatar color flicker no longer applies its color later.
+- Ghost avatars finish loading hats and visors without waiting for unused skins, and multipart ghost bodies render consistently.
 
-- Voice settings use Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions. Buttons, sliders, enabled toggles, selections, and progress use solid cyan; the cyan-to-purple gradient is limited to the logo and the panel header line.
-- The logo is a redrawn ribbed microphone with a gradient capsule, grey cradle, and black outline, simplified to three ribs so it stays readable at small sizes.
-- Microphone mode has separate Open Mic and Push To Talk buttons. Pills, slider tracks, toggles, and scrollbars keep true rounded ends at every size instead of stretching into ovals or tapering.
-- Headings, section labels, status text, and button labels use sentence case, and the product name is written **Perfect Comms** everywhere. Help icons stay muted until hovered, option steppers use chevron icons, and long setting descriptions shrink before truncating.
-- The settings panel fits the available canvas and retains scrolling, key rebinding, device selection, and the speaking-bar preview. Desktop shortcut hints follow the configured bindings.
-- Mouse-wheel scrolling eases smoothly in Voice Settings, Host Voice Settings and its mod-tab list, Player Volumes, and Voice Lobbies. Quick wheel turns build on the current motion instead of restarting it, the motion does not overshoot, and it feels the same at any frame rate. Dragging a scrollbar still moves the content directly.
-- Removed TextMeshPro's automatic extra tracking from bold interface text so headings and labels retain the font's intended spacing.
-- Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
-- Microphone and speaker HUD icons use mipmaps and trilinear filtering when scaled down; artwork, size, and positioning are unchanged.
-- Speaking-bar backdrops have square corners in gameplay and settings previews. Name measurements refresh after font changes, stacked labels clear neighboring rings, and preview bounds include animated rings and avatars.
-- The synthetic speaking-bar preview now selects wrapping from the live HUD's available space before scaling into its card, and updates when that space changes.
-- Abandoned one-frame avatar color changes no longer apply on a later, unrelated flicker.
-- Public ghost avatars finish loading hats and visors without waiting for unused skins. Ready and delayed multipart ghost bodies render consistently, while normal ghost poses and stable-identity caches remain unchanged.
-- First-time setup has its own four-step layout: paired audio controls, grouped shortcuts, a preview-first HUD workspace, and compact review rows with direct editing. A fixed footer and canvas-aware scaling keep navigation visible. Existing HUD layouts can be restored; changes stay staged until Save & finish.
-- Host voice settings now group related match rules with the same section labels and cards as personal settings, show inline explanations, and state their lobby-wide scope in the header. The panel fits the canvas, with scrollbars for long rule lists and mod tabs; changes still apply immediately.
-- Conditional host options retain their values and scroll position when hidden. Registered mod tabs refresh when added or removed while the host menu is open, avoiding stale controls and invalid category selections.
-- Player volumes now use a personal mixer layout with wider name labels, a quiet level meter, local-only scope text, a scrollable roster, and per-player reset controls. Saved 0%-200% volumes and privacy-filtered speaking meters are retained; closing or rebuilding the panel finishes an active volume adjustment.
-- Voice Lobbies retain their original illustrated main-menu button and open a scrollable directory instead of a three-row view. Each lobby shows its player count, and its button states whether it can be joined or why not (Full, Wrong version, In game, No code, No region). Live updates reuse rows and keep join actions bound to the current listing.
-- The lobby-info editor has separate title and language fields, character counts, focus indicators, keyboard hints, and a fixed Save/Cancel footer. Counts, fields, buttons, and scrollbars stay within the panel's clipped content area.
-- Voice Settings and Host Voice Settings use smaller microphone-logo launcher tiles with personal or lobby-wide scope labels. Their existing menu visibility and host-authority gates are retained.
-- Update notifications use a compact bottom-right card with the available version, View release, and Dismiss actions. They defer while another Perfect Comms panel is open. New menu loads discard an earlier completed check when notifications are disabled.
-- The update card intercepts clicks over its visible area without blocking the rest of the game menu. The original native lobby button retains its own click handling. Persistent-panel transitions close the lobby browser and discard unfinished editor changes.
+### Compatibility
+
+- Voice protocol 8 and host-settings schema 5: all voice participants need v4.1.12.
+- Supports Windows, Linux/Proton, macOS/Wine, and Starlight Android on Among Us v19 or newer. The desktop build targets Steam Among Us `2026.9.29`.
+- OBS features are available on native Windows x64 only, not on Proton, Wine, or Starlight. The OBS plugin is tested with OBS Studio 32.2.2; other OBS versions are unverified.
+
+<details>
+<summary>Technical notes</summary>
+
+#### Ghost listening
+
+- Ghost-only speech is sent only to authenticated ghosts and spectators, using restricted packet recipients and the existing capture cutover fences. Mod pair routes and task-voice bypasses do not extend it to living listeners. Mute, deafen, and Push To Talk take priority, and private-radio audiences are unchanged.
+- Host migration revokes the opt-in until fresh host settings arrive. Unavailable or retained rosters cannot authorize ghost listeners, and settings packets from non-hosts cannot change it.
+
+#### OBS recording
+
+- Voice files are 48 kHz stereo float WAV (RF64 when large), aligned to the start of the video. Import every voice file at timeline zero. The combined **Perfect Comms** source, game audio, and your microphone stay separate OBS sources, and OBS source filters and the fader do not change the voice files.
+- Supported outputs are standard MKV/MP4 and hybrid MP4/MOV with automatic file splitting off. The recording folder must support sparse files (NTFS or ReFS) and cannot pass through junctions or symbolic links. Unsupported setups and write failures stop the voice files with a visible status and do not end voice chat.
+- Recording follows the audio you are allowed to hear, after local mute, deafen, volume, spatial, and mod filters. Concealed identities are saved as **Private voices** in both modes, and your own microphone is never exported. The **Separate Voice Files** mode applies to the next recording.
+- The plugin connects to the mod over a current-user Windows named pipe, not a network port. Closing OBS returns the status to waiting; reopening it reconnects.
+- Desktop sidecar protocol 18. Pion ABI 3 is unchanged.
+
+#### Interface
+
+- Space Grotesk ships as an embedded distance-field font (SIL Open Font License 1.1; see THIRD_PARTY_NOTICES). TextMeshPro's automatic extra bold tracking is removed.
+- Pills, slider tracks, toggles, and scrollbars keep true rounded ends at every size. Long setting descriptions shrink before truncating.
+- Scrolling uses a critically damped spring, so it never overshoots and feels the same at any frame rate.
+- HUD icons use mipmaps and trilinear filtering.
+
+</details>
 
 ## Perfect Comms v4.1.11
 

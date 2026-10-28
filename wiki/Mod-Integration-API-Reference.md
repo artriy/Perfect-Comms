@@ -244,6 +244,8 @@ Pair callbacks use the local listener and remote speaker. Pair `Mute` wins immed
 
 An explicit pair route replaces ordinary routing for that pair. Speaker/global mutes, capture restrictions, and Tasks `OnlyMeetingOrLobby` remain authoritative. In Tasks, the pair route runs before receive-side `OnlyGhostsCanTalk` and Comms-sabotage blocking to support Medium-style exceptions. Pair and channel routes cannot bypass normal Meeting/Exile death separation. The host's built-in impostor meeting radio is the exception only in Meeting when both across-death options are enabled, never in Exile. Actual impostors transmit; living actual impostors, all ghosts and spectators listen. Private audience authorization runs before pair routing, so crew ghosts and spectators cannot transmit and living crew or mod-added voice privileges do not gain access. Eligible listeners retain pair mutes, route shape and gain.
 
+When the host enables **Ghosts Hear Living During Tasks**, a living speaker's ghost-only Tasks speech is sent only to authenticated ghosts and spectators. Pair routes and `BypassTaskVoiceGates` do not extend that speech to living listeners.
+
 See **[Channels](Mod-Integration-Channels#listener-speaker-pair-rules)**.
 
 ---
@@ -353,6 +355,8 @@ public static void RegisterContextualListenerFilter(
 Original and contextual origins share one registration order; the first finite, non-null origin wins. `Replace` hears only from the override during Tasks; `Additive` compares body and override routes and keeps the louder result per speaker.
 
 Any negative `LightRadius`, including `-1`, inherits the local resolved light radius. `0` disables vision-radius limiting at the override. A positive value supplies an explicit radius; non-finite values normalize to inheritance. `BypassTaskVoiceGates` can bypass only Tasks-wide `OnlyGhostsCanTalk` and Comms-sabotage receive gates; speaker mutes, phase policy, vent privacy, sight, distance, walls, and channel membership remain authoritative.
+
+`BypassTaskVoiceGates` does not make a listener eligible for ghost-only speech from **Ghosts Hear Living During Tasks**; only ghosts and spectators receive it.
 
 Original and contextual filters also share one list. Results compose restrictively. Any `Muffle` result applies the listener low-pass filter to all audible incoming audio. Any `SightObscured` result restricts sight-based hearing as temporarily blinded/obscured without revealing the source mod's private state. Failures are neutral for both fields.
 
