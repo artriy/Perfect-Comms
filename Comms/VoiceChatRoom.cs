@@ -1861,7 +1861,10 @@ public class VoiceChatRoom
         VoiceDiagnostics.Log("settings.host.resync_applied", $"transport={transport} hostClient={hostClientId} hostPlayer={hostPlayerId}");
     }
 
-    internal static void NoteHostSettingsSnapshotRejected()
+    // Untrusted senders must not revoke: any non-host could otherwise disable ghost listening room-wide.
+    internal static bool ShouldRevokeGhostListeningOnSnapshotRejection(bool trustedSender) => trustedSender;
+
+    internal static void NoteHostSettingsSnapshotRejected(bool trustedSender)
     {
         // Snapshot rejected (e.g. stale host id during migration): flag a re-request so settings
         // converge once the host id resolves. The successful-send gate bounds retries to 2 seconds.
@@ -1872,7 +1875,8 @@ public class VoiceChatRoom
         if (!current._hostSettingsResyncPending)
             current._hostPolicyWaitStartTime = Time.realtimeSinceStartup;
         current._hostSettingsResyncPending = true;
-        VoiceRoomSettingsState.RevokeGhostListening();
+        if (ShouldRevokeGhostListeningOnSnapshotRejection(trustedSender))
+            VoiceRoomSettingsState.RevokeGhostListening();
         current._hostSettingsRequestGate.Reset();
     }
 

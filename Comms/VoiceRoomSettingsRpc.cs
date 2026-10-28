@@ -464,7 +464,7 @@ internal static class VoiceRoomSettingsRpc
                         VoiceDiagnostics.Log("settings.snapshot.rejected",
                             $"{sender.ToDiagnosticFields()} reason={authReason} hostClient={hostClientId} hostPlayer={hostPlayerId}");
                         // Stale host id (e.g. post-migration): re-request a fresh snapshot.
-                        VoiceChatRoom.NoteHostSettingsSnapshotRejected();
+                        VoiceChatRoom.NoteHostSettingsSnapshotRejected(trustedSender: false);
                         return;
                     }
 
@@ -479,7 +479,7 @@ internal static class VoiceRoomSettingsRpc
                         string wireReason = kind == LegacySnapshotKind ? "legacy-unversioned" : "payload-oversized";
                         VoiceDiagnostics.Log("settings.snapshot.rejected",
                             $"{sender.ToDiagnosticFields()} reason={wireReason} kind={kind} hostClient={hostClientId} hostPlayer={hostPlayerId}");
-                        VoiceChatRoom.NoteHostSettingsSnapshotRejected();
+                        VoiceChatRoom.NoteHostSettingsSnapshotRejected(trustedSender: true);
                         return;
                     }
 
@@ -488,7 +488,7 @@ internal static class VoiceRoomSettingsRpc
                     {
                         VoiceDiagnostics.Log("settings.snapshot.rejected",
                             $"{sender.ToDiagnosticFields()} reason={decodeReason} kind={kind} hostClient={hostClientId} hostPlayer={hostPlayerId}");
-                        VoiceChatRoom.NoteHostSettingsSnapshotRejected();
+                        VoiceChatRoom.NoteHostSettingsSnapshotRejected(trustedSender: true);
                         return;
                     }
 

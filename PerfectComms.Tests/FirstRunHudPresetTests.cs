@@ -108,6 +108,8 @@ public sealed class FirstRunHudPresetTests
             OriginalHudSelected = true,
         };
 
+        Assert.Equal("Keeps your existing custom layout.", draft.SelectedHudDescription());
+
         draft.SelectHudPreset(2);
 
         Assert.False(draft.OriginalHudSelected);
@@ -119,6 +121,10 @@ public sealed class FirstRunHudPresetTests
         Assert.True(draft.OriginalHudSelected);
         Assert.Equal(original, draft.Hud);
         Assert.Equal(-1, draft.SelectedHudPreset);
+        Assert.Equal("Keeps your existing custom layout.", draft.SelectedHudDescription());
+
+        draft.OriginalHudSelected = false;
+        Assert.Equal("Choose a HUD layout to continue.", draft.SelectedHudDescription());
     }
 
     [Fact]

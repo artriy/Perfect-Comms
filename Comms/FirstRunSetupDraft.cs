@@ -283,6 +283,15 @@ internal sealed class FirstRunSetupDraft
         OriginalHudSelected = true;
     }
 
+    internal string SelectedHudDescription()
+    {
+        if (SelectedHudPreset >= 0 && SelectedHudPreset < FirstRunHudPresets.All.Count)
+            return FirstRunHudPresets.All[SelectedHudPreset].Description;
+        return OriginalHudSelected
+            ? "Keeps your existing custom layout."
+            : "Choose a HUD layout to continue.";
+    }
+
     internal int MicrophoneIndex()
         => FindDeviceIndex(MicrophoneDevice, VoiceChatLocalSettings.MicDevices);
 

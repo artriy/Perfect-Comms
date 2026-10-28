@@ -530,7 +530,10 @@ internal static class VoiceFirstRunSetup
         AddText(picker, "Layouts", 13f, SetupTextSecondary, TextAlignmentOptions.Left, FontStyles.Bold,
             Vector2.zero, new Vector2(pickerWidth, 24f));
         Buttons.Add(new VoiceUiKit.ActionButton(picker, "Use existing layout", 200f, 32f,
-            pickerWidth - 200f, 4f, VoiceUiKit.ButtonKind.Ghost,
+            pickerWidth - 200f, 4f,
+            _draft.OriginalHudSelected && _draft.SelectedHudPreset < 0
+                ? VoiceUiKit.ButtonKind.Secondary
+                : VoiceUiKit.ButtonKind.Ghost,
             () =>
             {
                 _draft.SelectOriginalHud();
@@ -1342,10 +1345,7 @@ internal static class VoiceFirstRunSetup
     private static string SelectedHudDescription()
     {
         if (_draft == null) return "Hover a layout to preview it live. Select one to use it.";
-        int index = _draft.SelectedHudPreset;
-        return index >= 0 && index < FirstRunHudPresets.All.Count
-            ? FirstRunHudPresets.All[index].Description
-            : "Choose a HUD layout to continue.";
+        return _draft.SelectedHudDescription();
     }
 
     private static string? SetupValidationIssue()

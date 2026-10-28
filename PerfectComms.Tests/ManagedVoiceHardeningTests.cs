@@ -332,6 +332,13 @@ public sealed class ManagedVoiceHardeningTests
             preserveHostAuthority: true));
     }
 
+    [Fact]
+    public void OnlyTrustedHostSnapshotRejectionsRevokeGhostListening()
+    {
+        Assert.False(VoiceChatRoom.ShouldRevokeGhostListeningOnSnapshotRejection(trustedSender: false));
+        Assert.True(VoiceChatRoom.ShouldRevokeGhostListeningOnSnapshotRejection(trustedSender: true));
+    }
+
     [Theory]
     [InlineData(7, -1, false, true)]
     [InlineData(7, -1, true, false)]
