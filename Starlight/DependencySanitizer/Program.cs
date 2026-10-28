@@ -17,7 +17,7 @@ internal static class Program
     private const string RequiredHostReference = "Microsoft.Extensions.Logging.Abstractions";
     private const string MicrosoftExtensionsPublicKeyToken = "adb9793829ddae60";
     private const string UnsupportedMessage = "Native interop is unavailable in Starlight.";
-    private static readonly Version PluginVersion = new(4, 1, 11, 0);
+    private static readonly Version PluginVersion = new(4, 1, 12, 0);
     private const string TmdsLibCAssemblyName = "Tmds.LibC";
     private const string LinuxHelperTypeName = "Makaretu.Dns.LinuxHelper";
     private const string ReuseAddressMethodName = "ReuseAddresss";
@@ -32,7 +32,7 @@ internal static class Program
             ["Licenses.PerfectComms-LICENSE.txt"] =
                 "20C17D8B8C48A600800DFD14F95D5CB9FF47066A9641DDEAB48DC54AEC96E331",
             ["Licenses.THIRD_PARTY_NOTICES.md"] =
-                "98E571B2A4D4325A005607A29929405E153E4ADAB523E29F2698C5D17D7EAC36",
+                "A61A5AF9CC60884630631F0AF6FFD0EC936BD5200EBE9CA28FE74BABAD499250",
             ["Licenses.SIPSorcery-LICENSE.md"] =
                 "C6806C324232D99B9F1BE116B55D376589C817EF22C6A514C1365C428499835A"
         };
@@ -170,6 +170,7 @@ internal static class Program
             "UnityEngine.ImageConversionModule|0.0.0.0|",
             "UnityEngine.InputLegacyModule|0.0.0.0|",
             "UnityEngine.Physics2DModule|0.0.0.0|",
+            "UnityEngine.TextCoreFontEngineModule|0.0.0.0|",
             "UnityEngine.UI|1.0.0.0|",
             "UnityEngine.UIModule|0.0.0.0|",
             "netstandard|2.0.0.0|cc7b13ffcd2ddd51"
