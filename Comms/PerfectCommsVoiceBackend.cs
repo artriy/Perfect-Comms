@@ -1762,7 +1762,24 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"slot={_activeCaptureSlot} device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)} wine={WineEnvironment.IsWine} " +
             "hint=check OS mic permission / antivirus quarantine / helper extraction");
         VoiceDiagnostics.Log("voice.sidecar.unavailable", detail);
-        try { VoiceChatHudState.ShowToastThreadSafe("Voice unavailable - retrying audio helper"); } catch { }
+        ShowVoiceUnavailableToast();
+    }
+
+    private static int _helperBlockToastEpisode;
+
+    private static void ShowVoiceUnavailableToast()
+    {
+        var blockKind = VoiceHelperBlockState.Kind;
+        var toast = "Voice unavailable - retrying audio helper";
+        if (blockKind != VoiceHelperBlockKind.None)
+        {
+            // The HUD line and notice card already explain the block; toast once per episode.
+            var episode = VoiceHelperBlockState.Episode;
+            if (Interlocked.Exchange(ref _helperBlockToastEpisode, episode) == episode)
+                return;
+            toast = VoiceConnectionStatusPolicy.HelperBlockedTitle(blockKind);
+        }
+        try { VoiceChatHudState.ShowToastThreadSafe(toast); } catch { }
     }
 
     internal static int VoiceRecoveryDelayMs(int priorAttempts)

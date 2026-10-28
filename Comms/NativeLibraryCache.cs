@@ -47,7 +47,10 @@ internal static class NativeLibraryCache
 
             stage = "verify-existing";
             if (File.Exists(target) && FileHashMatches(target, expected))
+            {
+                RecordExtractedHash(target, expected);
                 return target;
+            }
 
             stream.Position = 0;
             temp = $"{target}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
@@ -74,6 +77,7 @@ internal static class NativeLibraryCache
                 temp = null;
             }
 
+            RecordExtractedHash(target, expected);
             return target;
         }
         catch (NativeCacheExtractionException)
@@ -87,6 +91,16 @@ internal static class NativeLibraryCache
             throw new NativeCacheExtractionException(stage, target, resourceName, ex);
         }
     }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> ExtractedSha256 =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static void RecordExtractedHash(string target, byte[] sha256)
+        => ExtractedSha256[Path.GetFullPath(target)] = Convert.ToHexString(sha256);
+
+    /// <summary>SHA-256 (upper-case hex) of a file this process extracted or verified at <paramref name="path"/>.</summary>
+    internal static bool TryGetExtractedSha256(string path, out string sha256)
+        => ExtractedSha256.TryGetValue(Path.GetFullPath(path), out sha256!);
 
     /// <summary>
     /// Returns an immutable bundle identity tied to both the managed build and the selected

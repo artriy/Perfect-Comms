@@ -25,6 +25,7 @@
 - The Voice Settings and Host Voice Settings launchers are smaller microphone-logo tiles.
 - Update notifications appear as a small bottom-right card with **View release** and **Dismiss**, and wait while another Perfect Comms panel is open.
 - The microphone and speaker HUD icons are redrawn and stay smooth when scaled down.
+- When Windows antivirus removes or blocks the Perfect Comms audio helper, voice now says so instead of retrying silently. The HUD shows **Antivirus blocked voice chat**, a card in the main menu or lobby walks through restoring and allowing `PerfectCommsAudio.exe` (with **Open folder**, **Retry**, and **Open guide**), and Voice Settings shows the same message with **How to fix** and **Retry** until voice starts.
 
 ### Fixed
 

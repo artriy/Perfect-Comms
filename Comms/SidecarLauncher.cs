@@ -57,7 +57,8 @@ internal readonly record struct NativeHelperContractProbeResult(
     int ExitCode,
     string StandardOutput,
     bool StandardOutputTruncated,
-    string Diagnostic);
+    string Diagnostic,
+    int NativeErrorCode = 0);
 
 internal readonly record struct NativeCacheRootSelection(
     string CacheRoot,
@@ -436,7 +437,19 @@ internal static class SidecarLauncher
     }
 
     public static string EnsureHelperExtracted(Assembly assembly, string baseDirectory, bool force)
+        => EnsureHelperExtracted(assembly, baseDirectory, force, out _);
+
+    /// <param name="cacheRoot">
+    /// The selected native cache root. It is written as soon as it is known, so callers that catch
+    /// an extraction failure still see it.
+    /// </param>
+    public static string EnsureHelperExtracted(
+        Assembly assembly,
+        string baseDirectory,
+        bool force,
+        out string cacheRoot)
     {
+        cacheRoot = string.Empty;
         var triple = TargetTriple();
         var resourceName = ResourceName(triple);
         var isMac = resourceName.EndsWith(".zip", StringComparison.Ordinal);
@@ -462,6 +475,7 @@ internal static class SidecarLauncher
                 wine,
                 RequiresCurrentProcessCacheIsolation);
             diagnosticPath = cache.CacheRoot;
+            cacheRoot = cache.CacheRoot;
             VoiceDiagnostics.Log(
                 "sidecar.extract",
                 $"event=cache-root-selected rootKind={cache.RootKind} reason={cache.Reason} nativeWindows={(windows && !wine).ToString().ToLowerInvariant()} wine={wine.ToString().ToLowerInvariant()} triple={triple} bundle={canonicalBundleVersion} installProjectedHelperPathLength={cache.InstallProjectedHelperPathLength} selectedProjectedHelperPathLength={cache.SelectedProjectedHelperPathLength} launchPathBudget={NativeWindowsLaunchPathBudget} root={NativeLibraryCache.DiagnosticValue(cache.CacheRoot)}");
@@ -1756,16 +1770,27 @@ internal static class SidecarLauncher
             throw new ArgumentException("Value cannot be null or whitespace.", parameterName);
     }
 
-    private static bool TryValidateNativeHelperContract(string helperPath, out string failureReason)
+    private static bool TryValidateNativeHelperContract(
+        string helperPath,
+        out string failureReason,
+        out VoiceHelperLaunchFailure blockFailure)
         => TryValidateNativeHelperContract(
             helperPath,
             RunNativeHelperContractProbe,
-            out failureReason);
+            out failureReason,
+            out blockFailure);
 
     internal static bool TryValidateNativeHelperContract(
         string helperPath,
         Func<string, int, NativeHelperContractProbeResult> probe,
         out string failureReason)
+        => TryValidateNativeHelperContract(helperPath, probe, out failureReason, out _);
+
+    internal static bool TryValidateNativeHelperContract(
+        string helperPath,
+        Func<string, int, NativeHelperContractProbeResult> probe,
+        out string failureReason,
+        out VoiceHelperLaunchFailure blockFailure)
     {
         if (probe == null) throw new ArgumentNullException(nameof(probe));
         failureReason = string.Empty;
@@ -1773,9 +1798,18 @@ internal static class SidecarLauncher
                 helperPath,
                 out var normalizedPath,
                 out var identity,
-                out failureReason))
+                out failureReason,
+                out blockFailure))
         {
             LogNativeHelperContractFailure(helperPath, failureReason);
+            return false;
+        }
+        if (NativeLibraryCache.TryGetExtractedSha256(normalizedPath, out var extractedSha256) &&
+            !string.Equals(extractedSha256, identity.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            failureReason = "native helper contract preflight failed: helper changed after extraction";
+            blockFailure = new VoiceHelperLaunchFailure(VoiceHelperFailureStage.HelperChanged);
+            LogNativeHelperContractFailure(normalizedPath, failureReason);
             return false;
         }
 
@@ -1785,7 +1819,8 @@ internal static class SidecarLauncher
                     normalizedPath,
                     out _,
                     out identity,
-                    out failureReason))
+                    out failureReason,
+                    out blockFailure))
             {
                 ValidatedNativeHelpers.Remove(normalizedPath);
                 LogNativeHelperContractFailure(normalizedPath, failureReason);
@@ -1812,10 +1847,15 @@ internal static class SidecarLauncher
             catch (Exception ex)
             {
                 result = new NativeHelperContractProbeResult(
-                    false, false, -1, string.Empty, false, ExceptionDiagnostic(ex));
+                    false, false, -1, string.Empty, false, ExceptionDiagnostic(ex),
+                    VoiceHelperBlockClassifier.NativeErrorCode(ex));
             }
             if (!TryAcceptNativeHelperContractProbe(result, out failureReason))
             {
+                if (!result.Started)
+                    blockFailure = new VoiceHelperLaunchFailure(
+                        VoiceHelperFailureStage.ProbeStart,
+                        result.NativeErrorCode);
                 LogNativeHelperContractFailure(
                     normalizedPath,
                     failureReason,
@@ -1823,15 +1863,19 @@ internal static class SidecarLauncher
                 return false;
             }
 
-            if (!TryGetNativeHelperIdentity(
-                    normalizedPath,
-                    out _,
-                    out var validatedIdentity,
-                    out failureReason) ||
-                validatedIdentity != identity)
+            var reread = TryGetNativeHelperIdentity(
+                normalizedPath,
+                out _,
+                out var validatedIdentity,
+                out failureReason,
+                out var rereadBlock);
+            if (!reread || validatedIdentity != identity)
             {
                 failureReason =
                     "native helper contract preflight failed: helper changed while it was being validated";
+                blockFailure = reread
+                    ? new VoiceHelperLaunchFailure(VoiceHelperFailureStage.HelperChanged)
+                    : rereadBlock;
                 LogNativeHelperContractFailure(
                     normalizedPath,
                     failureReason,
@@ -1940,11 +1984,13 @@ internal static class SidecarLauncher
         string helperPath,
         out string normalizedPath,
         out NativeHelperIdentity identity,
-        out string failureReason)
+        out string failureReason,
+        out VoiceHelperLaunchFailure blockFailure)
     {
         normalizedPath = helperPath;
         identity = default;
         failureReason = string.Empty;
+        blockFailure = default;
         try
         {
             normalizedPath = Path.GetFullPath(helperPath);
@@ -1954,6 +2000,7 @@ internal static class SidecarLauncher
             {
                 failureReason =
                     "native helper contract preflight failed: helper file is unavailable";
+                blockFailure = new VoiceHelperLaunchFailure(VoiceHelperFailureStage.HelperMissing);
                 return false;
             }
             string sha256;
@@ -1975,6 +2022,9 @@ internal static class SidecarLauncher
         {
             failureReason =
                 $"native helper contract preflight could not inspect helper: {ExceptionDiagnostic(ex)}";
+            blockFailure = ex is FileNotFoundException
+                ? new VoiceHelperLaunchFailure(VoiceHelperFailureStage.HelperMissing)
+                : VoiceHelperLaunchFailure.FromException(VoiceHelperFailureStage.InspectHelper, ex);
             return false;
         }
     }
@@ -2044,7 +2094,8 @@ internal static class SidecarLauncher
                 -1,
                 stdout.Text,
                 stdout.Truncated,
-                ExceptionDiagnostic(ex));
+                ExceptionDiagnostic(ex),
+                VoiceHelperBlockClassifier.NativeErrorCode(ex));
         }
         finally
         {
@@ -2142,7 +2193,7 @@ internal static class SidecarLauncher
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=enumerate-prepare wine={wine} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
-            if (!wine && !TryValidateNativeHelperContract(helperPath, out _))
+            if (!wine && !TryValidateNativeHelperContract(helperPath, out _, out _))
                 return SidecarDeviceEnumerationResult.Failure;
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
             var hostOs = wine ? wineHostOs ?? WineEnvironment.HostOs : WineHostOs.Unknown;
@@ -2343,15 +2394,17 @@ internal static class SidecarLauncher
         string? tokenFile = null;
         string? macBrokerRequestPath = null;
         var sw = Stopwatch.StartNew();
+        var startingNativeHelper = false;
         try
         {
             VoiceDiagnostics.Log(
                 "sidecar.launch",
                 $"event=prepare wine={wine} timeoutMs={handshakeTimeoutMs} helper=\"{SafeDiagnosticField(helperPath, 512)}\"");
             if (!wine &&
-                !TryValidateNativeHelperContract(helperPath, out var contractFailure))
+                !TryValidateNativeHelperContract(helperPath, out var contractFailure, out var contractBlock))
             {
                 result.FailureReason = contractFailure;
+                result.BlockFailure = contractBlock;
                 return result;
             }
             hostAction ??= WineEnvironment.RunVerifiedHostAction;
@@ -2470,7 +2523,9 @@ internal static class SidecarLauncher
                 CreateNoWindow = true,
             };
 
+            startingNativeHelper = true;
             process = Process.Start(psi);
+            startingNativeHelper = false;
             if (process == null)
             {
                 result.FailureReason = "Process.Start returned null";
@@ -2496,9 +2551,13 @@ internal static class SidecarLauncher
 
             if (!PollHandshake(result.HandshakePath, handshakeTimeoutMs, () => !ProcessExited(process), out var port, out var pid))
             {
-                result.FailureReason = ProcessExited(process)
+                var exited = ProcessExited(process);
+                result.FailureReason = exited
                     ? "helper exited before handshake (host-exec blocked or crash)"
                     : "handshake timeout";
+                result.BlockFailure = new VoiceHelperLaunchFailure(exited
+                    ? VoiceHelperFailureStage.ExitedBeforeHandshake
+                    : VoiceHelperFailureStage.HandshakeTimeout);
                 KillQuietly(process);
                 return result;
             }
@@ -2514,6 +2573,12 @@ internal static class SidecarLauncher
         catch (Exception ex)
         {
             result.FailureReason = "launch failed: " + ExceptionDiagnostic(ex);
+            if (startingNativeHelper)
+            {
+                result.BlockFailure = File.Exists(helperPath)
+                    ? VoiceHelperLaunchFailure.FromException(VoiceHelperFailureStage.Start, ex)
+                    : new VoiceHelperLaunchFailure(VoiceHelperFailureStage.HelperMissing);
+            }
             if (process != null)
                 KillQuietly(process);
             return result;
@@ -2844,6 +2909,8 @@ internal static class SidecarLauncher
             details.Append(current is Win32Exception win32Exception
                 ? win32Exception.NativeErrorCode.ToString()
                 : "n/a");
+            details.Append(" hresult=0x");
+            details.Append(current.HResult.ToString("X8"));
             details.Append("):\"");
             details.Append(SafeDiagnosticField(current.Message, 240));
             details.Append('"');
@@ -2878,6 +2945,7 @@ internal sealed class SidecarLaunchResult
     public string? TemporaryRoot;
     public WineLaunchControlPaths? WineControl;
     public string FailureReason = "";
+    public VoiceHelperLaunchFailure BlockFailure;
 }
 
 internal sealed class SidecarProcessDiagnostics

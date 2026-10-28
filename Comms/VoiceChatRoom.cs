@@ -845,24 +845,38 @@ public class VoiceChatRoom
     }
 
     internal static void RequestLocalVoiceRefreshFromKeybind()
+        => RequestLocalVoiceRefresh("keybind");
+
+    /// <returns>True when a local voice refresh actually started.</returns>
+    internal static bool RequestLocalVoiceRefreshFromHelperNotice()
+        => RequestLocalVoiceRefresh("helper-blocked-retry");
+
+    /// <summary>True while the current room's local voice refresh (F7) cooldown is running.</summary>
+    internal static bool IsLocalVoiceRefreshCoolingDown
+    {
+        get
+        {
+            var current = Current;
+            return current != null &&
+                   !IsLocalVoiceRefreshCooldownElapsed(Time.time, current._lastLocalVoiceRefreshRequestTime);
+        }
+    }
+
+    private static bool RequestLocalVoiceRefresh(string trigger)
     {
         var current = Current;
         if (current == null)
         {
-            VoiceDiagnostics.Log("voice.refresh.local.ignored", "reason=no-room trigger=keybind");
-            return;
+            VoiceDiagnostics.Log("voice.refresh.local.ignored", $"reason=no-room trigger={trigger}");
+            return false;
         }
 
-        current.RequestLocalVoiceRefresh();
-    }
-
-    private void RequestLocalVoiceRefresh()
-    {
-        if (!TryBeginLocalVoiceRefreshCooldown("voice.refresh.local.rate_limited", "keybind"))
-            return;
+        if (!current.TryBeginLocalVoiceRefreshCooldown("voice.refresh.local.rate_limited", trigger))
+            return false;
         VoiceDiagnostics.Log("voice.refresh.local.requested",
-            $"backend=native-engine {VoiceDiagnostics.DescribeRoom(_activeRoomCode)} {VoiceDiagnostics.DescribeRegion(_activeRegion)} peers={_voiceBackend?.PeerCount ?? 0}");
-        ApplyLocalVoiceRefresh("keybind");
+            $"trigger={trigger} backend=native-engine {VoiceDiagnostics.DescribeRoom(current._activeRoomCode)} {VoiceDiagnostics.DescribeRegion(current._activeRegion)} peers={current._voiceBackend?.PeerCount ?? 0}");
+        current.ApplyLocalVoiceRefresh(trigger);
+        return true;
     }
 
     private bool TryBeginLocalVoiceRefreshCooldown(string rateLimitedEvent, string trigger)

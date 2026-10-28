@@ -149,6 +149,35 @@ internal static class VoiceConnectionStatusPolicy
                phase == VoiceGamePhase.Lobby;
     }
 
+    private const string HelperBlockedTitleColor = "#E65860";
+    private const string HelperBlockedHintColor = "#A6ACC3";
+
+    internal static string HelperBlockedTitle(VoiceHelperBlockKind kind)
+        => kind == VoiceHelperBlockKind.Suspected
+            ? "Antivirus may be blocking voice"
+            : "Antivirus blocked voice chat";
+
+    internal static string HelperBlockedHint(string? openVoiceSettingsKey)
+        => string.IsNullOrWhiteSpace(openVoiceSettingsKey) || openVoiceSettingsKey == "None"
+            ? "Open Voice Settings to fix"
+            : $"Press <noparse>{openVoiceSettingsKey}</noparse> to fix";
+
+    /// <summary>
+    /// Like <see cref="BuildText(VoiceConnectionProgress, int)"/>, but while the audio helper is
+    /// known to be blocked the retry line becomes a red title plus a muted fix hint (rich text).
+    /// </summary>
+    internal static string BuildText(
+        VoiceConnectionProgress progress,
+        int animationFrame,
+        VoiceHelperBlockKind helperBlock,
+        string? openVoiceSettingsKey)
+    {
+        if (progress.Stage != VoiceConnectionStage.RetryingAudio || helperBlock == VoiceHelperBlockKind.None)
+            return BuildText(progress, animationFrame);
+        return $"<color={HelperBlockedTitleColor}>{HelperBlockedTitle(helperBlock)}</color>\n" +
+               $"<size=85%><color={HelperBlockedHintColor}>{HelperBlockedHint(openVoiceSettingsKey)}</color></size>";
+    }
+
     internal static string BuildText(VoiceConnectionProgress progress, int animationFrame)
     {
         if (!progress.IsConnecting) return string.Empty;

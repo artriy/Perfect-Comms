@@ -116,9 +116,32 @@ Do not remove shared BepInEx files when other installed mods still use BepInEx.
 - **Can't hear anyone:** confirm you are not deafened, check the selected speaker, Speaker Volume, and per-player volume sliders, and confirm the other players use a compatible Perfect Comms version.
 - **Others can't hear you:** confirm you are not muted, hold Push To Talk if selected, check the selected microphone and Mic Volume, and grant operating-system microphone permission.
 - **Connection is stuck:** press `F7` to rebuild your local voice session. Refresh has a 10-second cooldown.
-- **Windows helper is blocked:** check whether security software quarantined a Perfect Comms audio helper, then restore or allow it only if it came from the official release.
+- **Windows helper is blocked:** see [Antivirus blocks voice chat](#antivirus-blocks-voice-chat).
 - **No Voice Settings, voice HUD, or Voice Lobbies on Starlight:** confirm the approved test uploaded or copied only `PerfectCommsStarlight.dll`, then follow the testing build's log instructions.
 - **Android mic never starts:** grant microphone permission to Starlight in Android settings, then restart the game.
 - **Installing alongside a role mod:** keep the BepInEx, MiraAPI, and Reactor files supplied by that mod. Do not install duplicate copies for Perfect Comms.
+
+## Antivirus blocks voice chat
+
+On native Windows, Perfect Comms runs its audio engine in a helper program, `PerfectCommsAudio.exe`, which it unpacks from `PerfectComms.dll` into a cache folder. Some antivirus software removes or blocks that helper. Voice cannot start until the helper is allowed to run.
+
+**Symptoms**
+
+- The voice HUD shows **Antivirus blocked voice chat** in red with **Press F10 to fix** under it (your own Voice Settings key if you changed it). When the helper keeps stopping without a clear antivirus signal, it shows **Antivirus may be blocking voice** instead.
+- In the main menu or a lobby, an **Antivirus blocked voice chat** card opens with the steps below. **Close** hides it until the next time the helper is blocked.
+- Every Voice Settings tab shows the same message at the top, with **How to fix** and **Retry**.
+
+**Fix it with Windows Security**
+
+1. Open **Windows Security** > **Virus & threat protection** > **Protection history**.
+2. Find the entry for `PerfectCommsAudio.exe`, open it, and choose **Actions** > **Restore** or **Allow on device**.
+3. Optional, so future updates are not blocked: go to **Virus & threat protection** > **Manage settings** > **Exclusions** > **Add or remove exclusions** > **Add an exclusion** > **Folder**, and add the helper folder. **Open folder** on the card opens it. The folder is one of:
+   - `<Among Us folder>\cache\PerfectComms\native`
+   - `%LOCALAPPDATA%\PerfectComms\native`, used when the Among Us folder path is too long
+4. Press **Retry** on the card or in Voice Settings, or press `F7` in a lobby. Voice starts as soon as the helper runs.
+
+**Other antivirus software:** open its quarantine or blocked-items list, restore or allow `PerfectCommsAudio.exe`, and add the same folder as an exclusion. Look for "quarantine", "exclusions", or "exceptions" in its settings.
+
+Only allow files from the official Perfect Comms release. If you downloaded `PerfectComms.dll` anywhere else, delete it and install the release from GitHub instead.
 
 See also: [Player Guide](Players) · [Host Settings](Host-Settings) · [Player Settings & Controls](Controls)

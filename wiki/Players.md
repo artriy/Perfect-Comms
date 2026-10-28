@@ -179,7 +179,7 @@ Voice files follow the incoming audio you are allowed to hear, including player/
 - **Others cannot hear you:** confirm you are not muted, hold Push To Talk if selected, check Mic Volume and Mic Sensitivity, and test the selected microphone in the Devices tab.
 - **Microphone or speaker is unavailable:** check operating-system permissions and device routing, then reopen Voice Settings. On Android, grant microphone permission to Starlight.
 - **The Starlight test does not load:** confirm the approved test received `PerfectCommsStarlight.dll`, then follow the beta or staff-approved local-mod testing build's log instructions.
-- **A Windows audio helper is blocked:** check whether security software quarantined it. Restore or allow it only when Perfect Comms came from the official release.
+- **A Windows audio helper is blocked:** see [Antivirus blocks voice chat](Installing-Perfect-Comms#antivirus-blocks-voice-chat).
 - **Perfect Comms Audio is missing from OBS:** on native Windows, enable **Audio > Streaming > OBS Compatibility Mode**, enter a voice lobby, and wait for the minimized **Perfect Comms Audio** helper window. Then reopen the OBS **Application Audio Capture** source properties to refresh its application list. Another player is not required for the window to appear.
 - **A problem needs detailed logs:** enable **Voice Settings > Advanced > Diagnostics**, reproduce the problem, and collect the BepInEx log. Diagnostics turns itself off on the next launch.
 

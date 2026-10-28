@@ -171,6 +171,9 @@ internal static class VoiceUiKit
         try { VoiceVolumeMenu.Tick(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceVolumeMenu.Tick threw: " + e.Message); }
         try { VoiceLobbyBrowserUi.Update(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceLobbyBrowserUi.Update threw: " + e.Message); }
         global::VoiceChatPlugin.PerfectCommsUpdateNotifier.TickUi();
+#if WINDOWS
+        try { VoiceHelperBlockedNotice.TickUi(); } catch (Exception e) { VoiceChatPlugin.VoiceChatPluginMain.Logger.LogWarning("[PC-UI] VoiceHelperBlockedNotice.TickUi threw: " + e.Message); }
+#endif
         EndTooltipFrame();
     }
 
@@ -678,7 +681,8 @@ internal static class VoiceUiKit
         public RectTransform Root => _root;
 
         public ActionButton(RectTransform parent, string text, float width, float height,
-            float x, float y, ButtonKind kind, Action click, Func<bool>? enabled = null)
+            float x, float y, ButtonKind kind, Action click, Func<bool>? enabled = null,
+            float maxLabelSize = 18f)
         {
             _kind = kind;
             _click = click;
@@ -699,13 +703,13 @@ internal static class VoiceUiKit
             _surface.Round(RadiusControl);
             _surface.color = RestColor();
             _surface.raycastTarget = false;
-            _label = Text("ButtonLabel", _root, text, 18f, LabelColor(),
+            _label = Text("ButtonLabel", _root, text, maxLabelSize, LabelColor(),
                 TextAlignmentOptions.Center, FontStyles.Bold);
             _label.characterSpacing = 0f;
             _label.richText = false;
             _label.enableAutoSizing = true;
-            _label.fontSizeMax = 18f;
-            _label.fontSizeMin = 15f;
+            _label.fontSizeMax = maxLabelSize;
+            _label.fontSizeMin = Mathf.Min(15f, maxLabelSize);
             _label.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _label.rectTransform.offsetMin = new Vector2(8f, 0f);
             _label.rectTransform.offsetMax = new Vector2(-8f, 0f);

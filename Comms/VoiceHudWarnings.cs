@@ -57,7 +57,15 @@ internal static class VoiceHudWarnings
             // Two animation frames per second keeps the status visibly alive without making the
             // compact text jitter rapidly beside the voice buttons.
             int animationFrame = (int)(Time.unscaledTime * 2f);
+#if WINDOWS
+            return VoiceConnectionStatusPolicy.BuildText(
+                connection,
+                animationFrame,
+                VoiceHelperBlockState.Kind,
+                VoiceChatKeybinds.OpenVoiceMenu.Label);
+#else
             return VoiceConnectionStatusPolicy.BuildText(connection, animationFrame);
+#endif
         }
 
         if (!room.UsingMicrophone && !room.Mute)

@@ -1218,19 +1218,59 @@ internal static class SidecarVoiceHost
     private static ISidecarVoiceClient CreateClient()
         => new SidecarVoiceClient(LaunchSidecarHelper);
 
+    private static readonly VoiceHelperBlockTracker HelperBlockTracker = new();
+
     private static SidecarLaunchResult LaunchSidecarHelper(string token, string deviceId)
     {
+        var nativeWindows = !WineEnvironment.IsWine
+            && System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                System.Runtime.InteropServices.OSPlatform.Windows);
         var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-        var helperPath = SidecarLauncher.EnsureHelperExtracted(
-            assembly,
-            SidecarLauncher.NativeCacheBaseDirectory(),
-            force: false);
-        return SidecarLauncher.Launch(
+        var cacheRoot = string.Empty;
+        string helperPath;
+        try
+        {
+            helperPath = SidecarLauncher.EnsureHelperExtracted(
+                assembly,
+                SidecarLauncher.NativeCacheBaseDirectory(),
+                force: false,
+                out cacheRoot);
+        }
+        catch (Exception ex)
+        {
+            ObserveHelperLaunch(VoiceHelperLaunchFailure.FromExtraction(ex), nativeWindows, cacheRoot);
+            throw;
+        }
+        var result = SidecarLauncher.Launch(
             helperPath,
             token,
             handshakeTimeoutMs: 4000,
             wine: WineEnvironment.IsWine,
             resolveWineHostPath: WineEnvironment.ResolveHostPath);
+        if (result.Success)
+        {
+            HelperBlockTracker.Reset();
+            VoiceHelperBlockState.Clear();
+        }
+        else
+        {
+            ObserveHelperLaunch(result.BlockFailure, nativeWindows, cacheRoot);
+        }
+        return result;
+    }
+
+    private static void ObserveHelperLaunch(
+        VoiceHelperLaunchFailure failure,
+        bool nativeWindows,
+        string cacheRoot)
+    {
+        var kind = HelperBlockTracker.Observe(failure, nativeWindows);
+        if (kind == VoiceHelperBlockKind.None)
+            return;
+        VoiceDiagnostics.Log(
+            "sidecar.helper_blocked",
+            $"kind={kind} stage={failure.Stage} nativeErrorCode={failure.NativeErrorCode} extractionStage={failure.ExtractionStage} root={NativeLibraryCache.DiagnosticValue(cacheRoot)}");
+        VoiceHelperBlockState.Report(kind, cacheRoot);
     }
 }
 #endif

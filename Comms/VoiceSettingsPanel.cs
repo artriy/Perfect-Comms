@@ -419,6 +419,15 @@ public static class VoiceSettingsPanel
         if ((uint)cat >= (uint)CategoryOrder.Length)
             return defs;
 
+#if WINDOWS
+        defs.Add(new Entry
+        {
+            Key = "Helper Blocked Banner",
+            Height = HelperBlockedBannerRow.RowHeight,
+            Visible = () => VoiceHelperBlockState.IsBlocked,
+            Build = (pane, paneW, y) => new HelperBlockedBannerRow().Build(pane, paneW, y),
+        });
+#endif
         switch (CategoryOrder[cat])
         {
             case VoiceSettingsCategory.Audio: BuildAudio(defs, s); break;

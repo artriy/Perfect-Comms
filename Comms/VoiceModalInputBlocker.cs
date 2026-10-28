@@ -9,7 +9,11 @@ public static class VoiceModalInputBlocker
         VoiceUiKit.BlockGameInput
         || VoiceOptionsMenuEntry.CursorOverChip
         || VoiceHostMenuEntry.CursorOverChip
-        || global::VoiceChatPlugin.PerfectCommsUpdateNotifier.CursorOverNotice;
+        || global::VoiceChatPlugin.PerfectCommsUpdateNotifier.CursorOverNotice
+#if WINDOWS
+        || VoiceHelperBlockedNotice.CursorOverNotice
+#endif
+        ;
 
     [HarmonyPatch(typeof(PassiveButton), nameof(PassiveButton.ReceiveClickDown))]
     [HarmonyPrefix]
