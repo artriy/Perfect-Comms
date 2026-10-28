@@ -261,7 +261,6 @@ pub(super) struct RecordingMix {
     stems: Vec<Stem>,
     reset_epoch: u64,
     clock: RecordingClock,
-    epoch: u64,
     connection: u64,
     active: bool,
     route_epoch: u64,
@@ -275,7 +274,6 @@ impl RecordingMix {
             stems: Vec::new(),
             reset_epoch: 0,
             clock: RecordingClock::default(),
-            epoch: 0,
             connection: 0,
             active: false,
             route_epoch: 0,
@@ -330,7 +328,6 @@ impl RecordingMix {
         if connection == 0 {
             self.clock.reset();
         }
-        self.epoch = snapshot.recording_epoch;
         self.reset_epoch = snapshot.recording_reset_epoch;
         self.connection = connection;
         self.route_epoch = route_epoch;
@@ -407,7 +404,7 @@ impl RecordingMix {
         let authorized = audible
             && !snapshot.local.deafened
             && snapshot.master > 0.0
-            && snapshot.recording_epoch == self.epoch
+            && snapshot.recording_reset_epoch == self.reset_epoch
             && self.route_epoch == self.bridge.route_epoch.load(Ordering::Acquire);
         self.bridge.set_audible(authorized);
         if !authorized {
@@ -433,19 +430,23 @@ impl RecordingMix {
             self.route_epoch,
         );
         for stem in &mut self.stems {
-            if !stem.assigned
+            if !stem.assigned {
+                continue;
+            }
+            if snapshot.recording_peer_epochs.get(&stem.peer_id) != Some(&stem.peer_epoch)
                 || !snapshot
                     .peers
                     .get(&stem.peer_id)
                     .is_some_and(|peer| peer.gain > 0.0)
             {
+                stem.release();
                 continue;
             }
             if stem.finish(snapshot.master, lowpass) {
                 self.bridge.publish(
                     &snapshot,
                     timestamp,
-                    Some(&stem.identity),
+                    Some((&stem.identity, stem.peer_epoch)),
                     &stem.out,
                     self.connection,
                     self.route_epoch,
@@ -804,5 +805,97 @@ mod lifecycle_tests {
         assert_eq!(frame.timestamp, 2_000_000_000);
         assert!(frame.combined);
         bridge.shared.test_recycle(frame);
+    }
+}
+
+#[cfg(test)]
+mod peer_epoch_tests {
+    use super::tests::filters;
+    use super::*;
+    use crate::gamestate::{LocalState, PeerState};
+
+    fn apply(gs: &GameState, b_muffled: bool) {
+        let peer = |muffled| PeerState {
+            gain: 1.0,
+            pan: 0.0,
+            mode: 0,
+            muffled,
+        };
+        let identity = |id| RecordingIdentity {
+            id,
+            name: format!("Alias {id}"),
+            group: 1,
+        };
+        gs.apply_recording(
+            LocalState::default(),
+            1.0,
+            vec![("a".into(), peer(false)), ("b".into(), peer(b_muffled))],
+            HashMap::from([("a".into(), identity(1)), ("b".into(), identity(2))]),
+        );
+    }
+
+    fn mixed_tick(
+        gs: &GameState,
+        change: impl FnOnce(),
+    ) -> (
+        crate::obs_recording::ObsRecording,
+        Vec<Box<crate::obs_recording::AudioFrame>>,
+    ) {
+        let bridge = crate::obs_recording::ObsRecording::new();
+        let (_, pending) = bridge.shared.test_connect();
+        let mut tap = RecordingMix::new(bridge.shared.clone(), filters());
+        tap.begin(&gs.snapshot(), true);
+        for peer in ["a", "b"] {
+            tap.render(
+                peer,
+                &[0.1; 960],
+                crate::loudness::GainRamp {
+                    start: 1.0,
+                    end: 1.0,
+                },
+                &gs.snapshot(),
+            );
+        }
+        change();
+        tap.publish(
+            gs,
+            &[0.25; SAMPLES],
+            true,
+            1_000_000_000,
+            Biquad::lowpass(1900.0, 0.7),
+        );
+        let frames = pending.try_iter().collect();
+        (bridge, frames)
+    }
+
+    #[test]
+    fn unrelated_peer_change_keeps_combined_and_other_stems() {
+        let gs = GameState::new();
+        apply(&gs, false);
+        let (bridge, frames) = mixed_tick(&gs, || apply(&gs, true));
+        let combined = frames.iter().find(|frame| frame.combined).unwrap();
+        assert!(combined.samples.iter().all(|sample| *sample == 0.25));
+        let stems: Vec<_> = frames
+            .iter()
+            .filter(|frame| !frame.combined)
+            .map(|frame| frame.identity)
+            .collect();
+        assert_eq!(stems, [1]);
+        for frame in frames {
+            bridge.shared.test_recycle(frame);
+        }
+    }
+
+    #[test]
+    fn deafen_before_publish_still_drops_every_stem() {
+        let gs = GameState::new();
+        apply(&gs, false);
+        let (bridge, frames) = mixed_tick(&gs, || gs.set_local(LocalState { deafened: true }));
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].combined);
+        assert!(frames[0].samples.iter().all(|sample| *sample == 0.0));
+        for frame in frames {
+            bridge.shared.test_recycle(frame);
+        }
     }
 }

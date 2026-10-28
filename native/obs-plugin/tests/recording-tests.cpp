@@ -211,7 +211,10 @@ static void directory_containment_tests(const std::filesystem::path &root)
     require(!target_before.empty(), "junction sentinel written");
     {
         Junction parent(root / L"junction-parent", target);
-        require_error([&] { recorder.start(parent.path / L"parent.mkv", 0); }, "parent junction is rejected");
+        std::string parent_error;
+        try { recorder.start(parent.path / L"parent.mkv", 0); } catch (const std::exception &error) { parent_error = error.what(); }
+        require(parent_error == "Recording folder path contains a junction or symbolic link. Choose a regular folder.",
+            "parent junction is rejected with a junction message");
         require(!recorder.active(), "parent junction failure leaves recorder inactive");
         require(!std::filesystem::exists(target / L"parent-voices"), "parent junction target receives no stem directory");
     }
@@ -633,6 +636,137 @@ static void pause_and_storage_tests(const std::filesystem::path &root)
     }
     CloseHandle(shutdown);
 }
+struct StemStatus {
+    uint8_t state = 0;
+    std::string text;
+    bool connected = true;
+    bool refused = false;
+    std::filesystem::path directory;
+};
+static pcobs::StemWriter stem_writer(StemStatus &status)
+{
+    return pcobs::StemWriter(nullptr, {
+        [&status] { return status.connected; },
+        [&status] { return status.state; },
+        [&status] { return status.refused; },
+        [&status](uint8_t state, std::string text) { status.state = state; status.text = std::move(text); status.refused = false; },
+        [&status](const std::filesystem::path &directory) { status.directory = directory; }});
+}
+static pcobs::Event stem_event(pcobs::EventKind kind, uint8_t mode = 0)
+{
+    pcobs::Event event;
+    event.kind = kind;
+    event.mode = mode;
+    return event;
+}
+static pcobs::Event stem_start(const std::filesystem::path &video)
+{
+    auto event = stem_event(pcobs::EventKind::start);
+    const auto path = video.wstring();
+    std::copy(path.begin(), path.end(), event.path.begin());
+    return event;
+}
+static pcobs::Event stem_clock(uint64_t absolute, uint64_t relative)
+{
+    auto event = stem_event(pcobs::EventKind::clock);
+    event.clock = {absolute, relative, 20000000};
+    return event;
+}
+static pcobs::Event stem_voice(uint64_t timestamp, uint32_t track, uint8_t group)
+{
+    auto event = stem_event(pcobs::EventKind::audio);
+    event.audio.timestamp = timestamp;
+    event.audio.connection = 1;
+    event.audio.track = track;
+    event.audio.group = group;
+    event.audio.frames = 960;
+    std::memcpy(event.audio.name.data(), "Alice", 5);
+    event.audio.samples.fill(0.25f);
+    return event;
+}
+static void stem_finish(pcobs::StemWriter &writer, uint64_t now)
+{
+    writer.handle(stem_event(pcobs::EventKind::stop), now);
+    auto watermark = stem_event(pcobs::EventKind::watermark);
+    watermark.clock.absolute = UINT64_MAX;
+    writer.handle(watermark, now);
+}
+static void stem_writer_tests(const std::filesystem::path &root)
+{
+    constexpr uint64_t origin = 1000000000;
+    constexpr uint64_t step = 20000000;
+    using pcobs::EventKind;
+    {
+        StemStatus status;
+        auto writer = stem_writer(status);
+        status.state = 3;
+        status.text = "Perfect Comms bridge sent malformed audio or protocol data.";
+        writer.handle(stem_event(EventKind::hello), origin);
+        require(status.state == 0 && status.text == "Ready. OBS recording controls voice stems.", "idle hello clears a bridge transport error");
+        const std::string refusal = "Add the Perfect Comms source once and keep its Sync Offset at 0 ms before recording.";
+        status.state = 3;
+        status.text = refusal;
+        status.refused = true;
+        for (const auto kind : {EventKind::pause, EventKind::resume, EventKind::hello}) writer.handle(stem_event(kind), origin);
+        require(status.state == 3 && status.text == refusal, "refused recording status survives pause, resume, and hello");
+        writer.handle(stem_event(EventKind::arm), origin);
+        require(status.state == 0, "new arm clears a standing refusal");
+        writer.handle(stem_start(root / L"reconnect.mkv"), origin);
+        require(status.state == 1, "armed recording reports recording");
+        status.connected = false;
+        writer.handle(stem_event(EventKind::disconnected), origin);
+        require(status.state == 3, "disconnect during recording is visible");
+        status.connected = true;
+        writer.handle(stem_event(EventKind::hello), origin);
+        require(status.state == 1 && status.text == "Connected. Recording aligned voice stems.", "reconnect during recording reports aligned stems");
+        stem_finish(writer, origin);
+        require(status.state == 0, "finished recording reports ready");
+    }
+    {
+        StemStatus status;
+        auto writer = stem_writer(status);
+        writer.handle(stem_event(EventKind::arm, 0), origin);
+        writer.handle(stem_event(EventKind::hello, 1), origin);
+        writer.handle(stem_start(root / L"late-hello-armed.mkv"), origin);
+        writer.handle(stem_clock(origin, 0), origin);
+        writer.handle(stem_voice(origin, 1, 1), origin);
+        stem_finish(writer, origin);
+        require(std::filesystem::exists(status.directory / L"Alive voices.wav"), "hello mode before start applies to the armed recording");
+
+        writer.handle(stem_event(EventKind::arm, 0), origin);
+        writer.handle(stem_start(root / L"late-hello-started.mkv"), origin);
+        writer.handle(stem_event(EventKind::hello, 1), origin);
+        writer.handle(stem_clock(origin, 0), origin);
+        writer.handle(stem_voice(origin, 1, 1), origin);
+        stem_finish(writer, origin);
+        require(std::filesystem::exists(status.directory / L"Alive voices.wav"), "hello mode before the first stem file applies");
+
+        writer.handle(stem_event(EventKind::arm, 0), origin);
+        writer.handle(stem_start(root / L"late-hello-written.mkv"), origin);
+        writer.handle(stem_clock(origin, 0), origin);
+        writer.handle(stem_voice(origin, 1, 1), origin);
+        writer.handle(stem_event(EventKind::hello, 1), origin);
+        writer.handle(stem_voice(origin, 2, 2), origin);
+        stem_finish(writer, origin);
+        require(std::filesystem::exists(status.directory / L"1-1-Alice.wav") && std::filesystem::exists(status.directory / L"1-2-Alice.wav") &&
+            !std::filesystem::exists(status.directory / L"Dead voices.wav"), "hello mode after the first stem file waits for the next recording");
+    }
+    {
+        StemStatus status;
+        auto writer = stem_writer(status);
+        constexpr uint64_t buffered = 3000;
+        writer.handle(stem_event(EventKind::arm), origin);
+        for (uint64_t i = 0; i < buffered; ++i) writer.handle(stem_voice(origin + i * step, 1, 0), origin);
+        require(status.state == 0, "startup buffer overflow keeps recording armed");
+        writer.handle(stem_start(root / L"startup-overflow.mkv"), origin);
+        writer.handle(stem_clock(origin, 0), origin);
+        writer.handle(stem_clock(origin + (buffered - 1) * step, step), origin);
+        stem_finish(writer, origin);
+        const auto bytes = read_file(status.directory / L"Private voices.wav");
+        require(bytes.size() == 80 + 1920 * 8 && sample(bytes, 0) == 0.0f && sample(bytes, 960) == 0.25f,
+            "startup buffer drops its oldest audio and keeps the newest");
+    }
+}
 int main()
 {
     try {
@@ -727,6 +861,7 @@ int main()
         hybrid_tail_tests(root);
         hybrid_stretched_sample_tests(root);
         pause_and_storage_tests(root);
+        stem_writer_tests(root);
         std::cout << "recording behavior passed\n";
         return 0;
     } catch (const std::exception &error) {

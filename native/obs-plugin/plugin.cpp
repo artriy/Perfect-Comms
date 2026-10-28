@@ -176,17 +176,17 @@ void frontend_event(obs_frontend_event event, void *)
     if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
         detach_output();
         recording_output = obs_frontend_get_recording_output();
-        if (!recording_output) { bridge->fail("OBS recording output is unavailable."); return; }
+        if (!recording_output) { bridge->refuse("OBS recording output is unavailable."); return; }
         const auto flags = obs_output_get_flags(recording_output);
         const std::string_view id(obs_output_get_id(recording_output));
         if (!(flags & OBS_OUTPUT_ENCODED) || !(flags & OBS_OUTPUT_VIDEO) ||
             (id != "ffmpeg_muxer" && id != "mp4_output" && id != "mov_output")) {
-            bridge->fail("Voice stems require standard encoded OBS recording (MKV/MP4). Custom raw FFmpeg outputs are unsupported.");
+            bridge->refuse("Voice stems require standard encoded OBS recording (MKV/MP4). Custom raw FFmpeg outputs are unsupported.");
             detach_output();
             return;
         }
         if (!bridge->source_ready()) {
-            bridge->fail("Add the Perfect Comms source once and keep its Sync Offset at 0 ms before recording.");
+            bridge->refuse("Add the Perfect Comms source once and keep its Sync Offset at 0 ms before recording.");
             detach_output();
             return;
         }

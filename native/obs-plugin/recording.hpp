@@ -2,7 +2,9 @@
 #include <array>
 #include <bitset>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <windows.h>
@@ -25,10 +27,19 @@ struct Audio {
     std::array<float, max_frames * 2> samples{};
 };
 struct Hello { uint8_t mode = 0; };
+enum class EventKind { audio, clock, arm, start, stop, pause, resume, hello, disconnected, watermark, failure };
 struct Clock {
     uint64_t absolute = 0;
     uint64_t relative = 0;
     uint64_t duration = 0;
+};
+struct Event {
+    EventKind kind = EventKind::audio;
+    Audio audio{};
+    Clock clock{};
+    uint8_t mode = 0;
+    std::array<char, 256> message{};
+    std::array<wchar_t, 1024> path{};
 };
 bool parse_message(std::span<const uint8_t> bytes, Hello &hello, Audio &audio);
 std::wstring safe_name(std::string_view name);
@@ -77,6 +88,7 @@ public:
     void pause(uint64_t retain_until);
     void resume(uint64_t now);
     void expire(uint64_t now);
+    void set_mode(uint8_t mode);
     void abandon() noexcept;
     void stop();
     const std::filesystem::path &directory() const;
@@ -84,5 +96,36 @@ public:
 private:
     struct State;
     std::unique_ptr<State> state_;
+};
+class StemWriter {
+public:
+    struct Status {
+        std::function<bool()> connected;
+        std::function<uint8_t()> state;
+        std::function<bool()> refused;
+        std::function<void(uint8_t, std::string)> set;
+        std::function<void(const std::filesystem::path &)> locate;
+    };
+    StemWriter(HANDLE shutdown, Status status);
+    void expire(uint64_t now);
+    void handle(const Event &event, uint64_t now);
+    void fail(const char *message);
+    void abandon() noexcept;
+private:
+    static constexpr size_t startup_limit = 2048;
+    Status status_;
+    Recorder recorder_;
+    CaptureDrain drain_;
+    std::deque<Event> startup_;
+    bool paused_ = false;
+    bool failed_ = false;
+    bool awaiting_start_ = false;
+    bool draining_ = false;
+    bool bridge_connected_ = false;
+    uint64_t next_expire_ = 0;
+    uint64_t final_absolute_ = 0;
+    uint64_t watermark_ = 0;
+    uint8_t latched_mode_ = 0;
+    void finish();
 };
 }

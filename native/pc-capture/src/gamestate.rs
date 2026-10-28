@@ -126,7 +126,6 @@ impl GameState {
             next.version = next.version.wrapping_add(1);
             next.recording.remove(peer_id);
             next.recording_peer_epochs.remove(peer_id);
-            next.recording_epoch = next.recording_epoch.wrapping_add(1);
         }
     }
 
@@ -149,18 +148,8 @@ impl GameState {
         let next = Arc::make_mut(&mut snapshot);
         next.version = next.version.wrapping_add(1);
         let reset = next.local.deafened != local.deafened || (next.master > 0.0) != (master > 0.0);
-        if next.recording != recording
-            || reset
-            || next.peers.len() != peers.len()
-            || peers.iter().any(|(id, peer)| {
-                next.peers
-                    .get(id)
-                    .is_none_or(|old| recording_route_changed(old, peer))
-            })
-        {
-            next.recording_epoch = next.recording_epoch.wrapping_add(1);
-        }
         if reset {
+            next.recording_epoch = next.recording_epoch.wrapping_add(1);
             next.recording_reset_epoch = next.recording_epoch;
         }
         for (id, peer) in &peers {
@@ -170,6 +159,8 @@ impl GameState {
                 .is_none_or(|old| recording_route_changed(old, peer))
                 || next.recording.get(id) != recording.get(id)
             {
+                // Each peer change takes a distinct value, so a queued stem's epoch names one peer version.
+                next.recording_epoch = next.recording_epoch.wrapping_add(1);
                 next.recording_peer_epochs
                     .insert(id.clone(), next.recording_epoch);
             }
@@ -424,6 +415,47 @@ mod recording_epoch_tests {
             before.recording_peer_epochs["b"],
             after.recording_peer_epochs["b"]
         );
+        assert_eq!(before.recording_reset_epoch, after.recording_reset_epoch);
+    }
+}
+
+#[cfg(test)]
+mod peer_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn peers_changed_together_receive_distinct_epochs_without_global_reset() {
+        let gs = GameState::new();
+        let peer = |muffled| PeerState {
+            gain: 1.0,
+            pan: 0.0,
+            mode: 0,
+            muffled,
+        };
+        gs.apply(
+            LocalState::default(),
+            1.0,
+            vec![("a".into(), peer(false)), ("b".into(), peer(false))],
+        );
+        let before = gs.snapshot();
+        assert_ne!(
+            before.recording_peer_epochs["a"],
+            before.recording_peer_epochs["b"]
+        );
+        gs.apply(
+            LocalState::default(),
+            1.0,
+            vec![("a".into(), peer(true)), ("b".into(), peer(false))],
+        );
+        let after = gs.snapshot();
+        assert_eq!(
+            before.recording_peer_epochs["b"],
+            after.recording_peer_epochs["b"]
+        );
+        assert!(!before
+            .recording_peer_epochs
+            .values()
+            .any(|epoch| *epoch == after.recording_peer_epochs["a"]));
         assert_eq!(before.recording_reset_epoch, after.recording_reset_epoch);
     }
 }

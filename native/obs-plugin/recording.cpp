@@ -33,6 +33,7 @@ std::wstring wide(std::string_view text)
     return value;
 }
 void disk_error() { throw std::runtime_error("Voice stem disk operation failed. Check free space and folder permissions."); }
+constexpr NTSTATUS reparse_point_encountered = NTSTATUS(0xC000050BL);
 struct Wave {
     HANDLE file = INVALID_HANDLE_VALUE;
     HANDLE completed = nullptr;
@@ -333,6 +334,8 @@ void Recorder::start(const std::filesystem::path &video, uint8_t mode)
             state_ = std::move(next);
             return;
         }
+        if (created == reparse_point_encountered)
+            throw std::runtime_error("Recording folder path contains a junction or symbolic link. Choose a regular folder.");
         if (RtlNtStatusToDosError(created) != ERROR_ALREADY_EXISTS) disk_error();
     }
     throw std::runtime_error("No unused voice stem folder name is available.");
@@ -487,4 +490,115 @@ void Recorder::stop()
     }
     if (failure) std::rethrow_exception(failure);
 }
+void Recorder::set_mode(uint8_t mode)
+{
+    if (state_->active && state_->waves.empty()) state_->mode = mode;
+}
+StemWriter::StemWriter(HANDLE shutdown, Status status) : status_(std::move(status)), recorder_(shutdown) {}
+void StemWriter::finish()
+{
+    draining_ = false;
+    recorder_.stop();
+    if (!failed_ && status_.state() != 3)
+        status_.set(0, status_.connected() ? "Ready. OBS recording controls voice stems." : "Waiting for Perfect Comms.");
+}
+void StemWriter::expire(uint64_t now)
+{
+    if (draining_) drain_.expire(now);
+    else if (now >= next_expire_) {
+        recorder_.expire(now);
+        next_expire_ = now + 20000000;
+    }
+}
+void StemWriter::handle(const Event &event, uint64_t now)
+{
+    if (awaiting_start_ && (event.kind == EventKind::audio || event.kind == EventKind::clock)) {
+        if (startup_.size() >= startup_limit) startup_.pop_front();
+        startup_.push_back(event);
+        return;
+    }
+    switch (event.kind) {
+    case EventKind::arm:
+        if (draining_) throw std::runtime_error("OBS started another recording before previous voice audio drained.");
+        recorder_.stop();
+        awaiting_start_ = true;
+        latched_mode_ = event.mode;
+        final_absolute_ = 0;
+        failed_ = false;
+        startup_.clear();
+        status_.set(0, status_.connected() ? "Ready. OBS recording controls voice stems." : "Waiting for Perfect Comms.");
+        break;
+    case EventKind::start:
+        if (failed_) break;
+        paused_ = false;
+        recorder_.start(std::filesystem::path(event.path.data()), awaiting_start_ ? latched_mode_ : event.mode);
+        awaiting_start_ = false;
+        for (const auto &buffered : startup_) {
+            if (buffered.kind == EventKind::audio) recorder_.audio(buffered.audio);
+            else {
+                recorder_.clock(buffered.clock);
+                final_absolute_ = std::max(final_absolute_, buffered.clock.absolute + buffered.clock.duration);
+            }
+        }
+        startup_.clear();
+        status_.locate(recorder_.directory());
+        status_.set(status_.connected() ? 1 : 3, status_.connected() ? "Recording synchronized voice stems." :
+            "OBS started without the mod bridge. Enable OBS recording in Perfect Comms; late joins will be aligned.");
+        break;
+    case EventKind::audio: if (!failed_) recorder_.audio(event.audio); break;
+    case EventKind::clock:
+        if (!failed_) {
+            recorder_.clock(event.clock);
+            final_absolute_ = std::max(final_absolute_, event.clock.absolute + event.clock.duration);
+        }
+        break;
+    case EventKind::stop:
+        awaiting_start_ = false;
+        startup_.clear();
+        if (failed_ || !recorder_.active() || (!bridge_connected_ && !status_.connected())) { finish(); break; }
+        drain_.start(final_absolute_, now);
+        draining_ = true;
+        if (drain_.ready(watermark_)) finish();
+        break;
+    case EventKind::watermark:
+        watermark_ = event.clock.absolute;
+        if (draining_ && drain_.ready(watermark_)) finish();
+        break;
+    case EventKind::pause:
+        paused_ = true;
+        recorder_.pause(event.clock.absolute + event.clock.duration);
+        if (!failed_ && recorder_.active()) status_.set(2, "Voice stems paused with OBS.");
+        break;
+    case EventKind::resume:
+        paused_ = false;
+        recorder_.resume(event.clock.absolute);
+        if (!failed_ && recorder_.active()) status_.set(1, "Recording synchronized voice stems.");
+        break;
+    case EventKind::hello:
+        bridge_connected_ = true;
+        if (awaiting_start_) latched_mode_ = event.mode;
+        else recorder_.set_mode(event.mode);
+        if (failed_) break;
+        if (recorder_.active()) status_.set(paused_ ? 2 : 1, "Connected. Recording aligned voice stems.");
+        else if (!status_.refused()) status_.set(0, "Ready. OBS recording controls voice stems.");
+        break;
+    case EventKind::disconnected:
+        bridge_connected_ = false;
+        if (draining_) throw std::runtime_error("Perfect Comms disconnected before final voice audio drained. Voice stems may be incomplete.");
+        if (!failed_ && status_.state() != 3) status_.set(recorder_.active() ? 3 : 0,
+            recorder_.active() ? "Mod bridge disconnected. Missing voice is silence; reconnect starts new aligned stems." : "Waiting for Perfect Comms.");
+        break;
+    case EventKind::failure: throw std::runtime_error(event.message.data());
+    }
+}
+void StemWriter::fail(const char *message)
+{
+    failed_ = true;
+    awaiting_start_ = false;
+    draining_ = false;
+    startup_.clear();
+    status_.set(3, message);
+    try { recorder_.stop(); } catch (const std::exception &error) { status_.set(3, error.what()); }
+}
+void StemWriter::abandon() noexcept { recorder_.abandon(); }
 }

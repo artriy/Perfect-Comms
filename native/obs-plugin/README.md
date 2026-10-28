@@ -27,7 +27,7 @@ Stems follow permitted incoming voice, local deafen and Speaker Volume, player/g
 
 Perfect Comms **Audio > Streaming** shows Off, Waiting for OBS, Connected, Recording, Paused, or Recording error. **Open Guide** opens the [player setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration). OBS source Properties shows status and output folder; click **Refresh connection and recording status** to update it.
 
-- Missing source: check the installed DLL/data paths, restart 64-bit OBS, and inspect the OBS log for load errors.
+- Missing source: check that `obs-plugins/64bit/perfect-comms-obs.dll` is inside your OBS installation folder, restart 64-bit OBS, and inspect the OBS log for load errors.
 - Waiting for OBS: join voice with the integration enabled, add the source, and run OBS and Among Us as the same Windows user.
 - Echo/doubling: disable duplicate application/desktop voice capture and check monitoring. In your editor, do not mix the combined voice track with the same separate voices.
 - Missing named files: check hearing rules, deafen, Speaker Volume, and player volumes. Hidden identities intentionally merge into Private voices.
@@ -51,7 +51,7 @@ WAV files use sparse silence and convert their reserved RIFF header to RF64 when
 
 File reads and writes use cancellation-aware overlapped I/O. Module shutdown cancels outstanding work and abandons further finalization rather than padding or flushing new data. Headers are updated after each mixed block, leaving the last committed length recoverable; shutdown is not reported as successful completion.
 
-Regression tests in `tests/recording-tests.cpp` cover packet acceptance/rejection, fractional FPS, encoder divisors, absent composition timestamps, bounded drain failure, long-pause delayed frames, directory write exclusion, cancellation, actual sparse RF64 conversion and size fields, in addition to parsing, privacy buses, overlaps, and reconnect namespaces. Build and run these through the existing CMake/CTest target.
+Regression tests in `tests/recording-tests.cpp` cover packet acceptance/rejection, fractional FPS, encoder divisors, absent composition timestamps, bounded drain failure, long-pause delayed frames, directory write exclusion, cancellation, actual sparse RF64 conversion and size fields, writer status after refused recordings, late stem-mode selection, and the bounded startup buffer, in addition to parsing, privacy buses, overlaps, and reconnect namespaces. Build and run these through the existing CMake/CTest target.
 
 A real official OBS 32.2.2 Windows x64 frontend capture using x264 and standard MKV, with native Pion peers sending synthetic tones, produced 3,570 video frames at 30 fps (119.1 seconds). All four resulting Alice, Bob, Replacement, and Private voice WAVs measured 119.1 seconds; the 48-second OBS pause was excluded. This establishes that exercised output path, not every encoder, format, OBS version, or physical audio device.
 

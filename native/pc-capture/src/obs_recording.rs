@@ -7,7 +7,6 @@ use std::thread::JoinHandle;
 pub(crate) const SAMPLES: usize = 1920;
 const POOL_SIZE: usize = 256;
 pub(crate) const MAX_STEMS: usize = 64;
-pub(crate) const MAX_TRACKS: usize = 256;
 
 #[derive(Debug)]
 pub(crate) struct AudioFrame {
@@ -17,7 +16,8 @@ pub(crate) struct AudioFrame {
     pub name_len: usize,
     pub name: [u8; 192],
     pub samples: [f32; SAMPLES],
-    pub epoch: u64,
+    pub reset_epoch: u64,
+    pub peer_epoch: u64,
     pub connection: u64,
     pub route_epoch: u64,
     pub combined: bool,
@@ -32,7 +32,8 @@ impl Default for AudioFrame {
             name_len: 0,
             name: [0; 192],
             samples: [0.0; SAMPLES],
-            epoch: 0,
+            reset_epoch: 0,
+            peer_epoch: 0,
             connection: 0,
             route_epoch: 0,
             combined: false,
@@ -146,19 +147,23 @@ impl Shared {
         connection != 0
             && frame.connection == connection
             && self.connected.load(Ordering::Acquire) == connection
-            && frame.epoch == snapshot.recording_epoch
+            && frame.reset_epoch == snapshot.recording_reset_epoch
             && frame.route_epoch == self.route_epoch.load(Ordering::Acquire)
             && (frame.combined
                 || (!snapshot.local.deafened
                     && snapshot.master > 0.0
-                    && self.audible.load(Ordering::Acquire)))
+                    && self.audible.load(Ordering::Acquire)
+                    && snapshot.recording_peer_epochs.iter().any(|(peer, epoch)| {
+                        *epoch == frame.peer_epoch
+                            && snapshot.peers.get(peer).is_some_and(|peer| peer.gain > 0.0)
+                    })))
     }
 
     pub fn publish(
         &self,
         snapshot: &GameSnapshot,
         timestamp: u64,
-        identity: Option<&RecordingIdentity>,
+        stem: Option<(&RecordingIdentity, u64)>,
         samples: &[f32],
         connection: u64,
         route_epoch: u64,
@@ -179,9 +184,14 @@ impl Shared {
             }
             return;
         };
-        let (id, group, name) = match identity {
-            Some(identity) => (identity.id, identity.group, identity.name.as_str()),
-            None => (0, 0, ""),
+        let (id, group, name, peer_epoch) = match stem {
+            Some((identity, peer_epoch)) => (
+                identity.id,
+                identity.group,
+                identity.name.as_str(),
+                peer_epoch,
+            ),
+            None => (0, 0, "", 0),
         };
         if samples.len() != SAMPLES || name.len() > 192 || samples.iter().any(|v| !v.is_finite()) {
             self.failed.store(true, Ordering::Release);
@@ -194,10 +204,11 @@ impl Shared {
         frame.name_len = name.len();
         frame.name[..name.len()].copy_from_slice(name.as_bytes());
         frame.samples.copy_from_slice(samples);
-        frame.epoch = snapshot.recording_epoch;
+        frame.reset_epoch = snapshot.recording_reset_epoch;
+        frame.peer_epoch = peer_epoch;
         frame.connection = connection;
         frame.route_epoch = route_epoch;
-        frame.combined = identity.is_none();
+        frame.combined = stem.is_none();
         if let Err(error) = publisher.pending.try_send(frame) {
             let _ = publisher.recycle.try_send(error.into_inner());
             self.failed.store(true, Ordering::Release);
@@ -557,7 +568,10 @@ mod privacy_tests {
         shared.publish(
             &gs.snapshot(),
             1,
-            Some(&recording_identity),
+            Some((
+                &recording_identity,
+                gs.snapshot().recording_peer_epochs["transport"],
+            )),
             &[0.5; SAMPLES],
             connection,
             route,
@@ -573,6 +587,86 @@ mod privacy_tests {
         gs.set_master(1.0);
         assert!(!shared.frame_authorized(&combined, &gs.snapshot(), connection));
         shared.test_recycle(combined);
+    }
+
+    fn two_peers() -> (Shared, u64, Receiver<Box<AudioFrame>>, GameState) {
+        let shared = Shared::new();
+        let (connection, pending) = shared.test_connect();
+        let gs = GameState::new();
+        gs.apply(LocalState::default(), 1.0, peers(1.0, false));
+        shared.set_audible(true);
+        (shared, connection, pending, gs)
+    }
+
+    fn peers(a_gain: f32, b_muffled: bool) -> Vec<(String, PeerState)> {
+        let peer = |gain, muffled| PeerState {
+            gain,
+            pan: 0.0,
+            mode: 0,
+            muffled,
+        };
+        vec![
+            ("a".into(), peer(a_gain, false)),
+            ("b".into(), peer(1.0, b_muffled)),
+        ]
+    }
+
+    fn publish(
+        shared: &Shared,
+        gs: &GameState,
+        connection: u64,
+        pending: &Receiver<Box<AudioFrame>>,
+        peer: Option<&str>,
+    ) -> Box<AudioFrame> {
+        let snapshot = gs.snapshot();
+        let identity = RecordingIdentity {
+            id: 1,
+            name: "Alias".into(),
+            group: 1,
+        };
+        shared.publish(
+            &snapshot,
+            1,
+            peer.map(|peer| (&identity, snapshot.recording_peer_epochs[peer])),
+            &[0.5; SAMPLES],
+            connection,
+            shared.route_epoch.load(Ordering::Acquire),
+        );
+        pending.try_recv().unwrap()
+    }
+
+    #[test]
+    fn peer_change_drops_only_that_peers_queued_stem() {
+        let (shared, connection, pending, gs) = two_peers();
+        let a = publish(&shared, &gs, connection, &pending, Some("a"));
+        let b = publish(&shared, &gs, connection, &pending, Some("b"));
+        let combined = publish(&shared, &gs, connection, &pending, None);
+        gs.apply(LocalState::default(), 1.0, peers(1.0, true));
+        let snapshot = gs.snapshot();
+        assert!(shared.frame_authorized(&a, &snapshot, connection));
+        assert!(shared.frame_authorized(&combined, &snapshot, connection));
+        assert!(!shared.frame_authorized(&b, &snapshot, connection));
+        gs.apply(LocalState::default(), 1.0, peers(0.0, true));
+        gs.apply(LocalState::default(), 1.0, peers(1.0, true));
+        assert!(!shared.frame_authorized(&a, &gs.snapshot(), connection));
+        assert!(shared.frame_authorized(&combined, &gs.snapshot(), connection));
+        for frame in [a, b, combined] {
+            shared.test_recycle(frame);
+        }
+    }
+
+    #[test]
+    fn deafen_drops_every_queued_frame() {
+        let (shared, connection, pending, gs) = two_peers();
+        let a = publish(&shared, &gs, connection, &pending, Some("a"));
+        let combined = publish(&shared, &gs, connection, &pending, None);
+        gs.set_local(LocalState { deafened: true });
+        gs.set_local(LocalState { deafened: false });
+        assert!(!shared.frame_authorized(&a, &gs.snapshot(), connection));
+        assert!(!shared.frame_authorized(&combined, &gs.snapshot(), connection));
+        for frame in [a, combined] {
+            shared.test_recycle(frame);
+        }
     }
 
     #[test]
