@@ -1,7 +1,12 @@
+<p align="center">
+  <img src="Resources/miclogo.png" alt="" width="96">
+</p>
+
 <h1 align="center">Perfect Comms</h1>
 
 <p align="center">
-  <strong>Immersive proximity voice chat, built directly inside Among Us.</strong>
+  <strong>Proximity voice chat built into Among Us.</strong><br>
+  No Discord, no mute bots. Hear the players near you, with rules your host sets.
 </p>
 
 <p align="center">
@@ -10,64 +15,55 @@
 </p>
 
 <p align="center">
-  <a href="#controls">Controls</a> &nbsp;·&nbsp;
   <a href="#install">Install</a> &nbsp;·&nbsp;
-  <a href="#supported-mods">Supported Mods</a> &nbsp;·&nbsp;
-  <a href="#for-mod-developers">For Mod Developers</a>
+  <a href="#controls">Controls</a> &nbsp;·&nbsp;
+  <a href="#settings">Settings</a> &nbsp;·&nbsp;
+  <a href="#supported-mods">Supported mods</a> &nbsp;·&nbsp;
+  <a href="#for-mod-developers">Mod developers</a>
 </p>
 
 <p align="center">
-  <img src="assets/brand/divider.svg" alt="" width="900">
+  <img src="assets/readme/voice-settings-demo.webp" alt="Perfect Comms voice settings recorded in game: dragging Mic Volume, turning on Noise Gate, scrolling, and switching tabs" width="860">
 </p>
 
-Perfect Comms makes voice chat feel like part of the match. Players talk in-game, hear the people around them, find voice-ready lobbies, and play with voice rules that fit the way Among Us is actually played.
+## Features
+<table>
+  <tr><td><b>Built into the game</b></td><td>Talk through your own mic inside the match. No Discord or mute bots.</td></tr>
+  <tr><td><b>Proximity audio</b></td><td>Clear up close and quiet at a distance, with optional wall and vision occlusion.</td></tr>
+  <tr><td><b>Host-tuned rounds</b></td><td>Hearing range, ghost and meeting rules, Team Radio, and an optional Meetings &amp; Lobby Only mode.</td></tr>
+  <tr><td><b>Role-aware voice</b></td><td>Role mutes, private Team Radio, and muffled hearing with <a href="#supported-mods">supported mods</a>.</td></tr>
+  <tr><td><b>Voice lobbies</b></td><td>Find voice-ready public lobbies from the main menu.</td></tr>
+  <tr><td><b>Plug and play</b></td><td>A short first-time setup, then every option is one key away (<code>F10</code>).</td></tr>
+</table>
 
+## Install
+
+1. Close Among Us.
+2. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
+3. Put it in `BepInEx/plugins`. If your mod or modpack already provides BepInEx, keep it and **don't install another copy over it**.
+4. Launch the game and follow the first-time setup.
+
+<details>
+<summary><b>No BepInEx yet?</b></summary>
 <br>
 
-## Why Players Use It
+1. Download **BepInEx 6 Unity IL2CPP** (`Unity.IL2CPP-win-x64`) from the [official build page](https://builds.bepinex.dev/projects/bepinex_be).
+2. Extract it into the folder containing `Among Us.exe`.
+3. Launch the game once to finish BepInEx setup, then close it and continue from step 2 above.
 
-- **Voice built into Among Us**, no Discord or mute bots
-- **Extremely immersive proximity audio**
-- **Optional Meetings & Lobby Only mode** for a simpler setup
-- **Role-specific voice behavior**
-- **Built-in voice lobby discovery**
-- **Simple in-game controls**, plug and play
+See the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html) for help. Perfect Comms installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies.
 
+</details>
+
+<details>
+<summary><b>Android (Starlight tester build)</b></summary>
 <br>
 
-## How It Works
+Android support is the single managed `PerfectCommsStarlight.dll` tester build. It is not an APK; use it only in an All Of Us staff-approved test or a Starlight beta/local-mod build, following the [Starlight developer testing guide](https://allofus.dev/guides/starlight-dev-guide/#testing). It uses Starlight recording and Unity playback, follows Android's system audio route, and plays with desktop players in the same voice lobby. Open Perfect Comms from the in-game Options menu.
 
-**Proximity by default.** Everyone talks through their own mic and hears each player by how close they are in-game, clear up close and quiet at a distance.
-
-**The host tunes the round.** Hearing range, wall and vision occlusion, ghost and meeting rules, and a meetings-only mode are all host options, so each lobby plays how its host sets it.
-
-<br>
-
-## Supported Mods
-
-Perfect Comms works on its own as a proximity voice mod. Some mods unlock extra voice behavior, integrations activate automatically when the mod is present and stay dormant when it is not.
-
-| Mod | Voice behavior |
-| :--- | :--- |
-| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing for Eclipsal, Grenadier, and Hypnotist effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
-
-<br>
-
-
-## Settings
-
-| Hosts set the match rules | Players set their own audio |
-| :--- | :--- |
-| Talk distance, falloff, and occlusion | Mic and speaker device |
-| Vent, ghost, and meeting voice rules | Open mic, push to talk, and an optional noise gate |
-| Team Radio channels | Meeting spatial audio, plus noise suppression and echo cancellation on desktop |
-| Role-based mutes (with supported mods) | Per-player volume and HUD layout |
-
-Native Windows users can optionally install the `PerfectComms-OBS-win-x64.zip` plugin, tested with 64-bit OBS Studio 32.2.2, then enable the default-off **OBS Recording Integration** to save editable per-player or alive/dead voice WAVs beside recordings. Other OBS versions are unverified. [OBS setup and timeline-zero import](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+</details>
 
 ## Controls
-
-### Desktop shortcuts
 
 | Key | Action |
 | :---: | :--- |
@@ -76,105 +72,74 @@ Native Windows users can optionally install the `PerfectComms-OBS-win-x64.zip` p
 | Hold `C` | Push To Talk |
 | Hold `V` | Team Radio |
 | `G` | Cycle Team Radio channel |
-| `Shift+B` | Open Player Volumes |
+| `Shift+B` | Player volumes |
 | `F7` | Refresh voice connection |
-| `F10` | Open Voice Settings |
-| `F11` | Open Host Voice Settings |
-
-> [!NOTE]
-> **Optional shortcuts are off by default.**
->
-> Assign any of these in **Voice Settings > Keybinds**:
-> - **Push To Mute** (hold)
-> - **Toggle Open Mic / Push To Talk**
-> - **Alive Louder / Dead Quieter** (hold)
-> - **Alive Quieter / Dead Louder** (hold)
+| `F10` | Voice settings |
+| `F11` | Host voice settings |
 
 > [!TIP]
-> **First time using Perfect Comms?**
-> - **Open Mic** is the default: your voice sends automatically when you speak.
->   Tap `Right Alt` to mute or unmute your microphone.
-> - **Push To Talk:** select it in **Voice Settings > Audio**, then hold `C`
->   whenever you want to speak, including while performing task minigames.
-> - **Deafen:** tap `Right Ctrl` to stop hearing voice and pause your microphone
->   until you undeafen.
-> - **Team Radio:** when your role and the host settings allow a private channel,
->   hold `V` to talk and press `G` to cycle available channels.
+> **Open Mic** is the default: your voice sends when you speak. Switch to **Push To Talk** in **Voice settings > Audio**; it works during task minigames too. Tap `Right Alt` or `Right Ctrl` on their own (not with another key) to mute or deafen; both work while chat is open. Push To Mute, Toggle Open Mic / Push To Talk, and alive/dead volume holds are unbound by default and can be set in **Voice settings > Keybinds**.
 
-### Android touch controls
-
-The Starlight tester build uses in-game touch controls instead of desktop keybinds:
-
-- In **Open Mic** mode, tap the microphone button to mute or unmute.
-- In **Push To Talk** mode, hold the microphone button while speaking and release it to stop.
-- When Team Radio is available, tap its button to change channel or hold it to transmit.
-- Tap the speaker button to deafen or undeafen. Deafening mutes playback and pauses microphone transmission.
-
-**Platform notes**
-
-- **Desktop:** Press and release `Right Alt` to mute or unmute, and `Right Ctrl`
-  to deafen or undeafen. If you press either one together with another key,
-  Perfect Comms does not mute or deafen. Both controls work while chat is open
-  by default; choose which other shortcuts work there from **Voice Settings >
-  Keybinds**.
-- **HUD reminder:** Enable **Voice Settings > HUD > Mute / Deafen Status
-  Reminder** to keep your muted or deafened state visible.
-
-## Install
-
-> [!TIP]
-> **Desktop: if your mod provides BepInEx**
->
-> 1. Close Among Us.
-> 2. Keep the BepInEx installation supplied by the mod or modpack. **Do not install or merge another copy over it.**
-> 3. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest).
-> 4. Place or replace the DLL in `BepInEx/plugins`.
-
-> [!IMPORTANT]
-> **Desktop: if BepInEx is not provided**
->
-> Use this path if your mod does not provide BepInEx, or if you are not using another mod.
->
-> 1. Download **BepInEx 6 Unity IL2CPP** from the [official BepInEx build page](https://builds.bepinex.dev/projects/bepinex_be).
-> 2. Choose `Unity.IL2CPP-win-x64`.
-> 3. Extract BepInEx into the folder containing `Among Us.exe`.
-> 4. Launch the game once to complete BepInEx setup, then close it.
-> 5. Download `PerfectComms.dll` from the [latest release](https://github.com/artriy/Perfect-Comms/releases/latest) and place it in `BepInEx/plugins`.
-
-### Desktop folder layout
-
-```text
-BepInEx/
-└─ plugins/
-   └─ PerfectComms.dll
-```
-
-### Android on Starlight
-
-Android support is available as the single managed `PerfectCommsStarlight.dll`
-tester build. It is not an APK and should be used only in an All Of Us
-staff-approved test or Starlight beta/local-mod build, following the
-[Starlight developer testing guide](https://allofus.dev/guides/starlight-dev-guide/#testing).
-
-It uses Starlight recording and Unity playback, follows Android's system audio
-route, and interoperates with desktop players in the same voice lobby. Open
-Perfect Comms from the in-game Options menu.
-
-Perfect Comms installs beside mods that use Reactor or MiraAPI (such as TOU-Mira) without replacing their loader or dependencies. For BepInEx setup help, see the [official IL2CPP installation guide](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html).
-
+<details>
+<summary><b>Android touch controls</b></summary>
 <br>
 
-## For Mod Developers
+- **Open Mic:** tap the microphone button to mute or unmute.
+- **Push To Talk:** hold the microphone button while speaking.
+- **Team Radio:** tap its button to change channel, hold it to transmit.
+- **Deafen:** tap the speaker button. Deafening mutes playback and pauses your microphone.
 
-Making a roles mod? You can add your own voice behaviours to Perfect Comms **without forking it**: mutes, private routes, persistent host options, concealment-safe overlays, animated colors, and managed Team Radio that reuses Perfect Comms' selector/PTT/network path. Compile against the small reference-only API package; it never installs or copies the Perfect Comms runtime into your mod:
+</details>
+
+## Settings
+
+Click a tab to see that screen exactly as it looks in game.
+
+<details name="settings-tab" open>
+<summary><b>Audio</b> &nbsp;·&nbsp; Tune your microphone and what you hear.</summary>
+<p align="center"><img src="assets/readme/tab-audio.png" alt="Audio tab" width="860"></p>
+</details>
+<details name="settings-tab">
+<summary><b>Devices</b> &nbsp;·&nbsp; Choose your microphone and speakers.</summary>
+<p align="center"><img src="assets/readme/tab-devices.png" alt="Devices tab" width="860"></p>
+</details>
+<details name="settings-tab">
+<summary><b>Keybinds</b> &nbsp;·&nbsp; Keep your voice controls within reach.</summary>
+<p align="center"><img src="assets/readme/tab-keybinds.png" alt="Keybinds tab" width="860"></p>
+</details>
+<details name="settings-tab">
+<summary><b>HUD</b> &nbsp;·&nbsp; Make your voice indicators feel at home.</summary>
+<p align="center"><img src="assets/readme/tab-hud.png" alt="HUD tab" width="860"></p>
+</details>
+<details name="settings-tab">
+<summary><b>Advanced</b> &nbsp;·&nbsp; Fine-tune your voice connection and processing.</summary>
+<p align="center"><img src="assets/readme/tab-advanced.png" alt="Advanced tab" width="860"></p>
+</details>
+
+| Hosts set the match rules | Players set their own audio |
+| :--- | :--- |
+| Talk distance, falloff, and occlusion | Mic and speaker device |
+| Vent, ghost, and meeting voice rules | Open Mic, Push To Talk, and an optional noise gate |
+| Team Radio channels | Meeting spatial audio, noise suppression, and echo cancellation (desktop) |
+| Role-based mutes (with supported mods) | Per-player volume and HUD layout |
+
+**Recording on Windows:** the optional OBS plugin saves separate per-player or alive/dead voice files next to your recording. [Setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+
+## Supported mods
+
+Perfect Comms works on its own. Supported mods unlock extra voice behavior automatically when they're installed.
+
+| Mod | Voice behavior |
+| :--- | :--- |
+| **TOU-Mira** | Blackmailer, Jailor, Parasite / Puppeteer, Swooper, and Glitch mutes.<br>Crewpostor impostor voice rules.<br>Medium ghost voice modes.<br>Muffled hearing for Eclipsal, Grenadier, and Hypnotist effects.<br>Team Radio for Impostors, Vampires, and Lovers, with keybind cycling. |
+
+## For mod developers
+
+Add voice behavior to your roles mod **without forking Perfect Comms**: mutes, private routes, persistent host options, concealment-safe overlays, animated colors, and Team Radio on Perfect Comms' own controls and network path. Compile against the reference-only API package; it never copies the runtime into your mod.
 
 ```xml
-<PackageReference Include="PerfectComms.Api"
-                  Version="4.1.7.1"
-                  PrivateAssets="all" />
+<PackageReference Include="PerfectComms.Api" Version="4.1.7.1" PrivateAssets="all" />
 ```
-
-`4.1.7.1` is the reference-only API package revision and is versioned independently from the player-facing mod. It supports Perfect Comms 4.1.7 and later runtimes that retain this API contract. Players install Perfect Comms separately. Declare it as a soft dependency and register your rules only when it is present:
 
 ```csharp
 [BepInDependency("com.edgetel.perfectcomms", BepInDependency.DependencyFlags.SoftDependency)]
@@ -185,21 +150,17 @@ PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
         : VoiceRuleResult.Pass);
 ```
 
-Full guide, every primitive, and copy-paste examples are in the **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
-
-<br>
+The API package (`4.1.7.1`) is versioned separately and supports Perfect Comms 4.1.7 and later. Players install Perfect Comms themselves; declare it as a soft dependency. Every primitive and copy-paste examples: **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
 
 ## Credits
 
-- AmongUs-VoiceChat: [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
-- BetterCrewLink: [OhMyGuus/BetterCrewLink](https://github.com/OhMyGuus/BetterCrewLink)
+- [FangkuaiYa/AmongUs-VoiceChat](https://github.com/FangkuaiYa/AmongUs-VoiceChat)
+- [OhMyGuus/BetterCrewLink](https://github.com/OhMyGuus/BetterCrewLink)
 - Peer transport: [Pion WebRTC](https://github.com/pion/webrtc)
 - Special thanks to [idkimneil](https://github.com/idkimneil), the reason I made this.
 
-<div align="center">
-
-<img src="assets/brand/divider.svg" alt="" width="900">
-
-</div>
+<p align="center">
+  <img src="assets/brand/divider.svg" alt="" width="900">
+</p>
 
 > Perfect Comms is an unofficial mod. It is not affiliated with Innersloth, Among Us, BepInEx, MiraAPI, Reactor, BetterCrewLink, or any supported mods.
