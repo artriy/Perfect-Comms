@@ -60,8 +60,8 @@ internal static class VoiceReactorCredits
     }
 
     private static string StyledEntry(string nameSize, string versionSize) =>
-        $"<font=\"{FontName}\"><size={nameSize}><gradient=\"{GradientName}\">Perfect Comms</gradient></size> " +
-        $"<size={versionSize}><color=#A6ACC3BE>v{VoiceChatPluginMain.Version}</color></size></font>";
+        $"<font=\"{FontName}\"><size={nameSize}><color=#A6ACC3>Perfect Comms</color></size> " +
+        $"<size={versionSize}><color=#818AA7>v{VoiceChatPluginMain.Version}</color></size></font>";
 
     private static void CaptureGameplaySpacing(PingTracker __instance)
     {

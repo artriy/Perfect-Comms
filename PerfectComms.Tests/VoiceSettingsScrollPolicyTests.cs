@@ -13,28 +13,59 @@ public sealed class VoiceSettingsScrollPolicyTests
     }
 
     [Fact]
-    public void ExponentialScrollFeelsTheSameAcrossFrameRates()
+    public void SpringScrollFeelsTheSameAcrossFrameRates()
     {
-        float sixtyFps = 0f;
+        float sixtyFps = 0f, sixtyVelocity = 0f;
         for (int i = 0; i < 60; i++)
-            sixtyFps = VoiceSettingsScrollPolicy.Advance(sixtyFps, 100f, 2f, 1f / 60f);
+            sixtyFps = VoiceSettingsScrollPolicy.Follow(sixtyFps, ref sixtyVelocity, 100f, 1f / 60f, response: 2f);
 
-        float tenFps = 0f;
+        float tenFps = 0f, tenVelocity = 0f;
         for (int i = 0; i < 10; i++)
-            tenFps = VoiceSettingsScrollPolicy.Advance(tenFps, 100f, 2f, 0.1f);
+            tenFps = VoiceSettingsScrollPolicy.Follow(tenFps, ref tenVelocity, 100f, 0.1f, response: 2f);
 
-        Assert.Equal(sixtyFps, tenFps, 3);
-        Assert.InRange(sixtyFps, 86.4f, 86.6f);
+        Assert.Equal(sixtyFps, tenFps, 2);
+        Assert.Equal(sixtyVelocity, tenVelocity, 2);
+        Assert.InRange(sixtyFps, 59.3f, 59.5f);
     }
 
     [Fact]
-    public void ZeroTimeDoesNotMoveAndLargeFramesSettleWithoutOvershoot()
+    public void SpringNeverOvershootsFromRestAndSettlesExactly()
     {
-        Assert.Equal(20f, VoiceSettingsScrollPolicy.Advance(20f, 100f, 18f, 0f));
-        Assert.Equal(99.98f, VoiceSettingsScrollPolicy.Advance(99.98f, 100f, 18f, 0f));
-        Assert.Equal(100f, VoiceSettingsScrollPolicy.Advance(20f, 100f, 18f, 10f));
-        Assert.Equal(20f, VoiceSettingsScrollPolicy.Advance(20f, 100f, 0f, 1f));
-        Assert.Equal(99.98f, VoiceSettingsScrollPolicy.Advance(99.98f, 100f, 0f, 1f));
+        float position = 0f, velocity = 0f, previous = 0f;
+        for (int i = 0; i < 120; i++)
+        {
+            position = VoiceSettingsScrollPolicy.Follow(position, ref velocity, 100f, 1f / 60f);
+            Assert.InRange(position, previous, 100f);
+            previous = position;
+        }
+        Assert.Equal(100f, position);
+        Assert.Equal(0f, velocity);
+
+        velocity = 0f;
+        Assert.Equal(20f, VoiceSettingsScrollPolicy.Follow(20f, ref velocity, 100f, 0f));
+        Assert.Equal(100f, VoiceSettingsScrollPolicy.Follow(20f, ref velocity, 100f, 10f));
+        Assert.Equal(0f, velocity);
+    }
+
+    [Fact]
+    public void ScrollerKeepsMomentumAcrossWheelNotchesButJumpsOnDirectWrites()
+    {
+        var scroller = new VoiceSettingsScrollPolicy.SmoothScroller();
+        float scroll = 0f;
+        scroller.Scroll(scroll, 80f, 1000f);
+        scroll = scroller.Step(scroll, 1000f, 1f / 60f);
+        float firstStep = scroll;
+        scroller.Scroll(scroll, 80f, 1000f);
+        Assert.Equal(160f, scroller.Target);
+        scroll = scroller.Step(scroll, 1000f, 1f / 60f);
+        Assert.True(scroll - firstStep > firstStep, "the second notch should build on the first notch's speed");
+
+        scroll = 400f;
+        Assert.Equal(400f, scroller.Step(scroll, 1000f, 1f / 60f));
+        Assert.Equal(400f, scroller.Target);
+
+        scroller.Scroll(400f, 10000f, 500f);
+        Assert.Equal(500f, scroller.Target);
     }
 
     [Fact]

@@ -24,7 +24,7 @@ On desktop, press `F10` to open Voice Settings. Hosts can press `F11` to open Ho
 Managed Starlight players and desktop `PerfectComms.dll` players interoperate in
 the same voice lobby. The desktop installation and media stack are unchanged.
 
-When an update notification appears in the main menu, **View release** opens its release page and **Dismiss** closes the card for that menu visit. The card waits while a PerfectComms panel or first-time setup is open.
+When an update notification appears in the main menu, **View release** opens its release page and **Dismiss** closes the card for that menu visit. The card waits while a Perfect Comms panel or first-time setup is open.
 
 ## First-time setup
 
@@ -118,7 +118,7 @@ The speaking bar can show only active speakers or reserve a slot for every conne
 
 Open **Voice Lobbies** from the main menu to browse public voice-enabled lobbies. A host chooses whether to publish the lobby and which supported directory to use. Directory selection changes discovery only; it does not change the match's voice rules.
 
-The directory scrolls through all listed lobbies. Each row shows its player count and whether it can be joined; full, in-game, incompatible, or incomplete listings are unavailable. **Refresh** requests a fresh list.
+The directory scrolls through all listed lobbies. Each row shows its player count, and its button reads **Join** or the reason it cannot be joined: **Full**, **In game**, **Wrong version**, **No code**, **No region**, or **Unavailable**. **Refresh** requests a fresh list.
 
 **Edit lobby info** opens separate lobby-title and language fields with 40- and 16-character limits. **Save** applies the text; **Cancel** or closing the panel discards unfinished changes. These details appear publicly only when you host and enable Public Voice Lobby. On desktop, `Tab` switches fields, `Enter` saves, and `Esc` cancels.
 
@@ -133,7 +133,7 @@ Only the current lobby host can edit these synced settings.
 | **Meeting & Voice** | Meeting-floor grace period, vent voice, ghost rules, Communications sabotage, and Meetings/Lobby Only mode. |
 | **Team Radio** | Team Radio, the impostor channel, and task/meeting availability. |
 
-Compatible mods can register additional tabs under **Mod Behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
+Compatible mods can register additional tabs under **Mod behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
 
 ## OBS Recording Integration
 

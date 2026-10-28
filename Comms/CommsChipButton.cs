@@ -54,10 +54,11 @@ internal sealed class CommsChipButton
         _border = rt.gameObject.AddComponent<Image>();
         _border.sprite = VoiceUiKit.Rounded();
         _border.type = Image.Type.Sliced;
+        _border.Round(VoiceUiKit.RadiusCard);
         _border.color = VoiceUiKit.Divider;
         _border.raycastTarget = false;
 
-        _surface = VoiceUiKit.Panel("Inner", rt, VoiceUiKit.PanelInner);
+        _surface = VoiceUiKit.Panel("Inner", rt, VoiceUiKit.PanelInner).Round(VoiceUiKit.RadiusCard - 1f);
         _surface.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
         _surface.rectTransform.offsetMin = Vector2.one;
         _surface.rectTransform.offsetMax = -Vector2.one;

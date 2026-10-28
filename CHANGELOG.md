@@ -25,9 +25,12 @@
 
 ### Voice Settings Interface
 
-- Voice settings now use the helper logo's cyan, blue, and purple palette, Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions.
-- Microphone mode has separate Open Mic and Push To Talk buttons. Sliders and enabled toggles use the same spectrum accent.
+- Voice settings use Space Grotesk text, an icon sidebar, grouped controls, and inline setting descriptions. Buttons, sliders, enabled toggles, selections, and progress use solid cyan; the cyan-to-purple gradient is limited to the logo and the panel header line.
+- The logo is a redrawn ribbed microphone with a gradient capsule, grey cradle, and black outline, simplified to three ribs so it stays readable at small sizes.
+- Microphone mode has separate Open Mic and Push To Talk buttons. Pills, slider tracks, toggles, and scrollbars keep true rounded ends at every size instead of stretching into ovals or tapering.
+- Headings, section labels, status text, and button labels use sentence case, and the product name is written **Perfect Comms** everywhere. Help icons stay muted until hovered, option steppers use chevron icons, and long setting descriptions shrink before truncating.
 - The settings panel fits the available canvas and retains scrolling, key rebinding, device selection, and the speaking-bar preview. Desktop shortcut hints follow the configured bindings.
+- Mouse-wheel scrolling eases smoothly in Voice Settings, Host Voice Settings and its mod-tab list, Player Volumes, and Voice Lobbies. Quick wheel turns build on the current motion instead of restarting it, the motion does not overshoot, and it feels the same at any frame rate. Dragging a scrollbar still moves the content directly.
 - Removed TextMeshPro's automatic extra tracking from bold interface text so headings and labels retain the font's intended spacing.
 - Corrected the font atlas's distance-field encoding to match Unity's antialiased edge range, avoiding overly hard text edges at small sizes.
 - Microphone and speaker HUD icons use mipmaps and trilinear filtering when scaled down; artwork, size, and positioning are unchanged.
@@ -35,14 +38,14 @@
 - The synthetic speaking-bar preview now selects wrapping from the live HUD's available space before scaling into its card, and updates when that space changes.
 - Abandoned one-frame avatar color changes no longer apply on a later, unrelated flicker.
 - Public ghost avatars finish loading hats and visors without waiting for unused skins. Ready and delayed multipart ghost bodies render consistently, while normal ghost poses and stable-identity caches remain unchanged.
-- First-time setup has its own four-step layout: paired audio controls, grouped shortcuts, a preview-first HUD workspace, and compact review rows with direct editing. A fixed footer and canvas-aware scaling keep navigation visible. Existing HUD layouts can be restored; changes stay staged until Save & finish. Capsule-mic branding, Space Grotesk text, and cyan-to-purple accents match the rest of PerfectComms.
-- Host voice settings now group related match rules, show inline explanations, and mark their lobby-wide scope. The panel fits the canvas, with scrollbars for long rule lists and mod tabs; changes still apply immediately.
+- First-time setup has its own four-step layout: paired audio controls, grouped shortcuts, a preview-first HUD workspace, and compact review rows with direct editing. A fixed footer and canvas-aware scaling keep navigation visible. Existing HUD layouts can be restored; changes stay staged until Save & finish.
+- Host voice settings now group related match rules with the same section labels and cards as personal settings, show inline explanations, and state their lobby-wide scope in the header. The panel fits the canvas, with scrollbars for long rule lists and mod tabs; changes still apply immediately.
 - Conditional host options retain their values and scroll position when hidden. Registered mod tabs refresh when added or removed while the host menu is open, avoiding stale controls and invalid category selections.
-- Player volumes now use a personal mixer layout with wider name labels, local-only scope text, a scrollable roster, and per-player reset controls. Saved 0%-200% volumes and privacy-filtered speaking meters are retained; closing or rebuilding the panel finishes an active volume adjustment.
-- Voice Lobbies retain their original illustrated main-menu button and open a scrollable directory instead of a three-row view. Each lobby shows its player count and join availability; live updates reuse rows and keep join actions bound to the current listing.
+- Player volumes now use a personal mixer layout with wider name labels, a quiet level meter, local-only scope text, a scrollable roster, and per-player reset controls. Saved 0%-200% volumes and privacy-filtered speaking meters are retained; closing or rebuilding the panel finishes an active volume adjustment.
+- Voice Lobbies retain their original illustrated main-menu button and open a scrollable directory instead of a three-row view. Each lobby shows its player count, and its button states whether it can be joined or why not (Full, Wrong version, In game, No code, No region). Live updates reuse rows and keep join actions bound to the current listing.
 - The lobby-info editor has separate title and language fields, character counts, focus indicators, keyboard hints, and a fixed Save/Cancel footer. Counts, fields, buttons, and scrollbars stay within the panel's clipped content area.
-- Voice Settings and Host Voice Settings use smaller capsule-mic launcher tiles with personal or lobby-wide scope labels. Their existing menu visibility and host-authority gates are retained.
-- Update notifications use a compact bottom-right card with the available version, View release, and Dismiss actions. They defer while another PerfectComms panel is open. New menu loads discard an earlier completed check when notifications are disabled.
+- Voice Settings and Host Voice Settings use smaller microphone-logo launcher tiles with personal or lobby-wide scope labels. Their existing menu visibility and host-authority gates are retained.
+- Update notifications use a compact bottom-right card with the available version, View release, and Dismiss actions. They defer while another Perfect Comms panel is open. New menu loads discard an earlier completed check when notifications are disabled.
 - The update card intercepts clicks over its visible area without blocking the rest of the game menu. The original native lobby button retains its own click handling. Persistent-panel transitions close the lobby browser and discard unfinished editor changes.
 
 ## Perfect Comms v4.1.11

@@ -43,7 +43,7 @@ public static class VoiceHostMenuEntry
     private static void EnsureButton()
     {
         if (_chip.Built) return;
-        _chip.Build("Lobby-wide · PerfectComms", "Host voice settings",
+        _chip.Build("Lobby-wide · Perfect Comms", "Host voice settings",
             new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
             new Vector2(0f, -48f),
             HostSettingsPanel.Show,

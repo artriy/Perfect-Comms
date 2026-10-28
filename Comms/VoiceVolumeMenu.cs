@@ -21,6 +21,7 @@ public static class VoiceVolumeMenu
     private static readonly List<VoiceUiKit.PlayerVolumeRow> _rows = new();
     private static VoiceUiKit.PlayerVolumeRow? _activeRow;
     private static float _scroll;
+    private static readonly VoiceSettingsScrollPolicy.SmoothScroller _smoothScroll = new();
     private static float _contentHeight;
     private static float _animT;
     private static int _rosterSignature;
@@ -108,16 +109,15 @@ public static class VoiceVolumeMenu
 
     private static void Build()
     {
-        _shell = new VoiceUiKit.PanelShell("VC_VolumeMenu", "PLAYER VOLUMES", PanelW, PanelH,
-            HeaderClose, rail: false, backdrop: false, subtitle: "PLAYER VOLUMES");
+        _shell = new VoiceUiKit.PanelShell("VC_VolumeMenu", "Player volumes", PanelW, PanelH,
+            HeaderClose, rail: false, backdrop: false, subtitle: "Player volumes");
 
-        var scope = VoiceUiKit.Panel("PersonalMixScope", _shell.HeaderRect, VoiceUiKit.ControlBg);
-        scope.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-        scope.rectTransform.sizeDelta = new Vector2(172f, 36f);
-        scope.rectTransform.anchoredPosition = new Vector2(-92f, 0f);
-        var scopeText = VoiceUiKit.Text("Scope", scope.transform, "PERSONAL MIX", 12f,
-            VoiceUiKit.TextPrimary, TMPro.TextAlignmentOptions.Center, TMPro.FontStyles.Bold);
-        scopeText.characterSpacing = 1.5f;
+        var scope = VoiceUiKit.Rect("PersonalMixScope", _shell.HeaderRect);
+        scope.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+        scope.sizeDelta = new Vector2(172f, 36f);
+        scope.anchoredPosition = new Vector2(-92f, 0f);
+        var scopeText = VoiceUiKit.Text("Scope", scope, "Personal mix", 14f,
+            VoiceUiKit.TextMuted, TMPro.TextAlignmentOptions.Right);
         scopeText.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
         scopeText.rectTransform.offsetMin = Vector2.zero;
         scopeText.rectTransform.offsetMax = Vector2.zero;
@@ -276,6 +276,8 @@ public static class VoiceVolumeMenu
         _shell.TickHeader();
         if (_shell == null || !_shown) return;
         bool pointerConsumed = HandleScroll();
+        _scroll = _smoothScroll.Step(_scroll, MaxScroll(), Time.unscaledDeltaTime);
+        ApplyScroll();
         HandleInput(pointerConsumed);
 
         FeedMeters(privacy, privacyPhase);
@@ -429,7 +431,7 @@ public static class VoiceVolumeMenu
                 consumed = true;
             }
             else
-                _scroll -= Input.mouseScrollDelta.y * RowH;
+                _smoothScroll.Scroll(_scroll, -Input.mouseScrollDelta.y * RowH, MaxScroll());
         }
         ApplyScroll();
         return consumed;

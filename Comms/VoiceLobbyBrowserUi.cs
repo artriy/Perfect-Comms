@@ -59,6 +59,7 @@ internal static class VoiceLobbyBrowserUi
     private static string _editLanguage = "";
     private static DateTime _nextLiveAgeTickUtc = DateTime.MinValue;
     private static float _scroll;
+    private static readonly VoiceSettingsScrollPolicy.SmoothScroller _smoothScroll = new();
     private static bool _scrollDragging;
     private static float _scrollDragOffset;
     private static int _lastUpdateFrame = -1;
@@ -386,12 +387,12 @@ internal static class VoiceLobbyBrowserUi
     {
         if (_shell != null && _shell.Root != null) return;
         _shell = new VoiceUiKit.PanelShell("VC_LobbyBrowserPanel", "Voice lobbies", PanelWidth, PanelHeight,
-            ClosePanel, rail: false, subtitle: "PUBLIC DIRECTORY  /  Find a lobby using Perfect Comms");
+            ClosePanel, rail: false, subtitle: "Public directory  /  Find a lobby using Perfect Comms");
         float w = _shell.PaneClip.rect.width;
         float h = _shell.PaneClip.rect.height;
         _directoryRoot = VoiceUiKit.Rect("Directory", _shell.PaneRoot);
         Place(_directoryRoot, 0f, 0f, w, h);
-        Label("LobbyColumn", _directoryRoot, "PUBLIC VOICE LOBBIES", 12f, VoiceUiKit.TextFaint, 0f, 0f, 500f, 24f);
+        Label("LobbyColumn", _directoryRoot, "Public voice lobbies", 12f, VoiceUiKit.TextFaint, 0f, 0f, 500f, 24f);
         _statusText = Label("DirectoryStatus", _directoryRoot, "Connecting to Perfect Comms live lobbies...", 14f,
             VoiceUiKit.TextMuted, 0f, 28f, w - 8f, 44f);
         _statusText.enableWordWrapping = true;
@@ -422,7 +423,7 @@ internal static class VoiceLobbyBrowserUi
         _refreshButton = new VoiceUiKit.ActionButton(_directoryRoot, "Refresh", 144f, 48f, 0f, -h + 56f,
             VoiceUiKit.ButtonKind.Secondary, () => Refresh());
         _infoButton = new VoiceUiKit.ActionButton(_directoryRoot, "Edit lobby info", 192f, 48f, w - 200f, -h + 56f,
-            VoiceUiKit.ButtonKind.Ghost, OpenInfoEditor);
+            VoiceUiKit.ButtonKind.Secondary, OpenInfoEditor);
         Label("DirectoryNote", _directoryRoot, "Host a lobby to publish it in game settings.", 12f,
             VoiceUiKit.TextFaint, 160f, h - 52f, w - 368f, 40f);
         BuildEditor(w, h);
@@ -462,9 +463,9 @@ internal static class VoiceLobbyBrowserUi
 
     private static RectTransform BuildEditorField(string name, float y, float w, out Image focus, out TextMeshProUGUI value)
     {
-        focus = VoiceUiKit.Panel(name + "Focus", _editorRoot!, VoiceUiKit.Divider);
+        focus = VoiceUiKit.Panel(name + "Focus", _editorRoot!, VoiceUiKit.Divider).Round(VoiceUiKit.RadiusField);
         Place(focus.rectTransform, 8f, y, w - 16f, 64f);
-        var inset = VoiceUiKit.Panel("Inset", focus.transform, VoiceUiKit.PanelOuter);
+        var inset = VoiceUiKit.Panel("Inset", focus.transform, VoiceUiKit.PanelOuter).Round(VoiceUiKit.RadiusField - 2f);
         Place(inset.rectTransform, 2f, 2f, w - 20f, 60f);
         value = Label(name + "Value", inset.rectTransform, "", 22f, VoiceUiKit.TextPrimary,
             18f, 12f, w - 64f, 36f);
@@ -564,7 +565,8 @@ internal static class VoiceLobbyBrowserUi
             consumed = true;
         }
         if (!_scrollDragging && VoiceUiKit.Contains(_listClip))
-            _scroll = Mathf.Clamp(_scroll - Input.mouseScrollDelta.y * 72f, 0f, MaxScroll);
+            _smoothScroll.Scroll(_scroll, -Input.mouseScrollDelta.y * 72f, MaxScroll);
+        _scroll = _smoothScroll.Step(_scroll, MaxScroll, Time.unscaledDeltaTime);
         UpdateScrollVisual();
         return consumed;
     }
@@ -611,7 +613,7 @@ internal static class VoiceLobbyBrowserUi
             _age = Label("LobbyStateAge", Root, "", 12f, VoiceUiKit.TextFaint, 20f, 84f, width - 340f, 22f);
             _slots = Label("PlayerSlots", Root, "", 20f, VoiceUiKit.TextPrimary, width - 304f, 20f, 112f, 30f, FontStyles.Bold);
             _slots.alignment = TextAlignmentOptions.Center;
-            var players = Label("PlayersLabel", Root, "PLAYERS", 10f, VoiceUiKit.TextFaint, width - 304f, 52f, 112f, 20f);
+            var players = Label("PlayersLabel", Root, "players", 10f, VoiceUiKit.TextFaint, width - 304f, 52f, 112f, 20f);
             players.alignment = TextAlignmentOptions.Center;
             _join = new VoiceUiKit.ActionButton(Root, "Join", 144f, 44f, width - 164f, -16f,
                 VoiceUiKit.ButtonKind.Primary, () => JoinListing(_listing), () => _joinEnabled);
@@ -637,9 +639,8 @@ internal static class VoiceLobbyBrowserUi
             _joinEnabled = IsJoinable(listing) && !string.IsNullOrWhiteSpace(listing.Region);
             if (status == "JOIN" && string.IsNullOrWhiteSpace(listing.Code)) status = "NO CODE";
             else if (status == "JOIN" && string.IsNullOrWhiteSpace(listing.Region)) status = "NO REGION";
-            _join.SetText(_joinEnabled ? "Join" : "Unavailable");
-            _availability.text = _joinEnabled ? "Ready to join" : status;
-            _availability.color = _joinEnabled ? VoiceUiKit.Accent : VoiceUiKit.TextMuted;
+            _join.SetText(_joinEnabled ? "Join" : JoinStatusText(status));
+            _availability.text = "";
             UpdateAge();
             _join.Tick(1f, allowInput: false);
         }
@@ -647,6 +648,16 @@ internal static class VoiceLobbyBrowserUi
         internal void UpdateAge() => _age.text = StateWithDuration(_listing);
         internal void Tick(float dt, bool allowInput) => _join.Tick(dt, allowInput);
     }
+
+    private static string JoinStatusText(string status) => status switch
+    {
+        "FULL" => "Full",
+        "VERSION" => "Wrong version",
+        "IN GAME" => "In game",
+        "NO CODE" => "No code",
+        "NO REGION" => "No region",
+        _ => "Unavailable",
+    };
 
     private static bool IsJoinable(VoiceLobbyListing listing)
         => string.Equals(listing.State, "Lobby", StringComparison.OrdinalIgnoreCase)

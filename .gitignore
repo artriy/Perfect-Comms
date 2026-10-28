@@ -63,9 +63,8 @@ cloudflare/**/package-lock.json
 cloudflare/**/*.log
 TouMira/
 artifacts/
-website/
 assets/brand/logo-concepts/
-assets/brand/vectorcraft/*.vectorcraft
+assets/brand/vectorcraft/
 # Local portable toolchains and downloaded installers travel with folder copies,
 # not with source-control commits.
 dev-tools/

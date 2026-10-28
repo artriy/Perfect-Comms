@@ -4,7 +4,7 @@ The host controls the match-wide voice rules. Host changes sync automatically to
 
 Open **Host Voice Settings** from the lobby game-settings console. On desktop, the host can also press `F11`. The panel closes automatically if host authority moves to another player. Hover the **?** beside an option for its full in-game explanation.
 
-The **Applies to everyone** badge distinguishes these shared rules from personal settings. Related rules are grouped, with dependent options indented below their parent. Use the scrollbars for long rule lists or mod-tab lists; changes apply immediately without a save step.
+The header's **Applies to everyone in the lobby** label distinguishes these shared rules from personal settings. Related rules are grouped, with dependent options indented below their parent. Use the scrollbars for long rule lists or mod-tab lists; changes apply immediately without a save step.
 
 ## Proximity tab
 
@@ -89,7 +89,7 @@ Role rules activate automatically when their matching mod and role state are ava
 
 ## Additional mod tabs
 
-Other compatible mods can add their own tab under **Mod Behaviour**, with synced options, through the [mod integration API](Mod-Integration). A client without that mod does not render its tab.
+Other compatible mods can add their own tab under **Mod behaviour**, with synced options, through the [mod integration API](Mod-Integration). A client without that mod does not render its tab.
 
 ## How synchronization works
 

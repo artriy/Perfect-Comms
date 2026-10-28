@@ -16,9 +16,12 @@ internal static class VoiceUiBranding
     private const string ResourcePrefix = "VoiceChatPlugin.Resources.VoiceUi.";
     private static readonly Sprite?[] CategorySprites = new Sprite?[5];
     private static Sprite? _logo;
+    private static Sprite? _chevron;
     private static TMP_FontAsset? _font;
 
     internal static Sprite Logo() => _logo ??= LoadSprite("VoiceChatPlugin.Resources.miclogo.png");
+
+    internal static Sprite Chevron() => _chevron ??= LoadSprite(ResourcePrefix + "Chevron.png");
 
     internal static Sprite CategoryIcon(VoiceSettingsCategory category)
     {

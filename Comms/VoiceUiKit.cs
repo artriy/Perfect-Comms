@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
 using TMPro;
 using UnityEngine;
@@ -60,6 +61,20 @@ internal static class VoiceUiKit
     public static readonly Color32 Danger          = new(230, 88, 96, 255);
     public static readonly Color32 DangerDim       = new(70, 34, 38, 255);
     public static readonly Color32 Clear           = new(0, 0, 0, 0);
+    // Direction A: solid cyan marks anything interactive; the cyan to violet spectrum is reserved
+    // for the brand (logo and the panel header hairline).
+    public static readonly Color32 AccentHover     = new(138, 216, 242, 255);
+    public static readonly Color32 AccentPressed   = new(79, 179, 214, 255);
+    public static readonly Color32 OnAccent        = new(10, 18, 32, 255);
+    public static readonly Color32 CardSurface     = new(20, 24, 39, 255);
+    public static readonly Color32 SegmentWell     = new(13, 16, 24, 255);
+    public static readonly Color32 SegmentSelected = new(38, 43, 64, 255);
+
+    public const float RadiusPanel = 22f;
+    public const float RadiusCard = 16f;
+    public const float RadiusControl = 12f;
+    public const float RadiusField = 10f;
+    public const float Capsule = float.PositiveInfinity;
 
     private static readonly Color32 LevelMeterGreen  = new(77, 217, 107, 240);
     private static readonly Color32 LevelMeterYellow = new(242, 214, 64, 240);
@@ -232,6 +247,7 @@ internal static class VoiceUiKit
         var background = backgroundRt.gameObject.AddComponent<Image>();
         background.sprite = Rounded();
         background.type = Image.Type.Sliced;
+        background.Round(RadiusControl);
         background.color = new Color32(18, 23, 31, 252);
         background.raycastTarget = false;
 
@@ -297,6 +313,14 @@ internal static class VoiceUiKit
         scaler.matchWidthOrHeight = 0.5f;
 
         _canvasRoot.AddComponent<GraphicRaycaster>();
+        if (!_fitHooked)
+        {
+            // Runs before UGUI rebuilds meshes, so sizes assigned after a Round() call are fitted
+            // in the same frame, including Canvas.ForceUpdateCanvases.
+            Canvas.add_preWillRenderCanvases(
+                DelegateSupport.ConvertDelegate<Canvas.WillRenderCanvases>(new Action(FitRoundedImages)));
+            _fitHooked = true;
+        }
         EnsureDriver();
     }
 
@@ -309,6 +333,48 @@ internal static class VoiceUiKit
         if (driver == null)
             driver = _canvasRoot.AddComponent<VoiceUiDriver>();
         if (!driver.enabled) driver.enabled = true;
+    }
+
+    // Unity scales a sliced border that exceeds its rect independently per axis, which turned
+    // capsules into ovals and thin tracks into spindles. Every rounded Image declares its radius
+    // here and its pixelsPerUnitMultiplier is refitted so the border never exceeds half the short
+    // side.
+    private static readonly Dictionary<int, (Image image, float radius)> _roundedImages = new();
+    private static readonly List<int> _deadRounded = new();
+    private const float CanvasReferencePixelsPerUnit = 100f;
+    private static bool _fitHooked;
+
+    public static Image Round(this Image image, float radius = Capsule)
+    {
+        _roundedImages[image.GetInstanceID()] = (image, radius);
+        FitRadius(image, radius);
+        return image;
+    }
+
+    private static void FitRadius(Image image, float radius)
+    {
+        var sprite = image.sprite;
+        if (sprite == null || sprite.border.x <= 0f) return;
+        var size = image.rectTransform.rect.size;
+        // A bar that starts empty (zero width) still has a known height: fit to that.
+        float shortSide = size.x <= 0.01f ? size.y : size.y <= 0.01f ? size.x : Mathf.Min(size.x, size.y);
+        float r = Mathf.Min(radius, shortSide * 0.5f);
+        if (r <= 0.01f) return;
+        float multiplier = sprite.border.x * CanvasReferencePixelsPerUnit / sprite.pixelsPerUnit / r;
+        if (Mathf.Abs(image.pixelsPerUnitMultiplier - multiplier) > 0.001f)
+            image.pixelsPerUnitMultiplier = multiplier;
+    }
+
+    private static void FitRoundedImages()
+    {
+        foreach (var entry in _roundedImages)
+        {
+            var (image, radius) = entry.Value;
+            if (image == null) { _deadRounded.Add(entry.Key); continue; }
+            if (image.isActiveAndEnabled) FitRadius(image, radius);
+        }
+        foreach (int id in _deadRounded) _roundedImages.Remove(id);
+        _deadRounded.Clear();
     }
 
     public static Sprite Solid(Color32 c)
@@ -453,9 +519,10 @@ internal static class VoiceUiKit
         var image = Rect(name, parent).gameObject.AddComponent<Image>();
         image.sprite = Spectrum();
         image.type = Image.Type.Sliced;
+        image.Round();
         image.color = Color.white;
         image.raycastTarget = false;
-        return image;
+        return image.Round();
     }
 
     public static Image GlowImage(string name, Transform parent, Color32 color)
@@ -511,7 +578,7 @@ internal static class VoiceUiKit
         if (rounded) img.type = Image.Type.Sliced;
         img.color = color;
         img.raycastTarget = false;
-        return img;
+        return rounded ? img.Round(soft ? Capsule : RadiusCard) : img;
     }
 
     public static TextMeshProUGUI Text(string name, Transform parent, string content, float size,
@@ -541,12 +608,24 @@ internal static class VoiceUiKit
         rt.sizeDelta = new Vector2(0f, height);
         rt.anchoredPosition = new Vector2(0f, y);
 
-        var label = Text("SectionLabel", rt, content, 13f, TextMuted, TextAlignmentOptions.Left, FontStyles.Bold);
-        label.characterSpacing = 1.5f;
+        var label = Text("SectionLabel", rt, content, 13f, TextFaint, TextAlignmentOptions.Left, FontStyles.Bold);
         label.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 1f), new Vector2(0f, 0.5f));
         label.rectTransform.offsetMin = Vector2.zero;
         label.rectTransform.offsetMax = new Vector2(0f, -2f);
         return rt;
+    }
+
+    public static Image ChevronIcon(RectTransform parent, bool pointsLeft, float size, Color32 color)
+    {
+        var icon = Rect("Chevron", parent).gameObject.AddComponent<Image>();
+        icon.sprite = VoiceUiBranding.Chevron();
+        icon.preserveAspect = true;
+        icon.color = color;
+        icon.raycastTarget = false;
+        icon.rectTransform.Anchor(new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f));
+        icon.rectTransform.sizeDelta = new Vector2(size, size);
+        if (pointsLeft) icon.rectTransform.localScale = new Vector3(-1f, 1f, 1f);
+        return icon;
     }
 
     public static bool Contains(RectTransform rt)
@@ -590,7 +669,6 @@ internal static class VoiceUiKit
     {
         private readonly RectTransform _root;
         private readonly Image _surface;
-        private readonly Image? _spectrum;
         private readonly TextMeshProUGUI _label;
         private readonly ButtonKind _kind;
         private readonly Action _click;
@@ -618,16 +696,9 @@ internal static class VoiceUiKit
             _surface = _root.gameObject.AddComponent<Image>();
             _surface.sprite = Rounded(true);
             _surface.type = Image.Type.Sliced;
+            _surface.Round(RadiusControl);
             _surface.color = RestColor();
             _surface.raycastTarget = false;
-            if (kind == ButtonKind.Primary)
-            {
-                _root.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-                _spectrum = SpectrumImage("ButtonSpectrum", _root);
-                _spectrum.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-                _spectrum.rectTransform.offsetMin = Vector2.zero;
-                _spectrum.rectTransform.offsetMax = Vector2.zero;
-            }
             _label = Text("ButtonLabel", _root, text, 18f, LabelColor(),
                 TextAlignmentOptions.Center, FontStyles.Bold);
             _label.characterSpacing = 0f;
@@ -654,15 +725,11 @@ internal static class VoiceUiKit
             bool enabled = _enabled();
             bool over = enabled && (_clip == null || Contains(_clip)) && Contains(_root);
             bool down = over && Input.GetMouseButton(0);
-            Color32 target = !enabled ? ToggleOffTrack : over ? HoverColor() : RestColor();
+            Color32 target = !enabled ? ToggleOffTrack : down ? PressedColor() : over ? HoverColor() : RestColor();
             _surface.color = Lerp(_surface.color, target, Mathf.Clamp01(dt * 15f));
-            if (_spectrum != null)
-                _spectrum.color = Lerp(_spectrum.color,
-                    !enabled ? Clear : over ? new Color32(224, 232, 255, 255) : new Color32(255, 255, 255, 255),
-                    Mathf.Clamp01(dt * 14f));
             _label.color = Lerp(_label.color,
                 enabled ? LabelColor() : TextFaint, Mathf.Clamp01(dt * 14f));
-            float targetScale = down ? 0.98f : over ? 1.015f : 1f;
+            float targetScale = down ? 0.98f : 1f;
             float scale = Mathf.Lerp(_root.localScale.x, targetScale, Mathf.Clamp01(dt * 18f));
             _root.localScale = new Vector3(scale, scale, 1f);
             if (allowInput && over && Input.GetMouseButtonDown(0))
@@ -672,9 +739,20 @@ internal static class VoiceUiKit
             }
         }
 
-        private Color32 RestColor() => _kind == ButtonKind.Ghost ? Clear : ControlBg;
-        private Color32 HoverColor() => _kind == ButtonKind.Ghost ? AccentFaint : ControlHover;
-        private Color32 LabelColor() => _kind == ButtonKind.Primary ? PanelOuter : TextPrimary;
+        private Color32 RestColor() => _kind switch
+        {
+            ButtonKind.Primary => Accent,
+            ButtonKind.Ghost => Clear,
+            _ => ControlBg,
+        };
+        private Color32 HoverColor() => _kind switch
+        {
+            ButtonKind.Primary => AccentHover,
+            ButtonKind.Ghost => AccentFaint,
+            _ => ControlHover,
+        };
+        private Color32 PressedColor() => _kind == ButtonKind.Primary ? AccentPressed : HoverColor();
+        private Color32 LabelColor() => _kind == ButtonKind.Primary ? OnAccent : TextPrimary;
     }
 
     public sealed class PanelShell
@@ -705,6 +783,8 @@ internal static class VoiceUiKit
         private readonly TextMeshProUGUI? _pageSubtitle;
 #if WINDOWS
         private readonly TextMeshProUGUI? _menuKey;
+        private readonly TextMeshProUGUI? _menuLabel;
+        private readonly Image? _menuKeyChip;
         private readonly TextMeshProUGUI? _pushToTalkKey;
         private readonly TextMeshProUGUI? _muteKey;
 #endif
@@ -768,7 +848,7 @@ internal static class VoiceUiKit
                 : new Vector2(46f, 38f);
 
 
-            var frame = Panel("Frame", RootRect, Divider);
+            var frame = Panel("Frame", RootRect, Divider).Round(RadiusPanel);
             frame.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             frame.rectTransform.offsetMin = Vector2.zero;
             frame.rectTransform.offsetMax = Vector2.zero;
@@ -782,6 +862,7 @@ internal static class VoiceUiKit
             surfaceImg.type = Image.Type.Sliced;
             surfaceImg.color = Color.white;
             surfaceImg.raycastTarget = false;
+            surfaceImg.Round(RadiusPanel - 1f);
 
             float headerH = branded ? 98f : 76f;
             float footerH = settingsStyle ? 48f : 0f;
@@ -794,6 +875,7 @@ internal static class VoiceUiKit
             headerBg.type = Image.Type.Sliced;
             headerBg.color = Color.white;
             headerBg.raycastTarget = false;
+            headerBg.Round(RadiusPanel - 1f);
 
             var headerDivider = Panel("HeaderDivider", HeaderRect, Divider, false);
             headerDivider.rectTransform.Anchor(new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f));
@@ -807,21 +889,20 @@ internal static class VoiceUiKit
                 logo.preserveAspect = true;
                 logo.raycastTarget = false;
                 logo.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-                logo.rectTransform.sizeDelta = new Vector2(52f, 64f);
-                logo.rectTransform.anchoredPosition = new Vector2(28f, 0f);
+                logo.rectTransform.sizeDelta = new Vector2(52f, 52f);
+                logo.rectTransform.anchoredPosition = new Vector2(24f, 0f);
 
-                var brand = Text("Title", HeaderRect, "Perfect<font-weight=400>Comms</font-weight>", 27f,
+                var brand = Text("Title", HeaderRect, "Perfect Comms", 26f,
                     TextBright, TextAlignmentOptions.Left, FontStyles.Bold);
                 brand.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-                brand.rectTransform.sizeDelta = new Vector2(320f, 38f);
-                brand.rectTransform.anchoredPosition = new Vector2(94f, 11f);
+                brand.rectTransform.sizeDelta = new Vector2(320f, 36f);
+                brand.rectTransform.anchoredPosition = new Vector2(88f, 11f);
                 var subtitleText = Text("Subtitle", HeaderRect,
-                    subtitle ?? (guided ? "FIRST-TIME SETUP" : hostSettings ? "HOST VOICE SETTINGS" : "VOICE SETTINGS"),
-                    11f, TextMuted, TextAlignmentOptions.Left);
-                subtitleText.characterSpacing = 4f;
+                    subtitle ?? (guided ? "First-time setup" : hostSettings ? "Host voice settings" : "Voice settings"),
+                    14f, TextMuted, TextAlignmentOptions.Left);
                 subtitleText.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-                subtitleText.rectTransform.sizeDelta = new Vector2(320f, 22f);
-                subtitleText.rectTransform.anchoredPosition = new Vector2(95f, -21f);
+                subtitleText.rectTransform.sizeDelta = new Vector2(420f, 22f);
+                subtitleText.rectTransform.anchoredPosition = new Vector2(89f, -18f);
 
                 var spectrum = SpectrumImage("Spectrum", HeaderRect);
                 spectrum.rectTransform.Anchor(new Vector2(0f, 1f), Vector2.one, new Vector2(0.5f, 1f));
@@ -829,23 +910,27 @@ internal static class VoiceUiKit
                 spectrum.rectTransform.anchoredPosition = Vector2.zero;
                 if (hostSettings)
                 {
-                    var scope = Panel("LobbyScope", HeaderRect, ControlBg);
-                    scope.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-                    scope.rectTransform.sizeDelta = new Vector2(226f, 36f);
-                    scope.rectTransform.anchoredPosition = new Vector2(-94f, 0f);
-                    var scopeText = Text("Scope", scope.transform, "APPLIES TO EVERYONE", 12f,
-                        TextPrimary, TextAlignmentOptions.Center, FontStyles.Bold);
-                    scopeText.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-                    scopeText.rectTransform.offsetMin = Vector2.zero;
-                    scopeText.rectTransform.offsetMax = Vector2.zero;
+                    var scopeText = Text("Scope", HeaderRect, "Applies to everyone in the lobby", 14f,
+                        TextMuted, TextAlignmentOptions.Right);
+                    scopeText.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+                    scopeText.rectTransform.sizeDelta = new Vector2(300f, 30f);
+                    scopeText.rectTransform.anchoredPosition = new Vector2(-88f, 0f);
                 }
 #if WINDOWS
                 if (personalSettings)
                 {
-                    _menuKey = Text("MenuShortcut", HeaderRect, "", 13f, TextMuted, TextAlignmentOptions.Right);
-                    _menuKey.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-                    _menuKey.rectTransform.sizeDelta = new Vector2(300f, 30f);
-                    _menuKey.rectTransform.anchoredPosition = new Vector2(-92f, 0f);
+                    _menuLabel = Text("MenuShortcutLabel", HeaderRect, "Voice settings", 14f, TextMuted, TextAlignmentOptions.Right);
+                    _menuLabel.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+                    _menuLabel.rectTransform.sizeDelta = new Vector2(140f, 30f);
+                    _menuLabel.rectTransform.anchoredPosition = new Vector2(-88f, 0f);
+                    _menuKeyChip = Panel("MenuShortcutKey", HeaderRect, ControlBg).Round(8f);
+                    _menuKeyChip.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
+                    _menuKeyChip.rectTransform.sizeDelta = new Vector2(44f, 28f);
+                    _menuKey = Text("MenuShortcut", _menuKeyChip.transform, "", 13f, TextPrimary,
+                        TextAlignmentOptions.Center, FontStyles.Bold);
+                    _menuKey.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                    _menuKey.rectTransform.offsetMin = Vector2.zero;
+                    _menuKey.rectTransform.offsetMax = Vector2.zero;
                 }
 #endif
             }
@@ -861,11 +946,12 @@ internal static class VoiceUiKit
 
             _closeRt = Rect("Close", HeaderRect);
             _closeRt.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
-            _closeRt.sizeDelta = new Vector2(46f, 46f);
+            _closeRt.sizeDelta = new Vector2(42f, 42f);
             _closeRt.anchoredPosition = new Vector2(-24f, 0f);
             _closeImg = _closeRt.gameObject.AddComponent<Image>();
             _closeImg.sprite = Rounded();
             _closeImg.type = Image.Type.Sliced;
+            _closeImg.Round(RadiusControl);
             _closeImg.color = _closeRestColor;
             _closeImg.raycastTarget = false;
             _closeBar1 = CloseBar(_closeRt, 45f);
@@ -922,8 +1008,7 @@ internal static class VoiceUiKit
                 _pageSubtitle.rectTransform.anchoredPosition = new Vector2(RailWidth + pad, -headerH - 66f);
 
                 var railHeading = Text("RailHeading", hostSettings ? RootRect : RailRoot,
-                    hostSettings ? "LOBBY RULES" : "YOUR SETTINGS", 11f, TextFaint, TextAlignmentOptions.Left);
-                railHeading.characterSpacing = 3f;
+                    hostSettings ? "Lobby rules" : "Your settings", 13f, TextFaint, TextAlignmentOptions.Left);
                 railHeading.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(0f, 1f));
                 railHeading.rectTransform.sizeDelta = new Vector2(RailWidth - 40f, 24f);
                 railHeading.rectTransform.anchoredPosition = new Vector2(30f, hostSettings ? -headerH - 24f : -24f);
@@ -941,15 +1026,6 @@ internal static class VoiceUiKit
                 var footerDivider = Panel("Divider", footer.transform, Divider, false);
                 footerDivider.rectTransform.Anchor(new Vector2(0f, 1f), Vector2.one, new Vector2(0.5f, 1f));
                 footerDivider.rectTransform.sizeDelta = new Vector2(0f, 1f);
-                var footerBrand = Text("Brand", footer.transform, "Perfect Comms", 12f,
-                    TextMuted, TextAlignmentOptions.Left);
-                footerBrand.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0f, 0.5f));
-                footerBrand.rectTransform.offsetMin = new Vector2(56f, 0f);
-                footerBrand.rectTransform.offsetMax = new Vector2(-32f, 0f);
-                var footerMark = SpectrumImage("SpectrumMark", footer.transform);
-                footerMark.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-                footerMark.rectTransform.sizeDelta = new Vector2(22f, 3f);
-                footerMark.rectTransform.anchoredPosition = new Vector2(28f, 0f);
                 var footerNote = Text("Note", footer.transform,
                     hostSettings ? "Changes apply immediately to the lobby" : "Changes apply immediately", 12f,
                     TextMuted, TextAlignmentOptions.Right);
@@ -1015,7 +1091,14 @@ internal static class VoiceUiKit
                 _ => throw new ArgumentOutOfRangeException(nameof(category)),
             };
 #if WINDOWS
-            if (_menuKey != null) _menuKey.text = VoiceChatKeybinds.OpenVoiceMenu.Label + "   Voice settings";
+            if (_menuKey != null && _menuKeyChip != null && _menuLabel != null)
+            {
+                _menuKey.text = VoiceChatKeybinds.OpenVoiceMenu.Label;
+                float keyWidth = Mathf.Max(28f, _menuKey.GetPreferredValues(_menuKey.text).x + 16f);
+                float labelWidth = _menuLabel.GetPreferredValues(_menuLabel.text).x;
+                _menuKeyChip.rectTransform.sizeDelta = new Vector2(keyWidth, 28f);
+                _menuKeyChip.rectTransform.anchoredPosition = new Vector2(-88f - labelWidth - 10f, 0f);
+            }
             if (_pushToTalkKey != null) _pushToTalkKey.text = VoiceChatKeybinds.PushToTalk.Label;
             if (_muteKey != null) _muteKey.text = VoiceChatKeybinds.ToggleMute.Label;
 #endif
@@ -1031,6 +1114,7 @@ internal static class VoiceUiKit
             var img = rt.gameObject.AddComponent<Image>();
             img.sprite = Rounded(true);
             img.type = Image.Type.Sliced;
+            img.Round();
             img.color = TextMuted;
             img.raycastTarget = false;
             return img;
@@ -1119,6 +1203,7 @@ internal static class VoiceUiKit
         private Image? _scrollThumbImage;
         private float _contentHeight;
         private float _scroll;
+        private readonly VoiceSettingsScrollPolicy.SmoothScroller _smoothScroll = new();
         private bool _scrollbarDragging;
         private float _scrollbarDragOffset;
         private const float RowH = 62f;
@@ -1149,17 +1234,19 @@ internal static class VoiceUiKit
             _highlight.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             _highlight.sizeDelta = new Vector2(-32f, ItemH);
             var hiImg = _highlight.gameObject.AddComponent<Image>();
-            hiImg.sprite = Spectrum();
+            hiImg.sprite = Rounded();
             hiImg.type = Image.Type.Sliced;
-            hiImg.color = new Color32(255, 255, 255, 28);
+            hiImg.Round(RadiusControl);
+            hiImg.color = ControlBg;
             hiImg.raycastTarget = false;
 
             var hiBar = Rect("RailBar", _highlight);
             hiBar.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
-            hiBar.sizeDelta = new Vector2(2f, ItemH - 24f);
+            hiBar.sizeDelta = new Vector2(3f, ItemH - 26f);
             var barImg = hiBar.gameObject.AddComponent<Image>();
             barImg.sprite = Rounded(true);
             barImg.type = Image.Type.Sliced;
+            barImg.Round();
             barImg.color = Accent;
             barImg.raycastTarget = false;
 
@@ -1185,6 +1272,7 @@ internal static class VoiceUiKit
                 var hover = rt.gameObject.AddComponent<Image>();
                 hover.sprite = Rounded();
                 hover.type = Image.Type.Sliced;
+                hover.Round(RadiusControl);
                 hover.color = Clear;
                 hover.raycastTarget = false;
 
@@ -1332,6 +1420,7 @@ internal static class VoiceUiKit
         private bool HandleScroll()
         {
             if (_scrollView == null || _scrollbar == null || _scrollThumb == null) return false;
+            _scroll = _smoothScroll.Step(_scroll, MaxScroll(), Time.unscaledDeltaTime);
             ApplyScroll();
             if (!_scrollbar.gameObject.activeSelf) return false;
             bool overBar = Contains(_scrollbar);
@@ -1362,10 +1451,7 @@ internal static class VoiceUiKit
                 return true;
             }
             if (Contains(_scrollView) && Mathf.Abs(Input.mouseScrollDelta.y) > 0.01f)
-            {
-                _scroll -= Input.mouseScrollDelta.y * RowH;
-                ApplyScroll();
-            }
+                _smoothScroll.Scroll(_scroll, -Input.mouseScrollDelta.y * RowH, MaxScroll());
             return overBar;
         }
 
@@ -1391,7 +1477,6 @@ internal static class VoiceUiKit
             divImg.raycastTarget = false;
 
             var label = Text("RailSectionLabel", railRoot, title, 13f, TextFaint, TextAlignmentOptions.Left, FontStyles.Bold);
-            label.characterSpacing = 1.5f;
             label.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
             label.rectTransform.sizeDelta = new Vector2(-44f, 20f);
             label.rectTransform.anchoredPosition = new Vector2(22f, y - 4f);
@@ -1503,6 +1588,9 @@ internal static class VoiceUiKit
             var description = Text("Description", Title.rectTransform, content!, 13f, TextMuted, TextAlignmentOptions.Left);
             description.richText = false;
             description.overflowMode = TextOverflowModes.Ellipsis;
+            description.enableAutoSizing = !expanded;
+            description.fontSizeMax = 13f;
+            description.fontSizeMin = 11f;
             description.rectTransform.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             description.enableWordWrapping = expanded;
             description.rectTransform.sizeDelta = new Vector2(
@@ -1519,7 +1607,7 @@ internal static class VoiceUiKit
         private void BuildHelp(string helpText)
         {
             const float hitD = 26f;
-            const float badgeD = 20f;
+            const float badgeD = 18f;
             const float gap = 6f;
             _helpText = helpText;
 
@@ -1539,10 +1627,11 @@ internal static class VoiceUiKit
             _helpBadge = badge.gameObject.AddComponent<Image>();
             _helpBadge.sprite = Rounded(true);
             _helpBadge.type = Image.Type.Sliced;
+            _helpBadge.Round();
             _helpBadge.color = ControlBg;
             _helpBadge.raycastTarget = false;
 
-            _helpGlyph = Text("Glyph", badge, "?", 17f, Accent,
+            _helpGlyph = Text("Glyph", badge, "?", 12f, TextFaint,
                 TextAlignmentOptions.Center, FontStyles.Bold);
             _helpGlyph.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _helpGlyph.rectTransform.offsetMin = Vector2.zero;
@@ -1568,9 +1657,9 @@ internal static class VoiceUiKit
                 0.28f);
             _helpGlyph.color = Lerp(
                 _helpGlyph.color,
-                over ? TextBright : Accent,
+                over ? Accent : TextFaint,
                 0.28f);
-            float scale = Mathf.Lerp(_helpRt.localScale.x, over ? 1.12f : 1f, 0.3f);
+            float scale = Mathf.Lerp(_helpRt.localScale.x, over ? 1.08f : 1f, 0.3f);
             _helpRt.localScale = new Vector3(scale, scale, 1f);
             if (over) RequestTooltip(Title.text, _helpText!);
         }
@@ -1656,12 +1745,13 @@ internal static class VoiceUiKit
             _button = _buttonRt.gameObject.AddComponent<Image>();
             _button.sprite = Rounded();
             _button.type = Image.Type.Sliced;
+            _button.Round(RadiusControl);
             _button.color = ControlBg;
             _button.raycastTarget = false;
 
             _buttonLabel = Text("ActionButtonLabel", _buttonRt, buttonText, 17f,
                 TextPrimary, TextAlignmentOptions.Center, FontStyles.Bold);
-            _buttonLabel.characterSpacing = 1f;
+            _buttonLabel.characterSpacing = 0f;
             _buttonLabel.enableAutoSizing = true;
             _buttonLabel.fontSizeMax = 17f;
             _buttonLabel.fontSizeMin = 12f;
@@ -1766,7 +1856,7 @@ internal static class VoiceUiKit
                 trackRt.anchoredPosition = new Vector2(ControlLeft, 0f);
             }
 
-            _glow = SpectrumImage("ActiveTrack", trackRt);
+            _glow = Panel("ActiveTrack", trackRt, Accent, true, true);
             _glow.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             _glow.rectTransform.offsetMin = Vector2.zero;
             _glow.rectTransform.offsetMax = Vector2.zero;
@@ -1774,6 +1864,7 @@ internal static class VoiceUiKit
             _track = trackRt.gameObject.AddComponent<Image>();
             _track.sprite = Rounded(true);
             _track.type = Image.Type.Sliced;
+            _track.Round();
             _track.color = ToggleOffTrack;
             _track.raycastTarget = false;
 
@@ -1792,6 +1883,7 @@ internal static class VoiceUiKit
             _knobImg.rectTransform.offsetMax = Vector2.zero;
             _knobImg.sprite = Rounded(true);
             _knobImg.type = Image.Type.Sliced;
+            _knobImg.Round();
             _knobImg.color = KnobOff;
             _knobImg.raycastTarget = false;
 
@@ -1806,7 +1898,7 @@ internal static class VoiceUiKit
             _knob.anchoredPosition = new Vector2(Mathf.Lerp(20f, 46f, e), 0f);
             _track.color = ToggleOffTrack;
             _knobImg.color = Lerp(KnobOff, TextBright, _knobT);
-            _glow.color = new Color32(255, 255, 255, (byte)(255f * _knobT));
+            _glow.color = new Color32(Accent.r, Accent.g, Accent.b, (byte)(255f * _knobT));
         }
 
         public override void OnMouseDown()
@@ -1846,17 +1938,17 @@ internal static class VoiceUiKit
             string helpText)
         {
             BuildBase(pane, "Mic Mode", width, y, height, helpText);
-            var frame = Panel("MicMode", Root, PanelOuter);
+            var frame = Panel("MicMode", Root, SegmentWell).Round(RadiusControl);
             frame.rectTransform.Anchor(new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(1f, 0.5f));
             frame.rectTransform.sizeDelta = new Vector2(Mathf.Min(300f, PaneW - EdgePad - ControlLeft), 44f);
             frame.rectTransform.anchoredPosition = new Vector2(-EdgePad, 0f);
             for (int i = 0; i < _buttons.Length; i++)
             {
-                var button = SpectrumImage(i == 0 ? "OpenMic" : "PushToTalk", frame.transform);
+                var button = Panel(i == 0 ? "OpenMic" : "PushToTalk", frame.transform, Clear).Round(RadiusField - 1f);
                 button.rectTransform.Anchor(new Vector2(i * 0.5f, 0f), new Vector2((i + 1) * 0.5f, 1f), new Vector2(0.5f, 0.5f));
                 button.rectTransform.offsetMin = new Vector2(4f, 4f);
                 button.rectTransform.offsetMax = new Vector2(-4f, -4f);
-                button.color = _get() == (VoiceMicMode)i ? new Color32(255, 255, 255, 38) : Clear;
+                button.color = _get() == (VoiceMicMode)i ? SegmentSelected : Clear;
                 var label = Text("Label", button.transform, i == 0 ? "Open Mic" : "Push To Talk",
                     16f, TextPrimary, TextAlignmentOptions.Center);
                 label.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
@@ -1888,8 +1980,8 @@ internal static class VoiceUiKit
                 bool selected = mode == (VoiceMicMode)i;
                 bool hover = PointerWithinClip && Contains(_buttons[i].rectTransform);
                 _buttons[i].color = Lerp(_buttons[i].color,
-                    selected ? new Color32(255, 255, 255, 38) :
-                    hover ? new Color32(255, 255, 255, 14) : Clear, 0.25f);
+                    selected ? SegmentSelected :
+                    hover ? ControlBg : Clear, 0.25f);
             }
         }
     }
@@ -1959,6 +2051,7 @@ internal static class VoiceUiKit
             var pillImg = pill.gameObject.AddComponent<Image>();
             pillImg.sprite = Rounded();
             pillImg.type = Image.Type.Sliced;
+            pillImg.Round(RadiusField);
             pillImg.color = ControlBg;
             pillImg.raycastTarget = false;
 
@@ -1988,6 +2081,7 @@ internal static class VoiceUiKit
             var trackImg = _track.gameObject.AddComponent<Image>();
             trackImg.sprite = Rounded(true);
             trackImg.type = Image.Type.Sliced;
+            trackImg.Round();
             trackImg.color = TrackBg;
             trackImg.raycastTarget = false;
 
@@ -2006,9 +2100,10 @@ internal static class VoiceUiKit
             _fill.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             _fill.sizeDelta = new Vector2(0f, trackHeight);
             var fillImg = _fill.gameObject.AddComponent<Image>();
-            fillImg.sprite = Spectrum();
+            fillImg.sprite = Rounded(true);
             fillImg.type = Image.Type.Sliced;
-            fillImg.color = Color.white;
+            fillImg.Round();
+            fillImg.color = Accent;
             fillImg.raycastTarget = false;
 
             _knob = Rect("Knob", _track);
@@ -2025,6 +2120,7 @@ internal static class VoiceUiKit
             knobImg.rectTransform.offsetMax = Vector2.zero;
             knobImg.sprite = Rounded(true);
             knobImg.type = Image.Type.Sliced;
+            knobImg.Round();
             knobImg.color = TextBright;
             knobImg.raycastTarget = false;
 
@@ -2164,6 +2260,7 @@ internal static class VoiceUiKit
             var valuePillImg = _valuePill.gameObject.AddComponent<Image>();
             valuePillImg.sprite = Rounded();
             valuePillImg.type = Image.Type.Sliced;
+            valuePillImg.Round(RadiusField);
             valuePillImg.color = ControlBg;
             valuePillImg.raycastTarget = false;
 
@@ -2181,14 +2278,14 @@ internal static class VoiceUiKit
             _value.rectTransform.offsetMin = new Vector2(8f, 0f);
             _value.rectTransform.offsetMax = new Vector2(-8f, 0f);
 
-            _left = Arrow(group, "<", new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(2f, 0f));
-            _right = Arrow(group, ">", new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(-2f, 0f));
+            _left = Arrow(group, true, new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(2f, 0f));
+            _right = Arrow(group, false, new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(-2f, 0f));
 
             Refresh();
             return this;
         }
 
-        private Image Arrow(RectTransform parent, string glyph, Vector2 aMin, Vector2 aMax, Vector2 pos)
+        private Image Arrow(RectTransform parent, bool pointsLeft, Vector2 aMin, Vector2 aMax, Vector2 pos)
         {
             var rt = Rect("Arrow", parent);
             rt.Anchor(aMin, aMax, new Vector2(aMin.x, 0.5f));
@@ -2197,12 +2294,10 @@ internal static class VoiceUiKit
             var img = rt.gameObject.AddComponent<Image>();
             img.sprite = Rounded();
             img.type = Image.Type.Sliced;
+            img.Round(RadiusField);
             img.color = ControlBg;
             img.raycastTarget = false;
-            var t = Text("G", rt, glyph, 24f, TextMuted, TextAlignmentOptions.Center, FontStyles.Bold);
-            t.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
-            t.rectTransform.offsetMin = Vector2.zero;
-            t.rectTransform.offsetMax = Vector2.zero;
+            ChevronIcon(rt, pointsLeft, 20f, TextMuted);
             return img;
         }
 
@@ -2391,6 +2486,7 @@ internal static class VoiceUiKit
             _btn = _btnRt.gameObject.AddComponent<Image>();
             _btn.sprite = Rounded();
             _btn.type = Image.Type.Sliced;
+            _btn.Round(RadiusControl);
             _btn.color = ControlBg;
             _btn.raycastTarget = false;
 
@@ -2412,6 +2508,7 @@ internal static class VoiceUiKit
                 _chatCheckButton = _chatCheckRt.gameObject.AddComponent<Image>();
                 _chatCheckButton.sprite = Rounded();
                 _chatCheckButton.type = Image.Type.Sliced;
+                _chatCheckButton.Round(RadiusControl);
                 _chatCheckButton.color = ControlBg;
                 _chatCheckButton.raycastTarget = false;
                 BuildChatCheckmark(_chatCheckRt);
@@ -2435,6 +2532,7 @@ internal static class VoiceUiKit
                 _settingsBtn = _settingsRt.gameObject.AddComponent<Image>();
                 _settingsBtn.sprite = Rounded();
                 _settingsBtn.type = Image.Type.Sliced;
+                _settingsBtn.Round(RadiusControl);
                 _settingsBtn.color = ControlBg;
                 _settingsBtn.raycastTarget = false;
                 BuildSettingsGlyph(_settingsRt);
@@ -2489,6 +2587,7 @@ internal static class VoiceUiKit
                 var barImg = bar.gameObject.AddComponent<Image>();
                 barImg.sprite = Rounded(true);
                 barImg.type = Image.Type.Sliced;
+                barImg.Round();
                 barImg.color = TextMuted;
                 barImg.raycastTarget = false;
 
@@ -2499,6 +2598,7 @@ internal static class VoiceUiKit
                 var knobImg = knob.gameObject.AddComponent<Image>();
                 knobImg.sprite = Rounded(true);
                 knobImg.type = Image.Type.Sliced;
+                knobImg.Round();
                 knobImg.color = TextBright;
                 knobImg.raycastTarget = false;
             }
@@ -2523,6 +2623,7 @@ internal static class VoiceUiKit
             _chatCheckBox = boxRt.gameObject.AddComponent<Image>();
             _chatCheckBox.sprite = Rounded(true);
             _chatCheckBox.type = Image.Type.Sliced;
+            _chatCheckBox.Round();
             _chatCheckBox.color = ToggleOffTrack;
             _chatCheckBox.raycastTarget = false;
 
@@ -2554,6 +2655,7 @@ internal static class VoiceUiKit
             var img = rt.gameObject.AddComponent<Image>();
             img.sprite = Rounded(true);
             img.type = Image.Type.Sliced;
+            img.Round();
             img.color = col;
             img.raycastTarget = false;
             var t = Text("T", rt, text, 16f, TextBright, TextAlignmentOptions.Center, FontStyles.Bold);
@@ -2839,7 +2941,8 @@ internal static class VoiceUiKit
             string name,
             float width,
             float height = 6f,
-            bool hideWhenInactive = false)
+            bool hideWhenInactive = false,
+            Color32? trackColor = null)
         {
             _width = Mathf.Max(1f, width);
             _height = Mathf.Max(2f, height);
@@ -2850,7 +2953,8 @@ internal static class VoiceUiKit
             var trackImage = _root.gameObject.AddComponent<Image>();
             trackImage.sprite = Rounded(true);
             trackImage.type = Image.Type.Sliced;
-            trackImage.color = TrackBg;
+            trackImage.Round();
+            trackImage.color = trackColor ?? TrackBg;
             trackImage.raycastTarget = false;
 
             _fill = Rect("Fill", _root);
@@ -2860,6 +2964,7 @@ internal static class VoiceUiKit
             _fillImage = _fill.gameObject.AddComponent<Image>();
             _fillImage.sprite = Rounded(true);
             _fillImage.type = Image.Type.Sliced;
+            _fillImage.Round();
             _fillImage.color = LevelMeterGreen;
             _fillImage.raycastTarget = false;
 
@@ -2994,6 +3099,7 @@ internal static class VoiceUiKit
             {
                 avatarImg.sprite = Rounded(true);
                 avatarImg.type = Image.Type.Sliced;
+                avatarImg.Round();
                 avatarImg.color = _glowColor;
             }
             avatarImg.raycastTarget = false;
@@ -3007,7 +3113,7 @@ internal static class VoiceUiKit
             Title.rectTransform.sizeDelta = new Vector2(textColW, 30f);
             Title.rectTransform.anchoredPosition = new Vector2(textLeft, 13f);
 
-            _levelMeter = new LiveLevelMeter(Root, "MeterTrack", textColW);
+            _levelMeter = new LiveLevelMeter(Root, "MeterTrack", textColW, 4f, trackColor: ControlBg);
             _levelMeter.Root.Anchor(
                 new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             _levelMeter.Root.anchoredPosition = new Vector2(textLeft, -15f);
@@ -3028,6 +3134,7 @@ internal static class VoiceUiKit
             var trackImg = _track.gameObject.AddComponent<Image>();
             trackImg.sprite = Rounded(true);
             trackImg.type = Image.Type.Sliced;
+            trackImg.Round();
             trackImg.color = TrackBg;
             trackImg.raycastTarget = false;
             _hitBand = Rect("TrackHitBand", Root);
@@ -3049,9 +3156,10 @@ internal static class VoiceUiKit
             _fill.Anchor(new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(0f, 0.5f));
             _fill.sizeDelta = new Vector2(0f, 6f);
             _fillImg = _fill.gameObject.AddComponent<Image>();
-            _fillImg.sprite = Spectrum();
+            _fillImg.sprite = Rounded(true);
             _fillImg.type = Image.Type.Sliced;
-            _fillImg.color = Color.white;
+            _fillImg.Round();
+            _fillImg.color = Accent;
             _fillImg.raycastTarget = false;
 
             _knob = Rect("Knob", _track);
@@ -3067,6 +3175,7 @@ internal static class VoiceUiKit
             knobImg.rectTransform.offsetMax = Vector2.zero;
             knobImg.sprite = Rounded(true);
             knobImg.type = Image.Type.Sliced;
+            knobImg.Round();
             knobImg.color = TextBright;
             knobImg.raycastTarget = false;
 
@@ -3075,8 +3184,9 @@ internal static class VoiceUiKit
             pill.sizeDelta = new Vector2(pillW, 34f);
             pill.anchoredPosition = new Vector2(pillLeft, 0f);
             var pillImg = pill.gameObject.AddComponent<Image>();
-            pillImg.sprite = Rounded(true);
+            pillImg.sprite = Rounded();
             pillImg.type = Image.Type.Sliced;
+            pillImg.Round(RadiusField);
             pillImg.color = ControlBg;
             pillImg.raycastTarget = false;
             _value = Text("Value", pill, "", 18f, TextPrimary, TextAlignmentOptions.Center, FontStyles.Bold);
@@ -3091,6 +3201,7 @@ internal static class VoiceUiKit
             _resetImg = _resetRt.gameObject.AddComponent<Image>();
             _resetImg.sprite = Rounded();
             _resetImg.type = Image.Type.Sliced;
+            _resetImg.Round(RadiusControl);
             _resetImg.color = ControlBg;
             _resetImg.raycastTarget = false;
             var icon = ResetIcon;
@@ -3118,9 +3229,7 @@ internal static class VoiceUiKit
             float t = Mathf.Approximately(_max, _min) ? 0f : (v - _min) / (_max - _min);
             _fill.sizeDelta = new Vector2(_trackW * t, 6f);
             bool boosted = v > 1.005f;
-            var fillSprite = boosted ? Rounded(true) : Spectrum();
-            if (_fillImg.sprite != fillSprite) _fillImg.sprite = fillSprite;
-            _fillImg.color = boosted ? FillBoost : Color.white;
+            _fillImg.color = boosted ? FillBoost : Accent;
             _knob.anchoredPosition = new Vector2(_trackW * t, 0f);
             int pct = Mathf.RoundToInt(v * 100f);
             _value.color = v < 0.005f ? TextMuted : boosted ? FillBoost : TextPrimary;

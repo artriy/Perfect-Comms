@@ -344,7 +344,7 @@ internal static class VoiceFirstRunSetup
             var track = VoiceUiKit.Panel("StepTrack", progress, VoiceUiKit.TrackBg, rounded: false);
             PlaceTopLeft(track.rectTransform, i * (width + gap), -40f, width, 3f);
             if (!_completed && i > _page) continue;
-            var accent = VoiceUiKit.SpectrumImage("StepProgress", track.transform);
+            var accent = VoiceUiKit.Panel("StepProgress", track.transform, VoiceUiKit.Accent, true, true);
             accent.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
             accent.rectTransform.offsetMin = Vector2.zero;
             accent.rectTransform.offsetMax = Vector2.zero;
@@ -366,9 +366,9 @@ internal static class VoiceFirstRunSetup
         PlaceTopLeft(input, 0f, ContentTopY, channelWidth, 196f);
         var output = VoiceUiKit.Rect("OutputChannel", _pageRoot);
         PlaceTopLeft(output, channelWidth + 32f, ContentTopY, channelWidth, 196f);
-        AddText(input, "YOUR VOICE", 13f, VoiceUiKit.Accent, TextAlignmentOptions.Left,
+        AddText(input, "Your voice", 13f, VoiceUiKit.TextFaint, TextAlignmentOptions.Left,
             FontStyles.Bold, new Vector2(22f, 0f), new Vector2(channelWidth - 44f, 22f));
-        AddText(output, "YOUR LOBBY", 13f, VoiceUiKit.Accent, TextAlignmentOptions.Left,
+        AddText(output, "Your lobby", 13f, VoiceUiKit.TextFaint, TextAlignmentOptions.Left,
             FontStyles.Bold, new Vector2(22f, 0f), new Vector2(channelWidth - 44f, 22f));
         AddRow(new VoiceUiKit.StepperRow(
                 DraftMicrophoneIndexForUi,
@@ -454,7 +454,7 @@ internal static class VoiceFirstRunSetup
         _micModeHelpText = AddText(_pageRoot, "", 15f, SetupTextSecondary,
             TextAlignmentOptions.Left, FontStyles.Normal,
             new Vector2(22f, -164f), new Vector2(ContentWidth - 44f, 42f), wrap: true);
-        AddText(_pageRoot, "JOINING & SHORTCUTS", 13f, SetupTextSecondary,
+        AddText(_pageRoot, "Joining & shortcuts", 13f, SetupTextSecondary,
             TextAlignmentOptions.Left, FontStyles.Bold,
             new Vector2(22f, -214f), new Vector2(ContentWidth - 44f, 22f));
 #if WINDOWS
@@ -479,7 +479,7 @@ internal static class VoiceFirstRunSetup
                 () => _draft.AllowKeybindsWhileChatOpen, value => _draft.AllowKeybindsWhileChatOpen = value)
             .Build(chat, "Shortcuts in chat", startupWidth, 0f, 58f,
                 "Keeps shortcuts active while typing. Printable keys can also type into chat.", stacked: true));
-        AddText(_pageRoot, "YOUR SHORTCUTS", 13f, SetupTextSecondary,
+        AddText(_pageRoot, "Your shortcuts", 13f, SetupTextSecondary,
             TextAlignmentOptions.Left, FontStyles.Bold,
             new Vector2(22f, -318f), new Vector2(ContentWidth - 44f, 22f));
         float width = (ContentWidth - 32f) * 0.5f;
@@ -502,7 +502,7 @@ internal static class VoiceFirstRunSetup
             TextAlignmentOptions.Left, FontStyles.Normal,
             new Vector2(22f, -112f), new Vector2(width - 44f, 42f), wrap: true);
 #else
-        AddText(_pageRoot, "IN-GAME TOUCH CONTROLS", 13f, SetupTextSecondary,
+        AddText(_pageRoot, "In-game touch controls", 13f, SetupTextSecondary,
             TextAlignmentOptions.Left, FontStyles.Bold,
             new Vector2(22f, -318f), new Vector2(ContentWidth - 44f, 22f));
         float width = (ContentWidth - 32f) / 3f;
@@ -527,7 +527,7 @@ internal static class VoiceFirstRunSetup
         var picker = VoiceUiKit.Rect("LayoutChoices", _pageRoot);
         PlaceTopLeft(picker, pickerX, ContentTopY, pickerWidth, 302f);
         picker.gameObject.AddComponent<CanvasGroup>().alpha = _draft.HideSpeakingBar ? 0.38f : 1f;
-        AddText(picker, "LAYOUTS", 13f, SetupTextSecondary, TextAlignmentOptions.Left, FontStyles.Bold,
+        AddText(picker, "Layouts", 13f, SetupTextSecondary, TextAlignmentOptions.Left, FontStyles.Bold,
             Vector2.zero, new Vector2(pickerWidth, 24f));
         Buttons.Add(new VoiceUiKit.ActionButton(picker, "Use existing layout", 200f, 32f,
             pickerWidth - 200f, 4f, VoiceUiKit.ButtonKind.Ghost,
@@ -1434,6 +1434,7 @@ internal static class VoiceFirstRunSetup
             _border = _root.gameObject.AddComponent<Image>();
             _border.sprite = VoiceUiKit.Rounded();
             _border.type = Image.Type.Sliced;
+            _border.Round(VoiceUiKit.RadiusControl);
             _border.color = SetupBorder;
             _border.raycastTarget = false;
 
@@ -1444,6 +1445,7 @@ internal static class VoiceFirstRunSetup
             _surface = _visual.gameObject.AddComponent<Image>();
             _surface.sprite = VoiceUiKit.Rounded();
             _surface.type = Image.Type.Sliced;
+            _surface.Round(VoiceUiKit.RadiusControl);
             _surface.color = SetupSurfaceRaised;
             _surface.raycastTarget = false;
 
@@ -1484,11 +1486,11 @@ internal static class VoiceFirstRunSetup
             _surface.color = VoiceUiKit.Lerp(
                 SetupSurfaceRaised,
                 VoiceUiKit.Lerp(SetupSurfaceHover,
-                    VoiceUiKit.Lerp(SetupSurfaceRaised, VoiceUiKit.AccentMiddle, 0.18f), _selected),
+                    VoiceUiKit.Lerp(SetupSurfaceRaised, VoiceUiKit.Accent, 0.12f), _selected),
                 Mathf.Max(_hover, _selected));
             _border.color = VoiceUiKit.Lerp(
                 SetupBorder,
-                VoiceUiKit.Lerp(VoiceUiKit.ControlHover, VoiceUiKit.AccentSecondary, _selected),
+                VoiceUiKit.Lerp(VoiceUiKit.ControlHover, VoiceUiKit.Accent, _selected),
                 Mathf.Max(_hover, _selected));
             _title.color = VoiceUiKit.Lerp(VoiceUiKit.TextPrimary, VoiceUiKit.TextBright,
                 Mathf.Max(_hover, _selected));

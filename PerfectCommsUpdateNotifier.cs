@@ -104,10 +104,11 @@ internal static class PerfectCommsUpdateNotifier
 
         var border = _root.AddComponent<UnityEngine.UI.Image>();
         border.sprite = VoiceUiKit.Rounded();
+        border.Round(VoiceUiKit.RadiusCard);
         border.type = UnityEngine.UI.Image.Type.Sliced;
         border.color = VoiceUiKit.Divider;
         border.raycastTarget = false;
-        var surface = VoiceUiKit.Panel("Surface", _rootRect, VoiceUiKit.PanelInner);
+        var surface = VoiceUiKit.Panel("Surface", _rootRect, VoiceUiKit.PanelInner).Round(VoiceUiKit.RadiusCard - 1f);
         surface.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
         surface.rectTransform.offsetMin = Vector2.one;
         surface.rectTransform.offsetMax = -Vector2.one;

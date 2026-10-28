@@ -116,7 +116,7 @@ Side Layout starts as Single Lane. The fresh guided setup selects Wrapped; at th
 
 ## Advanced tab
 
-- **First-Time Setup > Run Setup Again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes. On desktop, the Controls step can globally allow every keybind while chat is open; choose individual chat keybinds later from the full Keybinds tab. The HUD step exposes Hide controls, Hide connection status, Hide speaking bar, and Hide meeting overlay; hiding the speaking bar hides its preset picker and live preview.
+- **First-Time Setup > Run setup again** reopens the guided Welcome, Audio, Controls, HUD, and Review flow. Existing settings are kept unless you finish with changes. On desktop, the Controls step can globally allow every keybind while chat is open; choose individual chat keybinds later from the full Keybinds tab. The HUD step exposes Hide controls, Hide connection status, Hide speaking bar, and Hide meeting overlay; hiding the speaking bar hides its preset picker and live preview.
 - **Show Fake 15 Players** fills the speaking bar with a test roster for layout troubleshooting. It resets off on every game launch.
 - **Diagnostics** writes detailed voice and microphone-calibration logs. It resets off on launch; leave it off unless you are investigating a problem.
 

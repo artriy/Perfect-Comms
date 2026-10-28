@@ -21,10 +21,10 @@ public static class HostSettingsPanel
     private const int BuiltInCategoryCount = 4;
 
     private static readonly (int index, string title)[] RailSections =
-        { (4, "MOD BEHAVIOUR") };
+        { (4, "Mod behaviour") };
 
     // Built-in tabs plus one tab per third-party mod (PerfectComms.Api Primitive 5), appended in
-    // registration order under the "MOD BEHAVIOUR" section that already precedes index 4.
+    // registration order under the "Mod behaviour" section that already precedes index 4.
     private static string[] Categories
     {
         get
@@ -43,6 +43,7 @@ public static class HostSettingsPanel
     private static readonly List<VoiceUiKit.Row> _rows = new();
     private static VoiceUiKit.Row? _activeRow;
     private static float _scroll;
+    private static readonly VoiceSettingsScrollPolicy.SmoothScroller _smoothScroll = new();
     private static float _contentHeight;
     private static float _animT;
     private static bool _hostNotice;
@@ -78,7 +79,7 @@ public static class HostSettingsPanel
         if (!ShellAlive)
         {
             Destroy();
-            _shell = new VoiceUiKit.PanelShell("VC_HostPanel", "HOST VOICE SETTINGS", PanelW, PanelH,
+            _shell = new VoiceUiKit.PanelShell("VC_HostPanel", "Host voice settings", PanelW, PanelH,
                 () => { VoiceUiKit.SwallowClick(); Hide(); }, hostSettings: true);
         }
 
@@ -238,18 +239,17 @@ public static class HostSettingsPanel
                     group.sizeDelta = new Vector2(-24f, groupHeight);
                     y -= GroupGap;
                 }
-                var header = VoiceUiKit.SectionHeader(heading, _shell.PaneRoot, heading,
+                VoiceUiKit.SectionHeader(heading, _shell.PaneRoot, heading,
                     _shell.PaneWidth - 24f, y, SectionH);
-                var label = header.GetChild(0).GetComponent<TMPro.TextMeshProUGUI>();
-                label.fontSize = 17f;
-                label.characterSpacing = 0f;
-                label.color = VoiceUiKit.TextPrimary;
-                label.rectTransform.offsetMin = new Vector2(16f, 0f);
                 y -= SectionH;
-                var surface = VoiceUiKit.Panel("RuleGroup", _shell.PaneRoot, VoiceUiKit.PanelInner, true);
-                group = surface.rectTransform;
+                var frame = VoiceUiKit.Panel("RuleGroup", _shell.PaneRoot, VoiceUiKit.Divider);
+                group = frame.rectTransform;
                 group.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
                 group.anchoredPosition = new Vector2(-12f, y);
+                var fill = VoiceUiKit.Panel("Fill", frame.transform, VoiceUiKit.PanelInner);
+                fill.rectTransform.Anchor(Vector2.zero, Vector2.one, new Vector2(0.5f, 0.5f));
+                fill.rectTransform.offsetMin = Vector2.one;
+                fill.rectTransform.offsetMax = -Vector2.one;
                 groupTop = y;
                 groupHeight = 0f;
                 previousGroup = heading;
@@ -262,6 +262,13 @@ public static class HostSettingsPanel
                 row.Root.anchoredPosition = new Vector2(indent * 0.5f, y - groupTop);
                 row.ShowDescription(SummaryFor(holder), expanded: true);
                 _rows.Add(row);
+            }
+            if (i < holders.Count - 1 && GroupFor(holders[i + 1], category) == heading)
+            {
+                var div = VoiceUiKit.Panel("Div", group!, VoiceUiKit.Divider, false);
+                div.rectTransform.Anchor(new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f));
+                div.rectTransform.sizeDelta = new Vector2(-20f, 1f);
+                div.rectTransform.anchoredPosition = new Vector2(0f, y - groupTop - RowH + 1f);
             }
             y -= RowH;
             groupHeight += RowH;
@@ -464,6 +471,7 @@ public static class HostSettingsPanel
 
         _rail!.Tick();
         bool pointerConsumed = HandleScroll();
+        UpdateSmoothScroll();
         HandleInput(pointerConsumed);
         for (int i = 0; i < _rows.Count; i++) _rows[i].Tick(dt);
 
@@ -578,12 +586,20 @@ public static class HostSettingsPanel
                 consumed = true;
             }
             else if (VoiceUiKit.Contains(_shell.PaneClip))
-                _scroll -= Input.mouseScrollDelta.y * RowH;
+                _smoothScroll.Scroll(_scroll, -Input.mouseScrollDelta.y * RowH, MaxScroll());
         }
         _scroll = Mathf.Clamp(_scroll, 0f, MaxScroll());
         _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
         UpdateScrollbarVisual();
         return consumed;
+    }
+
+    private static void UpdateSmoothScroll()
+    {
+        if (_shell == null) return;
+        _scroll = _smoothScroll.Step(_scroll, MaxScroll(), Time.unscaledDeltaTime);
+        _shell.PaneRoot.anchoredPosition = new Vector2(0f, _scroll);
+        UpdateScrollbarVisual();
     }
 
     private static void CancelDrag()
