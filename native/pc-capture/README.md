@@ -125,7 +125,7 @@ cargo check --all-targets          # fast gate the CI matrix reuses per target
 ```
 
 `cargo build` produces the Rust helper only. From the repository root, use
-`scripts/build-pion.sh` with Go 1.26.2 to produce its required Pion companion,
+`scripts/build-pion.sh` with Go 1.26.10 to produce its required Pion companion,
 for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64,
 Linux x64, and macOS x64/arm64/universal targets are supported.
 

@@ -410,9 +410,9 @@ public static class VoiceVolumeMenu
         if (!Input.GetMouseButton(0)) _scrollbarDragging = false;
         bool consumed = _scrollbarDragging;
         bool insideClip = VoiceUiKit.Contains(_shell.PaneClip);
-        if (MaxScroll() > 0f && _activeRow == null && insideClip)
+        if (MaxScroll() > 0f && _activeRow == null && PointerReachesList(insideClip, _scrollbarDragging))
         {
-            if (Input.GetMouseButtonDown(0) && VoiceUiKit.Contains(_scrollbarRoot)
+            if (insideClip && Input.GetMouseButtonDown(0) && VoiceUiKit.Contains(_scrollbarRoot)
                 && VoiceUiKit.LocalPoint(_scrollbarRoot, out var down))
             {
                 float fromTop = _scrollbarRoot.rect.yMax - down.y;
@@ -430,7 +430,7 @@ public static class VoiceVolumeMenu
                     MaxScroll(), _scrollbarRoot.rect.height, _scrollbarThumb.rect.height);
                 consumed = true;
             }
-            else
+            else if (insideClip)
                 _smoothScroll.Scroll(_scroll, -Input.mouseScrollDelta.y * RowH, MaxScroll());
         }
         ApplyScroll();
@@ -453,10 +453,10 @@ public static class VoiceVolumeMenu
             if (_activeRow != null) { _activeRow.OnMouseUp(); _activeRow = null; }
             return;
         }
-        if (_shell == null || !VoiceUiKit.Contains(_shell.PaneClip)) return;
+        if (_shell == null) return;
         if (Input.GetMouseButtonDown(0))
         {
-            if (pointerConsumed) return;
+            if (pointerConsumed || !PointerReachesList(VoiceUiKit.Contains(_shell.PaneClip), dragActive: false)) return;
             for (int i = 0; i < _rows.Count; i++) _rows[i].OnMouseDown();
             _activeRow = FindDragging();
         }
@@ -465,6 +465,11 @@ public static class VoiceVolumeMenu
             _activeRow.OnMouseDrag();
         }
     }
+
+    // New presses and wheel input need the pointer over the list; a drag already in progress
+    // follows the pointer anywhere until the button is released.
+    internal static bool PointerReachesList(bool insideClip, bool dragActive)
+        => insideClip || dragActive;
 
     private static VoiceUiKit.PlayerVolumeRow? FindDragging()
     {

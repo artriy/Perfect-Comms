@@ -32,6 +32,9 @@
 - Speaking-bar names no longer overlap neighboring rings, and the settings preview wraps and sizes like the live HUD.
 - A one-frame avatar color flicker no longer applies its color later.
 - Ghost avatars finish loading hats and visors without waiting for unused skins, and multipart ghost bodies render consistently.
+- Dragging a Player Volumes slider or scrollbar keeps following the mouse when the pointer leaves the list.
+- Host Voice Settings stays on the selected tab when a mod adds or removes its tab while the panel is open.
+- If the interface font or artwork cannot load, panels open with the game's font instead of failing.
 
 ### Compatibility
 
@@ -65,7 +68,7 @@
 #### Dependencies
 
 - Starlight Android bundles SIPSorcery 10.0.17. The desktop DLL embeds System.Text.Json 10.0.14, and the native audio helper uses current Rust crates, including `parking_lot` 0.13.
-- Pion WebRTC stays at v4.2.17 (Go 1.26.2), so desktop P2P connections behave exactly as in v4.1.11.
+- Pion WebRTC stays at v4.2.17, so desktop P2P connections behave as in v4.1.11. It is now built with Go 1.26.10, which fixes a standard-library certificate-parsing issue ([GO-2026-5037](https://pkg.go.dev/vuln/GO-2026-5037)).
 
 </details>
 

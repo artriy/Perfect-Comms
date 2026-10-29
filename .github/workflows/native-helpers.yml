@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.2"
+          go-version: "1.26.10"
           cache-dependency-path: native/pc-pion/go.sum
       - name: MinGW cgo compiler
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.package }}
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.2"
+          go-version: "1.26.10"
           cache-dependency-path: native/pc-pion/go.sum
       - name: Test locked Pion transport and license inventory
         run: |
@@ -177,7 +177,7 @@ jobs:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.2"
+          go-version: "1.26.10"
           cache-dependency-path: native/pc-pion/go.sum
       - name: Build ad-hoc universal helper
         run: bash scripts/build-mac.sh

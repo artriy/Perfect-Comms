@@ -108,7 +108,7 @@ The Starlight/Pion probe drives capture and playback on fixed 20 ms ticks.
 Encoding and correlation work do not add drift to the simulated audio clock;
 the probe still requires 16 consecutive correlated playback frames.
 
-Pion release builds require Go 1.26.2 exactly. Build and optionally stage one
+Pion release builds require Go 1.26.10 exactly. Build and optionally stage one
 target with:
 
 ```bash

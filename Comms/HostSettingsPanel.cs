@@ -49,6 +49,7 @@ public static class HostSettingsPanel
     private static bool _hostNotice;
     private static int _visSignature = int.MinValue;
     private static int _categorySignature = int.MinValue;
+    private static string? _selectedCategoryKey;
     private static RectTransform? _scrollbarRoot;
     private static RectTransform? _scrollbarThumb;
     private static UnityEngine.UI.Image? _scrollbarThumbImage;
@@ -99,7 +100,7 @@ public static class HostSettingsPanel
         VoiceUiKit.RaiseAbove(_shell.RootRect);
     }
 
-    private static void BuildContent()
+    private static void BuildContent(string? keepCategoryKey = null)
     {
         VoiceUiKit.RebindRow.CancelCapture();
         CancelDrag();
@@ -126,9 +127,11 @@ public static class HostSettingsPanel
         _rail = new VoiceUiKit.CategoryRail();
         _categorySignature = CategorySignature();
         _rail.Build(_shell.RailRoot, _shell.RailWidth, Categories, RailSections, scrollable: true);
+        int kept = ResolveCategoryIndex(keepCategoryKey, VoiceModRegistry.Tabs);
+        if (kept > 0) _rail.Select(kept);
         _rail.OnSelect = _ => RebuildRows(true);
         if (_scrollbarRoot == null) BuildScrollbar();
-        RebuildRows(true);
+        RebuildRows(resetScroll: kept < 0);
     }
 
     public static void Hide()
@@ -184,6 +187,7 @@ public static class HostSettingsPanel
         _shown = false;
         _visSignature = int.MinValue;
         _categorySignature = int.MinValue;
+        _selectedCategoryKey = null;
         _scrollbarRoot = null;
         _scrollbarThumb = null;
         _scrollbarThumbImage = null;
@@ -209,6 +213,7 @@ public static class HostSettingsPanel
         if (resetScroll) _scroll = 0f;
 
         int category = _rail.Selected;
+        _selectedCategoryKey = CategoryKey(category, VoiceModRegistry.Tabs);
         var holders = CollectVisible(category);
         string title = category < BuiltInCategoryCount
             ? BuiltInCategories[category]
@@ -490,8 +495,23 @@ public static class HostSettingsPanel
     private static bool RefreshCategoriesIfChanged()
     {
         if (CategorySignature() == _categorySignature) return false;
-        BuildContent();
+        BuildContent(_selectedCategoryKey);
         return true;
+    }
+
+    // Mod tabs are keyed by mod id so a selection survives tabs being added or removed around it.
+    internal static string CategoryKey(int index, IReadOnlyList<(string ModId, string Label)> tabs)
+        => index < BuiltInCategoryCount
+            ? "builtin:" + BuiltInCategories[index]
+            : "mod:" + tabs[index - BuiltInCategoryCount].ModId;
+
+    /// <summary>Rail index for <paramref name="key"/>, or -1 when that category no longer exists.</summary>
+    internal static int ResolveCategoryIndex(string? key, IReadOnlyList<(string ModId, string Label)> tabs)
+    {
+        if (key == null) return -1;
+        for (int i = 0; i < BuiltInCategoryCount + tabs.Count; i++)
+            if (string.Equals(CategoryKey(i, tabs), key, System.StringComparison.Ordinal)) return i;
+        return -1;
     }
 
     private static int CategorySignature()

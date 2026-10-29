@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 
-PINNED_GO_VERSION = "go1.26.2"
+PINNED_GO_VERSION = "go1.26.10"
 PINNED_PION_VERSION = "v4.2.17"
 LICENSE_NAMES = ("LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE", "COPYING")
 
