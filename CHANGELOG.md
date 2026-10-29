@@ -2,10 +2,6 @@
 
 ## Perfect Comms v4.1.12
 
-> [!IMPORTANT]
-> Everyone in a voice lobby needs **v4.1.12**. Older versions show **Wrong version** in Voice Lobbies and cannot talk with v4.1.12 players.
-> OBS recording uses the optional **PerfectComms-OBS-win-x64.zip** plugin attached to this release.
-
 ### New
 
 - Hosts can enable **Ghosts Hear Living During Tasks** (off by default). Living players can speak to nearby ghosts and spectators while ordinary living-to-living task voice is off. The option appears only while **Meetings/Lobby Only** or **Only Ghosts can Talk/Hear** is on, and **Ghosts Also Meeting/Lobby Only** still blocks it. Ghost hearing distance, falloff, vent privacy, and mute controls still apply. A yellow lobby notice shows when it is on, and your microphone status reads **Ghosts only** while only ghosts and spectators can hear you.
