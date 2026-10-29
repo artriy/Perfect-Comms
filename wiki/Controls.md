@@ -22,7 +22,7 @@ The guided HUD choices are Top Middle, Middle Right, Middle Left, Compact, Top L
 | **Voice Falloff Softness** | 30% | Keeps voices clearer through more of the host's allowed range, then fades near the edge. It never extends that range. |
 | **Start Muted** | Off | Starts each voice session with your microphone muted. |
 | **Start Deafened** | Off | Starts each voice session with playback muted and microphone transmission paused until you undeafen. |
-| **OBS Compatibility Mode** | Off | Windows only. Adds a minimized Perfect Comms Audio window so OBS Application Audio Capture can capture voice chat separately. Voice routing is unchanged. |
+| **OBS Compatibility Mode** | Off | Windows only. Adds a minimized Perfect Comms Audio window so OBS Application Audio Capture can capture voice chat separately. Voice routing is unchanged. Not needed with the OBS recording plugin. See [OBS Compatibility Mode](Players#obs-compatibility-mode). |
 | **OBS Recording Integration** | Off | Windows only. Saves separate voice files beside your OBS recording with the optional OBS plugin. Does not record your own microphone. See [OBS Recording Integration](Players#obs-recording-integration). |
 | **Separate Voice Files** | Per player | Shown while OBS Recording Integration is on. Choose **Per player** or **Alive / dead** files; the change applies to the next recording. |
 

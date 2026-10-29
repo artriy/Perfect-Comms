@@ -134,6 +134,16 @@ Only the current lobby host can edit these synced settings.
 
 Compatible mods can register additional tabs under **Mod behaviour**. Those tabs and role-specific options appear only when the source mod registers them; Perfect Comms does not include a permanent TOU-Mira settings tab.
 
+## OBS Compatibility Mode
+
+Use this when you want voice chat as its own OBS audio source but are not installing the OBS recording plugin. Native Windows only, off by default.
+
+1. Open **Voice Settings > Audio > Streaming** and enable **OBS Compatibility Mode**, then join a voice lobby. A minimized **Perfect Comms Audio** window appears; closing it only minimizes it, and turning the option off removes it.
+2. In OBS **Sources**, add an **Application Audio Capture** and choose the **Perfect Comms Audio** window. This source carries voice chat only.
+3. Capture game sound with a second **Application Audio Capture** of **Among Us**, and keep your microphone as its own input. Do not use **Desktop Audio** for game sound, because it also contains voice chat and would play every voice twice.
+
+If you install the recording plugin below, turn **OBS Compatibility Mode** off and remove its Application Audio Capture; the plugin's **Perfect Comms** source replaces it.
+
 ## OBS Recording Integration
 
 Optional, off by default, and available for native Windows x64 Perfect Comms with 64-bit OBS Studio. Tested with OBS Studio 32.2.2; other OBS versions may work, but compatibility and recording synchronization are unverified. Linux/Proton, macOS/Wine/CrossOver, and Android do not provide this integration. It adds one combined **Perfect Comms** audio source to OBS and saves separate incoming-voice WAV files beside your recording. It does not record your own microphone.
@@ -144,7 +154,7 @@ Optional, off by default, and available for native Windows x64 Perfect Comms wit
 2. Close OBS. Extract the ZIP into your OBS installation folder, the folder containing `bin`, `data`, and `obs-plugins`. Merge its `obs-plugins` folder, rather than placing the ZIP inside another plugin folder. The DLL belongs at `obs-plugins/64bit/perfect-comms-obs.dll`. Restart OBS. This ZIP is not an installer and does not include OBS itself.
 3. In Perfect Comms, open **Voice Settings > Audio > Streaming**, enable **OBS Recording Integration**, and join voice. Under **Separate Voice Files**, choose **Per player** (default) or **Alive / dead**. Changes to this mode apply to the next recording.
 4. In OBS **Sources**, add **Perfect Comms** once. Use **Add Existing** to reuse that source in other scenes; additional new instances stay silent. Keep its **Sync Offset** at **0 ms** in **Advanced Audio Properties**.
-5. Disable any Application Audio Capture of **Perfect Comms Audio** and any desktop/game capture route that also includes incoming Perfect Comms voices. Keep your microphone as a separate OBS input and capture game audio separately. **OBS Compatibility Mode** remains available for combined Application Audio Capture without this plugin; it is not needed for the recording integration.
+5. Avoid capturing voice chat twice. Turn **OBS Compatibility Mode** off and remove any Application Audio Capture of **Perfect Comms Audio**. Capture game sound with an **Application Audio Capture** of **Among Us** instead of **Desktop Audio**, because Desktop Audio also contains voice chat. A typical setup has three audio sources: **Perfect Comms** (voice chat), **Among Us** (game sound), and your microphone.
 6. In **Settings > Output**, use Advanced output mode to select recording audio tracks. For example, track 1 can hold your combined listening mix, track 2 game audio, track 3 your microphone, and track 4 the Perfect Comms combined source. In **Advanced Audio Properties**, assign each source accordingly and enable those tracks in Recording. These are ordinary OBS tracks, not the individual voice files.
 7. Choose standard **MKV** or **MP4**, or **Hybrid MP4/MOV**, with automatic recording file splitting disabled. Custom FFmpeg output is not supported. Record to a writable NTFS or ReFS location with enough free space, without junctions or symbolic links anywhere in the recording folder path.
 
