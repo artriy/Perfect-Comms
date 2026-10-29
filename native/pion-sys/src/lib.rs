@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub const ABI_VERSION: u32 = 3;
-pub const PION_VERSION: u32 = 4_002_017;
-pub const PION_VERSION_TEXT: &str = "4.2.17";
+pub const PION_VERSION: u32 = 4_002_026;
+pub const PION_VERSION_TEXT: &str = "4.2.26";
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_EMPTY: i32 = 1;
 pub const STATUS_BUFFER_TOO_SMALL: i32 = 2;

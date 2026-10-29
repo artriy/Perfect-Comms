@@ -66,7 +66,7 @@ const (
 	statusInternal       = -7
 )
 
-const pionVersion uint32 = 4_002_017
+const pionVersion uint32 = 4_002_026
 
 func pionContractMarkerText() string {
 	return C.GoString(C.pc_pion_contract_marker_data())

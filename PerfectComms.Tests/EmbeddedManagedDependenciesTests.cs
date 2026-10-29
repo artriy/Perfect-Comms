@@ -86,7 +86,7 @@ public sealed class EmbeddedManagedDependenciesTests
 
                 var productVersion = FileVersionInfo.GetVersionInfo(extractedPath).ProductVersion;
                 Assert.NotNull(productVersion);
-                Assert.StartsWith("10.0.10+", productVersion, StringComparison.Ordinal);
+                Assert.StartsWith("10.0.14+", productVersion, StringComparison.Ordinal);
             }
             finally
             {

@@ -15,9 +15,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="SIPSorcery" Version="10.0.16" />
+    <PackageReference Include="SIPSorcery" Version="10.0.17" />
     <PackageReference Include="Concentus" Version="2.2.2" />
-    <PackageReference Include="Tmds.LibC" Version="0.2.0" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Tmds.LibC" Version="0.5.0" ExcludeAssets="all" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

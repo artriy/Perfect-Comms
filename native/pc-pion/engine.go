@@ -202,7 +202,7 @@ func newEngine() (*engine, error) {
 	settings := newSettingEngine()
 	// One shared mux per engine keeps host ICE traffic on one port per usable
 	// network family. Each ICE agent still owns its mDNS sockets, and Pion
-	// WebRTC v4.2.17 normal srflx gathering uses one socket per STUN URL.
+	// WebRTC v4.2.26 normal srflx gathering uses one socket per STUN URL.
 	// Prefer dual stack, while retaining an IPv4 fallback for hosts without a
 	// usable IPv6 interface.
 	muxClosing := &atomic.Bool{}

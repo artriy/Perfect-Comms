@@ -302,8 +302,8 @@
       },
       "SIPSorcery": {
         "type": "Transitive",
-        "resolved": "10.0.16",
-        "contentHash": "Fs+F4TaZaXFFVRtlsL1FpV4PoRg/aBaa5+FZLrgEIoWLKOtSeCiqxAFRmEzfAw/iL3YfEeFPXw9cUR1epJ6kiw==",
+        "resolved": "10.0.17",
+        "contentHash": "7JB9LxHiuF7wKKi4NUNKm7u39TN6awW1fIbfioHTON2gCMHuPrxYEy2NBxTVUbYNalXkR8tUDAIPbeJs/OFsQw==",
         "dependencies": {
           "BouncyCastle.Cryptography": "2.7.0",
           "Concentus": "2.2.2",
@@ -311,7 +311,7 @@
           "Makaretu.Dns.Multicast": "0.27.0",
           "Microsoft.Extensions.Logging.Abstractions": "10.0.11",
           "SIPSorcery.WebSocketSharp": "0.0.1",
-          "SIPSorceryMedia.Abstractions": "10.0.16"
+          "SIPSorceryMedia.Abstractions": "10.0.17"
         }
       },
       "SIPSorcery.WebSocketSharp": {
@@ -321,8 +321,8 @@
       },
       "SIPSorceryMedia.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.16",
-        "contentHash": "TApOBFelC4MZ6xTe2hB5IukSrGRBPQI69VDegyVwGoulTWmGciWJcNDC8Kx2/a8Yv5kwt4AYBVKvT6zNr+sHnA==",
+        "resolved": "10.0.17",
+        "contentHash": "evBOSRAauanA8kwZbNclXhnSWwEdHTNg2ALkcHvDCzrZuNAqwnP3r9v207K6eMfSR22hrnI4dvf6UGG80emDCg==",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "10.0.11"
         }
@@ -341,7 +341,7 @@
         "type": "Project",
         "dependencies": {
           "Concentus": "[2.2.2, )",
-          "SIPSorcery": "[10.0.16, )"
+          "SIPSorcery": "[10.0.17, )"
         }
       }
     }

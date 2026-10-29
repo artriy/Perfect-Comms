@@ -11,7 +11,7 @@ port, stdin token auth) to the PerfectComms BepInEx mod.
 
 Also runs DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled
 libopus 1.6.1 encode/decode with classic FEC plus Deep Redundancy (DRED), and the
-Pion WebRTC v4.2.17 peer transport with proximity mixing, so mic, peer audio,
+Pion WebRTC v4.2.26 peer transport with proximity mixing, so mic, peer audio,
 and playback all live in this helper. The Rust media core loads Pion through
 the companion C-shared library built from `native/pc-pion`; transport startup
 fails closed if the matching library is missing. Sidecar protocol version 18, Pion ABI 3.
@@ -125,7 +125,7 @@ cargo check --all-targets          # fast gate the CI matrix reuses per target
 ```
 
 `cargo build` produces the Rust helper only. From the repository root, use
-`scripts/build-pion.sh` with Go 1.26.2 to produce its required Pion companion,
+`scripts/build-pion.sh` with Go 1.27.3 to produce its required Pion companion,
 for example `bash scripts/build-pion.sh linux-x64 --stage`. Windows x64,
 Linux x64, and macOS x64/arm64/universal targets are supported.
 

@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="ILRepack.Lib" Version="[2.0.46]" PrivateAssets="all" />
+    <PackageReference Include="ILRepack.Lib" Version="[2.0.48]" PrivateAssets="all" />
     <PackageReference Include="Mono.Cecil" Version="0.11.6" />
   </ItemGroup>
 </Project>

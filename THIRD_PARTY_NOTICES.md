@@ -53,11 +53,11 @@ runtime for the applicable platform. Their licenses are reproduced or referenced
   `Licenses.WebRTC-spl-sqrt-floor-BSD-3-Clause.txt`, `Licenses.WebRTC-fft-BSD-3-Clause.txt`,
   `Licenses.WebRTC-pffft-BSD-3-Clause.txt`, and `Licenses.WebRTC-rnnoise-BSD-3-Clause.txt`.
 
-## Pion WebRTC v4.2.17 (peer-to-peer transport)
+## Pion WebRTC v4.2.26 (peer-to-peer transport)
 
 - Release files: `Libs/pion/pc-pion.x64.dll`, `Libs/pion/libpc-pion.linux-x64.so`, and the signed
   `PerfectCommsAudio.app/Contents/MacOS/libpc-pion.dylib` inside `pc-capture-mac.zip`.
-- Upstream: https://github.com/pion/webrtc, pinned to v4.2.17 together with the exact module graph
+- Upstream: https://github.com/pion/webrtc, pinned to v4.2.26 together with the exact module graph
   in `native/pc-pion/go.mod` and `native/pc-pion/go.sum`.
 - License: MIT for Pion; the c-shared binary also incorporates the BSD-licensed Go runtime and
   its locked Go module dependencies. Exact module versions and reproduced license texts are
@@ -69,8 +69,8 @@ The plugin embeds these managed assemblies as resources and resolves them at run
 
 | Assembly | Upstream and license text |
 |----------|---------------------------|
-| System.Text.Encodings.Web and System.Text.Json 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is embedded as `Licenses.dotnet-runtime-MIT.txt`; the exact 10.x package notices are embedded as `Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt` and `Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt`. |
-| Microsoft.Bcl.AsyncInterfaces and System.IO.Pipelines 10.0.10 | [.NET runtime](https://github.com/dotnet/runtime), MIT. These System.Text.Json runtime dependencies share the embedded .NET runtime license and 10.x NuGet third-party notices above. |
+| System.Text.Encodings.Web and System.Text.Json 10.0.14 | [.NET runtime](https://github.com/dotnet/runtime), MIT. The package license is embedded as `Licenses.dotnet-runtime-MIT.txt`; the exact 10.x package notices are embedded as `Licenses.System.Text.Encodings.Web-THIRD-PARTY-NOTICES.txt` and `Licenses.System.Text.Json-THIRD-PARTY-NOTICES.txt`. |
+| Microsoft.Bcl.AsyncInterfaces and System.IO.Pipelines 10.0.14 | [.NET runtime](https://github.com/dotnet/runtime), MIT. These System.Text.Json runtime dependencies share the embedded .NET runtime license and 10.x NuGet third-party notices above. |
 
 ## Native Rust dependencies
 

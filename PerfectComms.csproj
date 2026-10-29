@@ -47,12 +47,12 @@
 		<PackageReference Include="BepInEx.IL2CPP.MSBuild" Version="2.1.0-rc.1" PrivateAssets="all" ExcludeAssets="runtime" />
 		<!-- These assemblies are loaded from embedded resources at runtime. Keep them
 		     explicit so a clean restore always stages the exact files embedded below. -->
-		<PackageReference Include="System.Text.Encodings.Web" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.Text.Json" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Encodings.Web" Version="10.0.14" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.Text.Json" Version="10.0.14" PrivateAssets="all" GeneratePathProperty="true" />
 		<!-- System.Text.Json's netstandard asset requires these runtime assemblies on
 		     the pinned BepInEx host, so keep them embedded with the serializer. -->
-		<PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
-		<PackageReference Include="System.IO.Pipelines" Version="10.0.10" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.14" PrivateAssets="all" GeneratePathProperty="true" />
+		<PackageReference Include="System.IO.Pipelines" Version="10.0.14" PrivateAssets="all" GeneratePathProperty="true" />
 	</ItemGroup>
 
 	<ItemGroup>

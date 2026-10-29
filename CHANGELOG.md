@@ -62,6 +62,12 @@
 - Scrolling uses a critically damped spring, so it never overshoots and feels the same at any frame rate.
 - HUD icons use mipmaps and trilinear filtering.
 
+#### Dependencies
+
+- Desktop P2P voice uses Pion WebRTC v4.2.26 (from v4.2.17) built with Go 1.27.3, with current Pion ICE, DTLS, SRTP, SCTP, and TURN modules and `golang.org/x` libraries. The Pion ABI and connection protocol are unchanged.
+- Starlight Android bundles SIPSorcery 10.0.17. The desktop DLL embeds System.Text.Json 10.0.14, and the native audio helper uses current Rust crates, including `parking_lot` 0.13.
+- Native, Go, and Worker dependency audits report no known vulnerabilities.
+
 </details>
 
 ## Perfect Comms v4.1.11

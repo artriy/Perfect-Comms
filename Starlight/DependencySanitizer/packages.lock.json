@@ -4,9 +4,9 @@
     "net10.0": {
       "ILRepack.Lib": {
         "type": "Direct",
-        "requested": "[2.0.46, 2.0.46]",
-        "resolved": "2.0.46",
-        "contentHash": "m2Ex+I1dFBi0yPxoC67HbjQO3BwkbsQ3/DsOLYToiRYUUeRP4PTkQK+VvBwBCle/r9NRQ8U6KmyeEPPjyu/thg=="
+        "requested": "[2.0.48, 2.0.48]",
+        "resolved": "2.0.48",
+        "contentHash": "RnKDY9x44uKa3pTNBu14+kfp+1YYOgblejWaYV6R5qpHSt/NzPBUVhADk8mRuPikkoHpdDtJF7UEqYocEP9YLA=="
       },
       "Mono.Cecil": {
         "type": "Direct",

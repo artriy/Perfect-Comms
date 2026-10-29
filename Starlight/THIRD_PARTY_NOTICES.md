@@ -36,13 +36,13 @@ copyright and license text is embedded as
 | Microsoft.Extensions.DependencyInjection.Abstractions | 10.0.11 | Host-provided `Microsoft.Extensions.DependencyInjection.Abstractions.dll` | https://dot.net/ | MIT |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.11 | Host-provided `Microsoft.Extensions.Logging.Abstractions.dll` | https://dot.net/ | MIT |
 | SimpleBase | 1.3.1 | `SimpleBase.dll` | https://github.com/ssg/SimpleBase | Apache License 2.0 |
-| SIPSorcery | 10.0.16 | `SIPSorcery.dll` | https://github.com/sipsorcery-org/sipsorcery/tree/master/src/SIPSorcery | Package `LICENSE.md`, reproduced verbatim in `SIPSorcery-LICENSE.md` |
+| SIPSorcery | 10.0.17 | `SIPSorcery.dll` | https://github.com/sipsorcery-org/sipsorcery/tree/master/src/SIPSorcery | Package `LICENSE.md`, reproduced verbatim in `SIPSorcery-LICENSE.md` |
 | SIPSorcery.WebSocketSharp | 0.0.1 | `websocket-sharp.dll` | https://github.com/sipsorcery/websocket-sharp | MIT |
-| SIPSorceryMedia.Abstractions | 10.0.16 | `SIPSorceryMedia.Abstractions.dll` | https://github.com/sipsorcery-org/sipsorcery/tree/master/src/SIPSorceryMedia.Abstractions | Package `LICENSE.md`, reproduced verbatim in `SIPSorcery-LICENSE.md` |
+| SIPSorceryMedia.Abstractions | 10.0.17 | `SIPSorceryMedia.Abstractions.dll` | https://github.com/sipsorcery-org/sipsorcery/tree/master/src/SIPSorceryMedia.Abstractions | Package `LICENSE.md`, reproduced verbatim in `SIPSorcery-LICENSE.md` |
 
 ## SIPSorcery package terms
 
-The `SIPSorcery` 10.0.16 and `SIPSorceryMedia.Abstractions` 10.0.16 packages contain identical `LICENSE.md` files. Those files are not plain BSD licenses. They contain a BSD 3-Clause license, an additional use restriction that takes precedence where it conflicts with the BSD terms, and the GNU Lesser General Public License v2.1 text for SIPSorceryMedia.FFmpeg. The complete package file is embedded without modification in `PerfectCommsStarlight.dll`; its repository source is `SIPSorcery-LICENSE.md`.
+The `SIPSorcery` 10.0.17 and `SIPSorceryMedia.Abstractions` 10.0.17 packages contain identical `LICENSE.md` files. Those files are not plain BSD licenses. They contain a BSD 3-Clause license, an additional use restriction that takes precedence where it conflicts with the BSD terms, and the GNU Lesser General Public License v2.1 text for SIPSorceryMedia.FFmpeg. The complete package file is embedded without modification in `PerfectCommsStarlight.dll`; its repository source is `SIPSorcery-LICENSE.md`.
 
 ## MIT licensed components
 

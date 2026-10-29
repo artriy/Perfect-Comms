@@ -22,7 +22,7 @@ serde_json = "1"
 apm-sys = { path = "../apm-sys" }
 pion-sys = { path = "../pion-sys" }
 opusic-c = { version = "1.6.1", default-features = false, features = ["bundled", "dred"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # Cubeb is the desktop sidecar's audio-device backend. The managed Starlight Android build does not
 # compile this crate; retain the target guard for cargo tooling that inspects unsupported targets.

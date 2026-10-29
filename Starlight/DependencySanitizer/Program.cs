@@ -32,7 +32,7 @@ internal static class Program
             ["Licenses.PerfectComms-LICENSE.txt"] =
                 "20C17D8B8C48A600800DFD14F95D5CB9FF47066A9641DDEAB48DC54AEC96E331",
             ["Licenses.THIRD_PARTY_NOTICES.md"] =
-                "A61A5AF9CC60884630631F0AF6FFD0EC936BD5200EBE9CA28FE74BABAD499250",
+                "C7C77F97EB8291F3E275C31DF50986842B72F7098B61E88827FE556C196AC512",
             ["Licenses.SIPSorcery-LICENSE.md"] =
                 "C6806C324232D99B9F1BE116B55D376589C817EF22C6A514C1365C428499835A"
         };
@@ -51,8 +51,8 @@ internal static class Program
             ["Makaretu.Dns.Multicast"] = new(0, 27, 0, 0),
             ["Microsoft.Extensions.DependencyInjection.Abstractions"] = new(8, 0, 0, 0),
             ["Microsoft.Extensions.Logging.Abstractions"] = new(8, 0, 0, 0),
-            ["SIPSorcery"] = new(10, 0, 16, 0),
-            ["SIPSorceryMedia.Abstractions"] = new(10, 0, 16, 0),
+            ["SIPSorcery"] = new(10, 0, 17, 0),
+            ["SIPSorceryMedia.Abstractions"] = new(10, 0, 17, 0),
             ["SimpleBase"] = new(1, 3, 1, 0),
             ["System.Net.IPNetwork"] = new(2, 1, 2, 0),
             ["websocket-sharp"] = new(0, 0, 1, 0)
@@ -76,10 +76,10 @@ internal static class Program
                     "A5060D45F711F01FE1DFF20568AABDC1014C5B843BE15383EE40CCD4F88E147A",
                 [("Makaretu.Dns.Multicast", new Version(0, 27, 0, 0))] =
                     "023391027C668E58B1FFDF2C37448121979D01C3E2722E697BEDCD6819837E8E",
-                [("SIPSorcery", new Version(10, 0, 16, 0))] =
-                    "702563788B9D7178811FEA30B5432AD76A15DF617E1CD1FD407F297A1CA6453A",
-                [("SIPSorceryMedia.Abstractions", new Version(10, 0, 16, 0))] =
-                    "3EF101CA8EA078EF53BD94A09F07779121EF28EAB57B83E34B97B7010C071939",
+                [("SIPSorcery", new Version(10, 0, 17, 0))] =
+                    "0A20BB4EB239FB0BDAF20BACDE424B517726C9A97EED504CDB7CFFE14928B851",
+                [("SIPSorceryMedia.Abstractions", new Version(10, 0, 17, 0))] =
+                    "04A648630173CEC7FDCB7089ED388E9783D41BD6075940BF80CE534A3A03E89B",
                 [("SimpleBase", new Version(1, 3, 1, 0))] =
                     "72B1B02EE7AC700A212216FF5261F1EE5B04CABD5ED56B4E620579C9D7075E10",
                 [("System.Net.IPNetwork", new Version(2, 1, 2, 0))] =
@@ -107,7 +107,7 @@ internal static class Program
             "Microsoft.CSharp|10.0.0.0|b03f5f7f11d50a3a",
             "Microsoft.Extensions.DependencyInjection.Abstractions|8.0.0.0|adb9793829ddae60",
             "Microsoft.Extensions.Logging.Abstractions|8.0.0.0|adb9793829ddae60",
-            "Microsoft.Win32.Primitives|8.0.0.0|b03f5f7f11d50a3a",
+            "Microsoft.Win32.Primitives|10.0.0.0|b03f5f7f11d50a3a",
             "Microsoft.Win32.Registry|8.0.0.0|b03f5f7f11d50a3a",
             "SemanticVersioning|2.0.2.0|a89bb7dc6f7a145c",
             "System.Collections.Concurrent|10.0.0.0|b03f5f7f11d50a3a",
@@ -190,7 +190,8 @@ internal static class Program
             ["SIPSorcery"] = ImportSet(
                 "Polyfills.Polyfill/StandardHandleHelper::GetStdHandle|kernel32.dll|GetStdHandle",
                 "Polyfills.Polyfill/HardLinkHelper::CreateHardLinkW|kernel32.dll|CreateHardLinkW",
-                "Polyfills.Polyfill/HardLinkHelper::link|libc|link"),
+                "Polyfills.Polyfill/HardLinkHelper::link|libc|link",
+                "Polyfills.Polyfill/SignalHelper::kill|libc|kill"),
             ["Concentus"] = ImportSet(
                 "Concentus.Native.KernelInteropLinux/LibDL::dlclose|libdl.so|dlclose",
                 "Concentus.Native.KernelInteropLinux/LibDL::dlerror|libdl.so|dlerror",
