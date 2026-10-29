@@ -36,7 +36,7 @@ The directory handles public-lobby discovery only. It does not carry voice audio
 | **Impostors Hear Dead** | Off | Allows living impostors to hear dead players when the ghost rules permit speech. |
 | **Comms Sabotage Disables Voice** | On | Disables ordinary voice while Communications sabotage is active. |
 | **Only Ghosts can Talk/Hear** | Off | Restricts task-phase voice to dead players, except for the optional living-to-ghost rule below. |
-| **Ghosts Hear Living During Tasks** | Off | Lets living players speak to nearby ghosts and spectators while Meetings/Lobby Only or Only Ghosts can Talk/Hear blocks living-to-living voice. Keeps normal ghost hearing distance, falloff, vent privacy, and mute controls. |
+| **Ghosts Hear Living During Tasks** | Off | Lets living players speak to nearby ghosts and spectators while Meetings/Lobby Only or Only Ghosts can Talk/Hear blocks living-to-living voice. Keeps normal ghost hearing distance, falloff, vent privacy, and mute controls. Shown only while one of those two rules is on and Ghosts Also Meeting/Lobby Only is not overriding it. |
 | **Ghosts Hear Each Other Anywhere** | Off | Removes proximity distance between dead players. |
 | **Meetings/Lobby Only** | Off | Disables ordinary living-to-living voice during tasks. |
 | **Meeting Only - Impostor Chat** | Off | Beneath Meetings/Lobby Only when enabled. Living actual impostors can speak globally during tasks; all ghosts and spectators listen, but living crew and mod-added impostor voice privileges do not gain access. |

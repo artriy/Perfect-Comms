@@ -22,6 +22,28 @@ public sealed class GhostListeningPolicyTests : IDisposable
     public void Dispose() => VoiceRoomSettingsState.ClearRemote();
 
     [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(true, true, false, true)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, true, true, true)]
+    public void ExceptionAppliesOnlyWhileLivingTaskVoiceIsRestrictedAndGhostsAreNot(
+        bool meetingOnly, bool onlyGhosts, bool ghostsAlsoMeetingOnly, bool expected)
+    {
+        Assert.Equal(expected, VoiceGhostListeningPolicy.CanApply(meetingOnly, onlyGhosts, ghostsAlsoMeetingOnly));
+        var settings = Settings with
+        {
+            OnlyMeetingOrLobby = meetingOnly,
+            OnlyGhostsCanTalk = onlyGhosts,
+            OnlyMeetingOrLobbyAffectsGhosts = ghostsAlsoMeetingOnly,
+        };
+        Assert.Equal(expected, VoiceGhostListeningPolicy.Enabled(settings));
+    }
+
+    [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
