@@ -76,7 +76,7 @@ internal static class Program
         }
 
         await CodecInterop.RunAsync(options.CodecProbePath, options.Timeout).ConfigureAwait(false);
-        if (NativePion.AbiVersion() != 3 || NativePion.PionVersion() != 4_002_026)
+        if (NativePion.AbiVersion() != 3 || NativePion.PionVersion() != 4_002_017)
             throw new ProbeFailureException("native-contract");
 
         ulong nativeHandle = NativePion.EngineNew();

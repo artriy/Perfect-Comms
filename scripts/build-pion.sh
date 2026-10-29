@@ -8,8 +8,8 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 module="$root/native/pc-pion"
 artifact_root="$root/artifacts/pion"
-go_version="1.27.3"
-pion_version="v4.2.26"
+go_version="1.26.2"
+pion_version="v4.2.17"
 target="${1:-}"
 stage=0
 linker_flags="-s -w -buildid="

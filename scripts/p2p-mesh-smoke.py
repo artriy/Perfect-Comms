@@ -46,7 +46,7 @@ CLIENT_COUNT = 10
 LINK_COUNT = CLIENT_COUNT * (CLIENT_COUNT - 1) // 2
 ENDPOINT_COUNT = LINK_COUNT * 2
 LEVEL_THRESHOLD = 0.001
-PION_VERSION = "v4.2.26"
+PION_VERSION = "v4.2.17"
 
 # Keep this list byte-for-byte aligned with PerfectCommsVoiceBackend.DefaultIceServers.
 MANAGED_STUN_URLS = (

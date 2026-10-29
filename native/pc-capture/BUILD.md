@@ -1,6 +1,6 @@
 # pc-capture: build, sign, ship
 
-Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.26 peer transport with proximity mixing. The Rust media core loads Pion through a required ABI 3 companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), sidecar protocol version 18.
+Cubeb capture/playback, DSP (WebRTC-APM AEC3/high or very-high noise suppression/HPF), bundled libopus 1.6.1 codec with classic FEC plus DRED, and Pion WebRTC v4.2.17 peer transport with proximity mixing. The Rust media core loads Pion through a required ABI 3 companion C-shared library. Loopback 127.0.0.1 single client, token via stdin (native) or token-file (Wine), sidecar protocol version 18.
 
 The DRED encoder duration is 100 ms, matching the five-frame concealment cap. Opus' packet-loss
 CTL budgets the redundancy dynamically; the healthy 5% and 10% policies do not meet libopus'
@@ -25,7 +25,7 @@ The Pion build additionally names its desktop C-shared targets `win-x64`,
 ## Local build
 
 - All non-mac Rust helpers: `bash scripts/build-helpers.sh` (use `--dry-run` to preview the target -> output map; pass a single triple, e.g. `bash scripts/build-helpers.sh x86_64-unknown-linux-gnu`, to build just one). Cubeb requires CMake 3.19+ and a C/C++ compiler. Linux additionally needs `pkg-config`, `libpulse-dev`, and `libasound2-dev` so the shipped helper contains its PulseAudio primary backend and ALSA fallback.
-- Pion companions: install Go 1.27.3 exactly, then run `bash scripts/build-pion.sh <win-x64|linux-x64> --stage`. The script verifies the locked Pion v4.2.26 module before building. Windows x64 needs the matching MinGW C compiler and Linux needs GCC. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
+- Pion companions: install Go 1.26.2 exactly, then run `bash scripts/build-pion.sh <win-x64|linux-x64> --stage`. The script verifies the locked Pion v4.2.17 module before building. Windows x64 needs the matching MinGW C compiler and Linux needs GCC. For a manual macOS build, build `mac-x64` and `mac-arm64` without `--stage`, then build `mac-universal --stage`.
 - macOS universal + ad-hoc sign: `bash scripts/build-mac.sh` (use `--dry-run` to preview the lipo / codesign plan). Builds both Rust and Pion Apple slices, `lipo`s each into a universal binary, seals `libpc-pion.dylib` into a `PerfectCommsAudio.app` with an `Info.plist` carrying `NSMicrophoneUsageDescription` and a `PerfectCommsAudio.icns` icon (generated from `Resources/miclogo.png` via `iconutil`), ad-hoc-signs it (`codesign --sign -`), and zips the bundle with `ditto`. The bundle's inner executable is `Contents/MacOS/PerfectCommsAudio`; the embedded/zip artifact name stays `pc-capture-mac.zip`.
 - Rust helper outputs land in `Libs/pc-capture/` under the frozen names: `pc-capture-win-x64.exe`, `pc-capture-linux-x64`, `pc-capture-mac.zip`. Staged standalone Pion outputs land in `Libs/pion/` as `pc-pion.x64.dll` and `libpc-pion.linux-x64.so`; the macOS dylib stays inside the signed app.
 

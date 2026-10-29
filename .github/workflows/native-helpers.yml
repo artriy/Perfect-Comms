@@ -38,7 +38,7 @@ permissions:
 
 jobs:
   pion-windows:
-    name: Pion v4.2.26 (${{ matrix.target }})
+    name: Pion v4.2.17 (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
       - name: MinGW cgo compiler
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.package }}
@@ -70,7 +70,7 @@ jobs:
           if-no-files-found: error
 
   pion-linux:
-    name: Pion v4.2.26 (linux-x64, glibc 2.31)
+    name: Pion v4.2.17 (linux-x64, glibc 2.31)
     runs-on: ubuntu-latest
     container: debian:bullseye-slim
     steps:
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
       - name: Test locked Pion transport and license inventory
         run: |
@@ -177,7 +177,7 @@ jobs:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.26.2"
           cache-dependency-path: native/pc-pion/go.sum
       - name: Build ad-hoc universal helper
         run: bash scripts/build-mac.sh

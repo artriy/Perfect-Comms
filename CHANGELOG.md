@@ -64,9 +64,8 @@
 
 #### Dependencies
 
-- Desktop P2P voice uses Pion WebRTC v4.2.26 (from v4.2.17) built with Go 1.27.3, with current Pion ICE, DTLS, SRTP, SCTP, and TURN modules and `golang.org/x` libraries. The Pion ABI and connection protocol are unchanged.
 - Starlight Android bundles SIPSorcery 10.0.17. The desktop DLL embeds System.Text.Json 10.0.14, and the native audio helper uses current Rust crates, including `parking_lot` 0.13.
-- Native, Go, and Worker dependency audits report no known vulnerabilities.
+- Pion WebRTC stays at v4.2.17 (Go 1.26.2), so desktop P2P connections behave exactly as in v4.1.11.
 
 </details>
 
