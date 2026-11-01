@@ -199,6 +199,67 @@ public sealed class SidecarLauncherCacheTests
     }
 
     [Fact]
+    public void MacPrivateRootHoldsBrokerPrivateDirectoriesBesideTheApplication()
+    {
+        var workspace = NewTemporaryDirectory();
+        var bundleRoot = Path.Combine(workspace, "bundle");
+        var appDirectory = Path.Combine(bundleRoot, "PerfectCommsAudio.app");
+        var helper = Path.Combine(appDirectory, "Contents", "MacOS", "PerfectCommsAudio");
+        Directory.CreateDirectory(Path.GetDirectoryName(helper)!);
+        File.WriteAllText(helper, "mac-helper");
+        try
+        {
+            var privateRoot = SidecarLauncher.MacBrokerPrivateRoot(helper);
+            Assert.Equal(Path.Combine(bundleRoot, SidecarLauncher.MacBrokerPrivateRootName), privateRoot);
+            Directory.CreateDirectory(privateRoot);
+            string? requestedPrivateDirectory = null;
+
+            WineHostActionResult PrepareMac(
+                string operation,
+                string hostApplication,
+                string requestPath,
+                string requestJson,
+                string receiptPath,
+                string expectedReceipt)
+            {
+                using var document = JsonDocument.Parse(requestJson);
+                requestedPrivateDirectory = document.RootElement.GetProperty("private_directory").GetString();
+                var directory = Path.GetDirectoryName(receiptPath)!;
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, ".token.pending"), string.Empty);
+                File.WriteAllText(receiptPath, expectedReceipt);
+                return WineHostActionResult.Verified();
+            }
+
+            var paths = SidecarLauncher.CreateTemporaryPaths(
+                wine: true,
+                static path => path.Replace('\\', '/'),
+                static (_, _, _, _, _) =>
+                    throw new InvalidOperationException("macOS must not dispatch /bin/sh"),
+                privateRoot,
+                WineHostOs.MacOS,
+                helper,
+                PrepareMac);
+
+            Assert.Equal(privateRoot, Path.GetDirectoryName(paths.PrivateDirectory));
+            Assert.NotNull(requestedPrivateDirectory);
+            Assert.Equal(
+                privateRoot.Replace('\\', '/'),
+                requestedPrivateDirectory![..requestedPrivateDirectory.LastIndexOf('/')]);
+            SidecarLauncher.CleanupTemporaryPaths(
+                paths.HandshakePath,
+                paths.PrivateDirectory,
+                paths.PrivateRoot);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(privateRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(workspace))
+                Directory.Delete(workspace, true);
+        }
+    }
+
+    [Fact]
     public void MacWineLaunchQueuesArgumentsWithoutSecondHostDispatch()
     {
         var workspace = NewTemporaryDirectory();
@@ -1275,6 +1336,52 @@ public sealed class SidecarLauncherCacheTests
             selection.CacheRoot);
         Assert.Equal("install", selection.RootKind);
         Assert.Equal("platform-install-relative", selection.Reason);
+    }
+
+    [Fact]
+    public void SandboxedWinePrefixMovesCacheIntoLocalApplicationData()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, "steamapps", "common", "Among Us");
+        var localApplicationData = Path.Combine(root, "users", "steamuser", "AppData", "Local");
+
+        var selection = SidecarLauncher.ResolveNativeCacheRoot(
+            baseDirectory,
+            localApplicationData,
+            Triple,
+            TestBundleVersion,
+            windows: true,
+            wine: true,
+            static () => throw new InvalidOperationException("Wine must not query elevation"),
+            sandboxedPrefix: true);
+
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(localApplicationData, "PerfectComms", "native")),
+            selection.CacheRoot);
+        Assert.Equal("local-app-data", selection.RootKind);
+        Assert.Equal("wine-sandboxed-prefix", selection.Reason);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("relative-cache")]
+    public void SandboxedWinePrefixRequiresAbsoluteLocalApplicationData(string localApplicationData)
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var baseDirectory = Path.Combine(root, "steamapps", "common", "Among Us");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SidecarLauncher.ResolveNativeCacheRoot(
+                baseDirectory,
+                localApplicationData,
+                Triple,
+                TestBundleVersion,
+                windows: true,
+                wine: true,
+                static () => false,
+                sandboxedPrefix: true));
+
+        Assert.Contains("LocalApplicationData", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]

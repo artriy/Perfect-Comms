@@ -169,6 +169,67 @@ internal static class WineEnvironment
         return WineHostOs.Unknown;
     }
 
+    private static readonly Lazy<string?> SandboxedPrefixProbe = new(
+        DetectSandboxedPrefix,
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    public static string? SandboxedPrefixHostRoot => SandboxedPrefixProbe.Value;
+
+    private static string? DetectSandboxedPrefix()
+    {
+        if (HostOs != WineHostOs.MacOS) return null;
+        return ResolveSandboxedPrefixHostRoot(
+            Environment.GetEnvironmentVariable("SANDBOXFS_LAYER_MANIFEST"),
+            Environment.GetEnvironmentVariable("WINEPREFIX"),
+            Environment.GetEnvironmentVariable("WINECONFIGDIR"));
+    }
+
+    internal static string? ResolveSandboxedPrefixHostRoot(
+        string? layerManifest,
+        string? winePrefix,
+        string? wineConfigDirectory)
+    {
+        if (string.IsNullOrEmpty(layerManifest)) return null;
+        if (!string.IsNullOrEmpty(winePrefix) && winePrefix.StartsWith("/", StringComparison.Ordinal))
+            return NonRootHostPath(winePrefix);
+        if (string.IsNullOrEmpty(wineConfigDirectory) ||
+            !wineConfigDirectory.StartsWith(@"\??\", StringComparison.Ordinal))
+            return null;
+
+        var ntPath = wineConfigDirectory.Substring(4);
+        if (ntPath.StartsWith(@"unix\", StringComparison.OrdinalIgnoreCase))
+            return NonRootHostPath("/" + ntPath.Substring(5).Replace('\\', '/'));
+        if (ntPath.Length >= 3 && (ntPath[0] == 'Z' || ntPath[0] == 'z') && ntPath[1] == ':' && ntPath[2] == '\\')
+            return NonRootHostPath(ManualHostPath(ntPath));
+        return null;
+    }
+
+    internal static bool TryMapSandboxedHostPath(string windowsPath, string hostPrefix, out string hostPath)
+    {
+        hostPath = string.Empty;
+        if (string.IsNullOrEmpty(windowsPath) ||
+            string.IsNullOrEmpty(hostPrefix) ||
+            windowsPath.Length < 3 ||
+            (windowsPath[0] != 'C' && windowsPath[0] != 'c') ||
+            windowsPath[1] != ':' ||
+            (windowsPath[2] != '\\' && windowsPath[2] != '/'))
+        {
+            return false;
+        }
+
+        var relative = windowsPath.Substring(3).Replace('\\', '/').TrimEnd('/');
+        hostPath = relative.Length == 0
+            ? hostPrefix + "/drive_c"
+            : hostPrefix + "/drive_c/" + relative;
+        return true;
+    }
+
+    private static string? NonRootHostPath(string path)
+    {
+        var trimmed = path.TrimEnd('/');
+        return trimmed.Length == 0 ? null : trimmed;
+    }
+
     public static void HostExec(string unixProgram, params string[] unixArgs)
         => _ = TryHostExec(unixProgram, unixArgs);
 
@@ -732,6 +793,9 @@ internal static class WineEnvironment
 
     public static string ResolveHostPath(string windowsPath)
     {
+        if (SandboxedPrefixHostRoot is { } sandboxedPrefix &&
+            TryMapSandboxedHostPath(windowsPath, sandboxedPrefix, out var sandboxedHostPath))
+            return sandboxedHostPath;
         try
         {
             using var p = Process.Start(BuildWinePathStartInfo(windowsPath));

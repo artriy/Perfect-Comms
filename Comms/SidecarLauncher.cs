@@ -91,6 +91,7 @@ internal static class SidecarLauncher
         "PERFECTCOMMS_AUDIO_CONTRACT=1;ENGINE=CUBEB;CUBEB=0.36.0;";
     private const string WineTemporaryDirectoryPrefix = "perfect-comms-";
     internal const string MacBrokerRequestDirectoryName = ".perfect-comms-broker-v1";
+    internal const string MacBrokerPrivateRootName = ".perfect-comms-private-v1";
     internal const int WineHelperExitWaitMs = 9_500;
     internal const string WinePrivateDirectoryScript = """
         set -eu
@@ -463,7 +464,8 @@ internal static class SidecarLauncher
             stage = "select-cache-root";
             var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             var wine = WineEnvironment.IsWine;
-            var localApplicationData = windows && !wine
+            var sandboxedPrefix = wine && WineEnvironment.SandboxedPrefixHostRoot != null;
+            var localApplicationData = (windows && !wine) || sandboxedPrefix
                 ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
                 : string.Empty;
             var cache = ResolveNativeCacheRoot(
@@ -473,12 +475,13 @@ internal static class SidecarLauncher
                 canonicalBundleVersion,
                 windows,
                 wine,
-                RequiresCurrentProcessCacheIsolation);
+                RequiresCurrentProcessCacheIsolation,
+                sandboxedPrefix);
             diagnosticPath = cache.CacheRoot;
             cacheRoot = cache.CacheRoot;
             VoiceDiagnostics.Log(
                 "sidecar.extract",
-                $"event=cache-root-selected rootKind={cache.RootKind} reason={cache.Reason} nativeWindows={(windows && !wine).ToString().ToLowerInvariant()} wine={wine.ToString().ToLowerInvariant()} triple={triple} bundle={canonicalBundleVersion} installProjectedHelperPathLength={cache.InstallProjectedHelperPathLength} selectedProjectedHelperPathLength={cache.SelectedProjectedHelperPathLength} launchPathBudget={NativeWindowsLaunchPathBudget} root={NativeLibraryCache.DiagnosticValue(cache.CacheRoot)}");
+                $"event=cache-root-selected rootKind={cache.RootKind} reason={cache.Reason} nativeWindows={(windows && !wine).ToString().ToLowerInvariant()} wine={wine.ToString().ToLowerInvariant()} sandboxedPrefix={sandboxedPrefix.ToString().ToLowerInvariant()} triple={triple} bundle={canonicalBundleVersion} installProjectedHelperPathLength={cache.InstallProjectedHelperPathLength} selectedProjectedHelperPathLength={cache.SelectedProjectedHelperPathLength} launchPathBudget={NativeWindowsLaunchPathBudget} root={NativeLibraryCache.DiagnosticValue(cache.CacheRoot)}");
 
             var bundleVersion = force
                 ? canonicalBundleVersion + $"-refresh-{Environment.ProcessId}-{Guid.NewGuid():N}"
@@ -578,7 +581,8 @@ internal static class SidecarLauncher
         string bundleVersion,
         bool windows,
         bool wine,
-        Func<bool> requiresCurrentProcessCacheIsolation)
+        Func<bool> requiresCurrentProcessCacheIsolation,
+        bool sandboxedPrefix = false)
     {
         ThrowIfNullOrWhiteSpace(baseDirectory, nameof(baseDirectory));
         ArgumentNullException.ThrowIfNull(requiresCurrentProcessCacheIsolation);
@@ -588,6 +592,24 @@ internal static class SidecarLauncher
             installCacheRoot,
             triple,
             bundleVersion);
+        if (wine && sandboxedPrefix)
+        {
+            if (string.IsNullOrWhiteSpace(localApplicationData) ||
+                !Path.IsPathRooted(localApplicationData))
+            {
+                throw new InvalidOperationException(
+                    "The Wine LocalApplicationData directory is unavailable or is not absolute");
+            }
+
+            var sandboxedCacheRoot = Path.GetFullPath(
+                Path.Combine(localApplicationData, "PerfectComms", "native"));
+            return new NativeCacheRootSelection(
+                sandboxedCacheRoot,
+                LocalApplicationDataCacheRootKind,
+                "wine-sandboxed-prefix",
+                installProjectedHelperPathLength,
+                ProjectedHelperPathLength(sandboxedCacheRoot, triple, bundleVersion));
+        }
         if (!windows || wine)
         {
             return new NativeCacheRootSelection(
@@ -1125,14 +1147,30 @@ internal static class SidecarLauncher
         ThrowIfNullOrWhiteSpace(requestNonce, nameof(requestNonce));
         if (!IsSecureNonce(requestNonce))
             throw new InvalidDataException("A macOS broker request nonce must be 64 hexadecimal characters");
-        var appDirectory = MacAppDirectory(helperPath)
-            ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
-        var bundleDirectory = Path.GetDirectoryName(appDirectory)
-            ?? throw new InvalidDataException("The macOS helper bundle has no containing directory");
         return Path.Combine(
-            bundleDirectory,
+            MacBundleDirectory(helperPath),
             MacBrokerRequestDirectoryName,
             requestNonce + ".json");
+    }
+
+    internal static string MacBrokerPrivateRoot(string helperPath)
+        => Path.Combine(MacBundleDirectory(helperPath), MacBrokerPrivateRootName);
+
+    internal static string? SandboxedWineTemporaryRoot(string helperPath, WineHostOs hostOs)
+    {
+        if (hostOs != WineHostOs.MacOS || WineEnvironment.SandboxedPrefixHostRoot == null)
+            return null;
+        var root = MacBrokerPrivateRoot(helperPath);
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    private static string MacBundleDirectory(string helperPath)
+    {
+        var appDirectory = MacAppDirectory(helperPath)
+            ?? throw new InvalidDataException("The macOS helper is not inside an application bundle");
+        return Path.GetDirectoryName(appDirectory)
+            ?? throw new InvalidDataException("The macOS helper bundle has no containing directory");
     }
 
     internal static string BuildMacBrokerPrepareRequestJson(
@@ -2201,6 +2239,7 @@ internal static class SidecarLauncher
                 wine,
                 resolveWineHostPath,
                 hostAction,
+                wineTemporaryRoot: wine ? SandboxedWineTemporaryRoot(helperPath, hostOs) : null,
                 wineHostOs: hostOs,
                 helperPath: helperPath,
                 macBrokerAction: macBrokerAction);
@@ -2413,6 +2452,7 @@ internal static class SidecarLauncher
                 wine,
                 resolveWineHostPath,
                 hostAction,
+                wineTemporaryRoot: wine ? SandboxedWineTemporaryRoot(helperPath, hostOs) : null,
                 wineHostOs: hostOs,
                 helperPath: helperPath,
                 macBrokerAction: macBrokerAction);

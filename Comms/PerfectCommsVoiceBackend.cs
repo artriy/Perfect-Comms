@@ -313,7 +313,9 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             $"{VoiceDiagnostics.DescribeRoom(RoomCode)} {VoiceDiagnostics.DescribeRegion(Region)} signaling=among-us-rpc");
 #if WINDOWS
         if (WineEnvironment.IsWine)
-            VoiceDiagnostics.Log("env.wine", "detected=true");
+            VoiceDiagnostics.Log(
+                "env.wine",
+                $"detected=true hostOs={WineEnvironment.HostOs} sandboxedPrefix={(WineEnvironment.SandboxedPrefixHostRoot != null).ToString().ToLowerInvariant()}");
 #endif
     }
 

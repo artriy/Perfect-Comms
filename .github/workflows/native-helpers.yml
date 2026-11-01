@@ -181,6 +181,8 @@ jobs:
           cache-dependency-path: native/pc-pion/go.sum
       - name: Build ad-hoc universal helper
         run: bash scripts/build-mac.sh
+      - name: Test macOS broker
+        run: cargo test --locked --manifest-path native/pc-capture/Cargo.toml --bin pc-capture mac_broker
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # The helper is signed again after the APM dylib is staged.

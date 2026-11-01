@@ -278,6 +278,47 @@ public sealed class WinePathResolveTests
         }
     }
 
+    [Theory]
+    [InlineData(null, "/Users/me/prefix", null, null)]
+    [InlineData("", "/Users/me/prefix", null, null)]
+    [InlineData("/prefix/layers.bin", "/Users/me/prefix/", null, "/Users/me/prefix")]
+    [InlineData("/prefix/layers.bin", "relative-prefix", @"\??\Z:\Users\me\prefix", "/Users/me/prefix")]
+    [InlineData("/prefix/layers.bin", null, @"\??\unix\Users\me\prefix", "/Users/me/prefix")]
+    [InlineData("/prefix/layers.bin", null, @"\??\C:\prefix", null)]
+    [InlineData("/prefix/layers.bin", "/", null, null)]
+    [InlineData("/prefix/layers.bin", null, null, null)]
+    public void SandboxedPrefixRootRequiresLayerManifestAndAbsoluteHostPrefix(
+        string? layerManifest,
+        string? winePrefix,
+        string? wineConfigDirectory,
+        string? expected)
+    {
+        Assert.Equal(
+            expected,
+            WineEnvironment.ResolveSandboxedPrefixHostRoot(layerManifest, winePrefix, wineConfigDirectory));
+    }
+
+    [Theory]
+    [InlineData(@"C:\users\steamuser\AppData\Local\PerfectComms", "/prefix/drive_c/users/steamuser/AppData/Local/PerfectComms")]
+    [InlineData(@"c:\users\steamuser\", "/prefix/drive_c/users/steamuser")]
+    [InlineData(@"C:\", "/prefix/drive_c")]
+    public void SandboxedPrefixMapsDriveCIntoThePrefix(string windowsPath, string expected)
+    {
+        Assert.True(WineEnvironment.TryMapSandboxedHostPath(windowsPath, "/prefix", out var hostPath));
+        Assert.Equal(expected, hostPath);
+    }
+
+    [Theory]
+    [InlineData(@"Z:\tmp\perfect-comms")]
+    [InlineData(@"D:\Games\Among Us")]
+    [InlineData("relative")]
+    [InlineData("")]
+    public void SandboxedPrefixLeavesOtherPathsToWinePath(string windowsPath)
+    {
+        Assert.False(WineEnvironment.TryMapSandboxedHostPath(windowsPath, "/prefix", out var hostPath));
+        Assert.Empty(hostPath);
+    }
+
     private static Process StartWrapper(int exitCode, string output)
     {
         ProcessStartInfo psi;

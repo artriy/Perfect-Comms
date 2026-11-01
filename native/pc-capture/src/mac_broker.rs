@@ -7,11 +7,12 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const REQUEST_DIRECTORY_NAME: &str = ".perfect-comms-broker-v1";
+const PRIVATE_ROOT_NAME: &str = ".perfect-comms-private-v1";
 const REQUEST_SCHEMA: u32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const BROKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -21,6 +22,7 @@ const CLEANUP_DELAY: Duration = Duration::from_secs(10);
 
 static CLAIM_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RECEIPT_COUNTER: AtomicU64 = AtomicU64::new(1);
+static BUNDLE_PRIVATE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
@@ -77,6 +79,9 @@ pub fn try_run(argv: &[String]) -> Result<bool, String> {
         _ => return Ok(false),
     };
     validate_request_directory(&request_directory)?;
+    if let Some(bundle) = request_directory.parent() {
+        let _ = BUNDLE_PRIVATE_ROOT.set(bundle.join(PRIVATE_ROOT_NAME));
+    }
 
     let active = Arc::new(AtomicUsize::new(0));
     let mut idle_since = Instant::now();
@@ -160,13 +165,17 @@ fn application_directory(executable: &Path) -> Result<PathBuf, String> {
 }
 
 fn validate_request_directory(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect request directory: {error}"))?;
+    validate_owned_directory(path, "request directory")
+}
+
+fn validate_owned_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {label}: {error}"))?;
     if !metadata.file_type().is_dir() || metadata.uid() != effective_uid() {
-        return Err("request directory is not an owned directory".to_string());
+        return Err(format!("{label} is not an owned directory"));
     }
     if metadata.mode() & 0o022 != 0 {
-        return Err("request directory is group- or world-writable".to_string());
+        return Err(format!("{label} is group- or world-writable"));
     }
     Ok(())
 }
@@ -561,6 +570,10 @@ fn validate_runtime_arguments(
 }
 
 fn validate_private_path(path: &Path) -> Result<(), String> {
+    validate_private_path_within(path, BUNDLE_PRIVATE_ROOT.get().map(PathBuf::as_path))
+}
+
+fn validate_private_path_within(path: &Path, bundle_root: Option<&Path>) -> Result<(), String> {
     if !path.is_absolute()
         || path
             .components()
@@ -572,7 +585,12 @@ fn validate_private_path(path: &Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "private directory has no parent".to_string())?;
     if parent != Path::new("/tmp") && parent != Path::new("/private/tmp") {
-        return Err("private directory is outside the host temporary root".to_string());
+        let outside = || "private directory is outside the host temporary root".to_string();
+        let root = bundle_root.ok_or_else(outside)?;
+        if !same_directory(parent, root) {
+            return Err(outside());
+        }
+        validate_owned_directory(parent, "private root")?;
     }
     let leaf = path
         .file_name()
@@ -585,6 +603,13 @@ fn validate_private_path(path: &Path) -> Result<(), String> {
         return Err("private directory name has an invalid nonce".to_string());
     }
     Ok(())
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+    matches!(
+        (fs::canonicalize(left), fs::canonicalize(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 fn validate_existing_private_directory(path: &Path) -> Result<(), String> {
@@ -734,5 +759,36 @@ mod tests {
             "/Users/test/perfect-comms-0123456789abcdef0123456789abcdef"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn accepts_private_directories_only_in_the_owned_bundle_root() {
+        let workspace = std::env::temp_dir().join(format!(
+            "pc-broker-private-root-{}-{}",
+            std::process::id(),
+            CLAIM_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let root = workspace.join(PRIVATE_ROOT_NAME);
+        let elsewhere = workspace.join("elsewhere");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let leaf = "perfect-comms-0123456789abcdef0123456789abcdef";
+
+        assert!(validate_private_path_within(&root.join(leaf), Some(&root)).is_ok());
+        assert!(validate_private_path_within(&root.join(leaf), None).is_err());
+        assert!(validate_private_path_within(&elsewhere.join(leaf), Some(&root)).is_err());
+        assert!(
+            validate_private_path_within(&root.join("perfect-comms-xyz"), Some(&root)).is_err()
+        );
+
+        let linked = workspace.join("linked");
+        std::os::unix::fs::symlink(&root, &linked).unwrap();
+        assert!(validate_private_path_within(&linked.join(leaf), Some(&root)).is_err());
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_private_path_within(&root.join(leaf), Some(&root)).is_err());
+
+        let _ = fs::remove_dir_all(&workspace);
     }
 }
