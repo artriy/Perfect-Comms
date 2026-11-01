@@ -4462,7 +4462,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _obsRecordingTargets.Clear();
             _obsRecordingProjection ??= new VoiceObsRecordingProjection();
         }
-        _obsRecordingProjection?.UpdateParticipants(AmongUsClient.Instance?.GameId ?? 0, snapshot.Players,
+        _obsRecordingProjection?.UpdateParticipants(VoiceChatRoom.Current?.SnapshotGameId ?? 0, snapshot.Players,
             snapshot.PlayerEnumerationCompleted && !snapshot.RoutingRosterRetained && snapshot.AuthenticatedRosterAvailable);
 #endif
         foreach (var peer in _updatePeerScratch)

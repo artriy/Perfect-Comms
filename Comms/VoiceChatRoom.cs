@@ -101,6 +101,7 @@ public class VoiceChatRoom
     private bool _keepCaptureWarm;
     public int SampleRate => AudioHelpers.ClockRate;
     internal VoiceGameStateSnapshot? CurrentSnapshot { get; private set; }
+    internal int SnapshotGameId => _snapshotGameId;
     private bool _voiceRoutingPolicyReady;
     private VoiceConnectionProgress _voiceConnectionProgress = VoiceConnectionProgress.Starting;
     private VoiceConnectionDisplayState _voiceConnectionDisplayState = VoiceConnectionDisplayState.Initial;
