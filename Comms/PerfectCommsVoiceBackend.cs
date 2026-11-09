@@ -127,16 +127,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     private static readonly TimeSpan SpeakerTopologyFastPollInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SpeakerTopologyFastWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan SpeakerRetryInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan PlaybackStoppedRestartInterval = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan BtMutedMicReleaseDelay = TimeSpan.FromSeconds(10);
     private long _speakerTopologyFastUntilTicks;
-    private DateTime _lastSpeakerRetryUtc = DateTime.MinValue;
-    private DateTime _lastPlaybackStoppedRestartUtc = DateTime.MinValue;
-    private DateTime _muteSinceUtc = DateTime.MinValue;
-    private bool _btProfileConflict;
-    private bool _btMuteReleaseRequested;
-    private const int SpeakerRetryFailureLimit = 3;
-    private string _speakerRetryExhaustedSignature = string.Empty;
     private string _lastSpeakerDeviceName = string.Empty;
 #endif
 #if ANDROID || WINDOWS
@@ -1158,8 +1149,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _localSpeaking = false;
         }
 #if WINDOWS
-        _muteSinceUtc = mute ? DateTime.UtcNow : DateTime.MinValue;
-        _btMuteReleaseRequested = false;
         if (mute)
         {
             if (keepCaptureWarm)
@@ -1542,10 +1531,7 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             _lastMicDeviceName = normalizedName;
             _micVolume = NormalizeMicGain(volume);
             if (restartSidecar)
-            {
-                _btProfileConflict = false;
                 Interlocked.Increment(ref _audioRouteRevision);
-            }
         }
 #else
         var restartSidecar = ShouldRestartMicrophoneSelection(
@@ -4045,8 +4031,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
             long selectionRevision;
             lock (_voiceSync)
             {
-                if (!string.Equals(_lastSpeakerDeviceName, selectedDevice, StringComparison.Ordinal))
-                    _btProfileConflict = false;
                 _lastSpeakerDeviceName = selectedDevice;
                 selectionRevision = Interlocked.Increment(ref _speakerSelectionRevision);
                 Interlocked.Increment(ref _audioRouteRevision);
@@ -4102,9 +4086,12 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 
             voice = _voice;
             sessionGeneration = Volatile.Read(ref _voiceSessionGeneration);
-            _speakerReady = false;
+            if (!string.Equals(_speakerPlaybackRequestedDevice, deviceName, StringComparison.Ordinal))
+            {
+                _speakerReady = false;
+                _speakerPlaybackGeneration = 0;
+            }
             _speakerPlaybackRequestedDevice = deviceName;
-            _speakerPlaybackGeneration = 0;
             _speakerDefaultFallbackPending = false;
             expectedAudioRouteRevision = Volatile.Read(ref _audioRouteRevision);
             routeInputDevice = _lastMicDeviceName;
@@ -4259,17 +4246,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
     }
 #endif
 
-#if WINDOWS
-    private void MaybeReleaseBluetoothMutedMicrophone()
-    {
-        if (!Mute || _keepCaptureWarm || !_microphoneReady || !_btProfileConflict || _btMuteReleaseRequested) return;
-        if (_muteSinceUtc == DateTime.MinValue || DateTime.UtcNow - _muteSinceUtc < BtMutedMicReleaseDelay) return;
-        _btMuteReleaseRequested = true;
-        VoiceDiagnostics.Log("voice.mic", $"reason=muted-bt-release device={VoiceDiagnostics.DescribeDevice(_lastMicDeviceName)}");
-        QueueMicrophoneTransition(false, "muted-bt-release");
-    }
-#endif
-
     public void UpdateProfile(byte playerId, string playerName)
     {
         // Native peers are keyed by the Among Us client id resolved from the live roster. Player profile data is
@@ -4383,7 +4359,6 @@ internal sealed class PerfectCommsVoiceBackend : IVoiceBackend
 #elif WINDOWS
         _androidMicrophone?.Tick();
         RefreshVoiceRecoveryBudgetAfterStableUptime();
-        MaybeReleaseBluetoothMutedMicrophone();
 #endif
 
 #if WINDOWS || ANDROID
