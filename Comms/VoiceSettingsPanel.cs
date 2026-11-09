@@ -614,7 +614,7 @@ public static class VoiceSettingsPanel
                 Build = (pane, paneW, y) => new VoiceUiKit.ObsRecordingStatusRow().Build(pane, paneW, y),
             });
             Action(defs, "OBS Recording Setup", "Open Guide",
-                () => Application.OpenURL("https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration"),
+                () => Application.OpenURL("https://artriy.github.io/Perfect-Comms/obs#obs-recording-integration"),
                 "Install the plugin once, then add a Perfect Comms audio source.");
         }
 #endif

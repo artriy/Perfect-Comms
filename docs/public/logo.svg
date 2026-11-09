@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="144" height="144" viewBox="0 0 144 144">
+  <defs>
+    <linearGradient id="linear-gradient-1" x1="72" y1="6" x2="72" y2="98.328" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6acbec"/>
+      <stop offset="1" stop-color="#956aec"/>
+    </linearGradient>
+  </defs>
+  <title>perfect-comms-logo</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="stem" d="M63.344 108.426 L80.656 108.426 L80.656 108.426 L80.656 122.852 L80.656 122.852 L63.344 122.852 L63.344 122.852 L63.344 108.426 Z" fill="#b4b8c4" stroke="#0b0b10" stroke-width="4.905" stroke-linecap="round" stroke-miterlimit="10"/>
+    <path id="base" d="M43.148 130.066 C43.148 125.684 56.388 122.131 72.721 122.131 C89.054 122.131 102.295 125.684 102.295 130.066 C102.295 134.448 89.054 138 72.721 138 C56.388 138 43.148 134.448 43.148 130.066 Z" fill="#b4b8c4" stroke="#0b0b10" stroke-width="4.905" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="cradle" d="M26.557 42.066 L26.557 65.148 C26.557 90.245 46.903 110.59 72 110.59 C97.097 110.59 117.443 90.245 117.443 65.148 L117.443 42.066 L105.18 42.066 L105.18 65.148 C105.18 83.473 90.325 98.328 72 98.328 C53.675 98.328 38.82 83.473 38.82 65.148 L38.82 42.066 Z" fill="#b4b8c4" stroke="#0b0b10" stroke-width="4.905" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="capsule" d="M72 6 L72 6 C88.333 6 101.574 19.241 101.574 35.574 L101.574 68.754 C101.574 85.087 88.333 98.328 72 98.328 L72 98.328 C55.667 98.328 42.426 85.087 42.426 68.754 L42.426 35.574 C42.426 19.241 55.667 6 72 6 Z" fill="url(#linear-gradient-1)"/>
+    <path id="rib" d="M45.6 37.738 L59.738 37.738" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="rib-2" data-name="rib" d="M98.4 37.738 L84.262 37.738" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="rib-3" data-name="rib" d="M45.6 52.164 L60.459 52.164" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="rib-4" data-name="rib" d="M98.4 52.164 L83.541 52.164" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="rib-5" data-name="rib" d="M45.6 66.59 L59.738 66.59" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="rib-6" data-name="rib" d="M98.4 66.59 L84.262 66.59" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="slot" d="M72 9.174 L72 20.426" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="slot-2" data-name="slot" d="M72 95.154 L72 85.344" fill="none" stroke="#0b0b10" stroke-width="6.348" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="capsule_line" data-name="capsule line" d="M72 6 L72 6 C88.333 6 101.574 19.241 101.574 35.574 L101.574 68.754 C101.574 85.087 88.333 98.328 72 98.328 L72 98.328 C55.667 98.328 42.426 85.087 42.426 68.754 L42.426 35.574 C42.426 19.241 55.667 6 72 6 Z" fill="none" stroke="#0b0b10" stroke-width="4.905" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

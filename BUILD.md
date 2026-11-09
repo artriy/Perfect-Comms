@@ -247,9 +247,8 @@ four Actions artifacts for 14 days:
    `<PerfectCommsApiPackageVersion>` to the immutable NuGet version published for that API contract.
 2. Add the matching `## Perfect Comms vX.Y.Z` changelog entry, commit the changes
    on `main`, and wait for every workflow triggered by that push.
-3. Copy any changed `wiki/` pages to the GitHub wiki (see `wiki/README.md`).
-4. Run the manual Release rehearsal and inspect its packaged artifacts.
-5. Create and push tag `vX.Y.Z` on that tested `main` commit.
+3. Run the manual Release rehearsal and inspect its packaged artifacts.
+4. Create and push tag `vX.Y.Z` on that tested `main` commit.
 
 The tag run repeats every gate, verifies the tag is the current `main` tip,
 checks every version field, publishes the desktop `PerfectComms.dll` and
@@ -259,3 +258,6 @@ reference-only API package to NuGet.org using OIDC. The single managed
 workflow artifact for Starlight beta or approved local-mod testing. The GitHub
 release notes are the matching `CHANGELOG.md` section.
 A failed gate cannot publish a partial release.
+
+The docs site in `docs/` deploys to GitHub Pages from `main` through the Docs
+workflow; run `npm ci` and `npm run dev` in `docs/` to preview it locally.

@@ -1,42 +1,38 @@
-# API 1.2 Role Recipes
-
-These examples show how a source-owned role mod can implement the 17 TOU-Mira voice settings through public API 1.2. Names such as `MyRoles`, `MyVoiceState`, and `MyColors` stand for the source mod's own synchronized state and helpers.
-
-Call `Register()` only after the soft-dependency check in [Mod Integration](Mod-Integration). Register once and call `PerfectCommsApi.Unregister(Mod)` before a supported dynamic reload.
-
-Back to **[Mod Integration](Mod-Integration)**
-
 ---
+description: "Copyable API 1.2 role recipes and the TOU-Mira parity matrix."
+---
+
+# Examples: API 1.2 role recipes
+
+Recipes that reproduce TOU-Mira's 17 voice settings with public API 1.2. `MyRoles`, `MyVoiceState`, and `MyColors` stand for your mod's own synchronized state. Call `Register()` after the soft-dependency check in [Mod Integration](/api/), once.
 
 ## Complete 17-row parity matrix
 
-| # | Built-in host row / default | External API implementation | State the role mod must own |
+| # | TOU-Mira setting / default | External API implementation | State the role mod must own |
 | :---: | :--- | :--- | :--- |
 | 1 | `MuteBlackmailedInMeetings` / On | Bool option + Meeting/Exile speaker `Mute` | Current blackmailed player |
-| 2 | `MuteBlackmailedNextRound` / Off | Bool option + Meeting-or-Exile → Tasks observer + Tasks speaker `Mute` | Persisted affected player ids and clear boundary |
+| 2 | `MuteBlackmailedNextRound` / Off | Bool option + Meeting-or-Exile → Tasks observer + Tasks speaker `Mute` (needs row 1 on) | Players blackmailed during the meeting, cleared at the next meeting and in the lobby |
 | 3 | `MuteParasiteControlled` / On | Bool option + Tasks speaker `Mute` | Active controlled victim |
 | 4 | `ParasiteHearFromVictim` / On | Bool option + contextual listener origin, `Additive` | Parasite-to-victim link, victim position/light radius |
 | 5 | `MutePuppeteerControlled` / On | Bool option + Tasks speaker `Mute` | Active controlled victim |
 | 6 | `PuppeteerHearFromVictim` / On | Bool option + contextual listener origin, `Replace` | Puppeteer-to-victim link, victim position/light radius |
 | 7 | `MuteSwooperWhileSwooped` / On | Bool option + Tasks/Meeting/Exile speaker `Mute` while swooped | Active swoop state |
-| 8 | `MuffleBlindedOrFlashedHearing` / On | Bool option + contextual listener filter | Per-viewer Eclipsal/Grenadier effect state |
+| 8 | `MuffleBlindedOrFlashedHearing` / On | Bool option + Tasks-only contextual listener filter, plus `SightObscured` | Per-viewer Eclipsal/Grenadier effect state |
 | 9 | `MuffleHypnotizedDuringHysteria` / On | Bool option + contextual listener filter | Hypnotized target and Mass Hysteria state |
-| 10 | `CrewpostorUsesImpostorVoice` / On | Bool option + `VoicePlayerTraits.ImpostorVoice` | Crewpostor classification |
+| 10 | `CrewpostorUsesImpostorVoice` / On | Bool option + `VoicePlayerTraits.ImpostorVoice` (vent and ghost hearing only; see [Crewpostor player trait](/api/examples#crewpostor-player-trait)) | Crewpostor classification |
 | 11 | `MuteGlitchHacked` / On | Bool option + Tasks/Meeting/Exile speaker `Mute` while hacked | Active Glitch Hack state |
 | 12 | `MuteJailedInMeetings` / On | Bool option + Meeting/Exile speaker `Mute` | Jailee and owning Jailor |
-| 13 | `JailPersistsAfterJailorDeath` / Off | Conditional bool option + jail rule checks Jailor alive state | Jailor alive/dead and persisted jail |
+| 13 | `JailPersistsAfterJailorDeath` / Off | Bool option shown only while row 12 is on + jail rule checks that the Jailor is still alive | Jailor alive/dead and persisted jail |
 | 14 | `JailorCanUnmuteJailed` / On | Bool option + jail rule reads synchronized temporary allow flag | Jailor UI/input plus allow/revoke RPC |
-| 15 | `MediumGhostVoice` / None | Enum option + Tasks-only pair Route/Mute rules | Active Medium, spirit position, and the selected mediated ghost for the reverse direction |
-| 16 | `TeamRadioVampires` / On | Bool option + managed Team Radio membership | Current Vampire membership |
-| 17 | `TeamRadioLovers` / On | Bool option + pair-keyed managed Team Radio membership | Current Lovers pairing |
+| 15 | `MediumGhostVoice` / None | Enum option + Tasks-only pair Route/Mute rules + Medium listener origin at the spirit | Active Medium, spirit position, and the selected mediated ghost for the reverse direction |
+| 16 | `TeamRadioVampires` / On | Bool option shown only while Team Radio is on + managed Team Radio membership | Current Vampire membership |
+| 17 | `TeamRadioLovers` / On | Bool option shown only while Team Radio is on + pair-keyed managed Team Radio membership | Current Lovers pairing |
 
-Every built-in row has a public-API equivalent. The API supplies voice policy and option synchronization; the external mod supplies role truth and role networking.
-
----
+Every row has an API equivalent except one gap: row 10 cannot put the Crewpostor on built-in Impostors Team Radio. Perfect Comms has no TOU-Mira settings or role detection of its own; TOU-Mira registers these rows through this API.
 
 ## Register all parity options
 
-The exact keys below are safe because API keys are scoped to your own `modId`; they do not overwrite Perfect Comms' built-in settings.
+Keys are scoped to your `modId`, so they cannot collide with other mods. `TeamRadioEnabled` mirrors the **Team Radio** host toggle, so the Vampire and Lovers rows hide while it is off.
 
 ```csharp
 private const string Mod = "com.me.mymod";
@@ -75,8 +71,8 @@ private static void RegisterParityOptions()
         false,
         ctx => ctx.GetOption("MuteJailedInMeetings"));
     Toggle("JailorCanUnmuteJailed", "Jailor: Can Unmute Jailee", true);
-    Toggle("TeamRadioVampires", "Team Radio: Vampires", true);
-    Toggle("TeamRadioLovers", "Team Radio: Lovers", true);
+    Toggle("TeamRadioVampires", "Team Radio: Vampires", true, ctx => ctx.TeamRadioEnabled);
+    Toggle("TeamRadioLovers", "Team Radio: Lovers", true, ctx => ctx.TeamRadioEnabled);
 
     PerfectCommsApi.RegisterHostEnumOption(
         Mod,
@@ -94,9 +90,7 @@ private static void RegisterParityOptions()
 }
 ```
 
-Add descriptions in production code; they become the in-game help text. The helper is only to keep this page readable.
-
----
+Add `Description` in production code; it becomes the in-game help text.
 
 ## Speaker rules: Blackmailer, control, Swooper, Glitch, and Jailor
 
@@ -105,6 +99,9 @@ private static void RegisterSpeakerRules()
 {
     PerfectCommsApi.RegisterVoiceRule(Mod, ctx =>
     {
+        if (ctx.IsDead)
+            return VoiceRuleResult.Pass;
+
         bool deliberation = ctx.Phase is VoicePhaseKind.Meeting or VoicePhaseKind.Exile;
         bool liveGame = ctx.Phase is VoicePhaseKind.Tasks or VoicePhaseKind.Meeting or VoicePhaseKind.Exile;
 
@@ -112,7 +109,7 @@ private static void RegisterSpeakerRules()
             ctx.GetOption("MuteGlitchHacked") &&
             MyRoles.IsGlitchHacked(ctx.Player))
         {
-            return VoiceRuleResult.Mute("Hacked");
+            return VoiceRuleResult.Mute("Glitch Hacked");
         }
 
         if (liveGame &&
@@ -135,7 +132,7 @@ private static void RegisterSpeakerRules()
             {
                 bool jailorValid =
                     ctx.GetOption("JailPersistsAfterJailorDeath") ||
-                    MyRoles.IsAlive(jailorId);
+                    MyRoles.IsLivingJailor(jailorId);
                 bool temporarilyAllowed =
                     ctx.GetOption("JailorCanUnmuteJailed") &&
                     MyVoiceState.IsJailVoiceAllowed(ctx.Player.PlayerId);
@@ -153,11 +150,11 @@ private static void RegisterSpeakerRules()
 
             if (ctx.GetOption("MuteParasiteControlled") &&
                 MyRoles.IsParasiteControlled(ctx.Player))
-                return VoiceRuleResult.Mute("Parasite controlled");
+                return VoiceRuleResult.Mute("Parasite Controlled");
 
             if (ctx.GetOption("MutePuppeteerControlled") &&
                 MyRoles.IsPuppeteerControlled(ctx.Player))
-                return VoiceRuleResult.Mute("Puppeteer controlled");
+                return VoiceRuleResult.Mute("Puppeteer Controlled");
 
         }
 
@@ -177,7 +174,11 @@ private static void RegisterSpeakerRules()
         else if ((ctx.PreviousPhase is VoicePhaseKind.Meeting or VoicePhaseKind.Exile) &&
                  ctx.Phase == VoicePhaseKind.Tasks)
         {
-            MyVoiceState.CommitBlackmailForNextRound();
+            if (ctx.GetOption("MuteBlackmailedInMeetings") &&
+                ctx.GetOption("MuteBlackmailedNextRound"))
+                MyVoiceState.CommitBlackmailForNextRound();
+            else
+                MyVoiceState.ResetBlackmailVoiceState();
         }
     });
 }
@@ -185,13 +186,9 @@ private static void RegisterSpeakerRules()
 
 ### Phase-owned bookkeeping
 
-If a role effect should end on death, include that in `MyRoles` or add an explicit `ctx.IsDead` condition. API gates can intentionally act on voice-dead players; they do not silently skip them.
+The rule returns `Pass` for voice-dead speakers because every TOU-Mira mute targets living players; API gates otherwise apply to dead speakers too.
 
-These three bookkeeping methods must operate on state your mod already owns and synchronizes. The observer supplies deterministic meeting-start, post-Exile/post-Meeting, and lobby-reset boundaries but does not send the data.
-
-The Jailor's temporary unmute button and allow/revoke RPC also belong to the role mod. Perfect Comms only reads the resulting flag.
-
----
+The observer only marks boundaries (meeting start, Meeting/Exile → Tasks, lobby); your mod owns and syncs the data. `BeginMeetingBlackmailTracking` clears last round's list and records players blackmailed this meeting, `CommitBlackmailForNextRound` makes that the next-round list, `ResetBlackmailVoiceState` clears both. `IsLivingJailor` must be true only while the jailing player is alive and still the Jailor. The Jailor's unmute button and allow/revoke RPC are yours; Perfect Comms only reads the flag.
 
 ## Parasite and Puppeteer listener origins
 
@@ -226,9 +223,7 @@ private static void RegisterControlHearing()
 }
 ```
 
-`Replace` hears from the Puppeteer victim instead of the local body. `Additive` lets the Parasite hear from both positions. Both parity routes use the controlled victim's resolved light radius. Use `LightRadius: -1` only when you intentionally want to inherit the listener's own radius; `0` disables the vision-radius limit.
-
----
+`Replace` hears from the Puppeteer victim instead of your body; `Additive` lets the Parasite hear from both. Both use the victim's light radius. `LightRadius: -1` inherits the listener's own radius; `0` disables the vision limit.
 
 ## Eclipsal, Grenadier, and Hypnotist listener effects
 
@@ -242,6 +237,7 @@ private static void RegisterListenerEffects()
             MyRoles.IsGrenadierFlashed(ctx.Listener);
 
         bool muffleBlinded =
+            ctx.Phase == VoicePhaseKind.Tasks &&
             ctx.GetOption("MuffleBlindedOrFlashedHearing") &&
             sightObscured;
 
@@ -258,9 +254,7 @@ private static void RegisterListenerEffects()
 }
 ```
 
-The low-pass option muffles every audible incoming route for that local listener. `SightObscured` separately limits sight-based hearing while Eclipsal/Grenadier vision is obscured, even when low-pass muffling is disabled. Neither changes what the affected player transmits.
-
----
+Low-pass muffles every incoming route for the local listener: Eclipsal/Grenadier only during Tasks, Hypnotist in every phase while Mass Hysteria is active. `SightObscured` separately limits sight-based hearing during Tasks even when muffling is off. Neither changes what the player transmits.
 
 ## Crewpostor player trait
 
@@ -275,13 +269,11 @@ private static void RegisterCrewpostor()
 }
 ```
 
-`ImpostorVoice` participates in the same vent, ghost-hearing, team-radio, and viewer classification as built-in impostor voice.
-
----
+`ImpostorVoice` counts the player as an impostor for two Tasks rules only: staying audible in vents (**Hear Impostors in Vents** on, **Private Talk in Vents** off) and hearing the dead (**Impostors Hear Dead**). It does not grant built-in Impostors Team Radio, impostor-only chat, impostor meeting radio, or impostor viewer classification.
 
 ## Medium directional ghost voice
 
-Use pair rules so the selected Medium/spirit relationship stays private and each direction can be controlled independently:
+Pair rules keep the Medium/spirit link private per direction; a listener origin lets the Medium hear from the spirit:
 
 ```csharp
 private static void RegisterMedium()
@@ -329,18 +321,27 @@ private static void RegisterMedium()
 
         return VoicePairResult.Pass;
     });
+
+    PerfectCommsApi.RegisterContextualListenerOrigin(Mod, ctx =>
+        ctx.Phase == VoicePhaseKind.Tasks &&
+        ctx.GetEnumOption("MediumGhostVoice") != 0 &&
+        MyRoles.IsActiveMedium(ctx.Listener)
+            ? new VoiceListenerResult(
+                MyRoles.MediumSpiritPosition(ctx.Listener),
+                LightRadius: -1f,
+                VoiceListenerMode.Replace)
+            {
+                BypassTaskVoiceGates = true,
+            }
+            : null);
 }
 ```
 
-For built-in parity, the first branch routes the active Medium to every dead listener when that direction is enabled. The reverse branch accepts only the ghost selected by that Medium. A different role design can add a selected-pair check to the first branch too.
-
-Pair `Mute` results are important: they prevent ordinary proximity or a different permissive route from revealing a private Medium interaction.
-
----
+The first branch routes the active Medium to every dead listener; the reverse accepts only the ghost that Medium selected. While any mode is on, the Medium hears task voice from the spirit's position with their own light radius, and `BypassTaskVoiceGates` keeps that working through **Only Ghosts can Talk/Hear** and **Comms Sabotage Disables Voice** (speaker mutes, distance, walls, and sight still apply). The pair `Mute` results matter: they stop proximity or another route from revealing the private interaction.
 
 ## Vampire and Lovers managed Team Radio
 
-Use the managed primitive when Perfect Comms should own selection, hold-to-talk capture, selected-channel synchronization, labels, and private routing:
+Perfect Comms owns the selector, hold-to-talk capture, selected-channel sync, labels, and private routing:
 
 ```csharp
 private static void RegisterRoleRadios()
@@ -377,11 +378,7 @@ private static void RegisterRoleRadios()
 }
 ```
 
-Each returned key is automatically namespaced by `Mod`. All eligible memberships appear in Perfect Comms' Team Radio selector after its built-in choices. Holding Perfect Comms' radio control opens capture even when microphone mode is Push To Talk, sends the selected key, and routes only to living players with the same current membership. The normal Team Radio master and Tasks/Meeting settings remain authoritative.
-
-The role mod owns only current Vampire/Lovers membership and stable pair ids. It no longer needs a duplicate radio keybind, selected-channel UI, transmit-state RPC, or receive-only channel trick. Return membership whenever it is current; Perfect Comms applies phase eligibility itself.
-
----
+Keys are namespaced by `Mod`. Memberships appear in the Team Radio selector after built-in choices. Holding the radio control captures even in Push To Talk mode and routes only to living players with the same membership; the Team Radio master and Tasks/Meeting settings still apply. Return membership whenever it is current; Perfect Comms applies phase eligibility. Your mod owns only membership and stable pair ids.
 
 ## Complete registration
 
@@ -403,22 +400,11 @@ internal static void Unregister()
     => PerfectCommsApi.Unregister(Mod);
 ```
 
-Overlay privacy is separate from audio policy. `RegisterOverlayPrivacy` should add viewer/speaker rules for every disguise, concealment, and alias that can affect Perfect Comms' identity-bearing UI. The source mod registers the complete integration directly; there is no ownership claim or Perfect Comms reflection fallback.
-
----
-
-## Next
-
-- **[API Reference](Mod-Integration-API-Reference)** - exact records, signatures, precedence, and fallbacks.
-- **[Gate](Mod-Integration-Gate)** - speaker/global policy and traits.
-- **[Channels](Mod-Integration-Channels)** - receive-only membership and pair routing.
-- **[Listener Origin](Mod-Integration-Listener-Origin)** - contextual listener behavior and phase observers.
-- **[Host Options](Mod-Integration-Host-Options)** - numeric and conditional rows.
-- **[Overlay Privacy](Mod-Integration-Overlay-Privacy)** - hide, dim, or alias voice UI.
+`RegisterOverlayPrivacy` should add [overlay rules](/api/overlay-privacy) for every disguise, concealment, and alias that affects voice UI. There is no Perfect Comms fallback; your mod registers the whole integration.
 
 ## Current status / limitations
 
 **Currently broken:** None of the documented API 1.2 primitives on this page.
 
-- Perfect Comms persists and synchronizes registered host-option values. The role mod owns gameplay state, targets/pairs, lifecycle history, Jailor permissions/UI/RPCs, and other state read by these recipes. Managed Team Radio deliberately owns its own selector, keybind/touch control, PTT capture, selected-key synchronization, and private route.
-- These callbacks coordinate cooperative clients; they are not hostile-client authentication or enforcement.
+- Your mod owns gameplay state, targets/pairs, lifecycle history, and Jailor permissions/UI/RPCs. Managed Team Radio owns its selector, keybind/touch control, PTT capture, key sync, and route.
+- Callbacks coordinate cooperative clients; they are not hostile-client enforcement.

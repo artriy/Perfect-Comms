@@ -15,7 +15,7 @@ namespace VoiceChatPlugin.VoiceChat;
 internal static class VoiceHelperBlockedNotice
 {
     internal const string GuideUrl =
-        "https://github.com/artriy/Perfect-Comms/wiki/Installing-Perfect-Comms#antivirus-blocks-voice-chat";
+        "https://artriy.github.io/Perfect-Comms/troubleshooting#antivirus-blocks-voice-chat";
 
     private const float PanelWidth = 600f;
     private const float Pad = 24f;

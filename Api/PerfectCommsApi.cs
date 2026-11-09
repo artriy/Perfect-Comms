@@ -12,7 +12,7 @@ namespace PerfectComms.Api;
 // cannot leave a visual breadcrumb. The registry wraps every call in try/catch. Audio callbacks
 // fall back to their neutral result, while identity-bearing overlay callbacks fail private.
 //
-// See docs/MOD_INTEGRATION.md and the GitHub wiki for the full guide.
+// See docs/MOD_INTEGRATION.md and https://artriy.github.io/Perfect-Comms/api/ for the full guide.
 
 /// <summary>Game phase a rule is evaluated in.</summary>
 public enum VoicePhaseKind
@@ -91,7 +91,7 @@ public enum VoiceApiCapability
 public enum VoicePlayerTraits
 {
     None = 0,
-    /// <summary>Use the same vent, ghost-hearing, radio, and viewer-privacy classification as an impostor.</summary>
+    /// <summary>Use the same vent-hearing and task-phase ghost-hearing classification as an impostor. Impostor radio, impostor chat, and meeting radio still require the real impostor role.</summary>
     ImpostorVoice = 1 << 0,
     /// <summary>Treat the player as dead for voice even if base game data has not marked them dead.</summary>
     VoiceDead = 1 << 1,

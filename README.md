@@ -15,6 +15,7 @@
 </p>
 
 <p align="center">
+  <a href="https://artriy.github.io/Perfect-Comms/">Docs</a> &nbsp;·&nbsp;
   <a href="#install">Install</a> &nbsp;·&nbsp;
   <a href="#controls">Controls</a> &nbsp;·&nbsp;
   <a href="#settings">Settings</a> &nbsp;·&nbsp;
@@ -123,7 +124,7 @@ Click a tab to see that screen exactly as it looks in game.
 | Team Radio channels | Meeting spatial audio, noise suppression, and echo cancellation (desktop) |
 | Role-based mutes (with supported mods) | Per-player volume and HUD layout |
 
-**Recording on Windows:** the optional OBS plugin saves separate per-player or alive/dead voice files next to your recording. [Setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+**Recording on Windows:** the optional OBS plugin saves separate per-player or alive/dead voice files next to your recording. [Setup guide](https://artriy.github.io/Perfect-Comms/obs#obs-recording-integration).
 
 ## Supported mods
 
@@ -150,7 +151,7 @@ PerfectCommsApi.RegisterVoiceRule("com.me.mymod", ctx =>
         : VoiceRuleResult.Pass);
 ```
 
-The API package (`4.1.7.1`) is versioned separately and supports Perfect Comms 4.1.7 and later. Players install Perfect Comms themselves; declare it as a soft dependency. Every primitive and copy-paste examples: **[Mod Integration Wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration)**.
+The API package (`4.1.7.1`) is versioned separately and supports Perfect Comms 4.1.7 and later. Players install Perfect Comms themselves; declare it as a soft dependency. Every primitive and copy-paste examples: **[Mod integration docs](https://artriy.github.io/Perfect-Comms/api/)**.
 
 ## Credits
 

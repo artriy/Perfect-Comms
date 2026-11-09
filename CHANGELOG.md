@@ -6,7 +6,7 @@
 
 - Hosts can enable **Ghosts Hear Living During Tasks** (off by default). Living players can speak to nearby ghosts and spectators while ordinary living-to-living task voice is off. The option appears only while **Meetings/Lobby Only** or **Only Ghosts can Talk/Hear** is on, and **Ghosts Also Meeting/Lobby Only** still blocks it. Ghost hearing distance, falloff, vent privacy, and mute controls still apply. A yellow lobby notice shows when it is on, and your microphone status reads **Ghosts only** while only ghosts and spectators can hear you.
 - **OBS Compatibility Mode** (Windows, off by default, **Audio > Streaming**) shows a minimized Perfect Comms Audio window, so OBS Application Audio Capture can capture voice chat separately from the game. Closing the window minimizes it; turning the option off removes it.
-- **OBS Recording Integration** (Windows, off by default, **Audio > Streaming**) saves a separate voice file for each player, or one for alive and one for dead players, next to your OBS video. Install the plugin from `PerfectComms-OBS-win-x64.zip` and add the **Perfect Comms** source once; OBS Start, Stop, Pause, and Resume then control the voice files. The setting shows the bridge status with an **Open Guide** button, and the HUD warns if recording fails. [Setup guide](https://github.com/artriy/Perfect-Comms/wiki/Players#obs-recording-integration).
+- **OBS Recording Integration** (Windows, off by default, **Audio > Streaming**) saves a separate voice file for each player, or one for alive and one for dead players, next to your OBS video. Install the plugin from `PerfectComms-OBS-win-x64.zip` and add the **Perfect Comms** source once; OBS Start, Stop, Pause, and Resume then control the voice files. The setting shows the bridge status with an **Open Guide** button, and the HUD warns if recording fails. [Setup guide](https://artriy.github.io/Perfect-Comms/obs#obs-recording-integration).
 - Perfect Comms appears in Reactor's main-menu and in-game credits when Reactor is installed.
 
 ### Improved
@@ -758,7 +758,7 @@ Perfect Comms is now fully standalone: no Reactor or MiraAPI required. This rele
   > <sub>Fixed left/right stereo drifting apart, smoother voice on bursty connections, faster recovery for stuck players, and a push-to-talk indicator that always releases when you stop talking.</sub>
 
 - **Public mod-integration API (`PerfectComms.Api`).**
-  > <sub>Other mods can register custom voice behaviours as a soft dependency, no forking required: gates (mute/muffle), channels (private/team audio), listener origin, host options, and a host-panel tab. Callbacks are fail-closed, so a broken or missing mod has no effect on voice. Full guide and reference on the [wiki](https://github.com/artriy/Perfect-Comms/wiki/Mod-Integration).</sub>
+  > <sub>Other mods can register custom voice behaviours as a soft dependency, no forking required: gates (mute/muffle), channels (private/team audio), listener origin, host options, and a host-panel tab. Callbacks are fail-closed, so a broken or missing mod has no effect on voice. Full guide and reference in the [docs](https://artriy.github.io/Perfect-Comms/api/).</sub>
 
 ## Perfect Comms v2.1.7
 

@@ -61,6 +61,9 @@ cloudflare/**/node_modules/
 cloudflare/**/package-lock.json
 !cloudflare/perfect-comms-lobbies/package-lock.json
 cloudflare/**/*.log
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 TouMira/
 artifacts/
 assets/brand/logo-concepts/

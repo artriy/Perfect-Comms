@@ -29,7 +29,7 @@
 		<NuGetAuditLevel>low</NuGetAuditLevel>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
 		<Configurations>Debug;Release;Windows</Configurations>
-		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;PerfectComms.Starlight.Tests/**;cloudflare/**;packaging/**;scripts/**;native/**;Starlight/**</DefaultItemExcludes>
+		<DefaultItemExcludes>$(DefaultItemExcludes);artifacts/**;TouMira/**;PerfectComms.Tests/**;PerfectComms.Starlight.Tests/**;cloudflare/**;packaging/**;scripts/**;native/**;Starlight/**;docs/**</DefaultItemExcludes>
 	</PropertyGroup>
 
 	<!-- Desktop build (default): native sidecar media engine -->
