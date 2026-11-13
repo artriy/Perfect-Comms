@@ -71,6 +71,7 @@ const APPLE_STUDIO_DISPLAY_USB_ID: &str = "05AC:1114";
 // but this does not work in practice. Lie and say the minimum is 128 frames.
 const SAFE_MIN_LATENCY_FRAMES: u32 = 128;
 const SAFE_MAX_LATENCY_FRAMES: u32 = 512;
+const OUTPUT_UNIT_MAX_FRAMES_PER_SLICE: u32 = 4096;
 
 const VPIO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -4277,7 +4278,7 @@ impl<'ctx> CoreStreamData<'ctx> {
                 kAudioUnitProperty_MaximumFramesPerSlice,
                 kAudioUnitScope_Global,
                 AU_OUT_BUS,
-                &stream.latency_frames,
+                &OUTPUT_UNIT_MAX_FRAMES_PER_SLICE,
                 mem::size_of::<u32>(),
             );
             if r != NO_ERR {

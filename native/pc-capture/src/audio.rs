@@ -1423,6 +1423,8 @@ const CUBEB_MAX_LATENCY_FRAMES: u32 = 96_000;
 const CUBEB_LATENCY_REFRESH: Duration = Duration::from_millis(250);
 const CUBEB_FAST_LATENCY_REFRESH: Duration = Duration::from_millis(20);
 const CUBEB_FAST_LATENCY_PROBE_WINDOW: Duration = Duration::from_millis(80);
+const COREAUDIO_RENDER_START_TIMEOUT: Duration = Duration::from_secs(1);
+const COREAUDIO_DEFAULT_IO_BUFFER_FRAMES: u32 = 512;
 
 #[cfg(windows)]
 const COM_S_OK: i32 = 0;
@@ -1494,7 +1496,7 @@ fn init_cubeb_context(name: &str) -> cubeb::Result<cubeb::Context> {
     cubeb::Context::init(Some(name.as_c_str()), backend.as_deref())
 }
 
-fn cubeb_buffer_mode(context: &cubeb::Context) -> String {
+fn cubeb_buffer_mode(context: &cubeb::Context, latency_policy: &str) -> String {
     let backend = String::from_utf8_lossy(context.backend_id_bytes());
     let backend = backend.trim();
     let backend = if backend.is_empty() {
@@ -1502,7 +1504,7 @@ fn cubeb_buffer_mode(context: &cubeb::Context) -> String {
     } else {
         backend
     };
-    format!("cubeb-{backend}-min-latency")
+    format!("cubeb-{backend}-{latency_policy}")
 }
 
 fn append_hex(encoded: &mut String, bytes: &[u8]) {
@@ -2273,6 +2275,47 @@ fn cubeb_playback_stream_candidates(
         }
     }
     candidates
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaybackOpenPlan {
+    candidates: Vec<CubebStreamCandidate>,
+    minimum_latency_frames: u32,
+    latency_policy: &'static str,
+    render_start_timeout: Option<Duration>,
+}
+
+fn cubeb_playback_open_plans(backend_id: &[u8], preferred_rate: u32) -> Vec<PlaybackOpenPlan> {
+    let candidates = cubeb_playback_stream_candidates(backend_id, preferred_rate);
+    if normalized_cubeb_backend_family(backend_id) != "coreaudio" {
+        return vec![PlaybackOpenPlan {
+            candidates,
+            minimum_latency_frames: 0,
+            latency_policy: "min-latency",
+            render_start_timeout: None,
+        }];
+    }
+
+    let device_rate = normalize_device_rate(preferred_rate);
+    let device_rate_candidates = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.rate == device_rate)
+        .collect();
+    vec![
+        PlaybackOpenPlan {
+            candidates,
+            minimum_latency_frames: 0,
+            latency_policy: "min-latency",
+            render_start_timeout: Some(COREAUDIO_RENDER_START_TIMEOUT),
+        },
+        PlaybackOpenPlan {
+            candidates: device_rate_candidates,
+            minimum_latency_frames: COREAUDIO_DEFAULT_IO_BUFFER_FRAMES,
+            latency_policy: "safe-latency",
+            render_start_timeout: Some(COREAUDIO_RENDER_START_TIMEOUT),
+        },
+    ]
 }
 
 fn cubeb_output_channel_layout(channels: u16) -> Option<ChannelLayout> {
@@ -3323,7 +3366,7 @@ pub fn spawn_cubeb_capture(
         sample_rate: candidate.rate,
         channels: candidate.channels,
         sample_format: candidate.sample.label().to_string(),
-        buffer_mode: cubeb_buffer_mode(&context),
+        buffer_mode: cubeb_buffer_mode(&context, "min-latency"),
         buffer_min_frames: latency_frames,
         buffer_max_frames: latency_frames,
     };
@@ -3753,6 +3796,7 @@ struct PlaybackRealtime {
     remote_underrun_fader: UnderrunFader,
     monitor_playout: MonitorPlayout,
     flat_output: Vec<f32>,
+    first_callback_published: bool,
 }
 
 impl PlaybackRealtime {
@@ -3769,6 +3813,7 @@ impl PlaybackRealtime {
             remote_underrun_fader: UnderrunFader::for_sample_rate(sample_rate),
             monitor_playout: MonitorPlayout::for_sample_rate(sample_rate),
             flat_output: vec![0.0; CUBEB_MAX_LATENCY_FRAMES as usize * 2],
+            first_callback_published: false,
         }
     }
 
@@ -3781,7 +3826,9 @@ impl PlaybackRealtime {
         }
         let resources = &self.resources;
         let callback_ns = monotonic_ns();
-        if resources.diagnostics.observe_callback(callback_ns, frames) {
+        resources.diagnostics.observe_callback(callback_ns, frames);
+        if !self.first_callback_published {
+            self.first_callback_published = true;
             resources
                 .first_callback_frames
                 .store(frames as u64, Ordering::Release);
@@ -4270,6 +4317,7 @@ fn open_playback_candidate(
     selected: &SelectedDevice,
     prefs: StreamPrefs,
     candidate: CubebStreamCandidate,
+    minimum_latency_frames: u32,
     resources: PlaybackCallbackResources,
     errored: Arc<AtomicBool>,
 ) -> Result<(CubebPlaybackStream, u32), String> {
@@ -4286,7 +4334,8 @@ fn open_playback_candidate(
         .layout(layout)
         .prefs(prefs)
         .take();
-    let latency_frames = cubeb_latency_frames(context, params.as_ref(), candidate.rate);
+    let latency_frames =
+        cubeb_latency_frames(context, params.as_ref(), candidate.rate).max(minimum_latency_frames);
     let stream = match (candidate.sample, candidate.channels) {
         (CubebSampleKind::Float32, 2) => open_stereo_playback_stream::<f32>(
             context,
@@ -4471,111 +4520,67 @@ pub fn spawn_cubeb_playback(
     // Keep the app contract at stereo float/48 kHz while adapting the hardware side. Strict ALSA
     // devices receive native S16NE/preferred-rate attempts and, only after every stereo/mono
     // attempt, output-only physical-width fallbacks on the same selected endpoint.
-    let mut failures = Vec::new();
-    let mut opened = None;
-    for candidate in
-        cubeb_playback_stream_candidates(context.backend_id_bytes(), selected.preferred_rate)
-    {
-        device_change.clear_pending();
-        errored.store(false, Ordering::Release);
-        match open_playback_candidate(
-            &context,
-            &selected,
-            prefs,
-            candidate,
-            resources.clone(),
-            errored.clone(),
-        ) {
-            Ok((stream, latency_frames)) => {
-                opened = Some((stream, candidate, latency_frames));
-                break;
-            }
-            Err(error) => failures.push(format!(
-                "{}/{}/{}ch: {error}",
-                candidate.sample.label(),
-                candidate.rate,
-                candidate.channels
-            )),
-        }
-    }
-    let (stream, candidate, latency_frames) =
-        opened.ok_or_else(|| format!("build output stream: {}", failures.join("; ")))?;
     let requested_device = requested_device_id.unwrap_or_default();
     let requested_default = requested_device.is_empty();
-    let descriptor = StreamDescriptor {
-        requested_device: requested_device.clone(),
-        resolved_device: if requested_default {
-            String::new()
-        } else {
-            selected.resolved_device.clone()
-        },
-        requested_default,
-        requested_matched: true,
-        fell_back_to_default: false,
-        sample_rate: candidate.rate,
-        channels: candidate.channels,
-        sample_format: candidate.sample.label().to_string(),
-        buffer_mode: cubeb_buffer_mode(&context),
-        buffer_min_frames: latency_frames,
-        buffer_max_frames: latency_frames,
-    };
-    // Keep `devices` alive until both possible init attempts have resolved the endpoint handle.
-    store_cubeb_latency(&backend_latency_frames, stream.latency());
-    match device_change.take_action(selected.requested_default) {
-        CubebDeviceChangeAction::ResetDefaultStream => {
-            aec_timing.reset_playback_path();
-            backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
-            store_cubeb_latency(&backend_latency_frames, stream.latency());
+    let mut open_failures = None;
+    let mut silent_starts = Vec::new();
+    for plan in cubeb_playback_open_plans(context.backend_id_bytes(), selected.preferred_rate) {
+        let mut failures = Vec::new();
+        let mut opened = None;
+        for candidate in plan.candidates.iter().copied() {
+            device_change.clear_pending();
+            errored.store(false, Ordering::Release);
+            match open_playback_candidate(
+                &context,
+                &selected,
+                prefs,
+                candidate,
+                plan.minimum_latency_frames,
+                resources.clone(),
+                errored.clone(),
+            ) {
+                Ok((stream, latency_frames)) => {
+                    opened = Some((stream, candidate, latency_frames));
+                    break;
+                }
+                Err(error) => failures.push(format!(
+                    "{}/{}/{}ch: {error}",
+                    candidate.sample.label(),
+                    candidate.rate,
+                    candidate.channels
+                )),
+            }
         }
-        CubebDeviceChangeAction::ReopenExplicitStream => {
-            let _ = stream.stop();
-            return Err(
-                "selected output device changed; CoreAudio callback requires stream reopen"
-                    .to_string(),
-            );
-        }
-        CubebDeviceChangeAction::None => {}
-    }
-    if errored.load(Ordering::Acquire) {
-        let _ = stream.stop();
-        return Err("output device failed while starting".to_string());
-    }
-    let started_ns = monotonic_ns();
-    diagnostics.mark_stream_started(descriptor.clone());
-    start_succeeded.store(true, Ordering::Release);
-    send_media_state(
-        &media_events,
-        MediaStateEvent {
-            direction: "playback".to_string(),
-            state: "stream-started".to_string(),
-            stream_generation,
-            running: true,
-            requested_device: descriptor.requested_device,
-            resolved_device: descriptor.resolved_device,
-            requested_default: descriptor.requested_default,
-            requested_matched: descriptor.requested_matched,
-            fell_back_to_default: descriptor.fell_back_to_default,
-            sample_rate: descriptor.sample_rate,
-            channels: descriptor.channels,
-            sample_format: descriptor.sample_format,
-            buffer_mode: descriptor.buffer_mode,
-            ..Default::default()
-        },
-    );
-    progress.mark_started();
-    counters.playback_starts.fetch_add(1, Ordering::Relaxed);
-    let mut first_callback_reported = false;
-    let mut last_latency_refresh = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
+        let Some((stream, candidate, latency_frames)) = opened else {
+            open_failures.get_or_insert(failures);
+            continue;
+        };
+        let descriptor = StreamDescriptor {
+            requested_device: requested_device.clone(),
+            resolved_device: if requested_default {
+                String::new()
+            } else {
+                selected.resolved_device.clone()
+            },
+            requested_default,
+            requested_matched: true,
+            fell_back_to_default: false,
+            sample_rate: candidate.rate,
+            channels: candidate.channels,
+            sample_format: candidate.sample.label().to_string(),
+            buffer_mode: cubeb_buffer_mode(&context, plan.latency_policy),
+            buffer_min_frames: latency_frames,
+            buffer_max_frames: latency_frames,
+        };
+        // Keep `devices` alive until both possible init attempts have resolved the endpoint handle.
+        store_cubeb_latency(&backend_latency_frames, stream.latency());
         match device_change.take_action(selected.requested_default) {
             CubebDeviceChangeAction::ResetDefaultStream => {
                 aec_timing.reset_playback_path();
                 backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
                 store_cubeb_latency(&backend_latency_frames, stream.latency());
-                last_latency_refresh = Instant::now();
             }
             CubebDeviceChangeAction::ReopenExplicitStream => {
-                start_succeeded.store(false, Ordering::Release);
                 let _ = stream.stop();
                 return Err(
                     "selected output device changed; CoreAudio callback requires stream reopen"
@@ -4584,53 +4589,134 @@ pub fn spawn_cubeb_playback(
             }
             CubebDeviceChangeAction::None => {}
         }
-        if !first_callback_reported {
-            let callback_ns = first_callback_ns.load(Ordering::Acquire);
-            if callback_ns != 0 {
-                send_media_state(
-                    &media_events,
-                    MediaStateEvent {
-                        direction: "playback".to_string(),
-                        state: "first-callback".to_string(),
-                        stream_generation,
-                        running: true,
-                        callback_frames: first_callback_frames.load(Ordering::Acquire),
-                        elapsed_ms: callback_ns.saturating_sub(started_ns) / 1_000_000,
-                        ..Default::default()
-                    },
-                );
-                first_callback_reported = true;
-            }
-        }
-        if last_latency_refresh.elapsed() >= CUBEB_LATENCY_REFRESH {
-            store_cubeb_latency(&backend_latency_frames, stream.latency());
-            last_latency_refresh = Instant::now();
-        }
         if errored.load(Ordering::Acquire) {
-            start_succeeded.store(false, Ordering::Release);
             let _ = stream.stop();
-            counters
-                .playback_callback_errors
-                .fetch_add(1, Ordering::Relaxed);
-            return Err("output device stream failed".to_string());
+            return Err("output device failed while starting".to_string());
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let started_ns = monotonic_ns();
+        let started = Instant::now();
+        diagnostics.mark_stream_started(descriptor.clone());
+        start_succeeded.store(true, Ordering::Release);
+        send_media_state(
+            &media_events,
+            MediaStateEvent {
+                direction: "playback".to_string(),
+                state: "stream-started".to_string(),
+                stream_generation,
+                running: true,
+                requested_device: descriptor.requested_device,
+                resolved_device: descriptor.resolved_device,
+                requested_default: descriptor.requested_default,
+                requested_matched: descriptor.requested_matched,
+                fell_back_to_default: descriptor.fell_back_to_default,
+                sample_rate: descriptor.sample_rate,
+                channels: descriptor.channels,
+                sample_format: descriptor.sample_format,
+                buffer_mode: descriptor.buffer_mode,
+                ..Default::default()
+            },
+        );
+        progress.mark_started();
+        counters.playback_starts.fetch_add(1, Ordering::Relaxed);
+        let mut first_callback_reported = false;
+        let mut render_start_timed_out = false;
+        let mut last_latency_refresh = Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            match device_change.take_action(selected.requested_default) {
+                CubebDeviceChangeAction::ResetDefaultStream => {
+                    aec_timing.reset_playback_path();
+                    backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
+                    store_cubeb_latency(&backend_latency_frames, stream.latency());
+                    last_latency_refresh = Instant::now();
+                }
+                CubebDeviceChangeAction::ReopenExplicitStream => {
+                    start_succeeded.store(false, Ordering::Release);
+                    let _ = stream.stop();
+                    return Err(
+                        "selected output device changed; CoreAudio callback requires stream reopen"
+                            .to_string(),
+                    );
+                }
+                CubebDeviceChangeAction::None => {}
+            }
+            if !first_callback_reported {
+                let callback_ns = first_callback_ns.load(Ordering::Acquire);
+                if callback_ns != 0 {
+                    send_media_state(
+                        &media_events,
+                        MediaStateEvent {
+                            direction: "playback".to_string(),
+                            state: "first-callback".to_string(),
+                            stream_generation,
+                            running: true,
+                            callback_frames: first_callback_frames.load(Ordering::Acquire),
+                            elapsed_ms: callback_ns.saturating_sub(started_ns) / 1_000_000,
+                            ..Default::default()
+                        },
+                    );
+                    first_callback_reported = true;
+                } else if plan
+                    .render_start_timeout
+                    .is_some_and(|timeout| started.elapsed() >= timeout)
+                {
+                    render_start_timed_out = true;
+                    break;
+                }
+            }
+            if last_latency_refresh.elapsed() >= CUBEB_LATENCY_REFRESH {
+                store_cubeb_latency(&backend_latency_frames, stream.latency());
+                last_latency_refresh = Instant::now();
+            }
+            if errored.load(Ordering::Acquire) {
+                start_succeeded.store(false, Ordering::Release);
+                let _ = stream.stop();
+                counters
+                    .playback_callback_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err("output device stream failed".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        start_succeeded.store(false, Ordering::Release);
+        let _ = stream.stop();
+        if !render_start_timed_out {
+            counters.playback_stops.fetch_add(1, Ordering::Relaxed);
+            diagnostics.mark_stopped();
+            send_media_state(
+                &media_events,
+                MediaStateEvent {
+                    direction: "playback".to_string(),
+                    state: "stopped".to_string(),
+                    stream_generation,
+                    running: false,
+                    ..Default::default()
+                },
+            );
+            return Ok(());
+        }
+        drop(stream);
+        progress.reset();
+        backend_latency_frames.store(UNKNOWN_CUBEB_LATENCY_FRAMES, Ordering::Release);
+        first_callback_ns.store(0, Ordering::Release);
+        first_callback_frames.store(0, Ordering::Release);
+        silent_starts.push(format!(
+            "{}/{}/{}ch/{}f",
+            candidate.sample.label(),
+            candidate.rate,
+            candidate.channels,
+            latency_frames
+        ));
     }
-    start_succeeded.store(false, Ordering::Release);
-    let _ = stream.stop();
-    counters.playback_stops.fetch_add(1, Ordering::Relaxed);
-    diagnostics.mark_stopped();
-    send_media_state(
-        &media_events,
-        MediaStateEvent {
-            direction: "playback".to_string(),
-            state: "stopped".to_string(),
-            stream_generation,
-            running: false,
-            ..Default::default()
-        },
-    );
-    Ok(())
+    if silent_starts.is_empty() {
+        return Err(format!(
+            "build output stream: {}",
+            open_failures.unwrap_or_default().join("; ")
+        ));
+    }
+    Err(format!(
+        "output device start timed out: no audio callback for {}",
+        silent_starts.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -5396,6 +5482,97 @@ mod tests {
         assert_eq!(
             cubeb_playback_stream_candidates(b"pulse", 44_100),
             cubeb_stream_candidates(b"pulse", 44_100)
+        );
+    }
+
+    #[test]
+    fn coreaudio_playback_retries_a_silent_start_at_device_rate_with_default_io_buffer() {
+        for backend in [b"audiounit".as_slice(), b"audiounit-rust".as_slice()] {
+            let plans = cubeb_playback_open_plans(backend, 44_100);
+            assert_eq!(plans.len(), 2);
+            assert_eq!(
+                plans[0].candidates,
+                cubeb_playback_stream_candidates(backend, 44_100)
+            );
+            assert_eq!(plans[0].minimum_latency_frames, 0);
+            assert!(!plans[1].candidates.is_empty());
+            assert!(plans[1]
+                .candidates
+                .iter()
+                .all(|candidate| candidate.rate == 44_100));
+            assert_eq!(
+                plans[1].minimum_latency_frames,
+                COREAUDIO_DEFAULT_IO_BUFFER_FRAMES
+            );
+            assert_ne!(plans[0].latency_policy, plans[1].latency_policy);
+            let render_start_budget: Duration = plans
+                .iter()
+                .map(|plan| plan.render_start_timeout.unwrap())
+                .sum();
+            assert!(
+                render_start_budget < crate::ipc::PLAYBACK_CALLBACK_STALL_TIMEOUT,
+                "the session watchdog would close the helper before the fallback finished"
+            );
+        }
+
+        let unreported_rate_plans = cubeb_playback_open_plans(b"audiounit-rust", 0);
+        assert!(!unreported_rate_plans[1].candidates.is_empty());
+        assert!(unreported_rate_plans[1]
+            .candidates
+            .iter()
+            .all(|candidate| candidate.rate == SAMPLE_RATE));
+    }
+
+    #[test]
+    fn other_backends_keep_one_playback_plan_without_a_render_start_timeout() {
+        for backend in [
+            b"wasapi".as_slice(),
+            b"winmm".as_slice(),
+            b"pulse".as_slice(),
+            b"alsa".as_slice(),
+        ] {
+            assert_eq!(
+                cubeb_playback_open_plans(backend, 44_100),
+                vec![PlaybackOpenPlan {
+                    candidates: cubeb_playback_stream_candidates(backend, 44_100),
+                    minimum_latency_frames: 0,
+                    latency_policy: "min-latency",
+                    render_start_timeout: None,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn reopened_playback_stream_publishes_its_own_first_callback() {
+        let resources = PlaybackCallbackResources {
+            ring: PlaybackRing::new(16).consumer(),
+            monitor_ring: PlaybackRing::new(16).consumer(),
+            monitor_state: Arc::new(MicrophoneMonitorState::default()),
+            counters: Arc::new(NativeCounters::default()),
+            progress: Arc::new(PlaybackProgress::default()),
+            aec_timing: Arc::new(AecTiming::default()),
+            diagnostics: Arc::new(PlaybackDiagnostics::default()),
+            device_change: Arc::new(CubebDeviceChangeSignal::default()),
+            start_succeeded: Arc::new(AtomicBool::new(true)),
+            backend_latency_frames: Arc::new(AtomicU32::new(UNKNOWN_CUBEB_LATENCY_FRAMES)),
+            first_callback_ns: Arc::new(AtomicU64::new(0)),
+            first_callback_frames: Arc::new(AtomicU64::new(0)),
+        };
+        let mut silent_start = PlaybackRealtime::new(resources.clone(), SAMPLE_RATE);
+        assert!(silent_start.render(128, |_, _, _| {}));
+        assert_ne!(resources.first_callback_ns.load(Ordering::Acquire), 0);
+        resources.first_callback_ns.store(0, Ordering::Release);
+        resources.first_callback_frames.store(0, Ordering::Release);
+
+        let mut reopened = PlaybackRealtime::new(resources.clone(), 44_100);
+        assert!(reopened.render(512, |_, _, _| {}));
+        assert_ne!(resources.first_callback_ns.load(Ordering::Acquire), 0);
+        assert!(reopened.render(140, |_, _, _| {}));
+        assert_eq!(
+            resources.first_callback_frames.load(Ordering::Acquire),
+            512,
+            "a later callback replaced the first callback of the reopened stream"
         );
     }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Perfect Comms v4.1.13
+
+### Fixed
+
+- On macOS, Bluetooth headsets and other speakers could open but stay silent: you saw who was talking and heard no one. The audio helper no longer limits how much audio macOS may request per cycle, and a speaker that requests none within one second is reopened at its own sample rate with the default buffer size.
+- On macOS, a speaker that stays silent after both attempts is reported as a speaker failure, so a selected device falls back to **System Default**. Previously the voice session restarted whenever someone spoke.
+- The **speaker unavailable** HUD warning no longer stays on while the selected speaker is working.
+
 ## Perfect Comms v4.1.12
 
 ### New

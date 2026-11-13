@@ -3,7 +3,7 @@
 Source: crates.io `cubeb-sys` 0.36.0 archive, SHA-256
 `1227463346ba02e5b6adff179c9871273dbec40808d6ba576d57ed995b02675a`.
 
-The vendored source differs from that archive only in these release-integrity changes:
+The vendored source differs from that archive only in these changes:
 
 - `src/context.rs` declares libcubeb's public `cubeb_get_backend_names` ABI so release helpers can
   report the backends actually compiled into the linked C library.
@@ -16,6 +16,14 @@ The vendored source differs from that archive only in these release-integrity ch
   Linux dependency enables `unittest-build`, selecting the C backends rather than Rust PulseAudio.
   Other Rust PulseAudio builds require detected PulseAudio headers; macOS selects Rust CoreAudio
   when Apple AudioUnit is available.
+- `libcubeb/src/cubeb-coreaudio-rs/src/backend/mod.rs` sets the output unit's
+  `kAudioUnitProperty_MaximumFramesPerSlice` to a fixed 4096 frames instead of the stream latency.
+  AUHAL converts between the stream rate and the device rate, so one device cycle can need more
+  client frames than the latency value: 128 device frames at 44.1 kHz need 140 frames of a 48 kHz
+  stream, and a Bluetooth hands-free route at 16 kHz needs 384. A unit asked for more than its
+  slice limit renders nothing and reports no error, so the stream started but never called back.
+  The device rate can also change while the stream runs, so the limit is not derived from the
+  rate at open. The input unit is unchanged.
 
 The root and nested `Cargo.lock` files are intentionally tracked. Do not remove them: clean-checkout
 macOS builds rely on the CoreAudio lock, and the PulseAudio lock protects any build that enables the

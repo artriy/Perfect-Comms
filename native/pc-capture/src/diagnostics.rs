@@ -1046,7 +1046,7 @@ impl PlaybackDiagnostics {
         metadata.buffer_max_frames = descriptor.buffer_max_frames;
     }
 
-    pub fn observe_callback(&self, now_ns: u64, frames: usize) -> bool {
+    pub fn observe_callback(&self, now_ns: u64, frames: usize) {
         let previous = self.last_callback_ns.swap(now_ns, Ordering::AcqRel);
         if previous != 0 && now_ns >= previous {
             let interval = now_ns - previous;
@@ -1057,7 +1057,6 @@ impl PlaybackDiagnostics {
         self.callbacks_total.fetch_add(1, Ordering::Relaxed);
         self.callback_frames_last
             .store(frames as u64, Ordering::Relaxed);
-        previous == 0
     }
 
     pub fn mark_error(&self) {

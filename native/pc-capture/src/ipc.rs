@@ -39,7 +39,7 @@ pub const MAX_FRAME_LEN: usize = 1 << 20;
 const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(8);
 const PLAYBACK_SPAWN_THROTTLE: Duration = Duration::from_secs(1);
 const PLAYBACK_START_TIMEOUT: Duration = Duration::from_secs(5);
-const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_millis(750);
 const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const ENCODER_PRIVACY_EPOCH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -4447,6 +4447,12 @@ mod tests {
         );
         assert_eq!(playback_error_code("DeviceBusy"), "device-busy");
         assert_eq!(playback_error_code("operation timed out"), "timeout");
+        assert_eq!(
+            playback_error_code(
+                "output device start timed out: no audio callback for Float32NE/48000/2ch/128f; Float32NE/44100/2ch/512f"
+            ),
+            "timeout"
+        );
         assert_eq!(
             playback_error_code("output device callback failed"),
             "stream-error"
