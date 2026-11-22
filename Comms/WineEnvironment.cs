@@ -81,6 +81,8 @@ internal static class WineEnvironment
     // of trusting start.exe's exit status.
     internal const int HostActionTimeoutMs = 15_000;
     private const uint WineUnixCodePage = 65010;
+    private const string MacHelperBundleIdentifier = "ink.perfectcomms.pccapture";
+    private static int MacPermissionResetAttempted;
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int WineUnixSpawnNative(IntPtr arguments, int wait);
@@ -331,7 +333,8 @@ internal static class WineEnvironment
             receiptPath,
             expectedReceipt,
             InvokeWineUnixProcess,
-            HostActionTimeoutMs);
+            HostActionTimeoutMs,
+            ref MacPermissionResetAttempted);
 
     internal static WineHostActionResult RunVerifiedMacBrokerActionForTest(
         string operation,
@@ -342,7 +345,9 @@ internal static class WineEnvironment
         string expectedReceipt,
         WineUnixProcessExecutor runUnixProcess,
         int timeoutMs)
-        => RunVerifiedMacBrokerActionCore(
+    {
+        var permissionResetAttempted = 0;
+        return RunVerifiedMacBrokerActionCore(
             operation,
             hostApplication,
             requestPath,
@@ -350,7 +355,9 @@ internal static class WineEnvironment
             receiptPath,
             expectedReceipt,
             runUnixProcess,
-            timeoutMs);
+            timeoutMs,
+            ref permissionResetAttempted);
+    }
 
     private static WineHostActionResult RunVerifiedMacBrokerActionCore(
         string operation,
@@ -360,7 +367,8 @@ internal static class WineEnvironment
         string receiptPath,
         string expectedReceipt,
         WineUnixProcessExecutor runUnixProcess,
-        int timeoutMs)
+        int timeoutMs,
+        ref int permissionResetAttempted)
     {
         ThrowIfNullOrWhiteSpace(operation, nameof(operation));
         ThrowIfNullOrWhiteSpace(requestPath, nameof(requestPath));
@@ -410,6 +418,13 @@ internal static class WineEnvironment
                 Thread.Sleep(25);
             }
 
+            var diagnostic = startResult.Diagnostic;
+            if (!sawInvalidReceipt && Interlocked.Exchange(ref permissionResetAttempted, 1) == 0)
+            {
+                var reset = ResetMacHelperPermissions(runUnixProcess);
+                diagnostic = string.IsNullOrEmpty(diagnostic) ? reset : $"{diagnostic} {reset}";
+            }
+
             return LogHostAction(operation, new WineHostActionResult(
                 true,
                 false,
@@ -417,7 +432,7 @@ internal static class WineEnvironment
                 startResult.ExitCode,
                 sawInvalidReceipt ? "receipt-invalid" : "receipt-missing",
                 stopwatch.ElapsedMilliseconds,
-                startResult.Diagnostic));
+                diagnostic));
         }
         catch (Exception ex)
         {
@@ -434,6 +449,21 @@ internal static class WineEnvironment
         {
             TryDeleteFile(requestPath);
             TryDeleteFile(receiptPath);
+        }
+    }
+
+    private static string ResetMacHelperPermissions(WineUnixProcessExecutor runUnixProcess)
+    {
+        try
+        {
+            var exit = runUnixProcess(
+                new[] { "/usr/bin/tccutil", "reset", "All", MacHelperBundleIdentifier },
+                wait: true);
+            return $"tccutilExit={FormatUnixExit(exit)}";
+        }
+        catch (Exception ex)
+        {
+            return $"tccutilError={ex.GetType().Name}:{ex.Message}";
         }
     }
 

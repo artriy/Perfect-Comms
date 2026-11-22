@@ -61,6 +61,16 @@ Other antivirus software: add the same folder as an exclusion.
 - Every Voice settings tab shows the message at the top, with **How to fix** and **Retry**.
 :::
 
+## Voice does not start on macOS after an update
+
+On macOS (CrossOver, PortingKit, and other Wine apps), macOS can block the updated audio helper because of permissions saved for the previous one. When the helper does not answer, Perfect Comms clears those permissions once per game launch, and macOS asks again. Allow any prompt or notification that names **PerfectComms**.
+
+If voice still does not start:
+
+1. Quit Among Us.
+2. In **Terminal**, run `tccutil reset All ink.perfectcomms.pccapture`.
+3. Start Among Us, join a lobby, and allow the macOS prompts for **PerfectComms**, including the microphone.
+
 ## OBS does not show voice chat
 
 - **Perfect Comms Audio is missing from OBS:** enable **Audio > Streaming > OBS Compatibility Mode** (native Windows), enter a voice lobby, and wait for the minimized **Perfect Comms Audio** window. Then reopen the **Application Audio Capture** source properties to refresh its list. No other player is needed.

@@ -278,6 +278,50 @@ public sealed class WinePathResolveTests
         }
     }
 
+    [Fact]
+    public void MacBrokerResetsHelperPermissionsWhenNoReceiptArrives()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "perfect-comms-mac-dispatch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var request = Path.Combine(directory, "request.json");
+        var receipt = Path.Combine(directory, "receipt");
+        var calls = new List<(string[] Arguments, bool Wait)>();
+        try
+        {
+            var result = WineEnvironment.RunVerifiedMacBrokerActionForTest(
+                "test-mac-broker-blocked",
+                "/tmp/PerfectCommsAudio.app",
+                request,
+                "{}",
+                receipt,
+                "perfect-comms-host-action-v1:never-written",
+                (arguments, wait) =>
+                {
+                    calls.Add((new List<string>(arguments).ToArray(), wait));
+                    return 0;
+                },
+                timeoutMs: 100);
+
+            Assert.False(result.Succeeded);
+            Assert.True(result.TimedOut);
+            Assert.Equal("receipt-missing", result.FailureKind);
+            Assert.Equal("tccutilExit=0", result.ProcessOutput);
+            Assert.Equal(4, calls.Count);
+            Assert.Equal("/usr/bin/open", calls[2].Arguments[0]);
+            Assert.True(calls[3].Wait);
+            Assert.Equal(
+                new[] { "/usr/bin/tccutil", "reset", "All", "ink.perfectcomms.pccapture" },
+                calls[3].Arguments);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
     [Theory]
     [InlineData(null, "/Users/me/prefix", null, null)]
     [InlineData("", "/Users/me/prefix", null, null)]
