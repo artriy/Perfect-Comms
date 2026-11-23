@@ -39,6 +39,7 @@ pub const MAX_FRAME_LEN: usize = 1 << 20;
 const CONTROL_EOF_CLEANUP_DEADLINE: Duration = Duration::from_secs(8);
 const PLAYBACK_SPAWN_THROTTLE: Duration = Duration::from_secs(1);
 const PLAYBACK_START_TIMEOUT: Duration = Duration::from_secs(5);
+const PLAYBACK_START_CAPTURE_WAIT: Duration = Duration::from_secs(60);
 pub(crate) const PLAYBACK_CALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_millis(750);
 const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -240,9 +241,19 @@ impl PlaybackWatchdogFailure {
 struct PlaybackWatchdog {
     observed_callback_ns: u64,
     stalled_since_ns: Option<u64>,
+    startup_origin_ns: u64,
 }
 
 impl PlaybackWatchdog {
+    fn defer_startup_while_capture_opens(&mut self, now_ns: u64, capture_opening_since_ns: u64) {
+        if capture_opening_since_ns != 0
+            && now_ns.saturating_sub(capture_opening_since_ns)
+                < duration_ns(PLAYBACK_START_CAPTURE_WAIT)
+        {
+            self.startup_origin_ns = now_ns;
+        }
+    }
+
     fn observe(
         &mut self,
         now_ns: u64,
@@ -262,7 +273,8 @@ impl PlaybackWatchdog {
             self.observed_callback_ns = 0;
             self.stalled_since_ns = None;
             if spawned_ns != 0
-                && now_ns.saturating_sub(spawned_ns) >= duration_ns(PLAYBACK_START_TIMEOUT)
+                && now_ns.saturating_sub(spawned_ns.max(self.startup_origin_ns))
+                    >= duration_ns(PLAYBACK_START_TIMEOUT)
             {
                 return Some(PlaybackWatchdogFailure::StartupTimedOut);
             }
@@ -1483,8 +1495,15 @@ fn spawn_playback_watchdog(
                         0
                     };
                     let (started_ns, callback_ns) = supervision.progress.snapshot();
+                    let now_ns = monotonic_ns();
+                    if cfg!(target_os = "macos") {
+                        watchdog.defer_startup_while_capture_opens(
+                            now_ns,
+                            supervision.media_diagnostics.capture.opening_since_ns(),
+                        );
+                    }
                     let failure = watchdog.observe(
-                        monotonic_ns(),
+                        now_ns,
                         worker_running,
                         spawned_ns.load(Ordering::Acquire),
                         started_ns,
@@ -5084,6 +5103,32 @@ mod tests {
         );
         assert_eq!(
             watchdog.observe(spawned_ns + timeout_ns, true, spawned_ns, 0, 0, 0,),
+            Some(PlaybackWatchdogFailure::StartupTimedOut)
+        );
+    }
+
+    #[test]
+    fn playback_watchdog_waits_for_capture_open_before_bounding_startup() {
+        let spawned_ns = 100;
+        let timeout_ns = duration_ns(PLAYBACK_START_TIMEOUT);
+        let opened_ns = spawned_ns + timeout_ns * 4;
+
+        let mut watchdog = PlaybackWatchdog::default();
+        watchdog.defer_startup_while_capture_opens(opened_ns, spawned_ns);
+        assert_eq!(
+            watchdog.observe(opened_ns + timeout_ns - 1, true, spawned_ns, 0, 0, 0),
+            None
+        );
+        assert_eq!(
+            watchdog.observe(opened_ns + timeout_ns, true, spawned_ns, 0, 0, 0),
+            Some(PlaybackWatchdogFailure::StartupTimedOut)
+        );
+
+        let mut capped = PlaybackWatchdog::default();
+        let capped_ns = spawned_ns + duration_ns(PLAYBACK_START_CAPTURE_WAIT);
+        capped.defer_startup_while_capture_opens(capped_ns, spawned_ns);
+        assert_eq!(
+            capped.observe(capped_ns, true, spawned_ns, 0, 0, 0),
             Some(PlaybackWatchdogFailure::StartupTimedOut)
         );
     }

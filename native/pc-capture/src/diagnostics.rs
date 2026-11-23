@@ -596,6 +596,14 @@ impl CaptureDiagnostics {
         metadata.buffer_max_frames = descriptor.buffer_max_frames;
     }
 
+    pub fn opening_since_ns(&self) -> u64 {
+        let metadata = self.metadata.lock().unwrap();
+        match metadata.state.as_str() {
+            "starting" | "opening" => metadata.generation_started_ns,
+            _ => 0,
+        }
+    }
+
     pub fn mark_retrying(&self, retry_attempt: u64) {
         self.retry_attempt.store(retry_attempt, Ordering::Relaxed);
         self.stream_errors.fetch_add(1, Ordering::Relaxed);
