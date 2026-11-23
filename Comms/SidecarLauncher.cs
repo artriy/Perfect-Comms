@@ -2647,6 +2647,7 @@ internal static class SidecarLauncher
                     if (result.Pid <= 0 && TryReadWineLaunchStarted(control, out var startedPid))
                         result.Pid = startedPid;
                 }
+                LogHelperStderrFile(result);
                 // Once the host supervisor has claimed the directory, it owns the helper child
                 // and fixed-file cleanup. Removing the directory here races a detached host
                 // process and was the source of orphaned retries on Wine/CrossOver.
@@ -2662,6 +2663,35 @@ internal static class SidecarLauncher
                     result.Process = null;
                 }
             }
+        }
+    }
+
+    internal static void LogHelperStderrFile(SidecarLaunchResult launch)
+    {
+        if (!VoiceDiagnostics.IsEnabled || string.IsNullOrEmpty(launch.HandshakePath)) return;
+        try
+        {
+            var path = Path.Combine(Path.GetDirectoryName(launch.HandshakePath) ?? string.Empty, ".helper-stderr");
+            if (!File.Exists(path)) return;
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            var lines = reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            for (var i = Math.Max(0, lines.Length - 40); i < lines.Length; i++)
+            {
+                VoiceDiagnostics.Log(
+                    "sidecar.stderr",
+                    $"purpose=voice-wine pid={launch.Pid} source=helper-file seq={i + 1} text=\"{SanitizeStderrForDiagnostics(lines[i], string.Empty)}\"");
+            }
+        }
+        catch (Exception ex)
+        {
+            VoiceDiagnostics.Log(
+                "sidecar.stderr",
+                $"event=helper-file-failed pid={launch.Pid} error={ex.GetType().Name}");
         }
     }
 

@@ -81,8 +81,22 @@ internal static class WineEnvironment
     // of trusting start.exe's exit status.
     internal const int HostActionTimeoutMs = 15_000;
     private const uint WineUnixCodePage = 65010;
-    private const string MacHelperBundleIdentifier = "ink.perfectcomms.pccapture";
-    private static int MacPermissionResetAttempted;
+    private const string MacBrokerProbeScript = """
+        out=$1
+        app=$2
+        requests=${out%/*}
+        : >"$out.broker"
+        {
+          echo "uid=$(/usr/bin/id -u) umask=$(umask) os=$(/usr/bin/sw_vers -productVersion) arch=$(/usr/bin/uname -m) arm64=$(/usr/sbin/sysctl -n hw.optional.arm64) wrapper=$(/usr/bin/defaults read "${app%%.app/*}.app/Contents/Info.plist" CFBundleVersion) helpers=$(/bin/ps -axo comm= | /usr/bin/grep -c 'MacOS/PerfectCommsAudio$')"
+          /bin/ls -ldnO@ "$app" "$requests" "$requests/.."
+          /usr/bin/open -g -j -n --stderr "$out.broker" "$app"
+          echo "open=$?"
+          /bin/sleep 2
+          /bin/cat "$out.broker"
+        } 2>&1 | /usr/bin/sed "s|${HOME:-/var/empty}|~|g" >"$out"
+        /bin/rm -f "$out.broker"
+        """;
+    private static int _macBrokerProbeLogged;
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int WineUnixSpawnNative(IntPtr arguments, int wait);
@@ -333,8 +347,7 @@ internal static class WineEnvironment
             receiptPath,
             expectedReceipt,
             InvokeWineUnixProcess,
-            HostActionTimeoutMs,
-            ref MacPermissionResetAttempted);
+            HostActionTimeoutMs);
 
     internal static WineHostActionResult RunVerifiedMacBrokerActionForTest(
         string operation,
@@ -345,9 +358,7 @@ internal static class WineEnvironment
         string expectedReceipt,
         WineUnixProcessExecutor runUnixProcess,
         int timeoutMs)
-    {
-        var permissionResetAttempted = 0;
-        return RunVerifiedMacBrokerActionCore(
+        => RunVerifiedMacBrokerActionCore(
             operation,
             hostApplication,
             requestPath,
@@ -355,9 +366,7 @@ internal static class WineEnvironment
             receiptPath,
             expectedReceipt,
             runUnixProcess,
-            timeoutMs,
-            ref permissionResetAttempted);
-    }
+            timeoutMs);
 
     private static WineHostActionResult RunVerifiedMacBrokerActionCore(
         string operation,
@@ -367,8 +376,7 @@ internal static class WineEnvironment
         string receiptPath,
         string expectedReceipt,
         WineUnixProcessExecutor runUnixProcess,
-        int timeoutMs,
-        ref int permissionResetAttempted)
+        int timeoutMs)
     {
         ThrowIfNullOrWhiteSpace(operation, nameof(operation));
         ThrowIfNullOrWhiteSpace(requestPath, nameof(requestPath));
@@ -418,21 +426,24 @@ internal static class WineEnvironment
                 Thread.Sleep(25);
             }
 
-            var diagnostic = startResult.Diagnostic;
-            if (!sawInvalidReceipt && Interlocked.Exchange(ref permissionResetAttempted, 1) == 0)
-            {
-                var reset = ResetMacHelperPermissions(runUnixProcess);
-                diagnostic = string.IsNullOrEmpty(diagnostic) ? reset : $"{diagnostic} {reset}";
-            }
-
-            return LogHostAction(operation, new WineHostActionResult(
+            var timedOut = LogHostAction(operation, new WineHostActionResult(
                 true,
                 false,
                 true,
                 startResult.ExitCode,
                 sawInvalidReceipt ? "receipt-invalid" : "receipt-missing",
                 stopwatch.ElapsedMilliseconds,
-                diagnostic));
+                startResult.Diagnostic));
+            if (VoiceDiagnostics.IsEnabled && Interlocked.Exchange(ref _macBrokerProbeLogged, 1) == 0)
+            {
+                foreach (var line in ProbeMacBroker(hostApplication, requestPath, runUnixProcess))
+                {
+                    VoiceDiagnostics.Log(
+                        "wine.mac-broker-probe",
+                        $"operation={operation} text=\"{SidecarLauncher.SanitizeStderrForDiagnostics(line, string.Empty)}\"");
+                }
+            }
+            return timedOut;
         }
         catch (Exception ex)
         {
@@ -452,21 +463,6 @@ internal static class WineEnvironment
         }
     }
 
-    private static string ResetMacHelperPermissions(WineUnixProcessExecutor runUnixProcess)
-    {
-        try
-        {
-            var exit = runUnixProcess(
-                new[] { "/usr/bin/tccutil", "reset", "All", MacHelperBundleIdentifier },
-                wait: true);
-            return $"tccutilExit={FormatUnixExit(exit)}";
-        }
-        catch (Exception ex)
-        {
-            return $"tccutilError={ex.GetType().Name}:{ex.Message}";
-        }
-    }
-
     private static MacBrokerStartResult StartMacBrokerApplication(
         string hostApplication,
         WineUnixProcessExecutor runUnixProcess)
@@ -482,7 +478,7 @@ internal static class WineEnvironment
 
         var executable = app + "/Contents/MacOS/PerfectCommsAudio";
         var chmodExit = runUnixProcess(
-            new[] { "/bin/chmod", "u+x", executable },
+            new[] { "/bin/chmod", "u+x,go-w", executable, MacBrokerRequestDirectory(app) },
             wait: true);
         if (chmodExit != 0)
         {
@@ -609,6 +605,42 @@ internal static class WineEnvironment
         => exitCode is >= 0 and <= byte.MaxValue
             ? exitCode.ToString()
             : $"0x{unchecked((uint)exitCode):X8}";
+
+    private static string MacBrokerRequestDirectory(string app)
+        => app.Substring(0, app.LastIndexOf('/') + 1) + SidecarLauncher.MacBrokerRequestDirectoryName;
+
+    internal static IReadOnlyList<string> ProbeMacBroker(
+        string hostApplication,
+        string requestPath,
+        WineUnixProcessExecutor runUnixProcess)
+    {
+        var lines = new List<string>
+        {
+            $"requestConsumed={(!File.Exists(requestPath)).ToString().ToLowerInvariant()}",
+        };
+        var name = "probe-" + Guid.NewGuid().ToString("N") + ".txt";
+        var output = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(requestPath)) ?? string.Empty,
+            name);
+        try
+        {
+            var app = hostApplication.TrimEnd('/');
+            var exit = runUnixProcess(
+                new[] { "/bin/sh", "-c", MacBrokerProbeScript, "sh", MacBrokerRequestDirectory(app) + "/" + name, app },
+                wait: true);
+            lines.Add($"probeExit={FormatUnixExit(exit)}");
+            lines.AddRange(File.ReadAllLines(output));
+        }
+        catch (Exception ex)
+        {
+            lines.Add($"probeError={ex.GetType().Name}:{ex.Message}");
+        }
+        finally
+        {
+            TryDeleteFile(output);
+        }
+        return lines;
+    }
 
     internal static void PublishMacBrokerRequest(string requestPath, string requestJson)
     {

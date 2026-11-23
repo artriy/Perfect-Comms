@@ -207,8 +207,9 @@ public sealed class WinePathResolveTests
                         new[]
                         {
                             "/bin/chmod",
-                            "u+x",
+                            "u+x,go-w",
                             app + "/Contents/MacOS/PerfectCommsAudio",
+                            "/tmp/Perfect Comms/.perfect-comms-broker-v1",
                         },
                         call.Arguments);
                 },
@@ -279,7 +280,7 @@ public sealed class WinePathResolveTests
     }
 
     [Fact]
-    public void MacBrokerResetsHelperPermissionsWhenNoReceiptArrives()
+    public void MacBrokerProbeReturnsHostReportAndRemovesItsOutput()
     {
         var directory = Path.Combine(
             Path.GetTempPath(),
@@ -287,34 +288,36 @@ public sealed class WinePathResolveTests
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var request = Path.Combine(directory, "request.json");
-        var receipt = Path.Combine(directory, "receipt");
-        var calls = new List<(string[] Arguments, bool Wait)>();
+        File.WriteAllText(request, "{}");
+        const string app = "/tmp/Perfect Comms/PerfectCommsAudio.app";
+        const string brokerError =
+            "pc-capture: macOS launch broker failed: request directory is group- or world-writable";
+        var hostOutput = string.Empty;
         try
         {
-            var result = WineEnvironment.RunVerifiedMacBrokerActionForTest(
-                "test-mac-broker-blocked",
-                "/tmp/PerfectCommsAudio.app",
+            var lines = WineEnvironment.ProbeMacBroker(
+                app,
                 request,
-                "{}",
-                receipt,
-                "perfect-comms-host-action-v1:never-written",
                 (arguments, wait) =>
                 {
-                    calls.Add((new List<string>(arguments).ToArray(), wait));
+                    Assert.True(wait);
+                    Assert.Equal("/bin/sh", arguments[0]);
+                    Assert.Equal(app, arguments[5]);
+                    hostOutput = arguments[4];
+                    File.WriteAllLines(
+                        Path.Combine(directory, Path.GetFileName(hostOutput)),
+                        new[] { "open=0", brokerError });
                     return 0;
-                },
-                timeoutMs: 100);
+                });
 
-            Assert.False(result.Succeeded);
-            Assert.True(result.TimedOut);
-            Assert.Equal("receipt-missing", result.FailureKind);
-            Assert.Equal("tccutilExit=0", result.ProcessOutput);
-            Assert.Equal(4, calls.Count);
-            Assert.Equal("/usr/bin/open", calls[2].Arguments[0]);
-            Assert.True(calls[3].Wait);
             Assert.Equal(
-                new[] { "/usr/bin/tccutil", "reset", "All", "ink.perfectcomms.pccapture" },
-                calls[3].Arguments);
+                new[] { "requestConsumed=false", "probeExit=0", "open=0", brokerError },
+                lines);
+            Assert.StartsWith(
+                "/tmp/Perfect Comms/.perfect-comms-broker-v1/probe-",
+                hostOutput,
+                StringComparison.Ordinal);
+            Assert.Equal(new[] { request }, Directory.GetFiles(directory));
         }
         finally
         {

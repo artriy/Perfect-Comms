@@ -1113,6 +1113,7 @@ internal sealed class SidecarVoiceClient : ISidecarVoiceClient
                     out helperExitCode);
                 if (!helperExitVerified)
                     cancellationRequested = SidecarLauncher.RequestWineLaunchCancellation(control);
+                SidecarLauncher.LogHelperStderrFile(launch);
             }
             if (launch.Wine && launch.Process != null)
             {
